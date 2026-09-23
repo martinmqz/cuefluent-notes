@@ -4,7 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { installPlugin, main } from './install.mjs';
+import { installPlugin, main, renameInstalledPath } from './install.mjs';
+import { spawnCommand } from './command.mjs';
+import { smokeEnvironment } from './smoke-environment.mjs';
 
 async function fixture(t, client = 'codex') {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-install-')));
@@ -30,6 +32,77 @@ async function writeJSON(file, value) {
 }
 const readJSON = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 const absent = file => assert.rejects(fs.lstat(file), { code: 'ENOENT' });
+test('default installer runner reports missing and failed clients and pins Windows PATH selection', async t => {
+  const f = await fixture(t);
+  const bin = path.join(f.root, 'bin');
+  await fs.mkdir(bin);
+  const name = 'synthetic-client';
+  const ext = process.platform === 'win32' ? '.cmd' : '';
+  const shim = (status) => process.platform === 'win32' ? `@echo synthetic failure\r\n@exit /b ${status}\r\n`
+    : `#!/bin/sh\nprintf 'synthetic failure\\n'\nexit ${status}\n`;
+  await fs.writeFile(path.join(bin, name + ext), shim(23), { mode: 0o755 });
+  await fs.mkdir(path.join(f.options.homeDirectory, 'bin'));
+  await fs.writeFile(path.join(f.options.homeDirectory, 'bin', name + ext), shim(27), { mode: 0o755 });
+  const harness = path.join(f.root, 'default-runner.mjs');
+  await fs.writeFile(harness, `import {installPlugin} from ${JSON.stringify(new URL('./install.mjs', import.meta.url).href)};
+try { await installPlugin({...${JSON.stringify(f.options)}, cli:process.argv[2]}); }
+catch(e) { console.error(e.message); process.exitCode=1; }`);
+  const env = { ...smokeEnvironment(f.root), PATH: process.platform === 'win32' ? 'bin' : bin };
+  for (const [cli, expected] of [['missing-synthetic-client', /Cannot find/], [name, /exit 23/]]) {
+    const result = spawnSync(process.execPath, [harness, cli], { cwd: f.root, env, encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, expected);
+    assert.ok(!result.stderr.includes('exit 27'));
+    await absent(f.destination);
+    await absent(f.options.checkoutLockDirectory);
+  }
+});
+test('Windows installation renames retry briefly without overwriting newly appeared destinations', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  const source = path.join(f.root, 'source');
+  const target = path.join(f.root, 'target');
+  await fs.writeFile(source, 'package');
+  const rename = fs.rename;
+  let attempts = 0;
+  const mock = t.mock.method(fs, 'rename', async (...args) => {
+    if (attempts++ < 2) throw Object.assign(new Error('scanning'), { code: 'EPERM' });
+    return rename(...args);
+  });
+  await renameInstalledPath(source, target);
+  assert.equal(attempts, 3);
+  assert.equal(await fs.readFile(target, 'utf8'), 'package');
+  mock.mock.restore();
+  await fs.writeFile(source, 'next package');
+  await fs.unlink(target);
+  attempts = 0;
+  t.mock.method(fs, 'rename', async () => {
+    attempts++;
+    await fs.writeFile(target, 'external edit');
+    throw Object.assign(new Error('scanning'), { code: 'EBUSY' });
+  });
+  await assert.rejects(renameInstalledPath(source, target), /path changed/);
+  assert.equal(attempts, 1);
+  assert.equal(await fs.readFile(target, 'utf8'), 'external edit');
+  assert.equal(await fs.readFile(source, 'utf8'), 'next package');
+});
+test('Windows read-only catalogs are refused before package moves only when an edit is needed', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  await installPlugin(f.options);
+  const before = await fs.readFile(path.join(f.destination, '.codex-plugin/plugin.json'));
+  const registered = await fs.readFile(f.catalog);
+  await writeJSON(f.catalog, { name: 'personal', plugins: [] });
+  await fs.chmod(f.catalog, 0o444);
+  t.after(() => fs.chmod(f.catalog, 0o666).catch(() => {}));
+  f.calls.length = 0;
+  await assert.rejects(installPlugin(f.options), /marketplace is read-only/);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await fs.readFile(path.join(f.destination, '.codex-plugin/plugin.json')), before);
+  await fs.chmod(f.catalog, 0o666);
+  await fs.writeFile(f.catalog, registered);
+  await fs.chmod(f.catalog, 0o444);
+  await installPlugin(f.options);
+  assert.deepEqual(await fs.readFile(f.catalog), registered);
+});
 function helper(root, script, args) {
   const result = spawnSync(process.execPath, [path.join(root, 'skills/cuefluent-notes/scripts', script), ...args], {
     encoding: 'utf8', cwd: root, env: { ...process.env, NODE_PATH: '' },
@@ -90,7 +163,7 @@ test('Codex preserves the personal catalog name, metadata, entry order, and unre
   const catalog = await readJSON(f.catalog);
   assert.deepEqual({ ...catalog, plugins: catalog.plugins.slice(0, 1) }, original);
   assert.equal(result.identity, 'cuefluent-notes@my-personal');
-  assert.equal((await fs.stat(f.catalog)).mode & 0o777, 0o640);
+  assert.equal((await fs.stat(f.catalog)).mode & 0o777, process.platform === 'win32' ? 0o666 : 0o640);
   const bytes = await fs.readFile(f.catalog);
   await installPlugin(f.options);
   assert.deepEqual(await fs.readFile(f.catalog), bytes);
@@ -291,9 +364,10 @@ test('Catalog changes while dependencies install are not overwritten', async t =
 test('Custom Claude configuration directory and explicit client executable are honored', async t => {
   const f = await fixture(t, 'claude');
   const claudeDirectory = path.join(f.root, 'custom Claude config');
-  const result = await installPlugin({ ...f.options, claudeDirectory, cli: '/synthetic/bin/claude' });
+  const cli = path.join(f.root, 'synthetic/bin/claude');
+  const result = await installPlugin({ ...f.options, claudeDirectory, cli });
   assert.equal(result.destination, path.join(claudeDirectory, 'skills/cuefluent-notes'));
-  assert.equal(f.calls[0].exe, '/synthetic/bin/claude');
+  assert.equal(f.calls[0].exe, cli);
   await absent(f.destination);
 });
 
@@ -322,7 +396,7 @@ test('Configured Claude homes accept OS and dotfiles aliases with missing descen
   const f = await fixture(t, 'claude');
   const alias = path.join(f.root, 'dotfiles-alias');
   await fs.symlink(f.root, alias);
-  const osAlias = await fs.mkdtemp('/tmp/cuefluent-config-alias-');
+  const osAlias = await fs.mkdtemp(path.join(process.platform === 'win32' ? os.tmpdir() : '/tmp', 'cuefluent-config-alias-'));
   t.after(() => fs.rm(osAlias, { recursive: true, force: true }));
   for (const [requested, canonical] of [[alias, f.root], [osAlias, await fs.realpath(osAlias)]]) {
     const result = await installPlugin({ ...f.options, claudeDirectory: path.join(requested, 'settings/new-claude') });
@@ -346,7 +420,7 @@ test('A relative client executable is the same binary for inventory and registra
   const run = (exe, args, flags = {}) => {
     if (exe === 'npm') return '';
     calls.push(exe);
-    const result = spawnSync(exe, args, { cwd: flags.cwd ?? process.cwd(), encoding: 'utf8' });
+    const result = spawnCommand(exe, args, { cwd: flags.cwd ?? process.cwd(), encoding: 'utf8' });
     assert.equal(result.status, 0, result.error?.message ?? result.stderr);
     return result.stdout;
   };
@@ -363,7 +437,8 @@ await installPlugin({ ...${JSON.stringify(f.options)}, log: () => {}, run: async
   return JSON.stringify({ installed: [] });
 } });\n`);
   const interrupted = spawnSync(process.execPath, [harness], { encoding: 'utf8' });
-  assert.equal(interrupted.signal, 'SIGKILL', interrupted.stderr);
+  if (process.platform === 'win32') assert.notEqual(interrupted.status, 0, interrupted.stderr);
+  else assert.equal(interrupted.signal, 'SIGKILL', interrupted.stderr);
   const locks = [f.options.checkoutLockDirectory, path.join(f.options.homeDirectory, 'plugins/.cuefluent-installer/lock')];
   for (const lock of locks) {
     const owner = await readJSON(path.join(lock, 'owner.json'));
@@ -446,7 +521,7 @@ test('Concurrent installers stop before rebuilding or publishing, and release lo
 
 test('Help works through both documented npm scripts without starting installation', () => {
   for (const client of ['codex', 'claude']) {
-    const result = spawnSync('npm', ['run', `install:${client}`, '--', '--help'], { encoding: 'utf8' });
+    const result = spawnCommand('npm', ['run', `install:${client}`, '--', '--help'], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Usage: node scripts\/install.mjs/);
     assert.ok(!result.stdout.includes('Installing locked'));

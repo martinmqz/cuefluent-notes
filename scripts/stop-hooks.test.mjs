@@ -202,10 +202,11 @@ test('opting into completion preserves ordinary capture at the previous context-
     } else assert.equal(await f.invoke('Stop', { stop_hook_active: false }, enabled), null);
     // A long but valid explicit config path can exhaust the optional metadata
     // budget: preserve ordinary guidance rather than disabling capture.
-    const fallback = await hookResponse(client, f.payload, enabled, { configPath: `/${'a'.repeat(3000)}` });
+    const longConfigPath = path.join(f.root, 'a'.repeat(3000));
+    const fallback = await hookResponse(client, f.payload, enabled, { configPath: longConfigPath });
     assert.doesNotMatch(fallback.hookSpecificOutput.additionalContext, /capture is skipped/);
     assert.equal(operation(fallback).completion, undefined);
     assert.equal(await hookResponse(client, { ...f.payload, hook_event_name: 'Stop', stop_hook_active: false },
-      enabled, { configPath: `/${'a'.repeat(3000)}` }), null);
+      enabled, { configPath: longConfigPath }), null);
   }
 });

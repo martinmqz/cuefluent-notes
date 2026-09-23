@@ -24,8 +24,8 @@ test('unconfigured status is read-only and a manual choice persists without note
   await assert.rejects(fs.stat(path.dirname(f.configPath)), { code: 'ENOENT' });
   await initialize({ client: f.client, mode: 'manual', configPath: f.configPath });
   assert.equal((await setupStatus({ ...f, cwd: f.project })).status, 'disabled');
-  assert.equal((await fs.stat(f.configPath)).mode & 0o777, 0o600);
-  assert.equal((await fs.stat(path.dirname(f.configPath))).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(f.configPath)).mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
+  assert.equal((await fs.stat(path.dirname(f.configPath))).mode & 0o777, process.platform === 'win32' ? 0o666 : 0o700);
   const config = JSON.parse(await fs.readFile(f.configPath));
   assert.equal(await hookResponse('codex', { hook_event_name: 'UserPromptSubmit', session_id: 's', turn_id: 't', cwd: f.project }, config), null);
   assert.deepEqual(await fs.readdir(f.notes), []);
@@ -43,7 +43,7 @@ test('automatic and suggest setup produce policy consumed by the real hook witho
     await assert.rejects(fs.stat(status.stateDir), { code: 'ENOENT' });
     const config = JSON.parse(await fs.readFile(configPath));
     const output = await hookResponse('codex', { hook_event_name: 'UserPromptSubmit', session_id: 's', turn_id: 't', cwd: f.project }, config);
-    assert.ok(output.hookSpecificOutput.additionalContext.includes(f.destination));
+    assert.ok(output.hookSpecificOutput.additionalContext.includes(JSON.stringify(f.destination).slice(1, -1)));
     assert.equal(config.automaticUpdates, mode === 'automatic');
     assert.equal((await setupStatus({ ...f, cwd: f.root, configPath })).status, 'inactive');
     assert.equal((await setupStatus({ ...f, client: 'claude', cwd: f.project, configPath })).status, 'client_not_configured');
@@ -103,7 +103,7 @@ test('configuration cannot create a directory at the prospective note destinatio
 test('setup refuses filenames that cannot be used by the safe writer', async t => {
   const f = await fixture(t);
   for (const mode of ['automatic', 'suggest']) {
-    await assert.rejects(initialize({ ...f, mode, destination: path.join(f.notes, 'topic\\\\finding.md') }), /Invalid capture configuration/);
+    await assert.rejects(initialize({ ...f, mode, destination: path.join(f.notes, process.platform === 'win32' ? 'NUL.md' : 'topic\\\\finding.md') }), process.platform === 'win32' ? /reserved device names/ : /Invalid capture configuration/);
   }
   await assert.rejects(fs.stat(path.dirname(f.configPath)), { code: 'ENOENT' });
   assert.deepEqual(await fs.readdir(f.notes), []);

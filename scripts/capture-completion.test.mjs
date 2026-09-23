@@ -42,8 +42,8 @@ test('inspection is read-only; both native identities produce minimal private co
     const marker = path.join(dir, names[0]);
     const bytes = await fs.readFile(marker, 'utf8');
     assert.doesNotMatch(bytes, /SENTINEL|notes|session|timestamp|cwd/);
-    assert.equal((await fs.stat(marker)).mode & 0o777, 0o600);
-    assert.equal((await fs.stat(dir)).mode & 0o777, 0o700);
+    assert.equal((await fs.stat(marker)).mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
+    assert.equal((await fs.stat(dir)).mode & 0o777, process.platform === 'win32' ? 0o666 : 0o700);
     assert.deepEqual(await fs.readdir(f.notesDir), []);
     assert.deepEqual(await fs.readdir(f.stateDir), ['capture-completion']);
   }
@@ -102,8 +102,11 @@ test('linked, nonregular, corrupt and oversized marker entries are preserved and
   await assert.rejects(completionStatus(f.settings, f.client, f.input));
   await assert.rejects(recordCompletion(f.input));
   await fs.unlink(file);
-  const fifo = spawnSync('mkfifo', [file]);
-  assert.equal(fifo.status, 0, fifo.stderr?.toString());
+  if (process.platform === 'win32') await fs.mkdir(file);
+  else {
+    const fifo = spawnSync('mkfifo', [file]);
+    assert.equal(fifo.status, 0, fifo.stderr?.toString());
+  }
   await assert.rejects(completionStatus(f.settings, f.client, f.input));
   await assert.rejects(recordCompletion(f.input));
 });

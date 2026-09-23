@@ -23,7 +23,7 @@ async function inventory(root, prefix = '') {
   const files = [];
   for (const item of await fs.readdir(path.join(root, prefix), { withFileTypes: true })) {
     assert.ok(!item.isSymbolicLink(), `Nonportable symlink: ${item.name}`);
-    const relative = path.join(prefix, item.name);
+    const relative = path.posix.join(prefix, item.name);
     if (item.isDirectory()) files.push(...await inventory(root, relative));
     else files.push(relative);
   }
@@ -36,7 +36,7 @@ async function checkDocumentation(root, files) {
       const target = token.type === 'link_open' ? token.attrGet('href') : token.type === 'image' ? token.attrGet('src') : null;
       if (target && !/^(?:[a-z][a-z0-9+.-]*:|#|\/)/i.test(target)) {
         const relative = decodeURIComponent(target.split(/[?#]/)[0]);
-        const resolved = path.relative(root, path.resolve(path.dirname(file), relative));
+        const resolved = path.relative(root, path.resolve(path.dirname(file), relative)).split(path.sep).join('/');
         assert.ok(files.includes(resolved), `Missing packaged documentation target: ${resolved}`);
       }
       if (token.children) visit(token.children, file);
@@ -157,7 +157,7 @@ test('opt-in bundles preserve literal shell characters through host preprocessin
     assert.equal(output.status, 0, output.stderr);
     const response = JSON.parse(output.stdout);
     assert.equal(response.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-    assert.ok(response.hookSpecificOutput.additionalContext.includes(path.join(pkg.skillRoot, 'SKILL.md')));
+    assert.ok(response.hookSpecificOutput.additionalContext.includes(JSON.stringify(path.join(pkg.skillRoot, 'SKILL.md')).slice(1, -1)));
     assert.ok(!response.decision);
     const startup = { hook_event_name: 'SessionStart', source: 'startup', session_id: payload.session_id, cwd: directory };
     const configuredStart = invoke(startup);

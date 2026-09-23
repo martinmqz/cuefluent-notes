@@ -81,11 +81,13 @@ test('status rejects stale and incomplete hook registrations in both client bund
     ['missing command', hooks => { delete hooks.UserPromptSubmit[0].hooks[0].command; }],
     ['blank command', hooks => { hooks.UserPromptSubmit[0].hooks[0].command = '  '; }],
     ['invalid handler type', hooks => { hooks.UserPromptSubmit[0].hooks[0].type = 'invalid'; }],
+    ...['args', 'commandWindows', 'command_windows', 'shell'].map(key =>
+      [`unexpected ${key}`, hooks => { hooks.UserPromptSubmit[0].hooks[0][key] = 'unexpected'; }]),
     ...['SessionStart', 'UserPromptSubmit', 'Stop'].flatMap(event => [
       [`unrelated ${event} command`, hooks => { hooks[event][0].hooks[0].command = 'true'; }],
       [`wrong ${event} client`, (hooks, client) => {
         const handler = hooks[event][0].hooks[0];
-        handler.command = handler.command.replace(/(?:codex|claude)$/, client === 'codex' ? 'claude' : 'codex');
+        handler.command = handler.command.replace(`m.main(['${client}'])`, `m.main(['${client === 'codex' ? 'claude' : 'codex'}'])`);
       }],
       [`wrong ${event} script`, hooks => {
         const handler = hooks[event][0].hooks[0];

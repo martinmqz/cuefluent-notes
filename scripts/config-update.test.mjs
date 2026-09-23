@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { initialize, setupStatus } from './setup.mjs';
 import { updateConfiguration } from './config-update.mjs';
+import { hookConfigurationSelection } from './capture-policy.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function snapshot(file) {
@@ -32,6 +33,28 @@ async function writeProposal(f, config, name = 'proposal.json') {
   await fs.writeFile(proposal, `${JSON.stringify(config, null, 2)}\n`);
   return proposal;
 }
+test('configuration updates and hook selection recognize actual case aliases', async t => {
+  const f = await fixture(t);
+  const alias = path.join(path.dirname(f.configPath), 'CONFIG.json');
+  const exists = await fs.stat(alias).catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!exists) { t.skip('Selected volume is case-sensitive.'); return; }
+  const previous = process.env.CUEFLUENT_NOTES_CONFIG;
+  process.env.CUEFLUENT_NOTES_CONFIG = f.configPath;
+  t.after(() => { if (previous === undefined) delete process.env.CUEFLUENT_NOTES_CONFIG; else process.env.CUEFLUENT_NOTES_CONFIG = previous; });
+  assert.equal((await hookConfigurationSelection(alias)).hookConfigMatches, true);
+  assert.equal((await hookConfigurationSelection(path.join(f.root, 'different.json'))).hookConfigMatches, false);
+  const before = await snapshot(f.configPath);
+  const next = { ...before.config, scope: 'Updated synthetic scope.' };
+  const result = await updateConfiguration({ client: 'codex', cwd: f.project, configPath: alias,
+    proposal: await writeProposal(f, next), expectedHash: before.expectedHash });
+  assert.equal(result.configPath, f.configPath);
+  assert.equal(result.hookConfigMatches, true);
+  assert.deepEqual((await snapshot(f.configPath)).config, next);
+  assert.deepEqual(await fs.readdir(path.dirname(f.configPath)), ['config.json']);
+});
 
 test('reviewed updates add a project and client while preserving exclusions, routes, and suggestions', async t => {
   const f = await fixture(t);
@@ -49,7 +72,7 @@ test('reviewed updates add a project and client while preserving exclusions, rou
     proposal: await writeProposal(f, expanded), expectedHash: before.expectedHash });
   const afterProject = await snapshot(f.configPath);
   assert.deepEqual(afterProject.config, expanded);
-  assert.equal((await fs.stat(f.configPath)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(f.configPath)).mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
 
   const bothClients = { ...afterProject.config, clients: ['codex', 'claude'] };
   await updateConfiguration({ client: 'claude', cwd: f.secondProject, configPath: f.configPath,

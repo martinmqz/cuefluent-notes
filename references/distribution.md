@@ -40,6 +40,24 @@ and [Claude marketplace installation](https://code.claude.com/docs/en/discover-p
 
 ## Guided installer
 
+Native Windows uses the same packages and commands as macOS/Linux. In PowerShell,
+use `npm.cmd` if script execution policy blocks `npm.ps1`; do not relax global
+execution policy to install this plugin. `--cli "C:\Program Files\client\codex.exe"`
+selects a native executable; npm-style `.cmd`/`.bat` shims and explicit Node
+scripts also work. WSL, administrator access, and developer-mode symlink
+privileges are not prerequisites for ordinary installation or capture.
+
+`~` in this guide means the current user's home (`%USERPROFILE%` on Windows).
+The default private policy remains `.config/cuefluent-notes/config.json` under
+that home on every platform, preserving existing configuration. Keep private
+configuration, state, and notes in directories whose Windows ACL permits only
+the intended readers: Node's `chmod(0600)` does not establish a private ACL.
+Use full drive paths such as `C:\Users\Ada\Documents\Notes` or an explicit
+UNC share; drive-relative paths such as `C:Notes`, device namespaces, reserved
+device filenames, alternate streams, and trailing-dot/space aliases are refused.
+Native CI verifies local NTFS; network-share durability and cloud-sync behavior
+have not been verified. First-use setup requires hard-link support.
+
 The [README quickstart](../README.md#install-in-codex-or-claude-code) uses
 `npm run install:codex` or `npm run install:claude` from a Git clone. These
 source-only commands install locked dependencies with lifecycle scripts disabled,
@@ -116,7 +134,7 @@ Clone again when you next need to update.
   update to a version that discovers full plugins in its skills directory; a
   plain copied `SKILL.md` does not include the bundled runtime or hooks.
 
-The installer supports macOS and Linux, not Windows. The automated installer
+The installer supports native Windows, macOS, and Linux. The automated installer
 checks use disposable user and checkout-lock directories and stub client commands; they verify package
 contents, settings preservation, conflicts, retries, and updates. Actual host
 loading is covered separately in [verification results](verification.md).
@@ -317,10 +335,12 @@ each host rather than assuming both update the same way.
 ## Compatibility and verification status
 
 The declared Node baseline is `>=22`; development and isolated helper checks
-were run locally on macOS with Node `26.2.0`. CI targets standalone checks on
-Linux and macOS with Node 22. Hook command manifests use a POSIX shell for
-macOS/Linux; live Linux client hooks remain unverified, and Windows hook
-commands are not supplied. Reviewed host contracts are Codex
+run locally on macOS with Node `26.2.0`. CI checks native Windows, Linux, and
+macOS with Node 22 and compares release checksums across all three. Bundled
+hooks use a fixed Node bootstrap that reads the client-exported plugin root
+inside Node, so path contents never become shell source. Native Windows tests
+exercise Command Prompt, Windows PowerShell, PowerShell 7, and Git Bash. Live model
+hooks on Windows and Linux remain unverified. Reviewed host contracts are Codex
 `0.146.0` and Claude Code `2.1.278`; see [hooks.md](hooks.md) for native identity
 requirements and the Claude `prompt_id` version boundary.
 

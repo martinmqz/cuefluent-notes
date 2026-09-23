@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare, syncDirectory, sameFileIdentity } from './file-io.mjs';
+import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare, syncDirectory, sameFileIdentity, openGuarded, windowsComponent } from './file-io.mjs';
 import { GUIDE_VERSION, MAX_BYTES, inspectMarkdown, reviewVocabulary } from './check-notes.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 
@@ -11,7 +11,13 @@ const MAX_FILES = 100;
 const MAX_SOURCES = 1000;
 const HASH = /^[a-f0-9]{64}$/;
 const STAGE_NAME = /^\.cuefluent-stage-[a-f0-9-]{36}\.tmp$/;
-const LIMITATIONS = 'Atomic replacement preserves permission bits and ownership for existing notes, but not ACLs or extended attributes. Hard-linked replacements are refused. Per-file atomic replacement, not a collection transaction. The state-directory lock coordinates this helper only; an unrelated editor can still race the final hash check and rename. Markdown checks do not establish factual truth, app admission, rendering or ranking.';
+const LIMITATIONS = 'Atomic replacement preserves POSIX permission bits and ownership, but not ACLs or extended attributes. Windows access protection depends on the selected directory ACL; read-only notes are refused and directory flush durability is unavailable. Hard-linked replacements are refused. Per-file atomic replacement, not a collection transaction. The state-directory lock coordinates this helper only; an unrelated editor can still race the final hash check and rename. Markdown checks do not establish factual truth, app admission, rendering or ranking.';
+// Conservative uniqueness for missing targets on common Windows/macOS volumes.
+// macOS also aliases normalization, long-s and micro-sign spellings. NTFS does
+// not alias those in native tests; do not infer its rules from JS uppercasing.
+const pathKey = value => process.platform === 'darwin'
+  ? value.normalize('NFD').toUpperCase().toLowerCase().normalize('NFD')
+  : process.platform === 'win32' ? value.toLowerCase() : value;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const serialize = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
 const fail = message => { throw new Error(message); };
@@ -76,7 +82,8 @@ async function directory(input, { create = false, allowMissing = false } = {}) {
 }
 function relativeNote(value) {
   if (!regularString(value) || path.isAbsolute(value) || CONTROLS.test(value) || value.includes('\\') ||
-    path.normalize(value) !== value || value === '..' || value.startsWith(`..${path.sep}`) || !/\.(md|markdown)$/i.test(value)) {
+    path.posix.normalize(value) !== value || value === '..' || value.startsWith('../') || !/\.(md|markdown)$/i.test(value) ||
+    (process.platform === 'win32' && !value.split('/').every(windowsComponent))) {
     fail('Each output must be a normalized relative .md or .markdown path within the notes root.');
   }
   return value;
@@ -94,9 +101,11 @@ async function targetPath(root, relative, stateDir, { allowMissingParents = fals
     const stat = await existsStat(current);
     if (!stat && allowMissingParents) return target;
     if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) fail('Output parent directories must already exist and cannot be symlinks.');
+    if (await fs.realpath(current) !== current) fail('Use the canonical spelling of output parent directories.');
   }
   const stat = await existsStat(target);
   if (stat && (stat.isSymbolicLink() || !stat.isFile())) fail('Output targets must be regular files, never symlinks.');
+  if (stat && await fs.realpath(target) !== target) fail('Use the canonical spelling of output targets.');
   return target;
 }
 async function stateFile(stateDir, name) {
@@ -118,6 +127,7 @@ async function replacementMetadata(target) {
   const stat = await existsStat(target);
   if (!stat) return null;
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) fail('Replacement requires a regular file with a single hard link.');
+  if (process.platform === 'win32' && !(stat.mode & 0o200)) fail('Windows read-only notes must remain unchanged; review their permissions before replacement.');
   return { mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid };
 }
 async function checkReplacementMetadata(file, target, current) {
@@ -131,15 +141,15 @@ async function checkReplacementMetadata(file, target, current) {
   // on their remaining writes rather than assuming the former 0600 default.
   if (file.metadata === undefined) return;
   const expected = file.metadata;
-  if (!actual || (expected ? actual.mode !== expected.mode || actual.uid !== expected.uid || actual.gid !== expected.gid : actual.mode !== 0o600)) fail('Output permissions or ownership changed; inspect before replacing.');
+  if (!actual || (expected ? actual.mode !== expected.mode || actual.uid !== expected.uid || actual.gid !== expected.gid : actual.mode !== (process.platform === 'win32' ? 0o666 : 0o600))) fail('Output permissions or ownership changed; inspect before replacing.');
 }
 async function prepareStageMetadata(file, target) {
   const desired = file.metadata === undefined ? await replacementMetadata(target) : file.metadata;
-  const handle = await fs.open(file.stagePath, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  const { handle, stat } = await openGuarded(file.stagePath, {
+    flags: process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY, singleLink: true,
+  });
   try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1) fail('Stage must be a regular file with a single hard link.');
-    if (desired && (stat.uid !== desired.uid || stat.gid !== desired.gid)) await handle.chown(desired.uid, desired.gid);
+    if (desired && (Number(stat.uid) !== desired.uid || Number(stat.gid) !== desired.gid)) await handle.chown(desired.uid, desired.gid);
     // chown may clear set-ID bits; chmod last, just before replacement.
     await handle.chmod(desired?.mode ?? 0o600);
     await handle.sync();
@@ -243,8 +253,8 @@ function manifestSchema(value, root) {
   for (const file of value.files) {
     if (!file || !validHash(file.hash)) fail('Invalid derived output fingerprint.');
     relativeNote(file.path);
-    if (seen.has(file.path)) fail('Manifest contains duplicate output paths.');
-    seen.add(file.path);
+    if (seen.has(pathKey(file.path))) fail('Manifest contains duplicate output paths.');
+    seen.add(pathKey(file.path));
     const sources = sourcesSchema(file.sources, { required: true, stored: true });
     entriesSchema(file.entries, sources);
   }
@@ -256,8 +266,8 @@ function retireSchema(value = []) {
   return value.map(file => {
     if (!file || !validHash(file.expectedHash, true)) fail('Retirement needs path and inspected expectedHash (null for absence).');
     relativeNote(file.path);
-    if (seen.has(file.path)) fail('Duplicate retirement paths are not allowed.');
-    seen.add(file.path);
+    if (seen.has(pathKey(file.path))) fail('Duplicate retirement paths are not allowed.');
+    seen.add(pathKey(file.path));
     return { path: file.path, expectedHash: file.expectedHash };
   });
 }
@@ -310,8 +320,13 @@ export async function applyPlan(plan, options = {}) {
   if (plan.mode === 'derived' && !validHash(plan.expectedManifestHash, true)) fail('Derived plans require an explicit expectedManifestHash (null for the initial manifest).');
   const root = await directory(plan.root);
   const selectedState = await directory(plan.stateDir, { allowMissing: true });
+  const selectedPaths = new Set();
   for (const file of [...plan.files, ...retire]) {
     const target = path.join(root, relativeNote(file?.path));
+    // Refuse portable batch aliases before creating helper state or output.
+    const key = pathKey(target);
+    if (selectedPaths.has(key)) fail('Duplicate output targets or outputs updated and retired in one plan are not allowed.');
+    selectedPaths.add(key);
     if (within(target, selectedState)) fail('State directory cannot be inside a note target.');
   }
   const stateDir = await directory(selectedState, { create: true });
@@ -426,8 +441,8 @@ async function validateJournal(value, stateDir) {
     if (file.metadata !== undefined && file.metadata !== null && (!Number.isInteger(file.metadata.mode) || file.metadata.mode < 0 || file.metadata.mode > 0o7777 ||
       !Number.isSafeInteger(file.metadata.uid) || file.metadata.uid < 0 || !Number.isSafeInteger(file.metadata.gid) || file.metadata.gid < 0)) fail('Invalid recovery permission metadata.');
     const target = await targetPath(root, file.path, stateDir);
-    if (paths.has(target)) fail('Recovery journal repeats an output.');
-    paths.add(target);
+    if (paths.has(pathKey(target))) fail('Recovery journal repeats an output.');
+    paths.add(pathKey(target));
     if (file.oldHash === file.newHash) {
       if (file.stagePath !== null) fail('Unchanged recovery entries must not contain staged files.');
     } else if (!absolute(file.stagePath) || path.dirname(file.stagePath) !== path.dirname(target) || !STAGE_NAME.test(path.basename(file.stagePath))) fail('Invalid staged file location.');
@@ -436,8 +451,8 @@ async function validateJournal(value, stateDir) {
   }
   for (const file of retire) {
     const target = await targetPath(root, file.path, stateDir, { allowMissingParents: file.expectedHash === null });
-    if (paths.has(target)) fail('Recovery cannot both retire and update an output.');
-    paths.add(target);
+    if (paths.has(pathKey(target))) fail('Recovery cannot both retire and update an output.');
+    paths.add(pathKey(target));
   }
   if (value.previousManifest !== undefined) {
     manifestSchema(value.previousManifest, root);

@@ -1,11 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { absolute, lstatOrNull, isMain, readBoundedBytes } from './file-io.mjs';
+import { absolute, windowsAbsolute, lstatOrNull, isMain, readBoundedBytes } from './file-io.mjs';
 import { PACKAGE_ROOT, SKILL_ROOT } from './runtime-paths.mjs';
 import { CLIENTS, configurationPath, hookConfigurationSelection, readConfigSnapshot, configSchema, configHeader, configuredClient, assertCompatibleClients, captureSettings, canonicalSelectedPath, collectionRoot, assertPrivate, assertConfigurationStorage } from './capture-policy.mjs';
 import { updateConfiguration } from './config-update.mjs';
-import { hookCommand } from './hook-definition.mjs';
+import { validHookHandler } from './hook-definition.mjs';
 import { validatePluginManifest } from './plugin-manifest.mjs';
 
 const fail = message => { throw new Error(message); };
@@ -20,11 +20,9 @@ async function hookPackaged(client) {
   const bytes = await readBoundedBytes(path.join(PACKAGE_ROOT, 'hooks/hooks.json'), { missing: true });
   if (bytes === null) return false;
   const hooks = JSON.parse(bytes)?.hooks;
-  const command = hookCommand(client);
   const registered = groups => Array.isArray(groups) && groups.length > 0 && groups.every(group =>
     Array.isArray(group?.hooks) && group.hooks.length > 0 && group.hooks.every(handler =>
-      handler?.type === 'command' && handler.command === command &&
-      (handler.async === undefined || handler.async === false)));
+      validHookHandler(handler, client)));
   if (!registered(hooks?.SessionStart) || !hooks.SessionStart.some(group => group.matcher === 'startup') ||
     !registered(hooks?.UserPromptSubmit) || !registered(hooks?.Stop) || hooks.Stop.some(group => group.matcher !== undefined)) {
     fail('The package requires synchronous startup, prompt and Stop hooks invoking the bundled adapter for this client, with only the startup matcher.');
@@ -36,7 +34,7 @@ async function hookPackaged(client) {
 export async function setupStatus({ client, cwd, configPath } = {}) {
   if (!CLIENTS.has(client) || !absolute(cwd)) fail('Choose a supported client and supply an explicit absolute project directory (--cwd).');
   const file = configurationPath(configPath);
-  const result = { configPath: file, client, ...hookConfigurationSelection(file), hookPackaged: false, hostTrust: 'not_checked' };
+  const result = { configPath: file, client, ...await hookConfigurationSelection(file), hookPackaged: false, hostTrust: 'not_checked' };
   try { result.hookPackaged = await hookPackaged(client); }
   catch { result.hookIssue = 'The plugin package could not be inspected safely. Repair or reinstall the plugin before relying on capture.'; }
   try {
@@ -64,7 +62,7 @@ export async function initialize({ client, mode, project, destination, notesDir,
   if (!CLIENTS.has(client) || !modes.has(mode)) fail('Choose a supported client and manual, suggest, or automatic mode.');
   if (typeof completionCheck !== 'boolean' || (mode === 'manual' && completionCheck)) fail('Completion checks require Suggestions or Automatic mode and explicit opt-in.');
   const requested = configurationPath(configPath);
-  const selection = hookConfigurationSelection(requested);
+  const selection = await hookConfigurationSelection(requested);
   if (await lstatOrNull(requested)) fail('Configuration already exists. Inspect it with status; setup never resets existing settings.');
   const file = await canonicalSelectedPath(requested);
   assertPrivate(file, SKILL_ROOT);
@@ -74,6 +72,11 @@ export async function initialize({ client, mode, project, destination, notesDir,
     config = { version: 1, enabled: false, clients: [client], automaticUpdates: false,
       scope: 'Manual use only; no automatic capture.' };
   } else {
+    if (process.platform === 'win32') for (const value of [project, destination, notesDir, stateDir]) {
+      if (typeof value === 'string' && path.isAbsolute(value) && !windowsAbsolute(value)) {
+        fail('Use a full Windows drive or UNC path with ordinary filenames: reserved device names, alternate streams, invalid characters, and trailing dots or spaces are not allowed.');
+      }
+    }
     if (!absolute(project) || (destination !== undefined) === (notesDir !== undefined) ||
       !absolute(notesDir ?? destination)) fail('Choose an absolute project and exactly one Markdown file (--destination) or notes folder (--notes-dir).');
     const projectRoot = await fs.realpath(project);

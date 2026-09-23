@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { absolute, within, lstatOrNull, readBoundedBytes } from './file-io.mjs';
+import { absolute, within, lstatOrNull, readBoundedBytes, syncDirectory } from './file-io.mjs';
 import { CLIENTS, configurationPath, hookConfigurationSelection, configSchema, assertCompatibleClients, captureSettings, canonicalSelectedPath, collectionRoot, assertPrivate, assertConfigurationStorage, readConfig } from './capture-policy.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
 
@@ -64,13 +64,13 @@ export async function updateConfiguration({ client, cwd, configPath, proposal, e
     fail('Update requires a supported client, absolute project and proposal paths, and the inspected SHA-256 configuration hash.');
   }
   const requested = configurationPath(configPath);
-  const selection = hookConfigurationSelection(requested);
-  const file = path.join(await fs.realpath(path.dirname(requested)), path.basename(requested));
-  assertPrivate(file, SKILL_ROOT);
-  const current = await lstatOrNull(file);
+  const selection = await hookConfigurationSelection(requested);
+  const current = await lstatOrNull(requested);
   if (!current?.isFile() || current.isSymbolicLink() || current.nlink !== 1) {
     fail('Update requires an existing regular configuration with one hard link; preserve symlinks and inspect them separately.');
   }
+  const file = await fs.realpath(requested);
+  assertPrivate(file, SKILL_ROOT);
   if (await fs.realpath(proposal) === file) fail('Prepare the proposal in a separate private file.');
   const original = await bytesAt(file);
   if (hash(original) !== expectedHash) fail('Configuration changed since inspection; read it again before preparing another update.');
@@ -93,7 +93,9 @@ export async function updateConfiguration({ client, cwd, configPath, proposal, e
   let staged = false;
   const unchanged = async () => {
     const now = await lstatOrNull(file);
+    const selected = await lstatOrNull(requested);
     if (!sameFile(current, now) || !now.isFile() || now.nlink !== 1 ||
+      !sameFile(current, selected) || !selected.isFile() || selected.nlink !== 1 ||
       now.mtimeMs !== current.mtimeMs || now.ctimeMs !== current.ctimeMs ||
       await fs.realpath(requested) !== file || hash(await bytesAt(file)) !== expectedHash) {
       fail('Configuration changed since inspection; it was preserved.');
@@ -123,10 +125,7 @@ export async function updateConfiguration({ client, cwd, configPath, proposal, e
     await unchanged();
     await fs.rename(stage, file);
     staged = false;
-    const parent = await fs.open(path.dirname(file), 'r');
-    try { await parent.sync(); }
-    catch (error) { if (!['EINVAL', 'ENOTSUP'].includes(error.code)) throw error; }
-    finally { await parent.close(); }
+    await syncDirectory(path.dirname(file));
     return { status: 'updated', configPath: file, configHash: hash(bytes), ...selection };
   } finally {
     if (staged) await fs.unlink(stage).catch(() => {});

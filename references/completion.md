@@ -99,8 +99,9 @@ model adherence remain outside the guarantee; this is not exactly-once capture.
 
 Enabling the check explicitly permits a minimal marker, separately from note
 approval. The working-agent helper creates `stateDir/capture-completion/`, using
-the collection's existing writer lock. It stores one `0600` JSON file per client
-and session, replacing that session's last decision as turns advance. Each marker
+the collection's existing writer lock. It stores one JSON file per client
+and session (`0600` on POSIX; inherited directory ACL protection on Windows),
+replacing that session's last decision as turns advance. Each marker
 contains only its format version, hashed turn identity, hashed selected policy,
 and outcome. It stores no note text, raw IDs, project paths, or occurrence dates.
 It cannot answer “what happened yesterday?” and is not an activity log.

@@ -84,7 +84,7 @@ including first-use setup and hook trust, before advertising a release. The
 3. From the reviewed commit on `main`, create and push `v` followed by that exact
    version (for example, `v0.5.0` when all manifests say `0.5.0`). Do not move or
    reuse an existing version tag. **Prepare release** runs the Node 22 test
-   matrix and release builds on Linux and macOS, verifies that their archive
+   matrix and release builds on Windows, Linux, and macOS, verifies that their archive
    checksums match, and creates a **draft** GitHub Release using those exact Linux
    CI artifacts: all five archives and `SHA256SUMS`. Preparation does not rebuild.
 4. Open that draft on GitHub. Review the files, smoke-test the plugin ZIPs, and

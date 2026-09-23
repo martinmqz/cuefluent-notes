@@ -3,15 +3,37 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+import { spawnCommand, resolveCommand } from './command.mjs';
 import { buildPackages } from './package.mjs';
-import { absolute, isMain, lstatOrNull, readBoundedBytes } from './file-io.mjs';
+import { absolute, isMain, lstatOrNull, readBoundedBytes, sameFileIdentity } from './file-io.mjs';
 
 const SOURCE = await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const NAME = 'cuefluent-notes';
 const MARKER = '.cuefluent-installer.json';
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
 const fail = message => { throw new Error(message); };
+
+// Brief Windows sharing violations may clear after scanning finishes. Preserve
+// both selected entries on every retry; never retry a conflict or steal a path.
+export async function renameInstalledPath(source, destination, { replace = false, beforeRename = async () => {} } = {}) {
+  const original = await fs.lstat(source, { bigint: true });
+  const previous = await lstatOrNull(destination, { bigint: true });
+  if (previous && !replace) fail('Installation destination appeared before rename; it was preserved.');
+  for (let attempt = 0; ; attempt++) {
+    await directories(path.dirname(source));
+    await directories(path.dirname(destination));
+    const current = await lstatOrNull(destination, { bigint: true });
+    if (!sameFileIdentity(original, await lstatOrNull(source, { bigint: true })) ||
+      (previous ? !sameFileIdentity(previous, current) : current !== null)) fail('Installation path changed during rename; preserve it and inspect before retrying.');
+    await beforeRename();
+    try { await fs.rename(source, destination); return; }
+    catch (error) {
+      if (process.platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || attempt >= 5) throw error;
+      await delay(50 * 2 ** attempt);
+    }
+  }
+}
 
 // Resolve an explicitly selected home or reported location, including a missing
 // suffix beneath an existing OS/dotfiles alias. Write targets below it still
@@ -102,7 +124,9 @@ async function catalogAt(file) {
   }
   if (!existing) catalog.plugins.push({ name: NAME, source: { source: 'local', path: `./plugins/${NAME}` },
     policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' }, category: 'Productivity' });
-  return { bytes, catalog, changed: !existing, mode: bytes === null ? 0o600 : (await fs.lstat(file)).mode & 0o777 };
+  const mode = bytes === null ? 0o600 : (await fs.lstat(file)).mode & 0o777;
+  if (!existing && process.platform === 'win32' && !(mode & 0o200)) fail('The personal marketplace is read-only; review its permissions before installing. No package was moved.');
+  return { bytes, catalog, changed: !existing, mode };
 }
 async function managedDestination(destination, client) {
   const stat = await lstatOrNull(destination);
@@ -117,7 +141,7 @@ async function managedDestination(destination, client) {
   return true;
 }
 function command(executable, args, { capture = false, cwd = SOURCE } = {}) {
-  const result = spawnSync(executable, args, { cwd, encoding: 'utf8', shell: false,
+  const result = spawnCommand(executable, args, { cwd, encoding: 'utf8',
     stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit', maxBuffer: 8 * 1024 * 1024 });
   if (result.error?.code === 'ENOENT') fail(`Cannot find ${executable}. Install the current client/Node.js CLI, or select the client executable with --cli /absolute/path.`);
   if (result.error || result.status !== 0) fail(`${executable} ${args.join(' ')} failed${result.status === null ? '' : ` (exit ${result.status})`}. ${result.error?.message ?? (result.stdout?.trim().slice(0, 1000) || 'See the command output above.')}`);
@@ -140,10 +164,16 @@ export async function installPlugin({ client, withHooks = true, cli = client, ho
   run = command, log = console.log, warn = console.error } = {}) {
   if (!['codex', 'claude'].includes(client) || typeof withHooks !== 'boolean' || typeof cli !== 'string' || !cli.trim()) fail('Choose --client codex or --client claude.');
   if (Number(process.versions.node.split('.')[0]) < 22) fail('Node.js 22 or later is required.');
-  if (process.platform === 'win32') fail('This installer supports macOS/Linux. Windows hook commands are not supplied.');
   if (codexDirectory === '') codexDirectory = undefined;
   if (claudeDirectory === '') claudeDirectory = undefined;
-  if (cli.includes(path.sep)) cli = path.resolve(cli);
+  if (cli.includes(path.sep) || (process.platform === 'win32' && cli.includes('/'))) cli = path.resolve(cli);
+  if (run === command) {
+    try { cli = resolveCommand(cli); }
+    catch (error) {
+      if (error.code === 'ENOENT') fail(`Cannot find ${cli}. Install the current client/Node.js CLI, or select the client executable with --cli /absolute/path.`);
+      throw error;
+    }
+  }
   const configuredDirectory = client === 'codex' ? codexDirectory : claudeDirectory;
   if (!absolute(homeDirectory) || (configuredDirectory !== undefined && !absolute(configuredDirectory))) fail('Client home directories must be absolute paths.');
   if (!absolute(checkoutLockDirectory)) fail('The checkout lock directory must be an absolute path.');
@@ -215,17 +245,18 @@ export async function installPlugin({ client, withHooks = true, cli = client, ho
       if (catalog) {
         await directories(path.dirname(catalogFile), true);
         await unchanged(catalogFile, catalog.bytes);
+        await catalogAt(catalogFile); // Recheck read-only status before moving the package.
       }
       if (await managedDestination(destination, client) !== updating) fail('Installation destination changed; retry after other changes finish.');
       if (updating) {
         backup = path.join(work, 'previous');
         log(`Preserving the previous package at ${backup}…`);
-        await fs.rename(destination, backup);
+        await renameInstalledPath(destination, backup);
       }
-      try { await fs.rename(selected.root, destination); }
+      try { await renameInstalledPath(selected.root, destination); }
       catch (error) {
         if (backup) {
-          try { await fs.rename(backup, destination); backup = undefined; }
+          try { await renameInstalledPath(backup, destination); backup = undefined; }
           catch (restoreError) {
             error.backupPath = backup;
             error.rollbackError = restoreError;
@@ -241,7 +272,7 @@ export async function installPlugin({ client, withHooks = true, cli = client, ho
           await fs.chmod(stagedCatalog, catalog.mode);
           await unchanged(catalogFile, catalog.bytes);
           if (catalog.bytes === null) await fs.link(stagedCatalog, catalogFile);
-          else await fs.rename(stagedCatalog, catalogFile);
+          else await renameInstalledPath(stagedCatalog, catalogFile, { replace: true, beforeRename: () => unchanged(catalogFile, catalog.bytes) });
         } finally { await cleanup(stagedCatalog, () => fs.rm(stagedCatalog, { force: true })); }
       }
       if (client === 'codex') {

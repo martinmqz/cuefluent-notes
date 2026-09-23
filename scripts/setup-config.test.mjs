@@ -89,7 +89,7 @@ test('setup reports command-only configuration overrides and hooks follow their 
       assert.equal(invoke('SessionStart', matchedEnv), '');
       const prompt = invoke('UserPromptSubmit', matchedEnv);
       if (mode === 'manual') assert.equal(prompt, '');
-      else assert.ok(JSON.parse(prompt).hookSpecificOutput.additionalContext.includes(destination));
+      else assert.ok(JSON.parse(prompt).hookSpecificOutput.additionalContext.includes(JSON.stringify(destination).slice(1, -1)));
       assert.deepEqual(await fs.readFile(configPath), bytes);
       await assert.rejects(fs.stat(otherPath), { code: 'ENOENT' });
       await assert.rejects(fs.stat(destination), { code: 'ENOENT' });

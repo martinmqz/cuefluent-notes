@@ -5,7 +5,55 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { readBoundedBytes } from './file-io.mjs';
+import { readBoundedBytes, windowsAbsolute, syncDirectory } from './file-io.mjs';
+
+test('Windows paths require an explicit drive or share and ordinary filenames', () => {
+  for (const value of ['C:\\Users\\café\\Notes', 'c:/Notes/topic.md', '\\\\server\\share\\folder\\note.md']) assert.equal(windowsAbsolute(value), true, value);
+  for (const value of ['C:notes', '\\notes', '/notes', '\\\\?\\C:\\notes', '\\\\.\\pipe\\notes',
+    'C:\\notes\\NUL.md', 'C:\\notes\\COM¹.md', 'C:\\notes\\note.md:stream', 'C:\\notes.\\note.md',
+    'C:\\notes \\note.md', '\\\\server', '\\\\server\\share\\a?.md']) assert.equal(windowsAbsolute(value), false, value);
+});
+test('guarded reads refuse links and replacement between inspection and open', async t => {
+  const root = await fixture(t);
+  const file = path.join(root, 'selected.md');
+  const other = path.join(root, 'other.md');
+  await fs.writeFile(file, 'selected');
+  await fs.writeFile(other, 'unselected');
+  const link = path.join(root, 'linked.md');
+  await fs.symlink(other, link);
+  await assert.rejects(readBoundedBytes(link, { noFollow: true }), /regular/);
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (...args) => {
+    if (args[0] === file) await fs.rename(other, file);
+    return open(...args);
+  });
+  await assert.rejects(readBoundedBytes(file, { noFollow: true }), /identity changed/);
+});
+test('directory sync accepts real directories and preserves missing-path errors', async t => {
+  const root = await fixture(t);
+  await syncDirectory(root);
+  await assert.rejects(syncDirectory(path.join(root, 'missing')), { code: 'ENOENT' });
+});
+test('missing guarded reads tolerate unlink after open and always close the handle', async t => {
+  const file = path.join(await fixture(t), 'journal.json');
+  const open = fs.open;
+  let closed = 0;
+  t.mock.method(fs, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === file) {
+      const close = handle.close.bind(handle);
+      handle.close = async () => { closed++; await close(); };
+      await fs.unlink(file);
+    }
+    return handle;
+  });
+  await fs.writeFile(file, '{}');
+  assert.equal(await readBoundedBytes(file, { missing: true, noFollow: true }), null);
+  assert.equal(closed, 1);
+  await fs.writeFile(file, '{}');
+  await assert.rejects(readBoundedBytes(file, { noFollow: true }), { code: 'ENOENT' });
+  assert.equal(closed, 2);
+});
 
 const scripts = path.dirname(fileURLToPath(import.meta.url));
 async function fixture(t) {

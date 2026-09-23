@@ -28,8 +28,12 @@ the repository; keep detailed user workflows in the skill and its references.
 
 ## Development and verification
 
-Use macOS or Linux with Node.js 22+ and npm. The full source suite also needs
-Bash, Git, `unzip`, and `tar`.
+Use native Windows, macOS, or Linux with Node.js 22+ and npm. The full source
+suite also needs Bash, Git, `unzip`, and `tar`; these maintenance tools are not
+requirements for an installed plugin. In PowerShell use `npm.cmd` if needed.
+PowerShell 7 and Git Bash hook checks explicitly skip locally when unavailable;
+Windows CI requires both. The hook test locates Bash from Git for Windows rather
+than using a possible WSL launcher on PATH.
 
 ```sh
 npm ci --ignore-scripts
@@ -48,7 +52,12 @@ files in review: plain `git diff --check` covers only unstaged tracked changes.
 For packaging changes, verify detached packages and run `npm run release:build`.
 Builders refuse existing output directories: use a fresh destination with
 `-- --out /absolute/fresh-output` instead of deleting prior artifacts.
-CI runs Node 22 on Linux and macOS and compares release checksums across both.
+CI runs Node 22 on Windows, Linux, and macOS and compares all three release
+checksum sets. Keep test discovery and fixtures independent of POSIX paths,
+shebangs, chmod privacy, and shell globbing. Real-client smoke checks download
+locked CLIs without lifecycle scripts into temporary profiles; run them explicitly with
+`node scripts/client-smoke.mjs`. They must never use the user's real profile,
+authentication, capture settings, or hook trust.
 Report what was actually verified: emitted hook context and package validation
 do not prove live client behavior, native prompt rendering, or Cuefluent search
 ranking. Keep relevant evidence limits in [verification](references/verification.md).

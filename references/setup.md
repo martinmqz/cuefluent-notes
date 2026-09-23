@@ -162,7 +162,8 @@ Capture uses authored writes; a state containing a derived manifest or pending
 derived journal cannot be reused for capture. Setup refuses that conflict before
 writing configuration.
 
-Initialization creates a complete `0600` configuration without replacing an
+Initialization creates a complete configuration (`0600` on POSIX; protected by
+the selected directory's inherited ACL on Windows) without replacing an
 existing file or symlink, including a file created by a concurrent setup. It
 never writes note content, creates capture receipts, installs plugins, or changes
 hook trust. A refusal is a reason to inspect current settings, not to remove them

@@ -14,8 +14,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-14, windows-2025]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -24,8 +25,12 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+      - name: Record native runtime
+        run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release()})"
       - run: npm ci --ignore-scripts
       - run: npm test
+        env:
+          CUEFLUENT_REQUIRE_SHELLS: '1'
       - run: npm run check:examples
       - run: npm run release:build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -34,6 +39,26 @@ jobs:
           path: dist/release/artifacts/
           if-no-files-found: error
           retention-days: 7
+  client-smoke:
+    # Third-party CLIs never share an artifact-producing job. Release preparation
+    # uses locked product checks without depending on registry/client availability.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Verify locked real clients in disposable profiles
+        run: node scripts/client-smoke.mjs
   reproducibility:
     needs: test
     runs-on: ubuntu-24.04
@@ -42,8 +67,10 @@ jobs:
         with:
           pattern: release-preview-*
           path: artifacts
-      - name: Verify and compare Linux and macOS release artifacts
+      - name: Verify and compare Linux, macOS and Windows release artifacts
         run: |
           (cd artifacts/release-preview-ubuntu-24.04 && sha256sum --check SHA256SUMS)
           (cd artifacts/release-preview-macos-14 && sha256sum --check SHA256SUMS)
+          (cd artifacts/release-preview-windows-2025 && sha256sum --check SHA256SUMS)
           diff -u artifacts/release-preview-ubuntu-24.04/SHA256SUMS artifacts/release-preview-macos-14/SHA256SUMS
+          diff -u artifacts/release-preview-ubuntu-24.04/SHA256SUMS artifacts/release-preview-windows-2025/SHA256SUMS

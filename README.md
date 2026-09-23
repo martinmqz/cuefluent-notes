@@ -16,8 +16,10 @@ this public repository. The bundled examples are fictional.
 ### From the marketplace
 
 For a [published release](https://github.com/martinmqz/cuefluent-notes/releases),
-you need **Git, Node.js 22+, and a current client CLI**. Runtime dependencies
-are included; no npm install or source checkout is needed.
+you need **Git, Node.js 22+, and a current client CLI** on Windows, macOS, or
+Linux. Runtime dependencies are included; no npm install or source checkout is
+needed. Windows requires plugin version **0.6.0+**; until that release is
+published, use the updated source installer below.
 
 **Codex:**
 
@@ -47,7 +49,8 @@ the [first-use choices below](#start-using-it).
 ### From source
 
 You need **Git, Node.js 22+ with npm, and a current client CLI** (`codex` or
-`claude`). The installer supports macOS/Linux shells; macOS is tested.
+`claude`). Native Windows, macOS, and Linux are supported. On Windows, use
+PowerShell or Command Prompt; WSL is not required.
 
 Clone once:
 
@@ -61,6 +64,10 @@ Then choose your client:
 | Codex | Claude Code |
 | --- | --- |
 | `npm run install:codex` | `npm run install:claude` |
+
+In Windows PowerShell, use `npm.cmd run install:codex` or
+`npm.cmd run install:claude` if execution policy blocks `npm.ps1`. No global
+execution-policy change is needed. Paths with spaces must be quoted.
 
 Run both commands if you use both clients. Each command installs the locked
 build dependencies, builds a complete plugin, and installs it for your user.
@@ -244,9 +251,10 @@ exactly-once guarantee. Read [hook guidance](references/hooks.md) before opting 
 
 Verification covers synthetic content and vocabulary, safe-update conflicts and
 recovery, adapter routing and privacy, and standalone packaged helpers. Live
-client checks used macOS with Node `26.2.0`. CI targets Node 22 on Linux and
-macOS for standalone helpers, packaging, and publication logic; live client
-hook behavior on Linux remains unverified.
+model checks used macOS with Node `26.2.0`. CI uses Node 22 on native Windows,
+Linux, and macOS for helpers, shell hooks, packaging, and matching release
+checksums. Real CLI registration checks use disposable Windows/macOS profiles;
+live model hook behavior on Windows and Linux remains unverified.
 
 Authorized live CLI smoke tests also exercised temporary plugin loading and
 synthetic capture; see [verification results](references/verification.md) for

@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { absolute, within, lstatOrNull as lstat, readBoundedBytes, CONTROLS } from './file-io.mjs';
+import { absolute, within, lstatOrNull as lstat, readBoundedBytes, CONTROLS, sameFileIdentity } from './file-io.mjs';
 import { PACKAGE_ROOT, SKILL_ROOT } from './runtime-paths.mjs';
 import pkg from '../package.json' with { type: 'json' };
 
@@ -178,9 +178,18 @@ async function selectedDestination(input) {
   if (path.basename(input).includes('\\')) invalid();
   const parent = await existingDirectory(path.dirname(input));
   const destination = path.join(parent, path.basename(input));
-  const stat = await lstat(destination);
-  if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)) invalid();
-  return destination;
+  const stat = await lstat(destination, { bigint: true });
+  if (!stat) return destination;
+  const regular = entry => entry?.isFile() && !entry.isSymbolicLink() && entry.nlink === 1n;
+  if (!regular(stat)) invalid();
+  const canonical = await fs.realpath(destination);
+  // Canonical spelling must not turn a leaf swap into authority for a different
+  // note. Recheck both names after realpath, including their inspected identity.
+  const current = await lstat(destination, { bigint: true });
+  const resolved = await lstat(canonical, { bigint: true });
+  if (path.dirname(canonical) !== parent || !regular(current) || !regular(resolved) ||
+    !sameFileIdentity(stat, current) || !sameFileIdentity(stat, resolved)) invalid();
+  return canonical;
 }
 
 export function assertPrivate(file, skillRoot) {
@@ -241,14 +250,25 @@ export function configurationPath(explicit) {
 }
 
 /** Compare path selections in this process; the host's environment is not inspected. */
-export function hookConfigurationSelection(selected) {
+export async function hookConfigurationSelection(selected) {
   let hookConfigPath;
   try { hookConfigPath = configurationPath(); }
   catch {
     return { hookConfigPath: null, hookConfigMatches: false,
       hookConfigIssue: 'CUEFLUENT_NOTES_CONFIG must be an absolute path in the host launch environment before packaged hooks can use this configuration.' };
   }
-  const hookConfigMatches = selected === hookConfigPath;
+  let hookConfigMatches = selected === hookConfigPath;
+  if (!hookConfigMatches) {
+    // Resolve actual existing names, including case aliases, without guessing the
+    // volume's case rules or treating two different missing files as equivalent.
+    const canonical = async file => {
+      const stat = await lstat(file);
+      if (stat) return fs.realpath(file);
+      return path.join(await canonicalSelectedPath(path.dirname(file)), path.basename(file));
+    };
+    try { hookConfigMatches = await canonical(selected) === await canonical(hookConfigPath); }
+    catch { /* An unavailable path cannot prove matching hook selection. */ }
+  }
   return { hookConfigPath, hookConfigMatches, ...(!hookConfigMatches ? {
     hookConfigIssue: 'The --config override applies only to this command; packaged hooks select another path in this environment. Set CUEFLUENT_NOTES_CONFIG in the host launch environment to use this configuration, then verify in a fresh task.',
   } : {}) };

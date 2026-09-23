@@ -170,7 +170,8 @@ collection is not an all-or-nothing transaction: an interruption can leave some
 outputs updated and others unchanged. Before any staging, the private journal records all reserved temporary paths,
 hashes and the previous/proposed manifests, not note or source bodies; staged files necessarily contain the
 reviewed note content and need the same privacy as the notes. Stages live beside
-their targets and start with `0600` permission bits. New notes keep `0600`.
+their targets. On POSIX they start with `0600` permission bits and new notes keep
+`0600`; Windows protection comes from the selected directory's inherited ACL.
 Immediately before replacing an existing note, the stage receives its recorded
 permission bits and owner/group; inability to preserve them stops the write.
 Permission or ownership changes during the operation are conflicts. Updates to
@@ -182,6 +183,28 @@ macOS tags and Finder comments) are **not copied** by this portable Node helper.
 Use a metadata-preserving editing method when those attributes must survive;
 do not claim full filesystem metadata preservation. A stage interrupted just
 before rename can already have the existing note's permissions.
+
+On Windows, read-only notes are refused before staging; the helper never makes
+them writable to force an update. File contents are flushed before replacement,
+but Node cannot flush Windows directory handles, so rename persistence across
+power loss is not guaranteed. Locks, inspected hashes, journals, and recovery
+still apply. An open editor or sync agent can prevent a rename: preserve the
+journal and inspect the conflict instead of retrying with fresh hashes.
+
+Plan and journal note paths use forward slashes on every platform, for example
+`decisions/cache-policy.md`; absolute inputs use native full paths. Existing
+outputs and parent directories must use the filesystem's canonical spelling.
+Windows batches conservatively refuse case-only collisions, including missing
+targets. macOS also refuses Unicode case and normalization collisions. These
+rules can reject distinct names on case-sensitive volumes; they do not claim to
+reproduce every filesystem's Unicode comparison table. Native Windows tests
+retain distinct dotless-i, long-s, micro-sign, and decomposed-accent names rather
+than treating JavaScript uppercasing as proof of an NTFS alias.
+Linux retains distinct case-sensitive names.
+Junctions and symlinks cannot redirect output parents. Device names, alternate
+data streams, and trailing-dot/space aliases are refused. See
+[Microsoft's filename rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
+and [Node's Windows permission limits](https://nodejs.org/docs/latest-v22.x/api/fs.html#fschmodpath-mode-callback).
 
 An interruption during staging may leave missing or partial stages. They remain
 listed by `inspect`; no directory scan or untracked content discovery is needed.

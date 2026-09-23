@@ -53,6 +53,14 @@ this order: `--config`, `CUEFLUENT_NOTES_CONFIG`, then
 absolute. Packaged commands do not include `--config`: they use the environment
 inherited from their host, or the default path. Passing `--config` to Setup does
 not persist that selection for hooks; Setup reports differing path selections.
+
+The generated handler works on native Windows, macOS, and Linux. It invokes
+`node` with fixed bootstrap code and reads `PLUGIN_ROOT` (Codex) or
+`CLAUDE_PLUGIN_ROOT` (Claude) inside Node. Spaces, Unicode, and shell characters
+in installed paths are never inserted into shell code. Windows checks exercise
+`cmd.exe`, Windows PowerShell, PowerShell 7, and Git Bash. Node 22+ must be on the client's
+PATH, including when launched from a desktop app. Updating this handler may
+require renewed hook review/trust; it does not change capture consent.
 For a custom location, supply `CUEFLUENT_NOTES_CONFIG` in the host launch
 environment and verify from a fresh task, rather than setting it only for Setup.
 No configuration file means a startup host notice only, with no capture

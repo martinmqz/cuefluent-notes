@@ -23,7 +23,12 @@ model adherence have not yet been verified.
 
 This release contains complete Codex and Claude Code plugins, with runtime
 dependencies included. Each client has a hook-enabled ZIP and a manual ZIP
-without hooks. Requires Node.js 22+; hook commands target macOS and Linux.
+without hooks. Requires Node.js 22+ on native Windows, macOS, or Linux.
+Windows supports native executables and command shims during source installation,
+and packaged hooks run in Command Prompt or PowerShell without WSL.
+All three CI platforms build identical release archives. Private Windows
+configuration and state depend on the selected directory's ACL; read-only notes
+are preserved, and directory-flush power-loss durability is unavailable.
 
 After this release is published, the **Publish marketplace** workflow updates
 the `marketplace` branch. Wait for that workflow to succeed before using the

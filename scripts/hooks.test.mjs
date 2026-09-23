@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { hookResponse } from './hooks.mjs';
+import { captureSettings } from './capture-policy.mjs';
 
 const hookScript = fileURLToPath(new URL('./hooks.mjs', import.meta.url));
 const text = response => response?.hookSpecificOutput?.additionalContext ?? '';
@@ -31,11 +32,41 @@ test('both clients inject their own native identity and selected workflow withou
   for (const [client, id] of [['codex', 'turn-1'], ['claude', 'prompt-1']]) {
     const response = await hookResponse(client, payload, config);
     assert.equal(response.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-    assert.ok(text(response).includes(destination));
+    assert.ok(text(response).includes(JSON.stringify(destination).slice(1, -1)));
     assert.ok(text(response).includes('session-A'));
     assert.ok(text(response).includes(id));
     assert.ok(!JSON.stringify(response).includes('PRIVATE_'));
     assert.ok(!('decision' in response));
+  }
+});
+test('canonical filename selection refuses leaf or parent swaps instead of authorizing another note', async t => {
+  for (const kind of ['symlink', 'replacement', 'parent']) {
+    const f = await fixture(t);
+    await fs.writeFile(f.destination, 'Selected content.');
+    const unselected = path.join(f.directory, 'unselected.md');
+    await fs.writeFile(unselected, 'Unselected private content.');
+    const realpath = fs.realpath;
+    let swapped = false;
+    const spy = t.mock.method(fs, 'realpath', async (file, ...args) => {
+      if (file === f.destination && !swapped) {
+        swapped = true;
+        if (kind === 'parent') {
+          const moved = path.join(f.directory, 'moved-notes');
+          await fs.rename(f.notes, moved);
+          await fs.symlink(moved, f.notes, 'dir');
+        } else {
+          await fs.rename(f.destination, path.join(f.notes, 'original.md'));
+          if (kind === 'symlink') await fs.symlink(unselected, f.destination);
+          else await fs.copyFile(unselected, f.destination);
+        }
+      }
+      return realpath(file, ...args);
+    });
+    await assert.rejects(captureSettings('codex', f.nested, f.config), /Invalid capture configuration/);
+    spy.mock.restore();
+    assert.equal(swapped, true);
+    assert.equal(await fs.readFile(unselected, 'utf8'), 'Unselected private content.');
+    await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
   }
 });
 test('disabled or unselected clients and unsupported/subagent events produce no capture response', async t => {
@@ -53,7 +84,7 @@ test('missing unrelated project roots do not disable an otherwise valid route', 
   const response = await hookResponse('codex', payload, { ...config,
     exclude: [path.join(directory, 'unavailable-excluded-project')],
     routes: [...config.routes, { projectRoot: path.join(directory, 'unavailable-project'), destination, stateDir }] });
-  assert.ok(text(response).includes(destination));
+  assert.ok(text(response).includes(JSON.stringify(destination).slice(1, -1)));
   assert.ok(text(response).includes('turn-1'));
 });
 test('missing native identity does not borrow the other host identity', async t => {
@@ -67,8 +98,8 @@ test('longest project route wins and exclusions or disabled routes suppress capt
   const preciseDestination = path.join(notes, 'precise.md');
   const routed = { ...config, routes: [...config.routes, { projectRoot: nested, destination: preciseDestination, stateDir }] };
   const response = await hookResponse('codex', payload, routed);
-  assert.ok(text(response).includes(preciseDestination));
-  assert.ok(!text(response).includes(destination));
+  assert.ok(text(response).includes(JSON.stringify(preciseDestination).slice(1, -1)));
+  assert.ok(!text(response).includes(JSON.stringify(destination).slice(1, -1)));
   assert.equal(await hookResponse('codex', payload, { ...routed, exclude: [nested] }), null);
   routed.routes[1].enabled = false;
   assert.equal(await hookResponse('codex', payload, routed), null);
@@ -281,7 +312,7 @@ test('unrelated non-directory and inaccessible roots leave an active route usabl
   for (const unavailable of [blocked, path.join(blocked, 'project'), path.join(denied, 'project')]) {
     const response = await hookResponse('codex', payload, { ...config, exclude: [unavailable],
       routes: [...config.routes, { projectRoot: unavailable, destination, stateDir, enabled: false }] });
-    assert.ok(text(response).includes(destination));
+    assert.ok(text(response).includes(JSON.stringify(destination).slice(1, -1)));
     assert.ok(text(response).includes('turn-1'));
   }
 });

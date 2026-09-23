@@ -4,8 +4,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/;
+// Win32 aliases (devices, alternate streams, trailing dots/spaces) cannot be
+// treated as distinct ordinary files. Keep this independent of the host for tests.
+export const windowsComponent = value => !!value && !CONTROLS.test(value) &&
+  !/[<>:"|?*\\/]/.test(value) && !/[. ]$/.test(value) &&
+  !/^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/i.test(value);
+export function windowsAbsolute(value) {
+  const normalized = value.replaceAll('\\', '/');
+  const root = /^(?:[a-z]:\/|\/\/([^/]+)\/([^/]+)(?:\/|$))/i.exec(normalized);
+  if (!root || (root[1] && (!windowsComponent(root[1]) || !windowsComponent(root[2])))) return false;
+  return normalized.slice(root[0].length).split('/').every(part =>
+    !part || part === '.' || part === '..' || windowsComponent(part));
+}
 export const absolute = value => typeof value === 'string' && value.trim().length > 0 &&
-  value.length <= 4096 && !CONTROLS.test(value) && path.isAbsolute(value);
+  value.length <= 4096 && !CONTROLS.test(value) &&
+  (process.platform === 'win32' ? windowsAbsolute(value) : path.isAbsolute(value));
 export const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 export const sameFileIdentity = (left, right) => left && right && left.dev === right.dev &&
   left.ino === right.ino && left.birthtimeNs === right.birthtimeNs;
@@ -23,6 +36,14 @@ export async function readInputJSON(stream, maxBytes) {
 }
 
 export async function syncDirectory(dir) {
+  // Node cannot flush directory handles on Windows. Still validate the path;
+  // file fsync errors remain fatal everywhere. Rename power-loss durability is
+  // consequently weaker on Windows than a filesystem with directory fsync.
+  if (process.platform === 'win32') {
+    const stat = await fs.lstat(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Expected a real directory for synchronization.');
+    return;
+  }
   const handle = await fs.open(dir, 'r');
   try { await handle.sync(); }
   catch (error) { if (!['EINVAL', 'ENOTSUP'].includes(error.code)) throw error; }
@@ -32,8 +53,8 @@ export function within(parent, child) {
   const relative = path.relative(parent, child);
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
-export async function lstatOrNull(file) {
-  try { return await fs.lstat(file); }
+export async function lstatOrNull(file, options) {
+  try { return await fs.lstat(file, options); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
@@ -45,20 +66,50 @@ export async function isMain(url) {
   catch { return false; }
 }
 
+/** Open an ordinary file without trusting a path that changed during open. */
+export async function openGuarded(file, { flags = constants.O_RDONLY, missing = false, singleLink = false, maxBytes = Infinity } = {}) {
+  const check = stat => {
+    if (!stat.isFile() || (singleLink && stat.nlink !== 1n) || stat.size > maxBytes) {
+      throw new Error('Expected a regular file within the size limit' + (singleLink ? ' with a single hard link.' : '.'));
+    }
+  };
+  let handle;
+  try {
+    const before = await fs.lstat(file, { bigint: true });
+    check(before);
+    handle = await fs.open(file, flags | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const stat = await handle.stat({ bigint: true });
+    const current = await fs.lstat(file, { bigint: true });
+    check(stat); check(current);
+    if (!sameFileIdentity(before, stat) || !sameFileIdentity(stat, current)) throw new Error('File identity changed during guarded open.');
+    return { handle, stat };
+  } catch (error) {
+    if (handle) await handle.close();
+    if (missing && error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 /** Exact, bounded UTF-8 bytes. Never open a FIFO in blocking mode. */
 export async function readBoundedBytes(file, { maxBytes = 2 * 1024 * 1024, missing = false, utf8 = true, noFollow = false } = {}) {
   const check = stat => {
     if (!stat.isFile() || stat.size > maxBytes) throw new Error(`Expected a regular UTF-8 file at most ${maxBytes / (1024 * 1024)} MiB.`);
   };
-  let handle;
+  let handle, stat;
   try {
-    check(await (noFollow ? fs.lstat(file) : fs.stat(file)));
-    handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0));
+    if (noFollow) {
+      const opened = await openGuarded(file, { missing, maxBytes });
+      if (!opened) return null;
+      ({ handle, stat } = opened);
+    } else {
+      check(await fs.stat(file));
+      handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    }
   } catch (error) { if (missing && error.code === 'ENOENT') return null; throw error; }
   try {
-    const stat = await handle.stat();
+    stat ??= await handle.stat();
     check(stat);
-    let buffer = Buffer.alloc(stat.size + 1);
+    let buffer = Buffer.alloc(Number(stat.size) + 1);
     let offset = 0;
     for (;;) {
       const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);

@@ -3,6 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { abortUpdate, fingerprint, applyPlan, recover, inspectState } from './safe-update.mjs';
 
@@ -30,6 +31,49 @@ async function reinspect(plan) {
   for (const file of plan.files) file.expectedHash = await fingerprint(path.join(plan.root, file.path));
   if (plan.mode === 'derived') plan.expectedManifestHash = await fingerprint(path.join(plan.stateDir, 'manifest.json'));
 }
+test('nested portable note paths save successfully', async t => {
+  const f = await fixture(t);
+  await fs.mkdir(path.join(f.root, 'nested café'));
+  f.plan.files[0].path = 'nested café/decision.md';
+  await applyPlan(f.plan);
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'nested café', 'decision.md')), await fs.readFile(f.proposal));
+});
+test('Windows aliases, junctions and read-only notes cannot redirect or authorize replacement', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  for (const name of ['NUL.md', 'topic.md:stream.md', 'folder./note.md', 'COM1.md']) {
+    await assert.rejects(applyPlan({ ...f.plan, files: [{ ...f.plan.files[0], path: name }] }), /relative/);
+  }
+  await assert.rejects(applyPlan({ ...f.plan, files: [f.plan.files[0], { ...f.plan.files[0], path: 'NOTE.md' }] }), /Duplicate/);
+  const outside = path.join(f.directory, 'outside');
+  await fs.mkdir(outside);
+  await fs.symlink(outside, path.join(f.root, 'junction'), 'junction');
+  await assert.rejects(applyPlan({ ...f.plan, files: [{ ...f.plan.files[0], path: 'junction/note.md' }] }), /symlink/);
+  await applyPlan(f.plan);
+  await reinspect(f.plan);
+  await fs.appendFile(f.proposal, '\nReviewed update.\n');
+  await assert.rejects(applyPlan({ ...f.plan, files: [{ ...f.plan.files[0], path: 'NOTE.md' }] }), /canonical/);
+  const before = await fs.readFile(f.target);
+  await fs.chmod(f.target, 0o444);
+  t.after(() => fs.chmod(f.target, 0o666).catch(() => {}));
+  await assert.rejects(applyPlan(f.plan), /read-only/);
+  assert.deepEqual(await fs.readFile(f.target), before);
+  assert.equal((await fs.stat(f.target)).mode & 0o200, 0);
+  assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+});
+test('Windows Unicode case aliases are rejected before any output or journal is written', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  const probe = path.join(f.directory, 'Ä-probe.md');
+  await fs.writeFile(probe, 'case comparison probe');
+  const first = await fs.stat(probe, { bigint: true });
+  const alias = await fs.stat(path.join(f.directory, 'ä-probe.md'), { bigint: true });
+  assert.equal(first.ino, alias.ino, 'Native filesystem must exercise the Unicode alias.');
+  const secondProposal = path.join(f.directory, 'second.md');
+  await fs.copyFile(f.proposal, secondProposal);
+  const files = [{ ...f.plan.files[0], path: 'Ä.md' }, { ...f.plan.files[0], path: 'ä.md', contentPath: secondProposal }];
+  await assert.rejects(applyPlan({ ...f.plan, files }), /Duplicate/);
+  assert.deepEqual(await fs.readdir(f.root), []);
+  await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
+});
 test('authored writes preserve bytes, support explicit updates and leave no-op mtime alone', async t => {
   const { plan, proposal, target, stateDir } = await fixture(t);
   assert.equal((await applyPlan(plan)).status, 'updated');
@@ -42,6 +86,53 @@ test('authored writes preserve bytes, support explicit updates and leave no-op m
   await fs.appendFile(proposal, '\nCorrection recorded September 4: test was one invocation.\n');
   assert.equal((await applyPlan(plan)).status, 'updated');
   assert.match(await fs.readFile(target, 'utf8'), /Correction recorded September 4/);
+});
+test('native alias evidence informs collision guards without merging distinct Windows names', {
+  skip: !['win32', 'darwin'].includes(process.platform),
+}, async t => {
+  for (const [first, second] of [['Note', 'note'], ['ı', 'i'], ['ſ', 's'], ['µ', 'μ'], ['é', 'e\u0301']]) {
+    const f = await fixture(t);
+    // Record actual native aliases separately from the conservative batch rule.
+    const probe = path.join(f.directory, `${first}-probe.md`);
+    await fs.writeFile(probe, 'synthetic comparison');
+    const actual = await fs.stat(path.join(f.directory, `${second}-probe.md`), { bigint: true }).catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    const aliases = actual?.ino === (await fs.stat(probe, { bigint: true })).ino;
+    t.diagnostic(`${process.platform}: ${first}/${second} native aliases: ${aliases}`);
+    await fs.unlink(probe);
+    const collision = process.platform === 'darwin' || first.toLowerCase() === second.toLowerCase();
+    assert.ok(!aliases || collision, 'Native aliases must be refused by the preflight rule.');
+    const secondProposal = path.join(f.directory, 'second-proposal.md');
+    await fs.copyFile(f.proposal, secondProposal);
+    const files = [{ ...f.plan.files[0], path: `${first}.md` },
+      { ...f.plan.files[0], path: `${second}.md`, contentPath: secondProposal }];
+    if (collision) {
+      await assert.rejects(applyPlan({ ...f.plan, files }), /Duplicate/);
+      assert.deepEqual(await fs.readdir(f.root), []);
+      await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
+    } else {
+      await applyPlan({ ...f.plan, files });
+      assert.equal((await fs.readdir(f.root)).length, 2);
+    }
+  }
+});
+test('existing output aliases preserve the on-disk name and bytes', async t => {
+  const f = await fixture(t);
+  await applyPlan(f.plan);
+  const actual = await fs.stat(path.join(f.root, 'NOTE.md')).catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!actual) { t.skip('Selected volume is case-sensitive.'); return; }
+  await reinspect(f.plan);
+  await fs.appendFile(f.proposal, '\nA reviewed update.\n');
+  const before = await fs.readFile(f.target);
+  await assert.rejects(applyPlan({ ...f.plan, files: [{ ...f.plan.files[0], path: 'NOTE.md' }] }), /canonical/);
+  assert.deepEqual(await fs.readFile(f.target), before);
+  assert.deepEqual(await fs.readdir(f.root), ['note.md']);
+  assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
 });
 test('inspected-state conflict and invalid proposed Markdown preserve original bytes', async t => {
   const { plan, proposal, target } = await fixture(t);
@@ -248,8 +339,8 @@ test('inspection includes newly added outputs in an interrupted existing collect
   await assert.rejects(applyPlan(plan, { afterReplace() { throw new Error('Interrupted'); } }));
   const status = await inspectState(stateDir);
   assert.deepEqual(status.outputs.map(o => path.basename(o.path)).sort(), ['added.md', 'note.md', 'pending.md']);
-  assert.equal(status.outputs.find(o => o.path.endsWith('/added.md')).status, 'changed');
-  assert.equal(status.outputs.find(o => o.path.endsWith('/pending.md')).status, 'missing');
+  assert.equal(status.outputs.find(o => path.basename(o.path) === 'added.md').status, 'changed');
+  assert.equal(status.outputs.find(o => path.basename(o.path) === 'pending.md').status, 'missing');
   assert.equal(await fingerprint(path.join(stateDir, 'manifest.json')), beforeManifest);
   await recover(stateDir);
   assert.notEqual(await fingerprint(path.join(stateDir, 'manifest.json')), beforeManifest);
@@ -314,7 +405,8 @@ test('a kill during staging leaves an inspectable journal; abort handles missing
   await fs.writeFile(planPath, JSON.stringify(f.plan));
   const program = `import fs from 'node:fs/promises'; import { applyPlan } from ${JSON.stringify(new URL('./safe-update.mjs', import.meta.url).href)}; await applyPlan(JSON.parse(await fs.readFile(process.argv[1], 'utf8')), { afterStage() { process.kill(process.pid, 'SIGKILL'); } });`;
   const killed = spawnSync(process.execPath, ['--input-type=module', '-e', program, planPath], { encoding: 'utf8', timeout: 10000 });
-  assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+  if (process.platform === 'win32') assert.notEqual(killed.status, 0, killed.stderr);
+  else assert.equal(killed.signal, 'SIGKILL', killed.stderr);
   const inspected = await inspectState(f.stateDir);
   assert.equal(inspected.locked, true);
   assert.equal(inspected.phase, 'staging');
@@ -401,17 +493,17 @@ test('retirement of a deleted folder can accompany a reviewed update to the rema
   assert.deepEqual((await inspectState(f.stateDir)).outputs.map(file => path.basename(file.path)), ['note.md']);
 });
 
-test('replacement preserves existing permission bits and ownership; new notes stay private', async t => {
+test('replacement preserves representable permission bits and ownership', async t => {
   const f = await fixture(t);
   await applyPlan(f.plan);
-  assert.equal((await fs.stat(f.target)).mode & 0o7777, 0o600);
+  assert.equal((await fs.stat(f.target)).mode & 0o7777, process.platform === 'win32' ? 0o666 : 0o600);
   await fs.chmod(f.target, 0o664);
   const owner = await fs.stat(f.target);
   await reinspect(f.plan);
   await fs.appendFile(f.proposal, '\nReviewed correction.\n');
   await applyPlan(f.plan);
   const changed = await fs.stat(f.target);
-  assert.equal(changed.mode & 0o7777, 0o664);
+  assert.equal(changed.mode & 0o7777, owner.mode & 0o7777);
   assert.equal(changed.uid, owner.uid);
   assert.equal(changed.gid, owner.gid);
 });
@@ -422,11 +514,11 @@ test('recovery preserves permissions and refuses metadata drift or hard-linked r
   await reinspect(f.plan);
   await fs.appendFile(f.proposal, '\nReviewed correction.\n');
   await assert.rejects(applyPlan(f.plan, { afterStage() { throw new Error('Interrupted staging'); } }));
-  await fs.chmod(f.target, 0o644);
-  await assert.rejects(recover(f.stateDir), /permissions or ownership changed/);
+  await fs.chmod(f.target, process.platform === 'win32' ? 0o444 : 0o644);
+  await assert.rejects(recover(f.stateDir), /permissions or ownership changed|read-only/);
   await fs.chmod(f.target, 0o640);
   await recover(f.stateDir);
-  assert.equal((await fs.stat(f.target)).mode & 0o7777, 0o640);
+  assert.equal((await fs.stat(f.target)).mode & 0o7777, process.platform === 'win32' ? 0o666 : 0o640);
   const linked = path.join(f.directory, 'linked.md');
   await fs.link(f.target, linked);
   await reinspect(f.plan);
@@ -491,7 +583,7 @@ test('manifest hashes and no-op timestamps are stable across German and Swedish 
   const planPath = path.join(f.directory, 'plan.json');
   const invoke = async locale => {
     await fs.writeFile(planPath, JSON.stringify(f.plan));
-    const run = spawnSync(process.execPath, [new URL('./safe-update.mjs', import.meta.url).pathname, 'apply', planPath], {
+    const run = spawnSync(process.execPath, [fileURLToPath(new URL('./safe-update.mjs', import.meta.url)), 'apply', planPath], {
       encoding: 'utf8', timeout: 10000, env: { ...process.env, LANG: locale, LC_ALL: locale } });
     assert.equal(run.status, 0, run.stderr);
     return JSON.parse(run.stdout);
@@ -510,7 +602,7 @@ test('whole-file read work scales with output count rather than repeated collect
   t.mock.method(fs, 'open', async (file, ...args) => {
     if (typeof file === 'string' && typeof args[0] === 'number' && !(args[0] & 2)) {
       if (file.endsWith('.md') || path.basename(file).startsWith('.cuefluent-stage-')) reads++;
-      if (file.endsWith('/source.md')) sourceReads++;
+      if (path.basename(file) === 'source.md') sourceReads++;
     }
     return open(file, ...args);
   });
@@ -542,7 +634,7 @@ test('changed source metadata invalidates the cached hash even for same-length b
   assert.equal(await fingerprint(path.join(f.root, 'other.md')), null);
 });
 
-test('a stage with read-only target permissions can still finish after an interrupted rename', async t => {
+test('POSIX read-only stages can finish after interrupted rename; Windows refuses read-only targets', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t);
   await applyPlan(f.plan);
   await fs.chmod(f.target, 0o440);
