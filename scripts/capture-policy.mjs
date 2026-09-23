@@ -12,28 +12,70 @@ export const object = value => value !== null && typeof value === 'object' && !A
 export const text = (value, limit) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit && !CONTROLS.test(value);
 const invalid = () => { throw new Error('Invalid capture configuration.'); };
 const onlyKeys = (value, allowed) => object(value) && Object.keys(value).every(key => allowed.includes(key));
+const requiresUpgrade = () => {
+  throw Object.assign(new Error('This configuration requires a newer Cuefluent Notes plugin. Upgrade this client before using or changing capture settings.'), { code: 'CONFIG_REQUIRES_UPGRADE' });
+};
 
-function routeSchema(route, project = false) {
-  const keys = project ? ['projectRoot', 'destination', 'stateDir', 'automaticUpdates', 'scope', 'enabled'] : ['destination', 'stateDir'];
-  if (!onlyKeys(route, keys) || !absolute(route.destination) || !absolute(route.stateDir) ||
-    !/\.(?:md|markdown)$/i.test(route.destination)) invalid();
+function routeSchema(route, project = false, version = 1) {
+  const keys = project ? ['projectRoot', 'destination', 'notesDir', 'stateDir', 'automaticUpdates', 'scope', 'enabled'] : ['destination', 'notesDir', 'stateDir'];
+  if (!onlyKeys(route, keys) || !absolute(route.stateDir) ||
+    Object.hasOwn(route, 'destination') === Object.hasOwn(route, 'notesDir')) invalid();
+  if (version === 1 && Object.hasOwn(route, 'notesDir')) invalid();
+  if (Object.hasOwn(route, 'notesDir') ? !absolute(route.notesDir) :
+    !absolute(route.destination) || !/\.(?:md|markdown)$/i.test(route.destination)) invalid();
   if (project && (!absolute(route.projectRoot) ||
     (route.automaticUpdates !== undefined && typeof route.automaticUpdates !== 'boolean') ||
     (route.enabled !== undefined && typeof route.enabled !== 'boolean') ||
     (route.scope !== undefined && !text(route.scope, 2000)))) invalid();
 }
 
-export function configSchema(config) {
-  if (!onlyKeys(config, ['version', 'enabled', 'clients', 'automaticUpdates', 'scope', 'defaultRoute', 'routes', 'exclude']) ||
-    config.version !== 1 || typeof config.enabled !== 'boolean' || typeof config.automaticUpdates !== 'boolean' ||
+/** Read membership before interpreting version-specific fields for another client. */
+export function configuredClient(config, client) {
+  if (!object(config) || !Array.isArray(config.clients) || config.clients.length > MAX_ROUTES ||
+    config.clients.some(value => !text(value, 64)) || new Set(config.clients).size !== config.clients.length) invalid();
+  return config.clients.includes(client);
+}
+
+/** Common routing envelope; route contents are checked only after selection on reads. */
+export function configHeader(config) {
+  if (!object(config) || !Number.isSafeInteger(config.version) || config.version < 1) invalid();
+  if (config.version > 2) requiresUpgrade();
+  if (config.version === 2 && config.minimumPluginVersion !== '0.5.1') {
+    if (typeof config.minimumPluginVersion === 'string' && /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(config.minimumPluginVersion)) {
+      const [major, minor, patch] = config.minimumPluginVersion.split('.').map(Number);
+      if (major > 0 || minor > 5 || (minor === 5 && patch > 1)) requiresUpgrade();
+    }
+    invalid();
+  }
+  const keys = ['version', 'enabled', 'clients', 'automaticUpdates', 'scope', 'defaultRoute', 'routes', 'exclude'];
+  if (config.version === 2) keys.push('minimumPluginVersion');
+  if (!onlyKeys(config, keys) ||
+    typeof config.enabled !== 'boolean' || typeof config.automaticUpdates !== 'boolean' ||
     !text(config.scope, 2000) || !Array.isArray(config.clients) || config.clients.length > CLIENTS.size ||
     config.clients.some(client => !CLIENTS.has(client)) || new Set(config.clients).size !== config.clients.length) invalid();
-  if (config.defaultRoute !== undefined) routeSchema(config.defaultRoute);
   if (config.routes !== undefined) {
     if (!Array.isArray(config.routes) || config.routes.length > MAX_ROUTES) invalid();
-    for (const route of config.routes) routeSchema(route, true);
+    // Every project selector affects routing, including disabled/excluded routes.
+    for (const route of config.routes) {
+      if (!object(route) || !absolute(route.projectRoot) ||
+        (route.enabled !== undefined && typeof route.enabled !== 'boolean')) invalid();
+    }
   }
   if (config.exclude !== undefined && (!Array.isArray(config.exclude) || config.exclude.length > MAX_ROUTES || config.exclude.some(item => !absolute(item)))) invalid();
+}
+
+/** Writes validate the complete policy, including currently inactive routes. */
+export function configSchema(config) {
+  configHeader(config);
+  if (config.defaultRoute !== undefined) routeSchema(config.defaultRoute, false, config.version);
+  for (const route of config.routes ?? []) routeSchema(route, true, config.version);
+}
+
+/** Older installed readers cannot learn the new schema retroactively. */
+export function assertCompatibleClients(config, previous, confirmed) {
+  if (config.version === 2 && previous?.version !== 2 && confirmed !== true) {
+    throw Object.assign(new Error('Folder policies require Cuefluent Notes 0.5.1+ in every installed client reading this policy, including clients absent from its clients list. Inspect Codex and Claude installations before passing --confirm-compatible-clients yes. Otherwise retain version 1 with explicit files.'), { code: 'CLIENT_UPGRADE_REQUIRED' });
+  }
 }
 
 async function existingDirectory(input) {
@@ -89,6 +131,34 @@ export async function canonicalSelectedPath(input) {
   return path.join(canonical, ...suffix);
 }
 
+/** One canonical collection identity for setup defaults and shared writer locks. */
+export async function collectionRoot(route, { allowUnavailable = false } = {}) {
+  const folder = route.notesDir ?? path.dirname(route.destination);
+  try { return await existingDirectory(folder); }
+  catch (error) {
+    // Retained unrelated routes may be offline. Still resolve ancestor aliases.
+    if (!allowUnavailable || error.code !== 'ENOENT') throw error;
+    return canonicalSelectedPath(folder);
+  }
+}
+
+async function assertAuthoredState(stateDir) {
+  // Metadata only: never read a derived manifest's sources or note contents.
+  // Any manifest entry, including a broken link, reserves this state for derived outputs.
+  const derivedConflict = () => {
+    throw Object.assign(new Error('Capture needs an authored notes collection. This state owns derived outputs; keep its state and outputs together and select a separate notes collection for capture.'), { code: 'DERIVED_STATE_CONFLICT' });
+  };
+  if (await lstat(path.join(stateDir, 'manifest.json'))) derivedConflict();
+  const bytes = await readBoundedBytes(path.join(stateDir, 'journal.json'), { missing: true, noFollow: true });
+  if (bytes !== null) {
+    const journal = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    // Classify ownership only; full recovery validation would traverse referenced
+    // storage. Any other pending journal still prevents authored capture.
+    if (object(journal) && journal.version === 1 && journal.mode === 'derived') derivedConflict();
+    throw Object.assign(new Error('The writer state has an interrupted update. Inspect and resolve its recovery journal before using capture; no recovery was attempted.'), { code: 'STATE_RECOVERY_REQUIRED' });
+  }
+}
+
 async function selectedDestination(input) {
   // The safe writer uses the note basename as a relative path and rejects
   // backslashes even on systems where they are valid filename characters.
@@ -104,12 +174,19 @@ export function assertPrivate(file, skillRoot) {
   if (within(PACKAGE_ROOT, file) || within(skillRoot, file)) invalid();
 }
 
+export function assertConfigurationStorage(settings, file) {
+  if (within(settings.stateDir, file) || within(file, settings.stateDir) ||
+    within(settings.notesDir ?? settings.destination, file)) {
+    throw new Error('Keep the configuration separate from the notes collection and writer state.');
+  }
+}
+
 /** Resolve policy for a directory without manufacturing a hook event or identity. */
 export async function captureSettings(client, directory, config, { skillRoot = SKILL_ROOT } = {}) {
   if (!CLIENTS.has(client)) invalid();
   if (config === null || config === undefined || config.enabled === false) return null;
-  configSchema(config);
-  if (!config.clients.includes(client)) return null;
+  if (!configuredClient(config, client)) return null;
+  configHeader(config);
   const cwd = await existingDirectory(directory);
   for (const excluded of config.exclude ?? []) {
     if (await matchingRoot(excluded, cwd)) return null;
@@ -124,18 +201,23 @@ export async function captureSettings(client, directory, config, { skillRoot = S
     throw Object.assign(new Error('Ambiguous capture route.'), { code: 'AMBIGUOUS_ROUTE' });
   }
   const route = matches[0] ?? config.defaultRoute;
-  if (!route) return null;
-  if (route.enabled === false) return null;
+  if (route === undefined) return null;
+  if (matches.length > 0 && route.enabled === false) return null;
+  routeSchema(route, matches.length > 0, config.version);
   const installedRoot = await existingDirectory(skillRoot);
-  const destination = await selectedDestination(route.destination);
+  const storage = route.notesDir !== undefined
+    ? { notesDir: await existingDirectory(route.notesDir) }
+    : { destination: await selectedDestination(route.destination) };
+  const selected = storage.notesDir ?? storage.destination;
   const stateDir = await canonicalSelectedPath(route.stateDir);
-  assertPrivate(destination, installedRoot);
+  assertPrivate(selected, installedRoot);
   assertPrivate(stateDir, installedRoot);
-  if (within(stateDir, destination) || within(destination, stateDir)) invalid();
+  if (within(stateDir, selected) || within(selected, stateDir)) invalid();
+  await assertAuthoredState(stateDir);
   const automaticUpdates = route.automaticUpdates ?? config.automaticUpdates;
   return { skill: path.join(installedRoot, 'SKILL.md'),
     safeUpdate: path.join(installedRoot, 'scripts', 'safe-update.mjs'),
-    destination, stateDir, scope: route.scope ?? config.scope, automaticUpdates };
+    ...storage, stateDir, scope: route.scope ?? config.scope, automaticUpdates };
 }
 
 export function configurationPath(explicit) {

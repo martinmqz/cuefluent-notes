@@ -68,20 +68,32 @@ versioned example directly as the runtime configuration.
 
 | Field | Meaning |
 | --- | --- |
-| `version` | Configuration schema version, currently `1` |
+| `version` | `1` for legacy explicit-file policies; `2` supports file and folder routes |
+| `minimumPluginVersion` | Required in version 2, currently `"0.5.1"`; omitted from version 1 |
 | `enabled` | Explicit global enablement; `false` is quiet |
 | `clients` | Enabled adapter names, selected from `codex` and `claude` |
 | `automaticUpdates` | Whether configured capture may save; `false` supplies proposal-only guidance |
 | `scope` | A nonempty single-line description of eligible information, at most 2,000 characters |
-| `defaultRoute` | Optional `{destination, stateDir}` for sessions without a matching project route |
-| `routes` | Optional project routes with `projectRoot`, `destination`, and `stateDir`; each can override `scope`, `automaticUpdates`, or `enabled` |
+| `defaultRoute` | Optional `{notesDir, stateDir}` or `{destination, stateDir}` for sessions without a matching project route |
+| `routes` | Optional project routes with `projectRoot`, `stateDir`, and exactly one of `notesDir` or `destination`; each can override `scope`, `automaticUpdates`, or `enabled` |
 | `exclude` | Optional absolute project roots to exclude, including their descendants |
 
-The schema rejects unrecognized fields. All route paths are absolute. Project
+Complete policy writes reject unrecognized fields. Reads check client membership
+before interpreting version-specific fields, then validate the common envelope,
+all project selectors, and the selected route's storage. Unrelated storage fields
+do not prevent a valid selected route from working. Unknown newer schema or
+minimum plugin versions yield upgrade guidance for participating clients, and
+cannot be overwritten by an older helper. All route paths are absolute. Project
 and exclusion roots may be unavailable: missing roots and non-directory roots
 cannot match an existing session. Permission failures are ignored only when a
 readable ancestor proves the root is outside this session; otherwise capture
-is skipped, including when an exclusion or disabled route could apply. `destination` names one Markdown file; its parent
+is skipped, including when an exclusion or disabled route could apply.
+`notesDir` selects an existing notes folder. It authorizes topic-based selection
+of Markdown files directly in that folder, using the skill's file-selection
+guidance; no note is chosen or read by the hook. Reuse relevant notes or create
+descriptive filenames when authorized, without creating subfolders or following
+linked notes. Use the selected folder as the safe-writer root.
+`destination` preserves an explicitly selected Markdown file; its parent
 must exist, while the note itself may be new. An existing note must be a regular
 file with a single hard link, matching the safe writer's replacement requirements.
 `stateDir` may be new beneath an existing directory, including an ancestor alias
@@ -89,11 +101,25 @@ resolved to its real path.
 A symlink selected directly as the state directory is refused. It is the private state directory for the safe writer,
 not storage used by the hook. Reuse one state directory for all writes to the
 same collection, as described in [refresh.md](refresh.md). The state directory
-is shared by every route/default targeting that canonical notes folder; Setup
+is shared by every route/default targeting that canonical notes folder or an
+overlapping ancestor/descendant folder; Setup
 updates reject conflicting choices, including disabled routes and path aliases.
 Separate policy files still need the same collection state chosen explicitly.
+Capture requires authored state. Setup, updates, and prompt hooks refuse a
+selected state containing a derived manifest or pending derived journal without
+reading its sources or outputs. Journal reads are bounded and refuse symlinks;
+other pending journals require recovery before capture can proceed. Preserve a
+derived collection and choose a separate authored notes collection;
+assigning a second state to its existing outputs would defeat coordination.
 The state directory must not contain the destination note or be nested under its
-pathname. Keep policy concise: oversized input,
+pathname. For a folder route, configuration and writer state stay outside the
+notes folder, and state must not contain that folder. Existing file routes remain
+supported; moving to a folder is an explicit configuration change. Before first
+publishing version 2, Setup requires a compatibility assertion after inspecting
+**every installed client that reads the policy**, including unlisted clients.
+All must support `notesDir` (0.5.1+); older clients cannot gain the early membership
+check retroactively. See [setup](setup.md) for the preflight and version fields.
+Keep policy concise: oversized input,
 configuration, or emitted context produces bounded no-capture guidance.
 
 ## Routing and inactive cases
@@ -143,7 +169,9 @@ Before completing eligible work, the working agent should:
    selected scope. Mechanical edits, acknowledgments, and tool calls alone are
    insufficient. Unknown dates remain unknown; occurrence dates and verification
    limits follow the [evidence rules](evidence.md).
-2. Read the destination and relevant current task evidence. Recognize a manual
+2. For a folder route, select an existing note or a descriptive new filename as
+   described in [the skill](../SKILL.md). For a file route, keep its destination.
+   Read the selected note and relevant current task evidence. Recognize a manual
    save or replayed instruction and avoid duplicating information already
    captured. Use suitable existing sections rather than creating scenario copies.
 3. If automatic updates are permitted and a useful change is needed, prepare
@@ -151,8 +179,9 @@ Before completing eligible work, the working agent should:
    and apply it with the safe writer using the configured `stateDir` and inspected
    hashes. Preserve manual edits, stop on conflicts, and report actual limits.
 4. If there is no useful change, leave notes unchanged. With automatic updates
-   off, provide a useful proposal when warranted but do not save from hook policy
-   alone. Missing routing requires a user choice before any automatic save.
+   off, identify the proposed filename and useful change when warranted, but do
+   not save from hook policy alone. Missing routing requires a user choice before
+   any automatic save.
 
 The adapter cannot mechanically recognize whether an agent already captured a
 fact. The native identity identifies the current operation, while destination

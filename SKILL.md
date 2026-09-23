@@ -83,6 +83,18 @@ replaceable skill package.
 - Use the requested output location. Ask when it is missing and cannot be
   inferred from the task; do not create a separate storage location on the user's
   behalf. A conversation-only summary or preview does not authorize a file write.
+- A selected notes folder is a collection, not a request for one catch-all file.
+  Inspect relevant Markdown filenames and headings directly in that folder,
+  then read only candidate notes for the current subject. Reuse a suitable note;
+  otherwise choose a descriptive filename from the content, such as
+  `v1.0-release.md` or `cache-expiry-decisions.md`. Do not automatically prefix
+  filenames with the plugin name; include project context only when needed to
+  distinguish the subject. Keep coherent topics
+  together rather than making a file per turn. Preserve an explicitly selected
+  file. For folder routes, keep files directly in `notesDir`, avoid linked notes,
+  and use the same configured `stateDir` with that folder as the safe-writer root.
+  Suggestions should identify the proposed filename and useful change before
+  asking to save; do not create it until the user approves.
 - For an assessment, propose useful changes. For a creation or editing request,
   proceed within the supplied scope; resolve material uncertainty before turning
   it into a factual claim. Do not require another approval for work already requested.

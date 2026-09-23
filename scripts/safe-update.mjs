@@ -327,7 +327,7 @@ export async function applyPlan(plan, options = {}) {
     if (await existsStat(await stateFile(stateDir, 'journal.json'))) fail('An interrupted update needs recovery before applying another plan.');
     const old = await jsonFile(await stateFile(stateDir, 'manifest.json'));
     const manifest = manifestSchema(old.value, root);
-    if (plan.mode === 'authored' && manifest) fail('This state directory owns derived outputs; use derived mode or a separate authored state directory.');
+    if (plan.mode === 'authored' && manifest) fail('This state directory owns derived outputs; use the derived workflow or a separate authored notes collection with its own state.');
     if (plan.mode === 'derived' && old.hash !== plan.expectedManifestHash) fail('Derived manifest changed since inspection; prepare a current plan.');
     const retiring = new Set(retire.map(file => file.path));
     for (const file of retire) {

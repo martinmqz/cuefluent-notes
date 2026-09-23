@@ -1,9 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { absolute, within, lstatOrNull, isMain, readBoundedBytes } from './file-io.mjs';
+import { absolute, lstatOrNull, isMain, readBoundedBytes } from './file-io.mjs';
 import { PACKAGE_ROOT, SKILL_ROOT } from './runtime-paths.mjs';
-import { CLIENTS, configurationPath, hookConfigurationSelection, readConfigSnapshot, configSchema, captureSettings, canonicalSelectedPath, assertPrivate } from './capture-policy.mjs';
+import { CLIENTS, configurationPath, hookConfigurationSelection, readConfigSnapshot, configSchema, configHeader, configuredClient, assertCompatibleClients, captureSettings, canonicalSelectedPath, collectionRoot, assertPrivate, assertConfigurationStorage } from './capture-policy.mjs';
 import { updateConfiguration } from './config-update.mjs';
 import { hookCommand } from './hook-definition.mjs';
 import { validatePluginManifest } from './plugin-manifest.mjs';
@@ -43,20 +43,23 @@ export async function setupStatus({ client, cwd, configPath } = {}) {
     const { config, hash } = await readConfigSnapshot(file);
     result.configHash = hash;
     if (config === null) return { ...result, status: 'unconfigured' };
-    configSchema(config);
-    if (!config.clients.includes(client)) return { ...result, status: 'client_not_configured' };
+    if (!configuredClient(config, client)) return { ...result, status: 'client_not_configured' };
+    configHeader(config);
     if (!config.enabled) return { ...result, status: 'disabled', mode: 'manual' };
     const settings = await captureSettings(client, cwd, config);
     if (!settings) return { ...result, status: 'inactive', reason: 'No enabled route applies to this project.' };
-    const { destination, stateDir, scope, automaticUpdates } = settings;
-    return { ...result, status: 'configured', mode: automaticUpdates ? 'automatic' : 'suggest', destination, stateDir, scope };
-  } catch {
+    const { skill, safeUpdate, automaticUpdates, ...route } = settings;
+    return { ...result, status: 'configured', mode: automaticUpdates ? 'automatic' : 'suggest', ...route };
+  } catch (error) {
+    if (error.code === 'CONFIG_REQUIRES_UPGRADE') return { ...result, status: 'requires_upgrade', reason: error.message };
+    if (error.code === 'DERIVED_STATE_CONFLICT') return { ...result, status: 'state_conflict', reason: error.message };
+    if (error.code === 'STATE_RECOVERY_REQUIRED') return { ...result, status: 'recovery_required', reason: error.message };
     return { ...result, status: 'invalid', reason: 'Existing configuration or selected paths need repair; nothing was changed.' };
   }
 }
 
 /** First-use setup only: publish a complete private config without replacing any existing entry. */
-export async function initialize({ client, mode, project, destination, scope, stateDir, configPath } = {}) {
+export async function initialize({ client, mode, project, destination, notesDir, scope, stateDir, configPath, confirmCompatibleClients } = {}) {
   if (!CLIENTS.has(client) || !modes.has(mode)) fail('Choose a supported client and manual, suggest, or automatic mode.');
   const requested = configurationPath(configPath);
   const selection = hookConfigurationSelection(requested);
@@ -65,27 +68,29 @@ export async function initialize({ client, mode, project, destination, scope, st
   assertPrivate(file, SKILL_ROOT);
   let config;
   if (mode === 'manual') {
-    if ([project, destination, scope, stateDir].some(value => value !== undefined)) fail('Manual mode needs no project, destination, scope, or state directory.');
+    if ([project, destination, notesDir, scope, stateDir].some(value => value !== undefined)) fail('Manual mode needs no project, notes location, scope, or state directory.');
     config = { version: 1, enabled: false, clients: [client], automaticUpdates: false,
       scope: 'Manual use only; no automatic capture.' };
   } else {
-    if (!absolute(project) || !absolute(destination)) fail('Choose absolute project and Markdown destination paths.');
+    if (!absolute(project) || (destination !== undefined) === (notesDir !== undefined) ||
+      !absolute(notesDir ?? destination)) fail('Choose an absolute project and exactly one Markdown file (--destination) or notes folder (--notes-dir).');
     const projectRoot = await fs.realpath(project);
     if (!(await fs.stat(projectRoot)).isDirectory()) fail('The selected project must be an existing directory.');
-    const notesRoot = await fs.realpath(path.dirname(destination));
-    const selectedDestination = path.join(notesRoot, path.basename(destination));
+    const notesRoot = await collectionRoot({ notesDir, destination });
+    const storage = notesDir !== undefined ? { notesDir: notesRoot }
+      : { destination: path.join(notesRoot, path.basename(destination)) };
     const collection = createHash('sha256').update(notesRoot).digest('hex');
     const selectedState = stateDir ?? path.join(path.dirname(file), 'state', collection);
-    config = { version: 1, enabled: true, clients: [client], automaticUpdates: mode === 'automatic', scope,
-      routes: [{ projectRoot, destination: selectedDestination, stateDir: selectedState }] };
+    config = { ...(notesDir !== undefined ? { version: 2, minimumPluginVersion: '0.5.1' } : { version: 1 }),
+      enabled: true, clients: [client], automaticUpdates: mode === 'automatic', scope,
+      routes: [{ projectRoot, ...storage, stateDir: selectedState }] };
     configSchema(config);
     const settings = await captureSettings(client, projectRoot, config);
-    if (within(settings.stateDir, file) || within(file, settings.stateDir) || within(settings.destination, file)) {
-      fail('Keep the configuration separate from the note and writer state.');
-    }
+    assertConfigurationStorage(settings, file);
     config.routes[0].stateDir = settings.stateDir;
   }
   configSchema(config);
+  assertCompatibleClients(config, undefined, confirmCompatibleClients);
   const parent = path.dirname(file);
   await fs.mkdir(parent, { recursive: true, mode: 0o700 });
   if (await fs.realpath(parent) !== parent || await canonicalSelectedPath(requested) !== file) {
@@ -122,13 +127,13 @@ export async function initialize({ client, mode, project, destination, scope, st
 
 export async function main(args) {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('Usage: node scripts/setup.mjs status --client codex|claude --cwd /project [--config /private/config.json]\n       node scripts/setup.mjs init --client codex|claude --mode manual|suggest|automatic [--project /project --destination /notes/project.md --scope "selected facts" --state-dir /private/state] [--config /private/config.json]\n       node scripts/setup.mjs update --client codex|claude --cwd /project --proposal /private/proposed-config.json --expected-hash SHA256 [--config /private/config.json]\nFirst-use setup never overwrites configuration. Updates require inspected bytes and a validated proposal. Neither writes notes or trusts host hooks.\nA --config override applies only to this command. Packaged hooks use CUEFLUENT_NOTES_CONFIG from the host launch environment, or the default path.');
+    console.log('Usage: node scripts/setup.mjs status --client codex|claude --cwd /project [--config /private/config.json]\n       node scripts/setup.mjs init --client codex|claude --mode manual|suggest|automatic [--project /project (--notes-dir /notes | --destination /notes/topic.md) --scope "selected facts" --state-dir /private/state] [--config /private/config.json]\n       node scripts/setup.mjs update --client codex|claude --cwd /project --proposal /private/proposed-config.json --expected-hash SHA256 [--config /private/config.json]\nFolder init and version 1-to-2 updates require --confirm-compatible-clients yes after checking every installed reader, including unlisted clients, supports Cuefluent Notes 0.5.1+.\nFirst-use setup never overwrites configuration. Updates require inspected bytes and a validated proposal. Neither writes notes or trusts host hooks.\nA --config override applies only to this command. Packaged hooks use CUEFLUENT_NOTES_CONFIG from the host launch environment, or the default path.');
     return 0;
   }
   const [command, ...options] = args;
   const allowed = command === 'status' ? ['client', 'cwd', 'config'] : command === 'init'
-    ? ['client', 'mode', 'project', 'destination', 'scope', 'state-dir', 'config'] : command === 'update'
-    ? ['client', 'cwd', 'proposal', 'expected-hash', 'config'] : [];
+    ? ['client', 'mode', 'project', 'destination', 'notes-dir', 'scope', 'state-dir', 'config', 'confirm-compatible-clients'] : command === 'update'
+    ? ['client', 'cwd', 'proposal', 'expected-hash', 'config', 'confirm-compatible-clients'] : [];
   if (!allowed.length || options.length % 2) fail('Use status, init, or update with named options; see --help.');
   const parsed = {};
   for (let i = 0; i < options.length; i += 2) {
@@ -136,10 +141,11 @@ export async function main(args) {
     if (!options[i].startsWith('--') || !allowed.includes(key) || Object.hasOwn(parsed, key) || !options[i + 1]) fail('Unknown, repeated, or incomplete setup option.');
     parsed[key] = options[i + 1];
   }
-  const settings = { ...parsed, configPath: parsed.config, stateDir: parsed['state-dir'], expectedHash: parsed['expected-hash'] };
+  if (parsed['confirm-compatible-clients'] !== undefined && parsed['confirm-compatible-clients'] !== 'yes') fail('--confirm-compatible-clients accepts only yes after checking installed plugins.');
+  const settings = { ...parsed, configPath: parsed.config, notesDir: parsed['notes-dir'], stateDir: parsed['state-dir'], expectedHash: parsed['expected-hash'], confirmCompatibleClients: parsed['confirm-compatible-clients'] === 'yes' };
   const result = await (command === 'status' ? setupStatus(settings) : command === 'init' ? initialize(settings) : updateConfiguration(settings));
   console.log(JSON.stringify(result, null, 2));
-  return result.status === 'invalid' ? 2 : 0;
+  return ['invalid', 'state_conflict', 'recovery_required', 'requires_upgrade'].includes(result.status) ? 2 : 0;
 }
 
 if (await isMain(import.meta.url)) {

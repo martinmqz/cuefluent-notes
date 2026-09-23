@@ -1,4 +1,4 @@
-import { captureSettings, configurationPath, readConfig, configSchema, CLIENTS, object, text } from './capture-policy.mjs';
+import { captureSettings, configurationPath, readConfig, configuredClient, configHeader, CLIENTS, object, text } from './capture-policy.mjs';
 import { absolute, isMain } from './file-io.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
 
@@ -35,8 +35,9 @@ export async function hookResponse(client, payload, config, { skillRoot = SKILL_
   try {
     if (payload.hook_event_name === 'SessionStart') {
       if (config === undefined || config === null) return setupNotice();
-      configSchema(config);
-      return config.clients.includes(client) ? null : setupNotice();
+      if (!configuredClient(config, client)) return setupNotice();
+      configHeader(config);
+      return null;
     }
     if (config === undefined || config === null) return null;
     const settings = await captureSettings(client, payload.cwd, config, { skillRoot });
@@ -47,7 +48,10 @@ export async function hookResponse(client, payload, config, { skillRoot = SKILL_
     const context = [
       'Cuefluent Notes is configured for this operation. Before any capture-related read or write, apply the current user instructions, read-only requests, scope changes, and opt-outs, including “do not record this.” An all-logging opt-out also forbids completion metadata. If capture is excluded, do nothing for capture and continue the task.',
       'Before completing eligible work, consider whether this task established new durable information within the configured scope. Use only current-task evidence and explicitly selected sources; do not read transcripts or discover unrelated material. No useful new information or needed correction means no document write. Do not create completion receipts or another activity log.',
-      'When capture is permitted, use the installed skill and its ordinary Log, Prepare, Update, and Check workflow. Infer useful vocabulary; preserve rich Markdown, occurrence dates, evidence limits, what behavior was actually verified, and unrelated user edits. Use the shared safe-update helper for authorized changes to the selected destination; inspect current bytes first and preserve conflicts.',
+      'When capture is permitted, use the installed skill and its ordinary Log, Prepare, Update, and Check workflow. Infer useful vocabulary; preserve rich Markdown, occurrence dates, evidence limits, what behavior was actually verified, and unrelated user edits. Use the shared safe-update helper for authorized changes to the selected notes location; inspect current bytes first and preserve conflicts.',
+      settings.notesDir
+        ? 'The notesDir is an approved folder containing multiple notes. Inspect relevant Markdown filenames and headings directly in that folder, then reuse a suitable note or choose a descriptive subject-based filename without an automatic plugin-name prefix. Do not create a file per turn or force unrelated topics into one catch-all. Identify the proposed filename in Suggestions mode. Use notesDir as the writer root and the shared stateDir for all these files; do not follow linked notes or create subfolders.'
+        : 'The destination is an explicitly selected file. Preserve that choice; a file route does not authorize saving elsewhere.',
       'A repeated operation identity or a manual save is not new content to append. Re-read the current selected note when capture is permitted, compare the intended information, and leave already-recorded information unchanged. Produce no parallel scenario copies. Report a bounded failure without claiming success, retry loops, extra model calls, background workers, or a forced continuation.',
       settings.automaticUpdates
         ? 'Automatic updates are enabled for this route, subject to current user instructions. Apply only eligible reviewed changes through the safe-write workflow.'
@@ -58,6 +62,9 @@ export async function hookResponse(client, payload, config, { skillRoot = SKILL_
     if (Buffer.byteLength(context, 'utf8') > MAX_CONTEXT_BYTES) return skipped('the configured context exceeds the supported size.', payload.hook_event_name);
     return response(context);
   } catch (error) {
+    if (error.code === 'CONFIG_REQUIRES_UPGRADE') return skipped(error.message, payload.hook_event_name);
+    if (error.code === 'DERIVED_STATE_CONFLICT') return skipped(error.message, payload.hook_event_name);
+    if (error.code === 'STATE_RECOVERY_REQUIRED') return skipped(error.message, payload.hook_event_name);
     if (error.code === 'AMBIGUOUS_ROUTE') return skipped('more than one route matches the most specific project root.', payload.hook_event_name);
     return skipped('the private configuration or selected paths are invalid or unavailable.', payload.hook_event_name);
   }

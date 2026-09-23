@@ -25,14 +25,14 @@ export async function isMain(url) {
 }
 
 /** Exact, bounded UTF-8 bytes. Never open a FIFO in blocking mode. */
-export async function readBoundedBytes(file, { maxBytes = 2 * 1024 * 1024, missing = false, utf8 = true } = {}) {
+export async function readBoundedBytes(file, { maxBytes = 2 * 1024 * 1024, missing = false, utf8 = true, noFollow = false } = {}) {
   const check = stat => {
     if (!stat.isFile() || stat.size > maxBytes) throw new Error(`Expected a regular UTF-8 file at most ${maxBytes / (1024 * 1024)} MiB.`);
   };
   let handle;
   try {
-    check(await fs.stat(file));
-    handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    check(await (noFollow ? fs.lstat(file) : fs.stat(file)));
+    handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0));
   } catch (error) { if (missing && error.code === 'ENOENT') return null; throw error; }
   try {
     const stat = await handle.stat();

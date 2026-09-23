@@ -90,6 +90,13 @@ asks before saving; Automatic captures eligible work within your chosen scope.
 You do not need the Cuefluent app. Keep your notes outside the plugin and source
 checkout.
 
+Choose a notes folder to keep multiple files named for their content. The agent
+reuses a relevant note or proposes a descriptive filename, such as
+`v1.0-release.md`, when there is something useful to save. Filenames do not get
+an automatic plugin-name prefix. You can also
+select a specific Markdown file to keep using that file. Existing file-based
+settings stay unchanged until you request a folder instead.
+
 ### Update a marketplace installation
 
 For Codex:

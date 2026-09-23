@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { absolute, within, lstatOrNull, readBoundedBytes } from './file-io.mjs';
-import { CLIENTS, configurationPath, hookConfigurationSelection, configSchema, captureSettings, canonicalSelectedPath, assertPrivate, readConfig } from './capture-policy.mjs';
+import { CLIENTS, configurationPath, hookConfigurationSelection, configSchema, assertCompatibleClients, captureSettings, canonicalSelectedPath, collectionRoot, assertPrivate, assertConfigurationStorage, readConfig } from './capture-policy.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
 
 const fail = message => { throw new Error(message); };
@@ -12,23 +12,17 @@ const sameFile = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
 const bytesAt = file => readBoundedBytes(file, { maxBytes: 1024 * 1024 });
 
 async function validateCollectionState(config) {
-  const collections = new Map();
+  const collections = [];
   const routes = [...(config.routes ?? []), ...(config.defaultRoute ? [config.defaultRoute] : [])];
   for (const route of routes) {
-    const parent = path.dirname(route.destination);
-    let collection;
-    try { collection = await fs.realpath(parent); }
-    catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      // Preserve unavailable unrelated collections while resolving aliases in
-      // their existing ancestors. No notes or state directories are created.
-      collection = await canonicalSelectedPath(parent);
+    const root = await collectionRoot(route, { allowUnavailable: true });
+    const stateDir = await canonicalSelectedPath(route.stateDir);
+    for (const existing of collections) {
+      if ((within(existing.root, root) || within(root, existing.root)) && existing.stateDir !== stateDir) {
+        fail('Routes in the same notes collection or overlapping notes folders must share one state directory.');
+      }
     }
-    const existing = collections.get(collection);
-    if (existing && await canonicalSelectedPath(existing.stateDir) !== await canonicalSelectedPath(route.stateDir)) {
-      fail('Routes in the same notes collection must share one state directory.');
-    }
-    collections.set(collection, route);
+    collections.push({ root, stateDir });
   }
 }
 
@@ -40,12 +34,11 @@ async function validateChanges(config, previous, client, cwd, file) {
     !isDeepStrictEqual(config.defaultRoute, previous?.defaultRoute)) await validateCollectionState(config);
   const check = async (route, project) => {
     const settings = await captureSettings(client, project ?? cwd, {
-      version: 1, enabled: true, clients: [client], automaticUpdates: false, scope: config.scope,
+      version: config.version, ...(config.version === 2 ? { minimumPluginVersion: config.minimumPluginVersion } : {}),
+      enabled: true, clients: [client], automaticUpdates: false, scope: config.scope,
       ...(project ? { routes: [{ ...route, enabled: true }] } : { defaultRoute: route }),
     });
-    if (within(settings.stateDir, file) || within(file, settings.stateDir) || within(settings.destination, file)) {
-      fail('Keep the configuration separate from the note and writer state.');
-    }
+    assertConfigurationStorage(settings, file);
   };
   if (config.defaultRoute && !isDeepStrictEqual(config.defaultRoute, previous?.defaultRoute)) {
     await check(config.defaultRoute);
@@ -65,7 +58,7 @@ async function validateChanges(config, previous, client, cwd, file) {
 }
 
 /** Apply an explicitly reviewed complete policy against its inspected bytes. */
-export async function updateConfiguration({ client, cwd, configPath, proposal, expectedHash } = {}) {
+export async function updateConfiguration({ client, cwd, configPath, proposal, expectedHash, confirmCompatibleClients } = {}) {
   if (!CLIENTS.has(client) || !absolute(cwd) || !absolute(proposal) || !/^[a-f0-9]{64}$/.test(expectedHash ?? '')) {
     fail('Update requires a supported client, absolute project and proposal paths, and the inspected SHA-256 configuration hash.');
   }
@@ -82,9 +75,14 @@ export async function updateConfiguration({ client, cwd, configPath, proposal, e
   if (hash(original) !== expectedHash) fail('Configuration changed since inspection; read it again before preparing another update.');
   let previous;
   try { previous = JSON.parse(original); configSchema(previous); }
-  catch { previous = undefined; } // A requested repair still requires the exact inspected hash.
+  catch (error) {
+    // Never downgrade a newer policy as though it were malformed old settings.
+    if (error.code === 'CONFIG_REQUIRES_UPGRADE') throw error;
+    previous = undefined; // A requested repair still requires the exact inspected hash.
+  }
   const config = await readConfig(proposal);
   await validateChanges(config, previous, client, cwd, file);
+  assertCompatibleClients(config, previous, confirmCompatibleClients);
   const bytes = Buffer.from(`${JSON.stringify(config, null, 2)}\n`);
   if (bytes.length > 1024 * 1024) fail('Configuration exceeds its supported size.');
   const lockPath = path.join(path.dirname(file), `.${path.basename(file)}.cuefluent-lock`);

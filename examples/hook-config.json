@@ -1,5 +1,6 @@
 {
-  "version": 1,
+  "version": 2,
+  "minimumPluginVersion": "0.5.1",
   "enabled": false,
   "clients": ["codex", "claude"],
   "automaticUpdates": false,
@@ -7,12 +8,12 @@
   "routes": [
     {
       "projectRoot": "/absolute/example-project",
-      "destination": "/absolute/private-notes/atlas.md",
+      "notesDir": "/absolute/private-notes/atlas",
       "stateDir": "/absolute/private-state/atlas"
     },
     {
       "projectRoot": "/absolute/example-project/no-capture",
-      "destination": "/absolute/private-notes/atlas.md",
+      "notesDir": "/absolute/private-notes/atlas",
       "stateDir": "/absolute/private-state/atlas",
       "enabled": false
     }

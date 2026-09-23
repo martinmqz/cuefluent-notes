@@ -11,6 +11,9 @@ Identify the selected files or supplied facts, the subjects and requested
 purpose, and the destination when saving. Use the user's organization and the
 smallest sensible set of documents. Do not scan unrelated folders or create a
 new storage convention. A conversation-only request stays in the conversation.
+When the destination is a folder, use the [skill's file-selection guidance](../SKILL.md)
+to reuse a relevant note or name a new one for its content. A folder can contain
+multiple subjects; it does not imply one plugin- or project-named catch-all file.
 
 | Ownership | Handling |
 | --- | --- |

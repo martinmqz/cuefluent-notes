@@ -39,6 +39,14 @@ Explain the observed status in ordinary language:
   exclusions and other projects; do not offer to reset the file.
 - `invalid`: report the problem and stop setup writes. Preserve the existing file
   for a requested repair; never delete it to make initialization succeed.
+- `state_conflict`: the selected state owns derived outputs. Keep that collection
+  and its state together; select a separate authored notes collection for capture.
+  Do not bypass ownership by assigning another state to the same outputs.
+- `recovery_required`: an interrupted writer update needs inspection and recovery
+  before capture can proceed. Setup does not recover it or bypass it with new state.
+- `requires_upgrade`: this installed plugin cannot interpret the policy version.
+  Upgrade the client before editing the policy; do not repair it as malformed JSON
+  or downgrade it to a version this client knows.
 
 `hookPackaged` reports whether this package includes both synchronous command-hook
 registrations invoking the bundled adapter for the selected client, with
@@ -89,11 +97,14 @@ asking during the same conversation.
 
 For Suggestions or Automatic, ask for the missing project scope and notes
 location. Offer the current project as a concrete starting scope. Accept an
-existing Markdown file or a notes folder; if given a folder, propose a sensible
-project filename. Reuse suitable existing notes instead of inventing a parallel
-collection. Create a missing notes folder only when it is the user's selected
-location. The helper requires that folder to exist and never creates a note
-during setup.
+explicit Markdown file or a notes folder. Preserve a selected folder as a
+multi-file collection with `--notes-dir`; do not choose a project-named file
+during setup. Note filenames are chosen from their subject when useful content
+is ready, following the file-selection guidance in [the skill](../SKILL.md).
+Use `--destination` only when the user selected a specific file. Reuse suitable
+existing notes instead of inventing a parallel collection. Create a missing
+notes folder only when it is the user's selected location. The helper requires
+that folder to exist and never creates a note during setup.
 
 Summarize what will be eligible in plain language, such as “verified findings,
 decisions, and meaningful changes from this project.” Honor narrower or different
@@ -106,20 +117,47 @@ configuration change described in [hooks](hooks.md).
 The following are helper interfaces for the agent, not a questionnaire for the
 user. Substitute their actual choices; never execute the example paths literally.
 
+Before introducing a folder policy, inspect installed Cuefluent Notes versions
+in both Codex and Claude, including user/project installations and profiles that
+read this configuration. All must be **0.5.1 or newer**, even clients absent from
+the policy's `clients` list: 0.5.0 validates the entire policy before checking that
+list. Upgrade or remove older installations within the user's authorized scope.
+If an installation cannot be verified or upgraded, retain file-based version 1
+settings and explain what remains needed for folders; do not silently replace the
+user's folder choice with a catch-all file.
+
+The helper warns and refuses the first version 2 publication unless the caller
+supplies `--confirm-compatible-clients yes`. Supply it only after this inspection;
+it is the agent's compatibility assertion, not another user consent prompt, and
+the helper does not itself discover installed clients. A fresh profile does not
+prove that another profile reading the same policy is compatible.
+
 ```sh
 node scripts/setup.mjs init --client codex --mode manual
 
 node scripts/setup.mjs init --client codex --mode automatic \
   --project /absolute/selected-project \
-  --destination /absolute/private-notes/project.md \
-  --scope "Verified findings, decisions, and meaningful changes from this project."
+  --notes-dir /absolute/private-notes \
+  --scope "Verified findings, decisions, and meaningful changes from this project." \
+  --confirm-compatible-clients yes
 ```
+
+For an explicitly selected file, replace `--notes-dir` with
+`--destination /absolute/private-notes/selected-topic.md`; use exactly one option.
+Folder status reports `notesDir`, while file status reports `destination`.
+Explicit-file and Manual initialization keep schema version 1 and need no
+compatibility assertion. Folder initialization writes version 2 with
+`minimumPluginVersion: "0.5.1"`.
 
 Use `--mode suggest` for suggestions. The helper chooses private writer state
 beside the configuration, keyed by the canonical notes folder so notes in that
 collection share a lock. Reuse an existing collection's selected state directory
 with `--state-dir` when one is already established; do not start a competing lock
 directory for the same collection. State is created by the writer when needed.
+Overlapping ancestor/descendant notes folders also share one state directory.
+Capture uses authored writes; a state containing a derived manifest or pending
+derived journal cannot be reused for capture. Setup refuses that conflict before
+writing configuration.
 
 Initialization creates a complete `0600` configuration without replacing an
 existing file or symlink, including a file created by a concurrent setup. It
@@ -130,9 +168,11 @@ Atomic first-use publication requires same-directory hard links. If the filesyst
 or its permissions do not support them, explain the failure and let the user
 choose a supported private location; never fall back to writing a partial policy.
 
-Run Status again against the selected project. Report the chosen mode, where
-notes will go when relevant, and any remaining host setup. Keep configuration
-filenames, status enums, helper commands, state hashes, and internal memory
+Run Status again against the selected project. Report the chosen mode, folder
+or selected file, and any remaining host setup. For a folder, explain that
+relevant notes will be reused or named for their content; do not announce a
+catch-all filename. Keep configuration filenames, status enums, helper commands,
+state hashes, and internal memory
 details out of the normal completion message unless the user asks or needs them
 to resolve a problem. If `hookPackaged` is false, explain that automatic
 assistance requires the hook package from
@@ -152,6 +192,17 @@ onboarding and has not yet selected a mode or destination.
 `init` handles first use only. For a status question, report the existing mode and
 stop. An explicit setup request for another project/client, or a mode change,
 uses `update`; never rewrite the active configuration with an ordinary file write.
+
+Older configurations with `destination` remain file routes. Do not silently
+broaden them to folders. When the user requests a collection instead, perform the
+installed-client compatibility inspection above, including unlisted clients.
+Set `version` to `2` and `minimumPluginVersion` to `"0.5.1"`, then replace that
+route's `destination` with `notesDir` in the reviewed update. Pass
+`--confirm-compatible-clients yes` for that first schema upgrade; subsequent
+edits of a valid version 2 policy do not require the assertion again.
+For the same canonical folder, retain the existing `stateDir`. This changes
+routing only; it does not rename, split, or move existing notes. Correct existing
+note names only within the user's requested scope, preserving content and links.
 
 1. Run Status with the selected project and keep its `configHash`. Read that
    exact policy and prepare a complete proposed JSON in a separate private file.

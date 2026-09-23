@@ -1,5 +1,19 @@
 Capture and organize your knowledge for fast recall—right on cue.
 
+Folder setup now preserves a collection of notes instead of choosing one
+catch-all file. Reuse relevant notes or name new files for their content;
+Suggestions identifies the proposed filename before asking to save. Explicit
+file destinations remain supported and existing settings are not broadened.
+Folder policies use schema version 2 and record a minimum plugin version of
+0.5.1. Setup requires a compatibility check before first publishing that schema:
+upgrade every installed client that reads the policy, including unlisted clients.
+Explicit-file policies retain version 1. Newer schemas produce upgrade guidance,
+and unlisted clients ignore unfamiliar policy fields.
+
+Overlapping notes folders must share writer state. Capture setup also refuses
+state owned by a derived collection and explains how to choose a separate
+authored collection without creating competing locks for existing outputs.
+
 This release contains complete Codex and Claude Code plugins, with runtime
 dependencies included. Each client has a hook-enabled ZIP and a manual ZIP
 without hooks. Requires Node.js 22+; hook commands target macOS and Linux.
