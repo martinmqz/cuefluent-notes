@@ -1,0 +1,49 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run check:examples
+      - run: npm run release:build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-preview-${{ matrix.os }}
+          path: dist/release/artifacts/
+          if-no-files-found: error
+          retention-days: 7
+  reproducibility:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-preview-*
+          path: artifacts
+      - name: Verify and compare Linux and macOS release artifacts
+        run: |
+          (cd artifacts/release-preview-ubuntu-24.04 && sha256sum --check SHA256SUMS)
+          (cd artifacts/release-preview-macos-14 && sha256sum --check SHA256SUMS)
+          diff -u artifacts/release-preview-ubuntu-24.04/SHA256SUMS artifacts/release-preview-macos-14/SHA256SUMS

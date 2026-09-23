@@ -1,0 +1,27 @@
+{
+  "name": "cuefluent-notes",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Markdown capture guidance and local checks for Cuefluent Notes",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "install:codex": "node scripts/install.mjs --client codex",
+    "install:claude": "node scripts/install.mjs --client claude",
+    "test": "node --test scripts/*.test.mjs",
+    "check:examples": "node scripts/check-notes.mjs --cases examples/check-cases.json examples/feature-behavior.md examples/decision.md examples/standup.md examples/meeting-summary.md examples/task-summary.md examples/knowledge-base.md",
+    "package": "node scripts/package.mjs",
+    "package:hooks": "node scripts/package.mjs --hooks",
+    "release:build": "node scripts/release.mjs"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.2",
+    "markdown-it-footnote": "4.0.0"
+  },
+  "devDependencies": {
+    "fflate": "0.8.3",
+    "tar-stream": "3.2.1"
+  }
+}

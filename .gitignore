@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.DS_Store
+
+# Local capture data, agent settings, and credentials stay outside version control.
+.local/
+.codex/
+.claude/
+.env
+.env.*
+!.env.example
+*.pem
+*.key

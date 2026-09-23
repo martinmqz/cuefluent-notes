@@ -1,0 +1,20 @@
+{
+  "name": "cuefluent-notes",
+  "version": "0.5.0",
+  "description": "Capture and organize your knowledge for fast recall—right on cue.",
+  "author": { "name": "Cuefluent Notes contributors" },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Cuefluent Notes",
+    "shortDescription": "Capture and organize your knowledge for fast recall—right on cue.",
+    "longDescription": "Turn work, meetings, and ideas into clear, searchable Markdown. Capture decisions, create summaries, and maintain documentation and knowledge-base notes—Cuefluent-ready, with smart search keywords and optional automatic capture across sessions.",
+    "developerName": "Cuefluent Notes contributors",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Set up Cuefluent Notes for this project.",
+      "Check these notes for evidence and useful search vocabulary.",
+      "Update this note while preserving my edits and its history."
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+name: Publish marketplace
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: marketplace-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Download and verify the published marketplace snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          bash scripts/check-release-source.sh
+          mkdir -p "$RUNNER_TEMP/release-assets" dist/published-marketplace
+          gh release download "$RELEASE_TAG" --pattern "cuefluent-notes-${RELEASE_TAG#v}-marketplace.tar.gz" --pattern SHA256SUMS --dir "$RUNNER_TEMP/release-assets"
+          (cd "$RUNNER_TEMP/release-assets" && sha256sum --ignore-missing --check SHA256SUMS)
+          tar -xzf "$RUNNER_TEMP/release-assets/cuefluent-notes-${RELEASE_TAG#v}-marketplace.tar.gz" -C dist/published-marketplace
+      - name: Advance the marketplace branch without changing source history
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: bash scripts/publish-marketplace.sh

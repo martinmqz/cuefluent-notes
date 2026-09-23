@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "enabled": false,
+  "clients": ["codex", "claude"],
+  "automaticUpdates": false,
+  "scope": "Fictional example only: durable Atlas API findings, recorded decisions, and verified changes established during the authorized task.",
+  "routes": [
+    {
+      "projectRoot": "/absolute/example-project",
+      "destination": "/absolute/private-notes/atlas.md",
+      "stateDir": "/absolute/private-state/atlas"
+    },
+    {
+      "projectRoot": "/absolute/example-project/no-capture",
+      "destination": "/absolute/private-notes/atlas.md",
+      "stateDir": "/absolute/private-state/atlas",
+      "enabled": false
+    }
+  ],
+  "exclude": ["/absolute/example-project/private"]
+}
