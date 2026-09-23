@@ -34,8 +34,8 @@ Explain the observed status in ordinary language:
   claim the user chose Manual here. For an explicit setup request, use the
   existing-settings flow below to add the client while preserving other settings.
 - `configured`: describe the mode, project being checked, destination, and scope.
-  Also report whether the completion check is enabled when relevant. Policy
-  readiness does not prove the host runs the hook.
+  For a folder, report its organization; also report the completion check when
+  relevant. Policy readiness does not prove the host runs the hook.
 - `inactive`: settings exist, but no enabled route covers this project. Preserve
   exclusions and other projects; do not offer to reset the file.
 - `invalid`: report the problem and stop setup writes. Preserve the existing file
@@ -108,6 +108,14 @@ existing notes instead of inventing a parallel collection. Create a missing
 notes folder only when it is the user's selected location. The helper requires
 that folder to exist and never creates a note during setup.
 
+Folder organization defaults to flat. When the user wants categories, explain
+[by-type placement](workflow.md#note-placement) and its root fallback, then use
+`--organization by-type` only for that selected choice. Existing notes remain
+where they are; setup creates no category folders. Verify a supported app loading
+path before recommending this layout for real notes; nested/recursive loading
+is not established by the plugin tests. An explicit file or Manual choice has
+no organization option. Do not turn an organization discussion into capture consent.
+
 Summarize what will be eligible in plain language, such as “verified findings,
 decisions, and meaningful changes from this project.” Honor narrower or different
 scope. Do not silently select all projects or enable both clients. Start with the
@@ -128,7 +136,7 @@ If an installation cannot be verified or upgraded, retain file-based version 1
 settings and explain what remains needed for folders; do not silently replace the
 user's folder choice with a catch-all file.
 
-The helper warns and refuses the first version 2 publication unless the caller
+The helper warns and refuses the first publication of a newer schema unless the caller
 supplies `--confirm-compatible-clients yes`. Supply it only after this inspection;
 it is the agent's compatibility assertion, not another user consent prompt, and
 the helper does not itself discover installed clients. A fresh profile does not
@@ -151,6 +159,13 @@ Explicit-file and Manual initialization keep schema version 1 and need no
 compatibility assertion. Folder initialization writes version 2 with
 `minimumPluginVersion: "0.5.1"`. These defaults leave completion checks off;
 explicit opt-in uses version 3 as described below.
+
+An explicit `--organization flat` or `--organization by-type` selects schema 4
+with `minimumPluginVersion: "0.7.0"` and an explicit `completionCheck` boolean
+(false unless separately enabled). Before first schema-4 publication, inspect
+all installed readers as above: every reader must support **0.7.0+**. Supply
+`--confirm-compatible-clients yes` only after that inspection. Omit the option
+to retain the legacy initialization defaults; omission in schema 4 also means flat.
 
 Use `--mode suggest` for suggestions. The helper chooses private writer state
 beside the configuration, keyed by the canonical notes folder so notes in that
@@ -204,11 +219,20 @@ Set `version` to `2` and `minimumPluginVersion` to `"0.5.1"`, then replace that
 route's `destination` with `notesDir` in the reviewed update. Pass
 `--confirm-compatible-clients yes` for that first schema upgrade; subsequent
 edits of a valid version 2 policy do not require the assertion again.
-If the policy is already version 3, retain that version, minimum plugin version,
+If the policy is already version 3 or 4, retain that version, minimum plugin version,
 and completion setting when changing storage; do not downgrade it.
 For the same canonical folder, retain the existing `stateDir`. This changes
 routing only; it does not rename, split, or move existing notes. Correct existing
 note names only within the user's requested scope, preserving content and links.
+
+To change folder organization, preserve the complete policy and selected root,
+state, clients, scope and consent. Upgrade to schema 4 only after the 0.7.0+
+reader inspection; retain `completionCheck` (or explicitly set false when upgrading
+from schemas 1–2). Set the folder route's `organization` to the chosen mode.
+First publication requires the compatibility assertion. Do not write an organization
+field on a file route, downgrade a policy, or move notes as part of this change.
+Explain that switching back to flat limits automatic note discovery to the root;
+existing category notes stay in place and can still be explicitly selected.
 
 1. Run Status with the selected project and keep its `configHash`. Read that
    exact policy and prepare a complete proposed JSON in a separate private file.
@@ -245,8 +269,10 @@ Routes and the default route that target the same canonical notes folder must us
 the same canonical state directory, including disabled routes. Different state
 directories would create separate locks for writes to the same collection. Path
 aliases are resolved without creating notes or state. Fix a conflict in the
-reviewed proposal; do not invent another state directory to bypass it. This check
-covers one policy; separate policies and manual writer plans must also reuse the
+reviewed proposal; do not invent another state directory to bypass it. Overlapping
+folder routes must also agree on effective organization (omitted means flat),
+including defaults and disabled routes. Explicit-file routes have no organization.
+This check covers one policy; separate policies and manual writer plans must also reuse the
 collection's chosen state directory.
 Turning a policy off while preserving its routes/default remains possible even
 if those existing routes conflict; activation requires an explicit repair first.
@@ -287,12 +313,14 @@ For a fresh Suggestions or Automatic setup with explicit completion consent,
 add `--completion-check yes --confirm-compatible-clients yes` to `init`.
 For existing settings, follow the guarded update flow above with
 `version: 3`, `minimumPluginVersion: "0.6.0"`, and `completionCheck: true`, retaining
-all routes and other choices. Pass `--confirm-compatible-clients yes` on the first
+all routes and other choices. If already schema 4, retain version 4, its 0.7.0
+minimum, and organization settings; its reader requirements still apply.
+Pass `--confirm-compatible-clients yes` on the first
 schema-3 publication only after the inspection. Setup writes no markers or notes.
 
 To turn the check off, update `completionCheck` to `false` while retaining schema
-3 and the existing capture mode. This stops marker instructions and recovery
-requests; it does not delete existing state or stop ordinary note suggestions.
+3 or 4 as applicable and the existing capture mode. This stops marker instructions
+and recovery requests; it does not delete existing state or stop ordinary note suggestions.
 Status reports the effective `completionCheck` for an active route. A fresh task
 is the supported verification boundary after installing or updating a package.
 See [completion](completion.md) for helper use, marker retention, opt-outs, and

@@ -309,7 +309,8 @@ After installing, start a fresh task and say **“Set up Cuefluent Notes.”** T
 bundled [Setup flow](setup.md) reads current status, asks for missing choices, and
 saves the selected first-use policy. Manual use needs no notes destination;
 Suggestions and Automatic require a project, destination, and capture scope.
-The helper never overwrites existing settings or writes a note during setup.
+First-use initialization preserves existing settings; guarded updates replace
+only an inspected, approved policy. Neither operation writes notes.
 
 Host installation and trust are separate from implementation authorization.
 After choosing the hook variant, select private policy and note/state locations
@@ -334,6 +335,19 @@ each host rather than assuming both update the same way.
 
 ## Compatibility and verification status
 
+Optional by-type folder policies use schema 4 and require every installed reader
+of that shared configuration to support 0.7.0+. Setup requires an explicit caller
+compatibility assertion after checking those installations; it does not discover
+them automatically. Existing schemas and explicit files remain supported, and
+updating a package does not activate categories or move notes. Follow
+[setup](setup.md) to change organization while preserving consent and shared state.
+Directory-bound authored writes use journal version 2, which requires 0.7.0+
+for recovery or abort; older writers refuse it. Preserve pending journals during
+upgrades and resolve them with a compatible helper. See [safe updates](refresh.md).
+This also applies to root-only v2 plans under older capture schemas or manual use:
+the writer requires its own `confirmCompatibleReaders: true` assertion. Retain v1
+for mixed-version collections until every installed reader supports 0.7.0+.
+
 The declared Node baseline is `>=22`; development and isolated helper checks
 run locally on macOS with Node `26.2.0`. CI checks native Windows, Linux, and
 macOS with Node 22 and compares release checksums across all three. Bundled
@@ -357,6 +371,10 @@ host contracts above. Already-open session reload, desktop capture, real-user
 usefulness, and actual Cuefluent admission, rendering, image loading, and ranking
 remain unverified. Check the
 [releases page](https://github.com/martinmqz/cuefluent-notes/releases) for publication status.
+The [type-folder checks](verification.md#note-type-folders-070) establish helper
+and package behavior, not model classification, native Save / Skip rendering,
+or a Cuefluent ingestion path. Keep flat organization until loading evidence is
+available; do not infer recursive discovery from directory support.
 
 The project has no assigned source license. Included third-party dependencies
 keep their own license notices; no project license is implied by those notices.

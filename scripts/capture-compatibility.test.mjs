@@ -71,8 +71,8 @@ test('unlisted clients ignore unfamiliar policy schema while listed clients rece
   await initialize({ ...f, confirmCompatibleClients: true });
   const config = await load(f.configPath);
   for (const future of [
-    { ...config, version: 4, futureOption: true },
-    { ...config, minimumPluginVersion: '0.6.1', futureOption: true },
+    { ...config, version: 5, futureOption: true },
+    { ...config, minimumPluginVersion: '0.7.1', futureOption: true },
     { ...config, version: 999, routes: [{ futureRouteType: 'future' }] },
   ]) {
     await fs.writeFile(f.configPath, JSON.stringify(future));
@@ -143,5 +143,5 @@ test('a supported reader minimum in the wrong schema reports invalid rather than
   await fs.writeFile(f.configPath, JSON.stringify({ ...config, minimumPluginVersion: '0.6.0' }));
   assert.equal((await setupStatus(f)).status, 'invalid');
   assert.throws(() => configSchema({ ...config, minimumPluginVersion: '0.6.0' }), /Invalid capture configuration/);
-  assert.throws(() => configSchema({ ...config, minimumPluginVersion: '0.6.1' }), { code: 'CONFIG_REQUIRES_UPGRADE' });
+  assert.throws(() => configSchema({ ...config, minimumPluginVersion: '0.7.1' }), { code: 'CONFIG_REQUIRES_UPGRADE' });
 });

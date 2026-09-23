@@ -12,6 +12,12 @@ an all-logging opt-out or read-only request forbids even completion-marker write
 In that case, do no capture work and finish without a marker. Never change policy
 or create alternate storage just to satisfy a check.
 
+Use the same [note placement](workflow.md#note-placement) during ordinary work
+and recovery. A proposal previews the complete path, edit and any folder creation;
+recording `proposed` creates neither the note nor its folder. Changed note or parent
+state requires a fresh preview and approval. Switching flat/by-type policy changes
+the completion fingerprint and disarms recovery until a new marker succeeds.
+
 Use the helper only when the current host already permits both its command and
 the selected state writes without a new permission request. Do not escalate,
 change host permissions, or ask on every turn just for bookkeeping. If access is

@@ -77,15 +77,16 @@ versioned example directly as the runtime configuration.
 
 | Field | Meaning |
 | --- | --- |
-| `version` | `1` for legacy explicit-file policies; `2` supports file and folder routes; `3` adds explicit completion-check settings |
-| `minimumPluginVersion` | `"0.5.1"` in version 2; `"0.6.0"` in version 3; omitted from version 1 |
-| `completionCheck` | Required boolean in version 3; `true` explicitly permits private completion markers and one Stop recovery. Absent from older schemas. Applies to every active route and listed client. |
+| `version` | `1` for legacy explicit-file policies; `2` supports file and folder routes; `3` adds completion-check settings; `4` adds folder organization |
+| `minimumPluginVersion` | `"0.5.1"` in version 2; `"0.6.0"` in version 3; `"0.7.0"` in version 4; omitted from version 1 |
+| `completionCheck` | Required boolean in versions 3 and 4; `true` explicitly permits private completion markers and one Stop recovery. Absent from older schemas. Applies to every active route and listed client. |
 | `enabled` | Explicit global enablement; `false` is quiet |
 | `clients` | Enabled adapter names, selected from `codex` and `claude` |
 | `automaticUpdates` | Whether configured capture may save; `false` supplies proposal-only guidance |
 | `scope` | A nonempty single-line description of eligible information, at most 2,000 characters |
 | `defaultRoute` | Optional `{notesDir, stateDir}` or `{destination, stateDir}` for sessions without a matching project route |
 | `routes` | Optional project routes with `projectRoot`, `stateDir`, and exactly one of `notesDir` or `destination`; each can override `scope`, `automaticUpdates`, or `enabled` |
+| `organization` | Optional `"flat"` or `"by-type"` on folder project/default routes in version 4 only. Omitted means flat; forbidden on explicit-file routes. |
 | `exclude` | Optional absolute project roots to exclude, including their descendants |
 
 Complete policy writes reject unrecognized fields. Reads check client membership
@@ -98,11 +99,13 @@ and exclusion roots may be unavailable: missing roots and non-directory roots
 cannot match an existing session. Permission failures are ignored only when a
 readable ancestor proves the root is outside this session; otherwise capture
 is skipped, including when an exclusion or disabled route could apply.
-`notesDir` selects an existing notes folder. It authorizes topic-based selection
-of Markdown files directly in that folder, using the skill's file-selection
-guidance; no note is chosen or read by the hook. Reuse relevant notes or create
-descriptive filenames when authorized, without creating subfolders or following
-linked notes. Use the selected folder as the safe-writer root.
+`notesDir` selects an existing notes folder. Flat organization keeps notes directly
+in it. By-type uses [note placement](workflow.md#note-placement), preserving explicit
+destinations and suitable existing notes before choosing a category for clear new
+types; general/unclear material stays at root. No note is chosen or read by the
+hook. Never follow linked notes. Use the selected folder as the safe-writer root;
+category writes use inspected directory expectations, and Suggestions approval
+covers both the note and any folder creation.
 `destination` preserves an explicitly selected Markdown file; its parent
 must exist, while the note itself may be new. An existing note must be a regular
 file with a single hard link, matching the safe writer's replacement requirements.
@@ -115,6 +118,8 @@ same collection, as described in [refresh.md](refresh.md). The state directory
 is shared by every route/default targeting that canonical notes folder or an
 overlapping ancestor/descendant folder; Setup
 updates reject conflicting choices, including disabled routes and path aliases.
+Overlapping folder routes must also agree on effective organization, including
+default and disabled routes; explicit files do not participate in that comparison.
 Separate policy files still need the same collection state chosen explicitly.
 Capture requires authored state. Setup, updates, and prompt hooks refuse a
 selected state containing a derived manifest or pending derived journal without
@@ -130,7 +135,8 @@ publishing version 2, Setup requires a compatibility assertion after inspecting
 **every installed client that reads the policy**, including unlisted clients.
 All must support `notesDir` (0.5.1+); older clients cannot gain the early membership
 check retroactively. First publication of version 3 requires all installed readers
-to support 0.6.0+. See [setup](setup.md) for the preflight and version fields.
+to support 0.6.0+; version 4 requires 0.7.0+ even when organization is omitted
+or completion is off. See [setup](setup.md) for the preflight and version fields.
 Keep policy concise: oversized input,
 configuration, or emitted context produces bounded no-capture guidance.
 Optional completion data that would exceed the context budget is omitted from

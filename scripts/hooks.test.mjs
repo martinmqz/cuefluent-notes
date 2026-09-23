@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { hookResponse } from './hooks.mjs';
 import { captureSettings } from './capture-policy.mjs';
+import { recordCompletion } from './capture-completion.mjs';
 
 const hookScript = fileURLToPath(new URL('./hooks.mjs', import.meta.url));
 const text = response => response?.hookSpecificOutput?.additionalContext ?? '';
@@ -135,6 +136,8 @@ test('Suggestions and Automatic guards stay distinct for file and folder routes 
           automaticUpdates: override ? !automaticUpdates : automaticUpdates,
           routes: [{ ...route, ...(override ? { automaticUpdates } : {}) }] };
         const context = text(await hookResponse(client, payload, policy));
+        assert.match(context, /When capture is permitted, use the installed skill/);
+        assert.match(context, /When capture is permitted, re-read the selected note/);
         const operation = JSON.parse(context.split('\n\n').at(-1));
         assert.equal(operation.automaticUpdates, automaticUpdates);
         assert.equal(operation.skill, skill);
@@ -142,9 +145,8 @@ test('Suggestions and Automatic guards stay distinct for file and folder routes 
         assert.equal(Object.hasOwn(operation, folder ? 'destination' : 'notesDir'), false);
         if (folder) {
           assert.match(context, /Use notesDir as the writer root and the shared stateDir/);
-          if (automaticUpdates) assert.doesNotMatch(context, /identify the proposed filename/i);
-          else assert.match(context, /When offering an interactive proposal, identify the proposed filename/);
-        } else assert.doesNotMatch(context, /When offering an interactive proposal/);
+          assert.match(context, /Flat organization/);
+        }
         if (automaticUpdates) {
           assert.match(context, /Automatic updates are enabled/);
           assert.doesNotMatch(context, /Automatic updates are disabled|Do not autosave|without explicit user approval|silence, or timeout is not approval|Approval covers only/);
@@ -153,6 +155,8 @@ test('Suggestions and Automatic guards stay distinct for file and folder routes 
           assert.match(context, /read Suggestions at the JSON "skill" path/);
           assert.match(context, /Do not autosave/);
           assert.match(context, /without explicit user approval/);
+          assert.match(context, /complete relative path, edit and any folder creation/);
+          assert.match(context, /inspected parent state/);
           assert.match(context, /default choice, silence, or timeout is not approval/);
           assert.match(context, /Omit unsolicited proposals in non-interactive or uncertain runs/);
           assert.match(context, /Approval covers only the previewed target, inspected note, and edit/);
@@ -328,4 +332,96 @@ test('an inaccessible root that could govern this session fails closed', async t
     routes: [...config.routes, { ...config.routes[0], projectRoot: unknown, enabled: false }] }]) {
     assert.match(text(await hookResponse('codex', payload, policy)), /capture is skipped/);
   }
+});
+
+test('organization guidance agrees across prompt and Stop, clients, modes and route selection without hook writes', async t => {
+  const f = await fixture(t);
+  const configPath = path.join(f.directory, 'config.json');
+  await fs.writeFile(f.destination, '# Existing knowledge\n\n## Decision\n\nPreserve this.\n');
+  const before = await fs.stat(f.destination, { bigint: true });
+  for (const client of ['codex', 'claude']) for (const kind of ['file', 'omitted', 'flat', 'by-type']) {
+    for (const automaticUpdates of [false, true]) for (const completionCheck of [false, true]) {
+      for (const useDefault of [false, true]) {
+        const route = { stateDir: f.stateDir, ...(kind === 'file' ? { destination: f.destination }
+          : { notesDir: f.notes, ...(kind === 'omitted' ? {} : { organization: kind }) }) };
+        const config = { ...f.config, version: 4, minimumPluginVersion: '0.7.0', completionCheck, automaticUpdates,
+          routes: useDefault ? [] : [{ ...route, projectRoot: f.project }],
+          ...(useDefault ? { defaultRoute: route } : {}) };
+        await fs.writeFile(configPath, JSON.stringify(config));
+        const payload = { ...f.payload, permission_mode: 'default', session_id: `${client}-${kind}-${automaticUpdates}-${completionCheck}-${useDefault}` };
+        const context = text(await hookResponse(client, payload, config, { configPath }));
+        const op = JSON.parse(context.split('\n\n').at(-1));
+        assert.equal(op.organization, kind === 'file' ? undefined : kind === 'omitted' ? 'flat' : kind);
+        assert.equal(op.automaticUpdates, automaticUpdates);
+        assert.equal(op.stateDir, f.stateDir);
+        assert.equal(Boolean(op.completion), completionCheck);
+        const contexts = [context];
+        if (completionCheck) {
+          const { helper, ...completion } = op.completion;
+          await recordCompletion({ ...completion, client, session_id: op.session_id,
+            [client === 'codex' ? 'turn_id' : 'prompt_id']: 'previous-turn', outcome: 'no-change' });
+          const files = await fs.readdir(f.stateDir, { recursive: true });
+          const snapshot = () => Promise.all(files.map(async file => {
+            const target = path.join(f.stateDir, file);
+            return (await fs.lstat(target)).isFile() ? fs.readFile(target) : null;
+          }));
+          const stateBefore = await snapshot();
+          const stop = await hookResponse(client, { ...payload, hook_event_name: 'Stop', stop_hook_active: false }, config, { configPath });
+          assert.equal(stop.decision, 'block');
+          assert.deepEqual(JSON.parse(stop.reason.split('\n\n').at(-1)), op);
+          contexts.push(stop.reason);
+          assert.deepEqual(await fs.readdir(f.stateDir, { recursive: true }), files);
+          assert.deepEqual(await snapshot(), stateBefore);
+        }
+        for (const guidance of contexts) {
+          assert.ok(Buffer.byteLength(guidance) <= 8000);
+          if (kind === 'file') {
+            assert.match(guidance, /explicitly selected file/);
+            assert.doesNotMatch(guidance, /Flat organization|meetings\//);
+          } else {
+            assert.match(guidance, /reuse suitable existing notes before creating/);
+            assert.match(guidance, /shared stateDir for the whole collection/);
+            if (kind === 'by-type') {
+              assert.match(guidance, /meetings\/, tasks\/, knowledge-base\/, decisions\//);
+              assert.match(guidance, /general\/unclear content stays at root/);
+              assert.match(guidance, /inspected directories and v2 authored plans/);
+              assert.match(guidance, /custom\/deeper paths use v1 with agent-side parent checks/);
+              assert.doesNotMatch(guidance, /Flat organization/);
+            } else assert.match(guidance, /Flat organization/);
+          }
+          if (automaticUpdates) assert.doesNotMatch(guidance, /before approval|fresh preview|Do not autosave/);
+          else {
+            assert.match(guidance, /complete relative path, edit and any folder creation/);
+            assert.match(guidance, /create neither notes nor folders before approval/);
+            assert.match(guidance, /parent state/);
+            assert.match(guidance, /fresh preview and (?:obtain new )?approval/);
+          }
+        }
+        assert.deepEqual(await fs.readdir(f.notes), ['knowledge.md']);
+        assert.equal((await fs.stat(f.destination, { bigint: true })).mtimeNs, before.mtimeNs);
+      }
+    }
+  }
+});
+
+test('by-type byte pressure preserves bounded ordinary guidance when completion cannot fit', async t => {
+  const f = await fixture(t);
+  for (const client of ['codex', 'claude']) {
+    const config = { ...f.config, version: 4, minimumPluginVersion: '0.7.0', completionCheck: true,
+      automaticUpdates: false, scope: '界'.repeat(1400),
+      routes: [{ projectRoot: f.project, notesDir: f.notes, stateDir: f.stateDir, organization: 'by-type' }] };
+    const options = { configPath: path.join(f.directory, 'x'.repeat(3000)) };
+    const payload = { ...f.payload, permission_mode: 'default' };
+    const context = text(await hookResponse(client, payload, config, options));
+    assert.doesNotMatch(context, /capture is skipped/);
+    assert.ok(Buffer.byteLength(context) <= 8000);
+    const op = JSON.parse(context.split('\n\n').at(-1));
+    assert.equal(op.organization, 'by-type');
+    assert.equal(op.completion, undefined);
+    assert.equal(await hookResponse(client, { ...payload, hook_event_name: 'Stop', stop_hook_active: false }, config, options), null);
+    const oversized = text(await hookResponse(client, payload, { ...config, scope: '界'.repeat(2000) }, options));
+    assert.match(oversized, /capture is skipped.*context exceeds/);
+  }
+  assert.deepEqual(await fs.readdir(f.notes), []);
+  await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
 });

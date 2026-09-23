@@ -19,6 +19,7 @@ const SOURCE_FILES = [
   'scripts/check-notes.mjs', 'scripts/safe-update.mjs', 'scripts/hooks.mjs', 'scripts/runtime-paths.mjs', 'scripts/file-io.mjs',
   'scripts/capture-policy.mjs', 'scripts/setup.mjs', 'scripts/config-update.mjs', 'scripts/hook-definition.mjs',
   'scripts/plugin-manifest.mjs', 'scripts/capture-completion.mjs',
+  'scripts/note-organization.mjs',
 ];
 const EXCLUDED_DIRECTORIES = new Set(['node_modules', '.git', '.github', '.hg', '.svn', 'test', 'tests', '__tests__', '__mocks__', 'coverage', 'benchmark', 'benchmarks', 'scripts']);
 const EXCLUDED_FILES = /^(?:\.DS_Store|\.npmignore|\.gitignore|\.travis\.yml|Makefile|(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)|(?:tsconfig(?:\.[^.]+)?\.json)|(?:(?:rollup|webpack|vite|eslint|jest|vitest|babel)\.config\..+)|\.(?:eslint|babel|prettier|nyc|mocha)rc(?:\..+)?)$/;

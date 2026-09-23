@@ -18,8 +18,7 @@ this public repository. The bundled examples are fictional.
 For a [published release](https://github.com/martinmqz/cuefluent-notes/releases),
 you need **Git, Node.js 22+, and a current client CLI** on Windows, macOS, or
 Linux. Runtime dependencies are included; no npm install or source checkout is
-needed. Windows requires plugin version **0.6.0+**; until that release is
-published, use the updated source installer below.
+needed. Windows requires plugin version **0.6.0+**.
 
 **Codex:**
 
@@ -104,6 +103,23 @@ reuses a relevant note or proposes a descriptive filename, such as
 an automatic plugin-name prefix. You can also
 select a specific Markdown file to keep using that file. Existing file-based
 settings stay unchanged until you request a folder instead.
+
+Folders default to a flat collection. Version **0.7.0+** also supports optional
+**by-type** organization: `meetings/`, `tasks/`, `knowledge-base/`, and `decisions/`.
+For example, a new meeting could use `meetings/release-planning.md`; general or
+unclear content stays at the root. The agent first preserves explicit destinations
+and suitable existing notes, so enabling this option does not move files or create
+duplicate category copies. There is no required `type:` field or task lifecycle.
+
+Suggestions show the complete proposed path, edit, and any folder creation before
+Save / Skip. Skipping or leaving it unanswered creates neither notes nor folders.
+Type folders require every installed reader of the shared policy to support
+0.7.0+; installation alone does not change organization or capture consent.
+Ask to change organization only after confirming a supported way to load those
+files into Cuefluent. App loading of nested files, including recursive discovery,
+has not been verified here; keep flat organization until it is. See
+[note placement](references/workflow.md#note-placement) and
+[verification](references/verification.md#note-type-folders-070).
 
 ### Update a marketplace installation
 

@@ -9,7 +9,7 @@ import pkg from '../package.json' with { type: 'json' };
 export const CLIENTS = new Set(['codex', 'claude']);
 // The schema's required minimum is separate from this reader's capabilities.
 const READER_VERSION = pkg.version.split(/[.+-]/).slice(0, 3).map(Number);
-export const completionEnabled = config => config?.version === 3 && config.completionCheck === true;
+export const completionEnabled = config => [3, 4].includes(config?.version) && config.completionCheck === true;
 export const completionPermissionMode = (client, mode) =>
   ['default', 'acceptEdits', 'dontAsk', 'bypassPermissions', ...(client === 'claude' ? ['auto'] : [])].includes(mode);
 const MAX_INPUT_BYTES = 1024 * 1024;
@@ -24,9 +24,12 @@ const requiresUpgrade = () => {
 
 function routeSchema(route, project = false, version = 1) {
   const keys = project ? ['projectRoot', 'destination', 'notesDir', 'stateDir', 'automaticUpdates', 'scope', 'enabled'] : ['destination', 'notesDir', 'stateDir'];
+  if (version === 4) keys.push('organization');
   if (!onlyKeys(route, keys) || !absolute(route.stateDir) ||
     Object.hasOwn(route, 'destination') === Object.hasOwn(route, 'notesDir')) invalid();
   if (version === 1 && Object.hasOwn(route, 'notesDir')) invalid();
+  if (Object.hasOwn(route, 'organization') &&
+    (!Object.hasOwn(route, 'notesDir') || !['flat', 'by-type'].includes(route.organization))) invalid();
   if (Object.hasOwn(route, 'notesDir') ? !absolute(route.notesDir) :
     !absolute(route.destination) || !/\.(?:md|markdown)$/i.test(route.destination)) invalid();
   if (project && (!absolute(route.projectRoot) ||
@@ -45,8 +48,8 @@ export function configuredClient(config, client) {
 /** Common routing envelope; route contents are checked only after selection on reads. */
 export function configHeader(config) {
   if (!object(config) || !Number.isSafeInteger(config.version) || config.version < 1) invalid();
-  if (config.version > 3) requiresUpgrade();
-  const minimum = config.version === 3 ? '0.6.0' : '0.5.1';
+  if (config.version > 4) requiresUpgrade();
+  const minimum = config.version === 4 ? '0.7.0' : config.version === 3 ? '0.6.0' : '0.5.1';
   if (config.version >= 2 && config.minimumPluginVersion !== minimum) {
     if (typeof config.minimumPluginVersion === 'string' && /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(config.minimumPluginVersion)) {
       const requested = config.minimumPluginVersion.split('.').map(Number);
@@ -57,9 +60,9 @@ export function configHeader(config) {
   }
   const keys = ['version', 'enabled', 'clients', 'automaticUpdates', 'scope', 'defaultRoute', 'routes', 'exclude'];
   if (config.version >= 2) keys.push('minimumPluginVersion');
-  if (config.version === 3) keys.push('completionCheck');
+  if (config.version >= 3) keys.push('completionCheck');
   if (!onlyKeys(config, keys) ||
-    (config.version === 3 && typeof config.completionCheck !== 'boolean') ||
+    (config.version >= 3 && typeof config.completionCheck !== 'boolean') ||
     typeof config.enabled !== 'boolean' || typeof config.automaticUpdates !== 'boolean' ||
     !text(config.scope, 2000) || !Array.isArray(config.clients) || config.clients.length > CLIENTS.size ||
     config.clients.some(client => !CLIENTS.has(client)) || new Set(config.clients).size !== config.clients.length) invalid();
@@ -83,6 +86,9 @@ export function configSchema(config) {
 
 /** Older installed readers cannot learn the new schema retroactively. */
 export function assertCompatibleClients(config, previous, confirmed) {
+  if (config.version === 4 && previous?.version !== 4 && confirmed !== true) {
+    throw Object.assign(new Error('Organization policies require Cuefluent Notes 0.7.0+ in every installed client reading this policy, including clients absent from its clients list. Inspect installations before passing --confirm-compatible-clients yes. Otherwise retain the existing policy.'), { code: 'CLIENT_UPGRADE_REQUIRED' });
+  }
   if (config.version === 3 && previous?.version !== 3 && confirmed !== true) {
     throw Object.assign(new Error('Completion checks require Cuefluent Notes 0.6.0+ in every installed client reading this policy, including clients absent from its clients list. Inspect installations before passing --confirm-compatible-clients yes. Otherwise retain the existing schema without completion checks.'), { code: 'CLIENT_UPGRADE_REQUIRED' });
   }
@@ -228,7 +234,7 @@ export async function captureSettings(client, directory, config, { skillRoot = S
   routeSchema(route, matches.length > 0, config.version);
   const installedRoot = await existingDirectory(skillRoot);
   const storage = route.notesDir !== undefined
-    ? { notesDir: await existingDirectory(route.notesDir) }
+    ? { notesDir: await existingDirectory(route.notesDir), organization: route.organization ?? 'flat' }
     : { destination: await selectedDestination(route.destination) };
   const selected = storage.notesDir ?? storage.destination;
   const stateDir = await canonicalSelectedPath(route.stateDir);

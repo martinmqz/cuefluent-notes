@@ -14,6 +14,12 @@ preserves ordinary CommonMark/GFM section bodies. A section can begin with prose
 a list, a table, or code. Preserve useful structure and detail; a bold opening
 answer is optional.
 
+Use [note placement](workflow.md#note-placement) for category folders and naming.
+Neither filenames nor folders supply search terms. Put useful type and subject
+vocabulary in H1/H2 headings or faithful aliases; no required `type:` frontmatter
+is added. Plugin filesystem support does not establish app ingestion of nested
+files or recursive folder discovery; keep that evidence separate.
+
 ```markdown
 # Topic context
 

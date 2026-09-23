@@ -129,3 +129,25 @@ export async function readBoundedBytes(file, { maxBytes = 2 * 1024 * 1024, missi
     return bytes;
   } finally { await handle.close(); }
 }
+
+/** Verify a helper-owned stage across the byte read, including optional parents. */
+export async function isOwnedStage(file, identity, bytes, { partial = false, guard } = {}) {
+  const unchanged = stat => stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n &&
+    sameFileIdentity(identity, stat) && stat.ctimeNs === identity.ctimeNs && stat.mtimeNs === identity.mtimeNs;
+  try {
+    if (!identity) return false;
+    await guard?.();
+    if (!unchanged(await fs.lstat(file, { bigint: true }))) return false;
+    const actual = await readBoundedBytes(file, { maxBytes: bytes.length, utf8: false, noFollow: true });
+    if (!actual.equals(partial ? bytes.subarray(0, actual.length) : bytes)) return false;
+    await guard?.();
+    return unchanged(await fs.lstat(file, { bigint: true }));
+  } catch { return false; }
+}
+
+/** Remove only the still-owned stage; false leaves unfamiliar paths untouched. */
+export async function removeOwnedStage(file, identity, bytes, options) {
+  if (!await isOwnedStage(file, identity, bytes, options)) return false;
+  await fs.unlink(file);
+  return true;
+}

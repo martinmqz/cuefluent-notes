@@ -14,9 +14,10 @@ No Cuefluent app, source checkout, workspace packages, or Devlog is required.
 ## Ownership and private state
 
 Choose the output root and state directory from the user's authorized locations.
-Both are absolute paths; the notes root and output parent directories must
-already exist. The helper creates its private state directory when needed, not
-a new notes folder structure. Keep notes, source
+Both are absolute paths; the notes root must already exist. Version-1 plans
+require existing output parents. Version-2 authored plans can create explicitly
+reviewed category parents as described below. The helper creates its private
+state directory when needed. Keep notes, source
 paths, proposals, query cases, plans, manifests, and recovery state outside this
 public skill repository. The state directory is a private companion to the
 collection, separate from the loaded Markdown; it is not another note store.
@@ -77,6 +78,7 @@ them with the selected private locations.
 
 ```sh
 node scripts/safe-update.mjs fingerprint /absolute/private-notes/client.md /absolute/private-sources/task.md
+node scripts/safe-update.mjs inspect-directories /absolute/private-notes meetings/planning.md
 node scripts/safe-update.mjs inspect /absolute/private-state
 node scripts/safe-update.mjs apply /absolute/private-review/plan.json
 node scripts/safe-update.mjs recover /absolute/private-state
@@ -147,6 +149,149 @@ entry mappings, and the compatibility guide version. It contains private paths
 and identifiers but no source bodies. Keep it with the selected private
 collection state and out of versioned skill files. A later plan must use its
 inspected fingerprint to detect concurrent manifest changes.
+
+## Reviewed category directory creation
+
+Version-2 journals require every installed reader/writer of the collection to
+support 0.7.0+, even when the capture policy is still schema 2/3 or no policy exists.
+Inspect those installations before setting `confirmCompatibleReaders: true` in
+each v2 plan. This is a caller compatibility assertion, not another user consent
+question or automatic discovery. Without that evidence, retain v1 for root notes
+and existing parents; do not create categories or publish a v2 journal. A schema-4
+preflight can supply this evidence only while its installed-reader inventory is
+still current. Do not infer compatibility from the active client alone.
+
+For an authorized v2 root note or an immediate file under `meetings/`, `tasks/`,
+`knowledge-base/`, or `decisions/`, use `inspect-directories ROOT RELATIVE-NOTE...`
+before preparing the proposal. It reads only those parents and returns a canonical
+`root`, `directories` with opaque identity fingerprints (or `null` for absence),
+and `createDirectories` for missing categories. It creates nothing and does not
+read note contents. Inspect the target note bytes separately.
+
+Use existing categories in their canonical spelling, such as `Meetings/topic.md`;
+ASCII case variants are supported when that directory already exists. New category
+names use the lowercase defaults. Inspect names before selecting the path; resolve
+multiple candidate variants instead of creating a competing folder or renaming one.
+If an alias spelling is refused, inspect the reported canonical path and preview
+that exact path before approval.
+
+Category creation needs a selected by-type route or an explicit one-time request
+for that category destination. A flat route does not authorize automatic category
+creation. The generic writer intentionally also serves manual requests without
+capture configuration: explicit `createDirectories` is reviewed plan data, not
+proof of either route consent or user approval.
+
+For an authorized authored write, copy that inspected result into a version-2
+plan alongside the existing collection `stateDir` and ordinary `files` entries:
+
+```json
+{
+  "version": 2,
+  "mode": "authored",
+  "confirmCompatibleReaders": true,
+  "root": "/absolute/private-notes",
+  "stateDir": "/absolute/private-state",
+  "directories": [
+    {"path": ".", "identity": "<inspected root identity>"},
+    {"path": "meetings", "identity": null}
+  ],
+  "createDirectories": ["meetings"],
+  "files": [
+    {"path": "meetings/planning.md", "expectedHash": null,
+     "contentPath": "/absolute/private-review/planning.md"}
+  ]
+}
+```
+
+The root and every used category appear exactly once. Existing directories need
+their inspected identity; only missing categories named in `createDirectories`
+use `null`. Empty creation lists are valid. Output paths are root files or files
+one level below a known category. Explicit existing custom/deeper paths and
+derived output continue to use version 1; see the custom-path checks below.
+Adding directory intent to version 1 is rejected. Notes and state must not
+contain each other in version 2.
+
+Preview the complete note path, content change, and any category creation. In
+Suggestions, wait for approval before applying; Skip or silence creates no note
+or folder. If a parent appears, disappears, changes identity, or changes spelling
+after inspection, preserve it and obtain fresh approval for any revised proposal.
+Do not refresh identities under the old approval. A helper plan is not proof of
+user consent, and a manual save does not enable persistent organization settings.
+
+The writer checks the batch before creating categories under the shared lock.
+It uses nonrecursive creation and reports `createdDirectories`. A later failure
+may leave an empty created folder; the error reports those names, and the helper
+retains the folders. Do not remove them or their contents automatically.
+
+Version-2 writes use version-2 recovery journals with root and parent identities.
+They require Cuefluent Notes 0.7.0+ for recovery and abort; older writers refuse
+them. Recovery and abort preserve unfamiliar replacement directories, even when
+copied stage bytes match. `inspect` reports a directory conflict without reading
+notes, sources or stages through the changed path. Normal recovery/cleanup stays
+blocked; the preservation abort below provides a reviewed exit. Version-1 journals
+remain supported. Device identity is deliberately included: a changed mounted
+device must not be mistaken for the previously inspected folder. If storage
+presents a new device/inode identity after reconnection, inspect again and obtain
+fresh approval; do not weaken the fingerprint or silently adopt it.
+These checks retain the final-check/mutation race limits below.
+
+### Preservation abort after a directory conflict
+
+When v2 `inspect` reports `directoryConflict`, its stage and pending-output entries
+have an `issue` instead of an inspected `hash`. Do not invent those hashes or read
+through a changed parent to build a normal cleanup plan. Explain the conflict and
+obtain approval to cancel the pending writes while retaining all notes, stages
+and journal evidence. Then use the journal/manifest hashes from that inspection:
+
+```json
+{
+  "version": 1,
+  "stateDir": "/absolute/private-state",
+  "expectedJournalHash": "<inspected journal hash>",
+  "expectedManifestHash": null,
+  "preserveStages": true
+}
+```
+
+This authored-v2-only abort never traverses note storage or cleans stages. Under
+the same collection lock, it retains the exact journal bytes at the returned
+`archivedJournal` path before removing the active journal entry. It refuses changed
+journal/manifest hashes, malformed journals, and conflicting archive bytes. Report
+the archive and retained stages; do not claim notes were restored or all saves
+completed. If interrupted before releasing the active journal, re-inspect state;
+an identical archive can be reused without replacing its bytes.
+
+Keep the archive and staged files for separately reviewed reconciliation. Do not
+delete them, restore an old journal automatically, or switch state directories.
+After the abort, any new save needs fresh note/parent inspection and authorization;
+a missing or unsafe notes root must still be corrected before capture can run.
+
+### Existing custom and deeper paths
+
+Preserve an explicitly selected existing custom/deeper path with a version-1
+plan and the collection's existing root and state. Do not change root/state to
+make it fit version 2. `inspect-directories` supports only root notes and immediate
+category children; it cannot inspect this custom path, and version 1 cannot carry
+directory expectations or create missing parents.
+
+Before a Suggestions preview for such a path, perform a read-only inspection of
+the root and every existing parent between it and the note. Retain each canonical
+path spelling and stable identity: Node's `lstat` with `{ bigint: true }` supplies
+`dev`, `ino`, and `birthtimeNs`. Reject symlinks/junctions and non-directories;
+check identities again after resolving canonical paths so inspection itself
+does not adopt a changed parent. Inspect note bytes separately as usual.
+
+Recheck those exact parent spellings and identities immediately before applying
+the approved v1 plan. Any appearance, disappearance or replacement requires a
+fresh preview and approval; do not refresh recorded identities under old approval.
+If the inspection cannot be completed, stop the save and explain the conflict.
+Automatic or explicitly authorized writes also inspect and recheck parents, but
+do not add a Suggestions question when authorization already covers the write.
+
+These are agent-side checks. The v1 helper checks current path safety and note
+hashes; it does not enforce the previously inspected parent identities. Even an
+immediate recheck leaves the documented final-check/mutation race. Version-2
+plans bind those identities through apply and recovery for their supported paths.
 
 ## Retire derived output tracking
 

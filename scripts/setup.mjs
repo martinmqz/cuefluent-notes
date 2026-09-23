@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { absolute, windowsAbsolute, lstatOrNull, isMain, readBoundedBytes } from './file-io.mjs';
 import { PACKAGE_ROOT, SKILL_ROOT } from './runtime-paths.mjs';
-import { CLIENTS, configurationPath, hookConfigurationSelection, readConfigSnapshot, configSchema, configHeader, configuredClient, assertCompatibleClients, captureSettings, canonicalSelectedPath, collectionRoot, assertPrivate, assertConfigurationStorage } from './capture-policy.mjs';
+import { CLIENTS, configurationPath, hookConfigurationSelection, readConfigSnapshot, configSchema, configHeader, configuredClient, assertCompatibleClients, captureSettings, canonicalSelectedPath, collectionRoot, assertPrivate, assertConfigurationStorage, completionEnabled } from './capture-policy.mjs';
 import { updateConfiguration } from './config-update.mjs';
 import { validHookHandler } from './hook-definition.mjs';
 import { validatePluginManifest } from './plugin-manifest.mjs';
@@ -48,7 +48,7 @@ export async function setupStatus({ client, cwd, configPath } = {}) {
     if (!settings) return { ...result, status: 'inactive', reason: 'No enabled route applies to this project.' };
     const { skill, safeUpdate, completionHelper, automaticUpdates, ...route } = settings;
     return { ...result, status: 'configured', mode: automaticUpdates ? 'automatic' : 'suggest',
-      completionCheck: config.version === 3 && config.completionCheck === true, ...route };
+      completionCheck: completionEnabled(config), ...route };
   } catch (error) {
     if (error.code === 'CONFIG_REQUIRES_UPGRADE') return { ...result, status: 'requires_upgrade', reason: error.message };
     if (error.code === 'DERIVED_STATE_CONFLICT') return { ...result, status: 'state_conflict', reason: error.message };
@@ -58,9 +58,12 @@ export async function setupStatus({ client, cwd, configPath } = {}) {
 }
 
 /** First-use setup only: publish a complete private config without replacing any existing entry. */
-export async function initialize({ client, mode, project, destination, notesDir, scope, stateDir, configPath, confirmCompatibleClients, completionCheck = false } = {}) {
+export async function initialize({ client, mode, project, destination, notesDir, organization, scope, stateDir, configPath, confirmCompatibleClients, completionCheck = false } = {}) {
   if (!CLIENTS.has(client) || !modes.has(mode)) fail('Choose a supported client and manual, suggest, or automatic mode.');
   if (typeof completionCheck !== 'boolean' || (mode === 'manual' && completionCheck)) fail('Completion checks require Suggestions or Automatic mode and explicit opt-in.');
+  if (organization !== undefined && (mode === 'manual' || notesDir === undefined || !['flat', 'by-type'].includes(organization))) {
+    fail('Organization must be flat or by-type and requires a notes-folder capture route.');
+  }
   const requested = configurationPath(configPath);
   const selection = await hookConfigurationSelection(requested);
   if (await lstatOrNull(requested)) fail('Configuration already exists. Inspect it with status; setup never resets existing settings.');
@@ -86,10 +89,11 @@ export async function initialize({ client, mode, project, destination, notesDir,
       : { destination: path.join(notesRoot, path.basename(destination)) };
     const collection = createHash('sha256').update(notesRoot).digest('hex');
     const selectedState = stateDir ?? path.join(path.dirname(file), 'state', collection);
-    config = { ...(completionCheck ? { version: 3, minimumPluginVersion: '0.6.0', completionCheck: true }
+    config = { ...(organization !== undefined ? { version: 4, minimumPluginVersion: '0.7.0', completionCheck }
+      : completionCheck ? { version: 3, minimumPluginVersion: '0.6.0', completionCheck: true }
       : notesDir !== undefined ? { version: 2, minimumPluginVersion: '0.5.1' } : { version: 1 }),
       enabled: true, clients: [client], automaticUpdates: mode === 'automatic', scope,
-      routes: [{ projectRoot, ...storage, stateDir: selectedState }] };
+      routes: [{ projectRoot, ...storage, ...(organization !== undefined ? { organization } : {}), stateDir: selectedState }] };
     configSchema(config);
     const settings = await captureSettings(client, projectRoot, config);
     assertConfigurationStorage(settings, file);
@@ -133,12 +137,12 @@ export async function initialize({ client, mode, project, destination, notesDir,
 
 export async function main(args) {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('Usage: node scripts/setup.mjs status --client codex|claude --cwd /project [--config /private/config.json]\n       node scripts/setup.mjs init --client codex|claude --mode manual|suggest|automatic [--project /project (--notes-dir /notes | --destination /notes/topic.md) --scope "selected facts" --state-dir /private/state] [--config /private/config.json]\n       node scripts/setup.mjs update --client codex|claude --cwd /project --proposal /private/proposed-config.json --expected-hash SHA256 [--config /private/config.json]\nOptional --completion-check yes enables a private completion marker and one bounded Stop recovery in Suggestions/Automatic mode; requires schema 3 and every installed reader at 0.6.0+. First schema 3 publication also requires --confirm-compatible-clients yes.\nFolder init and version 1-to-2 updates require --confirm-compatible-clients yes after checking every installed reader, including unlisted clients, supports Cuefluent Notes 0.5.1+.\nFirst-use setup never overwrites configuration. Updates require inspected bytes and a validated proposal. Neither writes notes or trusts host hooks.\nA --config override applies only to this command. Packaged hooks use CUEFLUENT_NOTES_CONFIG from the host launch environment, or the default path.');
+    console.log('Usage: node scripts/setup.mjs status --client codex|claude --cwd /project [--config /private/config.json]\n       node scripts/setup.mjs init --client codex|claude --mode manual|suggest|automatic [--project /project (--notes-dir /notes | --destination /notes/topic.md) --scope "selected facts" --state-dir /private/state] [--config /private/config.json]\n       node scripts/setup.mjs update --client codex|claude --cwd /project --proposal /private/proposed-config.json --expected-hash SHA256 [--config /private/config.json]\nOptional --organization flat|by-type selects a folder policy using schema 4 and requires every installed reader at 0.7.0+. First schema 4 publication requires --confirm-compatible-clients yes. Omission retains legacy flat setup.\nOptional --completion-check yes enables a private completion marker and one bounded Stop recovery in Suggestions/Automatic mode; requires schema 3 and every installed reader at 0.6.0+. First schema 3 publication also requires --confirm-compatible-clients yes.\nFolder init and version 1-to-2 updates require --confirm-compatible-clients yes after checking every installed reader, including unlisted clients, supports Cuefluent Notes 0.5.1+.\nFirst-use setup never overwrites configuration. Updates require inspected bytes and a validated proposal. Neither writes notes or trusts host hooks.\nA --config override applies only to this command. Packaged hooks use CUEFLUENT_NOTES_CONFIG from the host launch environment, or the default path.');
     return 0;
   }
   const [command, ...options] = args;
   const allowed = command === 'status' ? ['client', 'cwd', 'config'] : command === 'init'
-    ? ['client', 'mode', 'project', 'destination', 'notes-dir', 'scope', 'state-dir', 'config', 'confirm-compatible-clients', 'completion-check'] : command === 'update'
+    ? ['client', 'mode', 'project', 'destination', 'notes-dir', 'organization', 'scope', 'state-dir', 'config', 'confirm-compatible-clients', 'completion-check'] : command === 'update'
     ? ['client', 'cwd', 'proposal', 'expected-hash', 'config', 'confirm-compatible-clients'] : [];
   if (!allowed.length || options.length % 2) fail('Use status, init, or update with named options; see --help.');
   const parsed = {};

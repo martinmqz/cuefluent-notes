@@ -18,11 +18,15 @@ async function validateCollectionState(config) {
     const root = await collectionRoot(route, { allowUnavailable: true });
     const stateDir = await canonicalSelectedPath(route.stateDir);
     for (const existing of collections) {
-      if ((within(existing.root, root) || within(root, existing.root)) && existing.stateDir !== stateDir) {
-        fail('Routes in the same notes collection or overlapping notes folders must share one state directory.');
+      if (within(existing.root, root) || within(root, existing.root)) {
+        if (existing.stateDir !== stateDir) fail('Routes in the same notes collection or overlapping notes folders must share one state directory.');
+        if (existing.organization !== undefined && route.notesDir !== undefined &&
+          existing.organization !== (route.organization ?? 'flat')) {
+          fail('Overlapping notes folders must use the same organization policy.');
+        }
       }
     }
-    collections.push({ root, stateDir });
+    collections.push({ root, stateDir, ...(route.notesDir !== undefined ? { organization: route.organization ?? 'flat' } : {}) });
   }
 }
 
@@ -35,7 +39,7 @@ async function validateChanges(config, previous, client, cwd, file) {
   const check = async (route, project) => {
     const settings = await captureSettings(client, project ?? cwd, {
       version: config.version, ...(config.version >= 2 ? { minimumPluginVersion: config.minimumPluginVersion } : {}),
-      ...(config.version === 3 ? { completionCheck: config.completionCheck } : {}),
+      ...(config.version >= 3 ? { completionCheck: config.completionCheck } : {}),
       enabled: true, clients: [client], automaticUpdates: false, scope: config.scope,
       ...(project ? { routes: [{ ...route, enabled: true }] } : { defaultRoute: route }),
     });

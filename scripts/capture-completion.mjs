@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { absolute, isMain, lstatOrNull, readBoundedBytes, readInputJSON, syncDirectory, sameFileIdentity } from './file-io.mjs';
+import { absolute, isMain, lstatOrNull, readBoundedBytes, readInputJSON, syncDirectory, sameFileIdentity, isOwnedStage, removeOwnedStage } from './file-io.mjs';
 import { CLIENTS, object, text, canonicalSelectedPath, captureSettings, configurationPath, readConfig, assertConfigurationStorage, completionEnabled, completionPermissionMode } from './capture-policy.mjs';
 
 const outcomes = new Set(['saved', 'proposed', 'no-change', 'skipped', 'failed']);
@@ -29,7 +29,8 @@ function identity(client, payload) {
 // persisting paths, scope text, native identifiers or note content.
 export function completionPolicyHash(settings, permissionMode) {
   return digest([settings.notesDir ?? null, settings.destination ?? null,
-    settings.stateDir, settings.scope, settings.automaticUpdates, permissionMode ?? null]);
+    settings.stateDir, settings.scope, settings.automaticUpdates, permissionMode ?? null,
+    ...(settings.organization === 'by-type' ? ['organization:by-type'] : [])]);
 }
 
 async function directory(input, create = false) {
@@ -116,21 +117,9 @@ export async function recordCompletion(input) {
     const stage = path.join(parentPath, `.completion-${randomUUID()}.tmp`);
     let stageIdentity;
     let partialStage = false;
-    const unchangedStage = stat => stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n &&
-      sameFileIdentity(stageIdentity, stat) && stat.ctimeNs === stageIdentity.ctimeNs &&
-      stat.mtimeNs === stageIdentity.mtimeNs;
-    const ownedStage = async () => {
-      try {
-        if (!stageIdentity || !await unchangedDirectories(parents)) return false;
-        if (!unchangedStage(await fs.lstat(stage, { bigint: true }))) return false;
-        const actual = await readBoundedBytes(stage, { maxBytes: 1024, noFollow: true });
-        const expected = partialStage ? bytes.subarray(0, actual.length) : bytes;
-        // The read awaits filesystem operations: its descriptor can retain our
-        // bytes while another process replaces the stage pathname or parent.
-        return actual.equals(expected) && await unchangedDirectories(parents) &&
-          unchangedStage(await fs.lstat(stage, { bigint: true }));
-      } catch { return false; }
-    };
+    const stageOptions = () => ({ partial: partialStage, guard: async () => {
+      if (!await unchangedDirectories(parents)) fail();
+    } });
     let created = false;
     try {
       if (!await unchangedDirectories(parents)) fail();
@@ -151,7 +140,7 @@ export async function recordCompletion(input) {
       }
       await selected();
       if (await markerPath(settings, ids) !== file ||
-        JSON.stringify(await readMarker(file)) !== JSON.stringify(old) || !await ownedStage()) fail();
+        JSON.stringify(await readMarker(file)) !== JSON.stringify(old) || !await isOwnedStage(stage, stageIdentity, bytes, stageOptions())) fail();
       await fs.rename(stage, file);
       created = false;
       await syncDirectory(path.dirname(file));
@@ -159,7 +148,7 @@ export async function recordCompletion(input) {
     } finally {
       // Validation may have detected a replaced parent or stage. Never follow
       // that path during cleanup or remove an unfamiliar replacement by name.
-      if (created && await ownedStage()) await fs.unlink(stage).catch(() => {});
+      if (created) await removeOwnedStage(stage, stageIdentity, bytes, stageOptions()).catch(() => {});
     }
   });
 }

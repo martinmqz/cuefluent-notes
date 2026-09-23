@@ -1,25 +1,30 @@
 Capture and organize your knowledge for fast recall—right on cue.
 
-Optional completion checks catch a missed capture decision in Codex and Claude
-Code. With explicit opt-in, a read-only Stop hook can request one recovery
-attempt. A Save / Skip proposal counts as handled without waiting for an answer;
-it never authorizes a note save. Current instructions and recording opt-outs
-still take precedence.
+Optional by-type organization places clear new notes under `meetings/`, `tasks/`,
+`knowledge-base/`, or `decisions/`. General or unclear material stays at the notes
+root. Explicit destinations and suitable existing notes take precedence; no files
+are moved, and no required `type:` field or task lifecycle is introduced.
 
-The working agent keeps a minimal private completion marker with hashed identity,
-policy and outcome. It contains no note text or dates and is not an activity log.
-Busy, corrupt, or unsafe state produces a warning without repeated recovery.
-Recovery requires a previous successful marker in the same session and permission
-mode; plan, unknown and unverified sessions stay quiet. The helper must already
-have ordinary write permission, without escalating or prompting each turn.
+Suggestions preview the full path, edit and any folder creation before Save /
+Skip. Neither notes nor folders are created before approval. The safe writer
+checks inspected note hashes and directory identities, preserves conflicts,
+and supports guarded recovery. Interrupted writes can leave a reported empty
+category folder; it is retained rather than removed automatically.
+Existing category spellings such as `Meetings/` can be reused. When a directory
+changes during an interrupted write, inspection reports the conflict and a
+reviewed abort can archive the journal while preserving every note and stage.
 
-Existing capture settings stay unchanged. Ask **“Enable the Cuefluent Notes
-completion check”** after updating every installed client that reads the policy
-to 0.6.0+. Setup requires the compatibility check before publishing schema 3.
-Review and trust the added Stop hook through each client's normal hook settings.
-Schema-1/2 policies and both explicit-file and folder routing remain supported.
-Synthetic tests cover both adapters and detached packages; live Stop delivery and
-model adherence have not yet been verified.
+Existing capture settings stay unchanged and flat remains the default. By-type
+uses schema 4 and requires all installed readers of the shared policy to support
+0.7.0+. Completion checks remain separately opt-in. Older schemas and explicit
+files remain supported. All version-2 writes, including root-only manual saves,
+require confirmation that every collection reader supports 0.7.0+; otherwise
+retain version-1 writes with existing parents.
+
+Synthetic checks cover both adapters and all four detached packages. Native
+Save / Skip rendering, model classification and Cuefluent ingestion of nested
+files remain unverified. Keep flat capture until a supported app loading path is
+confirmed; directory support does not promise recursive discovery or search ranking.
 
 This release contains complete Codex and Claude Code plugins, with runtime
 dependencies included. Each client has a hook-enabled ZIP and a manual ZIP

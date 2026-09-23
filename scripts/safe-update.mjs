@@ -3,14 +3,16 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare, syncDirectory, sameFileIdentity, openGuarded, windowsComponent } from './file-io.mjs';
+import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare, syncDirectory, sameFileIdentity, openGuarded, windowsComponent, isOwnedStage, removeOwnedStage } from './file-io.mjs';
 import { GUIDE_VERSION, MAX_BYTES, inspectMarkdown, reviewVocabulary } from './check-notes.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
+import { NOTE_CATEGORIES, isNoteCategory } from './note-organization.mjs';
 
 const MAX_FILES = 100;
 const MAX_SOURCES = 1000;
 const HASH = /^[a-f0-9]{64}$/;
 const STAGE_NAME = /^\.cuefluent-stage-[a-f0-9-]{36}\.tmp$/;
+const CATEGORIES = new Set(NOTE_CATEGORIES);
 const LIMITATIONS = 'Atomic replacement preserves POSIX permission bits and ownership, but not ACLs or extended attributes. Windows access protection depends on the selected directory ACL; read-only notes are refused and directory flush durability is unavailable. Hard-linked replacements are refused. Per-file atomic replacement, not a collection transaction. The state-directory lock coordinates this helper only; an unrelated editor can still race the final hash check and rename. Markdown checks do not establish factual truth, app admission, rendering or ranking.';
 // Conservative uniqueness for missing targets on common Windows/macOS volumes.
 // macOS also aliases normalization, long-s and micro-sign spellings. NTFS does
@@ -108,6 +110,65 @@ async function targetPath(root, relative, stateDir, { allowMissingParents = fals
   if (stat && await fs.realpath(target) !== target) fail('Use the canonical spelling of output targets.');
   return target;
 }
+function noteParents(files) {
+  const parents = new Set(['.']);
+  for (const file of files) {
+    const parts = relativeNote(file?.path).split('/');
+    if (parts.length > 2 || (parts.length === 2 && !isNoteCategory(parts[0]))) {
+      fail('Version 2 notes must be in the root or an immediate note category. Use version 1 for selected existing custom paths.');
+    }
+    if (parts.length === 2) parents.add(parts[0]);
+  }
+  return parents;
+}
+async function directoryIdentity(file) {
+  const before = await existsStat(file, { bigint: true });
+  if (!before) return null;
+  if (!before.isDirectory() || before.isSymbolicLink()) fail('An inspected note directory is linked or not a directory.');
+  const canonical = await fs.realpath(file);
+  if (canonical !== file) fail(`An inspected note directory is not canonically spelled. Inspect and preview the existing spelling: ${canonical}`);
+  const after = await existsStat(file, { bigint: true });
+  if (!sameFileIdentity(before, after)) fail('A note directory changed during inspection.');
+  return sha256(JSON.stringify([before.dev, before.ino, before.birthtimeNs].map(String)));
+}
+function directorySchema(value, files, createDirectories = []) {
+  const parents = noteParents(files);
+  if (!Array.isArray(value) || value.length !== parents.size || !Array.isArray(createDirectories) ||
+    createDirectories.length > CATEGORIES.size || new Set(createDirectories).size !== createDirectories.length ||
+    createDirectories.some(name => !CATEGORIES.has(name) || !parents.has(name))) fail('Select exactly the used note directories and explicit category creations.');
+  const seen = new Set();
+  for (const item of value) {
+    if (!item || Object.keys(item).sort().join(',') !== 'identity,path' || !parents.has(item.path) || seen.has(item.path) ||
+      !validHash(item.identity, item.path !== '.') || (item.identity === null) !== createDirectories.includes(item.path)) {
+      fail('Directory expectations must include each used parent once; only approved missing categories have null identity.');
+    }
+    seen.add(item.path);
+  }
+  return [...value].map(item => ({ ...item })).sort((a, b) => compare(a.path, b.path));
+}
+async function checkDirectories(root, directories) {
+  if (!directories) return;
+  const rootIdentity = directories.find(item => item.path === '.').identity;
+  if (await directoryIdentity(root) !== rootIdentity) fail('The inspected notes root changed.');
+  for (const item of directories.filter(item => item.path !== '.')) {
+    if (await directoryIdentity(path.join(root, item.path)) !== item.identity) fail(`Note directory changed since inspection: ${item.path}. Preserve it and review the target again.`);
+  }
+  // Detect a root replacement during inspection of the category children.
+  if (await directoryIdentity(root) !== rootIdentity) fail('The inspected notes root changed.');
+}
+/** Read only explicitly selected root/category parents, without creating storage. */
+export async function inspectDirectories(rootInput, paths) {
+  if (!Array.isArray(paths) || !paths.length || paths.length > MAX_FILES) fail('Inspect 1–100 explicit note paths.');
+  const root = await directory(rootInput);
+  const directories = [];
+  for (const parent of noteParents(paths.map(notePath => ({ path: notePath })))) {
+    directories.push({ path: parent, identity: await directoryIdentity(path.join(root, parent)) });
+  }
+  const createDirectories = directories.filter(item => item.identity === null).map(item => item.path);
+  directorySchema(directories, paths.map(notePath => ({ path: notePath })), createDirectories);
+  await checkDirectories(root, directories);
+  return { root, directories, createDirectories };
+}
 async function stateFile(stateDir, name) {
   const directoryStat = await existsStat(stateDir);
   if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink() || await fs.realpath(stateDir) !== stateDir) fail('The state directory changed or became a symlink.');
@@ -116,12 +177,31 @@ async function stateFile(stateDir, name) {
   if (stat && (stat.isSymbolicLink() || !stat.isFile())) fail('State metadata must be regular files, never symlinks.');
   return file;
 }
-async function writeExclusive(file, bytes) {
+async function writeExclusive(file, bytes, guard) {
+  if (guard) await guard();
   const handle = await fs.open(file, 'wx', 0o600);
+  let identity;
   try {
-    try { await handle.writeFile(bytes); await handle.sync(); }
-    finally { await handle.close(); }
-  } catch (error) { await fs.rm(file, { force: true }); throw error; }
+    try {
+      identity = await handle.stat({ bigint: true });
+      await guard?.();
+      await handle.writeFile(bytes); await handle.sync();
+    }
+    finally {
+      try { identity = await handle.stat({ bigint: true }); } catch { identity = undefined; }
+      await handle.close();
+    }
+  } catch (error) {
+    try {
+      if (!await removeOwnedStage(file, identity, bytes, { partial: true, guard })) fail('Stage ownership changed.');
+    } catch {
+      const warning = 'Stage cleanup was not safe; preserve the journal and inspect the remaining stage.';
+      if (error instanceof Error && Object.isExtensible(error)) error.cleanupWarnings = [...(error.cleanupWarnings ?? []), warning];
+      else console.error(warning);
+    }
+    throw error;
+  }
+  return identity;
 }
 async function replacementMetadata(target) {
   const stat = await existsStat(target);
@@ -160,12 +240,18 @@ async function writeMetadata(stateDir, name, value) {
   if (bytes.length > MAX_BYTES) fail('State metadata exceeds 2 MiB.');
   const target = await stateFile(stateDir, name);
   const temp = path.join(stateDir, `.metadata-${randomUUID()}.tmp`);
+  let identity;
   try {
-    await writeExclusive(temp, bytes);
+    identity = await writeExclusive(temp, bytes);
     await stateFile(stateDir, name);
+    if (!await isOwnedStage(temp, identity, bytes)) fail('Metadata stage ownership changed; preserve it for inspection.');
     await fs.rename(temp, target);
     await syncDirectory(stateDir);
-  } finally { await fs.rm(temp, { force: true }); }
+  } finally {
+    // writeExclusive owns cleanup on write failure. Do not override a decision
+    // to retain unfamiliar bytes with unconditional pathname removal here.
+    if (identity) await removeOwnedStage(temp, identity, bytes);
+  }
 }
 async function lock(stateDir) {
   const lockDir = path.join(stateDir, '.lock');
@@ -210,7 +296,7 @@ export async function withLock(stateDir, operation) {
   const warning = await unlock();
   if (failed) {
     if (warning) {
-      if (failure instanceof Error && Object.isExtensible(failure)) failure.cleanupWarnings = [warning];
+      if (failure instanceof Error && Object.isExtensible(failure)) failure.cleanupWarnings = [...(failure.cleanupWarnings ?? []), warning];
       else console.error(warning);
     }
     throw failure;
@@ -311,7 +397,12 @@ function result(updated, manifestChanged, diagnostics = []) {
 }
 
 export async function applyPlan(plan, options = {}) {
-  if (!plan || plan.version !== 1 || !['authored', 'derived'].includes(plan.mode) || !Array.isArray(plan.files) || plan.files.length > MAX_FILES) fail('Plan requires version 1, authored/derived mode, and at most 100 explicit files.');
+  if (!plan || ![1, 2].includes(plan.version) || !['authored', 'derived'].includes(plan.mode) || !Array.isArray(plan.files) || plan.files.length > MAX_FILES) fail('Plan requires version 1 or 2, authored/derived mode, and at most 100 explicit files.');
+  if (plan.version === 1 && ['directories', 'createDirectories'].some(key => Object.hasOwn(plan, key))) fail('Directory intents require a version-2 authored plan.');
+  if (plan.version === 2 && (plan.mode !== 'authored' || !Array.isArray(plan.createDirectories))) fail('Version 2 requires authored mode and explicit createDirectories.');
+  if (plan.version === 2 && plan.confirmCompatibleReaders !== true) fail('Version-2 plans require confirmCompatibleReaders: true after verifying every reader of this collection supports Cuefluent Notes 0.7.0+. Otherwise retain version 1 and existing parents.');
+  const directories = plan.version === 2 ? directorySchema(plan.directories, plan.files, plan.createDirectories) : undefined;
+  const createdDirectories = [];
   const retire = retireSchema(plan.retire);
   if ((!plan.files.length && !retire.length) || plan.files.length + retire.length > MAX_FILES) fail('Select 1–100 updates or retirements.');
   if (retire.length && plan.mode !== 'derived') fail('Only derived plans can retire tracked outputs.');
@@ -320,6 +411,10 @@ export async function applyPlan(plan, options = {}) {
   if (plan.mode === 'derived' && !validHash(plan.expectedManifestHash, true)) fail('Derived plans require an explicit expectedManifestHash (null for the initial manifest).');
   const root = await directory(plan.root);
   const selectedState = await directory(plan.stateDir, { allowMissing: true });
+  if (directories) {
+    if (root !== plan.root || within(root, selectedState) || within(selectedState, root)) fail('Version 2 requires the canonical inspected root and a separate, non-overlapping state directory.');
+    await checkDirectories(root, directories);
+  }
   const selectedPaths = new Set();
   for (const file of [...plan.files, ...retire]) {
     const target = path.join(root, relativeNote(file?.path));
@@ -331,7 +426,7 @@ export async function applyPlan(plan, options = {}) {
   }
   const stateDir = await directory(selectedState, { create: true });
   if (root === stateDir) fail('Use a separate private state directory, not the notes root itself.');
-  return withLock(stateDir, async () => {
+  try { return await withLock(stateDir, async () => {
     if (await existsStat(await stateFile(stateDir, 'journal.json'))) fail('An interrupted update needs recovery before applying another plan.');
     const old = await jsonFile(await stateFile(stateDir, 'manifest.json'));
     const manifest = manifestSchema(old.value, root);
@@ -351,7 +446,7 @@ export async function applyPlan(plan, options = {}) {
     const allSections = [];
     for (const file of plan.files) {
       if (!file || !validHash(file.expectedHash, true) || !absolute(file.contentPath)) fail('Each file needs path, expectedHash (null for new), and an absolute contentPath.');
-      const target = await targetPath(root, file.path, stateDir);
+      const target = await targetPath(root, file.path, stateDir, { allowMissingParents: Boolean(directories) });
       if (outputPaths.has(target)) fail('Duplicate output targets are not allowed.');
       outputPaths.add(target);
       let proposal;
@@ -402,45 +497,86 @@ export async function applyPlan(plan, options = {}) {
     }
     const proposedManifestHash = proposedManifest ? sha256(serialize(proposedManifest)) : null;
     const manifestChanged = plan.mode === 'derived' && proposedManifestHash !== old.hash;
-    if (prepared.every(file => file.oldHash === file.newHash) && !manifestChanged) return result([], false, diagnostics);
+    await checkDirectories(root, directories);
+    if (prepared.every(file => file.oldHash === file.newHash) && !manifestChanged) return { ...result([], false, diagnostics), ...(directories ? { createdDirectories } : {}) };
     for (const file of prepared) if (file.oldHash !== file.newHash) {
       file.stagePath = path.join(path.dirname(file.target), `.cuefluent-stage-${randomUUID()}.tmp`);
     }
-    const journal = { version: 1, phase: 'staging', mode: plan.mode, root, stateDir, guideVersion: GUIDE_VERSION,
+    const journal = { version: plan.version, phase: 'staging', mode: plan.mode, root, stateDir, guideVersion: GUIDE_VERSION,
+      ...(directories ? { directories } : {}),
       expectedManifestHash: plan.mode === 'derived' ? old.hash : null, previousManifest: manifest, proposedManifest, retire,
       files: prepared.map(({ path: relative, oldHash, newHash, metadata, sources, entries, stagePath }) => ({ path: relative, oldHash, newHash, metadata, sources, entries, stagePath })) };
-    if (serialize(journal).length > MAX_BYTES) fail('Recovery journal exceeds 2 MiB.');
+    // Bound the eventual journal before mkdir; missing identities become SHA-256 strings.
+    const sized = directories ? { ...journal, directories: directories.map(item => ({ ...item, identity: item.identity ?? '0'.repeat(64) })) } : journal;
+    if (serialize(sized).length > MAX_BYTES) fail('Recovery journal exceeds 2 MiB.');
+    if (directories) {
+      const recheck = async () => {
+        await checkDirectories(root, directories);
+        if (await manifestHash(stateDir) !== null) fail('Authored update conflicts with derived state.');
+        await sourceChecks(prepared, outputPaths, proposalPaths);
+        for (const file of prepared) {
+          const target = await targetPath(root, file.path, stateDir, { allowMissingParents: true });
+          const current = await fingerprint(target);
+          if (current !== file.oldHash) fail('An output changed since inspection; preserve current edits.');
+          await checkReplacementMetadata(file, target, current);
+        }
+        await checkDirectories(root, directories);
+      };
+      for (const item of directories.filter(item => item.identity === null)) {
+        await recheck();
+        await fs.mkdir(path.join(root, item.path), { mode: 0o700 }); // EEXIST is a conflict, never adoption.
+        createdDirectories.push(item.path);
+        item.identity = await directoryIdentity(path.join(root, item.path));
+        if (item.identity === null) fail('A newly created category disappeared.');
+        await checkDirectories(root, directories);
+        await syncDirectory(root);
+      }
+      await recheck();
+    }
     await validateJournal(journal, stateDir);
     await preflight(journal, stateDir, { staging: true });
     // Reserve all stage names durably before writing any note content.
     await writeMetadata(stateDir, 'journal.json', journal);
     for (const file of prepared) if (file.stagePath) {
+      await checkDirectories(root, directories);
       await targetPath(root, file.path, stateDir);
-      await writeExclusive(file.stagePath, file.bytes);
+      await writeExclusive(file.stagePath, file.bytes, directories ? () => checkDirectories(root, directories) : undefined);
       await syncDirectory(path.dirname(file.stagePath));
       if (options.afterStage) await options.afterStage({ path: file.path, stagePath: file.stagePath });
     }
     journal.phase = 'ready';
     await writeMetadata(stateDir, 'journal.json', journal);
     const applied = await finishJournal(journal, stateDir, options);
-    return { ...applied, warnings: diagnostics.filter(item => item.severity === 'warning').length, diagnostics: diagnostics.slice(0, 100) };
-  });
+    return { ...applied, ...(directories ? { createdDirectories } : {}), warnings: diagnostics.filter(item => item.severity === 'warning').length, diagnostics: diagnostics.slice(0, 100) };
+  }); } catch (error) {
+    if (createdDirectories.length && error instanceof Error && Object.isExtensible(error)) error.createdDirectories = createdDirectories;
+    throw error;
+  }
 }
 
-async function validateJournal(value, stateDir) {
-  if (!value || value.version !== 1 || !['authored', 'derived'].includes(value.mode) || value.stateDir !== stateDir ||
+async function validateJournal(value, stateDir, { checkStorage = true } = {}) {
+  if (!value || ![1, 2].includes(value.version) || !['authored', 'derived'].includes(value.mode) || value.stateDir !== stateDir ||
     !Array.isArray(value.files) || value.files.length > MAX_FILES || !validHash(value.expectedManifestHash, true) ||
     (value.phase !== undefined && !['staging', 'ready', 'aborting'].includes(value.phase))) fail('Invalid recovery journal.');
   const retire = retireSchema(value.retire);
   if ((!value.files.length && !retire.length) || value.files.length + retire.length > MAX_FILES) fail('Invalid recovery operation count.');
-  const root = await directory(value.root);
+  if (!checkStorage && value.version !== 2) fail('Only version-2 journals support preservation without traversing note storage.');
+  if (!absolute(value.root)) fail('Recovery root must be an absolute directory.');
+  const root = checkStorage ? await directory(value.root) : path.resolve(value.root);
+  privatePath(root);
   if (root !== value.root || root === stateDir) fail('Recovery root does not match its canonical directory.');
+  if (value.version === 1 && Object.hasOwn(value, 'directories')) fail('Directory-bound recovery requires journal version 2.');
+  if (value.version === 2) {
+    if (value.mode !== 'authored' || within(root, stateDir) || within(stateDir, root)) fail('Version-2 recovery requires authored mode and non-overlapping state.');
+    directorySchema(value.directories, value.files);
+    if (checkStorage) await checkDirectories(root, value.directories);
+  }
   const paths = new Set();
   for (const file of value.files) {
     if (!file || !validHash(file.oldHash, true) || !validHash(file.newHash)) fail('Invalid recovery fingerprints.');
     if (file.metadata !== undefined && file.metadata !== null && (!Number.isInteger(file.metadata.mode) || file.metadata.mode < 0 || file.metadata.mode > 0o7777 ||
       !Number.isSafeInteger(file.metadata.uid) || file.metadata.uid < 0 || !Number.isSafeInteger(file.metadata.gid) || file.metadata.gid < 0)) fail('Invalid recovery permission metadata.');
-    const target = await targetPath(root, file.path, stateDir);
+    const target = checkStorage ? await targetPath(root, file.path, stateDir) : path.join(root, relativeNote(file.path));
     if (paths.has(pathKey(target))) fail('Recovery journal repeats an output.');
     paths.add(pathKey(target));
     if (file.oldHash === file.newHash) {
@@ -450,7 +586,7 @@ async function validateJournal(value, stateDir) {
     entriesSchema(file.entries, sources);
   }
   for (const file of retire) {
-    const target = await targetPath(root, file.path, stateDir, { allowMissingParents: file.expectedHash === null });
+    const target = checkStorage ? await targetPath(root, file.path, stateDir, { allowMissingParents: file.expectedHash === null }) : path.join(root, relativeNote(file.path));
     if (paths.has(pathKey(target))) fail('Recovery cannot both retire and update an output.');
     paths.add(pathKey(target));
   }
@@ -474,6 +610,7 @@ function journalOutputPaths(journal) {
     ...(journal.proposedManifest?.files ?? [])].map(file => path.join(journal.root, file.path)));
 }
 async function preflightFile(journal, file, stateDir, { staging = false } = {}) {
+  await checkDirectories(journal.root, journal.directories);
   const target = await targetPath(journal.root, file.path, stateDir);
   const current = await fingerprint(target);
   if (current !== file.oldHash && current !== file.newHash) fail('Recovery conflict: an output contains newer edits; preserve them and resolve the conflict.');
@@ -507,11 +644,13 @@ async function finishJournal(journal, stateDir, options) {
     await sourceChecks([file], paths, new Set(), { cache, forceHash: false });
     const { target, current } = await preflightFile(journal, file, stateDir);
     if (current === file.newHash) continue;
+    await checkDirectories(journal.root, journal.directories);
     await prepareStageMetadata(file, target);
     if (await fingerprint(file.stagePath) !== file.newHash) fail('Staged recovery content changed before replacement.');
     // Preserve the final output check adjacent to rename after metadata work.
     if (await fingerprint(target) !== file.oldHash) fail('Output changed before replacement.');
     await checkReplacementMetadata(file, target, file.oldHash);
+    await checkDirectories(journal.root, journal.directories);
     await fs.rename(file.stagePath, target);
     await syncDirectory(path.dirname(target));
     updated.push(file.path);
@@ -532,9 +671,12 @@ async function finishJournal(journal, stateDir, options) {
     }
   }
   for (const file of journal.files) if (file.stagePath && await existsStat(file.stagePath)) {
+    await checkDirectories(journal.root, journal.directories);
     if (await fingerprint(file.stagePath) !== file.newHash) fail('A remaining stage changed; inspect it before cleanup.');
+    await checkDirectories(journal.root, journal.directories);
     await fs.unlink(file.stagePath);
   }
+  await checkDirectories(journal.root, journal.directories);
   await fs.unlink(await stateFile(stateDir, 'journal.json'));
   await syncDirectory(stateDir);
   return { ...result(updated, manifestChanged), retired: (journal.retire ?? []).map(file => file.path) };
@@ -581,6 +723,7 @@ function validateAbort(journal) {
   } else if (abort.manifest !== null || abort.expectedManifestHash !== null) fail('Authored abort must not contain a manifest.');
 }
 async function abortChecks(journal, stateDir) {
+  await checkDirectories(journal.root, journal.directories);
   for (const file of journal.abort.files) {
     const target = await targetPath(journal.root, file.path, stateDir);
     if (await fingerprint(target) !== file.expectedHash) fail('Abort output changed since review; preserve it and inspect again.');
@@ -601,9 +744,11 @@ async function finishAbort(journal, stateDir) {
     manifestChanged = true;
   }
   for (const stage of journal.abort.stages) {
+    await checkDirectories(journal.root, journal.directories);
     const current = await stageHash(stage.path);
     if (current === null) continue;
     if (current !== stage.expectedHash) fail('Abort stage changed before cleanup; preserve it and inspect again.');
+    await checkDirectories(journal.root, journal.directories);
     await fs.unlink(stage.path);
     await syncDirectory(path.dirname(stage.path));
   }
@@ -613,13 +758,42 @@ async function finishAbort(journal, stateDir) {
   return { ...result([], manifestChanged), status: 'aborted', preserved: journal.abort.files.map(file => file.path) };
 }
 
+// A reviewed preservation abort never traverses note storage. Keep the exact
+// journal bytes as durable recovery evidence before releasing the pending slot.
+async function preserveAbortedJournal(plan, pending, stateDir) {
+  if (Object.keys(plan).some(key => !['version', 'stateDir', 'expectedJournalHash', 'expectedManifestHash', 'preserveStages'].includes(key))) fail('A preservation abort reviews journal/manifest hashes only; omit file and stage cleanup requests.');
+  const journal = await validateJournal(pending.value, stateDir, { checkStorage: false });
+  if (plan.expectedManifestHash !== null || await manifestHash(stateDir) !== null) fail('Preservation abort requires unchanged authored state without a manifest.');
+  const selected = await stateFile(stateDir, 'journal.json');
+  const identity = await fs.lstat(selected, { bigint: true });
+  const bytes = await readBoundedBytes(selected, { noFollow: true });
+  if (sha256(bytes) !== plan.expectedJournalHash) fail('Recovery journal changed since inspection.');
+  const name = `aborted-journal-${plan.expectedJournalHash}.json`;
+  const archive = await stateFile(stateDir, name);
+  const prior = await readBoundedBytes(archive, { noFollow: true, missing: true });
+  if (prior !== null && !prior.equals(bytes)) fail('The retained journal archive contains different bytes; preserve it.');
+  if (prior === null) await writeExclusive(archive, bytes);
+  await syncDirectory(stateDir);
+  // A failed attempt can leave the immutable archive; exact-byte retries reuse it.
+  await stateFile(stateDir, name);
+  if (!(await readBoundedBytes(archive, { noFollow: true })).equals(bytes) ||
+    await manifestHash(stateDir) !== null || await fingerprint(await stateFile(stateDir, 'journal.json')) !== plan.expectedJournalHash ||
+    !sameFileIdentity(identity, await fs.lstat(selected, { bigint: true }))) fail('Recovery state changed while preserving the journal.');
+  await fs.unlink(selected);
+  await syncDirectory(stateDir);
+  return { ...result([], false), status: 'aborted', preservedStages: true, archivedJournal: archive,
+    preserved: journal.files.map(file => file.path) };
+}
+
 /** Cancel remaining replacements after explicit review, retaining completed bytes. */
 export async function abortUpdate(plan) {
   if (!plan || plan.version !== 1 || !validHash(plan.expectedJournalHash) || !validHash(plan.expectedManifestHash, true)) fail('Abort needs version 1 and inspected journal and manifest hashes.');
+  if (Object.hasOwn(plan, 'preserveStages') && typeof plan.preserveStages !== 'boolean') fail('preserveStages must be a boolean.');
   const stateDir = await directory(plan.stateDir);
   return withLock(stateDir, async () => {
     const pending = await jsonFile(await stateFile(stateDir, 'journal.json'));
     if (pending.hash !== plan.expectedJournalHash) fail('Recovery journal changed since inspection.');
+    if (plan.preserveStages === true) return preserveAbortedJournal(plan, pending, stateDir);
     const journal = await validateJournal(pending.value, stateDir);
     if (journal.phase === 'aborting') fail('An approved abort is pending; use recover to finish it.');
     const current = await jsonFile(await stateFile(stateDir, 'manifest.json'));
@@ -654,6 +828,21 @@ export async function inspectState(stateDirInput) {
   if (!await existsStat(stateDir)) return { manifestHash: null, journalHash: null, recoveryPending: false, locked: false, outputs: [], sources: [], stages: [], pendingOutputs: [], limitations: LIMITATIONS };
   const manifestData = await jsonFile(await stateFile(stateDir, 'manifest.json'));
   const journalData = await jsonFile(await stateFile(stateDir, 'journal.json'));
+  if (journalData.value?.version === 2) {
+    const journal = await validateJournal(journalData.value, stateDir, { checkStorage: false });
+    let directoryConflict;
+    try { await checkDirectories(journal.root, journal.directories); }
+    catch (error) { directoryConflict = String(error.message).slice(0, 500); }
+    if (directoryConflict) {
+      const issue = 'Not inspected because a recorded directory is changed or unavailable.';
+      return { manifestHash: manifestData.hash, journalHash: journalData.hash, phase: journal.phase ?? 'ready',
+        recoveryPending: true, locked: Boolean(await existsStat(path.join(stateDir, '.lock'))), directoryConflict,
+        directories: journal.directories, outputs: [], sources: [],
+        stages: journal.files.flatMap(file => file.stagePath ? [{ path: file.stagePath, issue }] : []),
+        pendingOutputs: journal.files.map(file => ({ path: file.path, oldHash: file.oldHash, newHash: file.newHash, issue })),
+        limitations: LIMITATIONS };
+    }
+  }
   const journal = journalData.value ? await validateJournal(journalData.value, stateDir) : null;
   const manifest = manifestData.value ? manifestSchema(manifestData.value, await directory(manifestData.value.root)) : null;
   if (manifest && journal && manifest.root !== journal.root) fail('Manifest and recovery journal roots disagree.');
@@ -710,7 +899,7 @@ export async function inspectState(stateDirInput) {
 
 export async function main(args) {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('Usage: node scripts/safe-update.mjs apply plan.json | abort abort-plan.json | recover stateDir | inspect stateDir | fingerprint file...\nLocal reviewed proposals only. Private state and output directories required. Retirement removes tracking only; abort preserves note bytes.');
+    console.log('Usage: node scripts/safe-update.mjs apply plan.json | abort abort-plan.json | recover stateDir | inspect stateDir | fingerprint file... | inspect-directories root relative-note...\nLocal reviewed proposals only. Version 2 authored plans can create inspected immediate category directories. Retirement removes tracking only; abort preserves note bytes.');
     return 0;
   }
   const [command, ...inputs] = args;
@@ -718,6 +907,8 @@ export async function main(args) {
   if (command === 'fingerprint' && inputs.length && inputs.length <= MAX_SOURCES) {
     output = { files: [] };
     for (const input of inputs) { const file = path.resolve(input); output.files.push({ path: file, hash: await fingerprint(file) }); }
+  } else if (command === 'inspect-directories' && inputs.length >= 2) {
+    output = await inspectDirectories(path.resolve(inputs[0]), inputs.slice(1));
   } else if (command === 'apply' && inputs.length === 1) {
     const plan = await jsonFile(path.resolve(inputs[0]));
     if (plan.value === null) fail('Plan file is missing.');
@@ -735,6 +926,7 @@ if (await isMain(import.meta.url)) {
   try { process.exitCode = await main(process.argv.slice(2)); }
   catch (error) {
     console.error(`Safe update failed: ${String(error.message).slice(0, 500)}`);
+    if (error.createdDirectories?.length) console.error(`Created category directories retained: ${error.createdDirectories.join(', ')}`);
     for (const warning of error.cleanupWarnings ?? []) console.error(warning);
     process.exitCode = 2;
   }
