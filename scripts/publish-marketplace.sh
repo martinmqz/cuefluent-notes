@@ -27,7 +27,7 @@ if test -n "$previous"; then
     exit 1
   fi
 fi
-set -- "$tree" -m "Publish $RELEASE_TAG"
+set -- "$tree" -m "chore(release): publish $RELEASE_TAG"
 if test -n "$previous"; then set -- "$@" -p "$previous"; fi
 commit=$(git -c commit.gpgsign=false -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree "$@")
 git push origin "$commit:refs/heads/marketplace"

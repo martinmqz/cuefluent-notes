@@ -92,6 +92,86 @@ test('default route applies across unrelated eligible projects; proposal-only po
   assert.match(text(response), /propos|preview/i);
   assert.match(text(response), /no automatic|do not (?:auto|save|write)|automaticUpdates.*false/i);
 });
+test('Suggestions and Automatic guards stay distinct for file and folder routes in both clients', async t => {
+  const { config, payload, project, notes, destination, stateDir } = await fixture(t);
+  const skill = await fs.realpath(new URL('../SKILL.md', import.meta.url));
+  for (const folder of [false, true]) {
+    const route = { projectRoot: project, stateDir, ...(folder ? { notesDir: notes } : { destination }) };
+    for (const client of ['codex', 'claude']) for (const automaticUpdates of [false, true]) {
+      // Check both the shared default and a route overriding the opposite mode.
+      for (const override of [false, true]) {
+        const policy = { ...config, ...(folder ? { version: 2, minimumPluginVersion: '0.5.1' } : {}),
+          automaticUpdates: override ? !automaticUpdates : automaticUpdates,
+          routes: [{ ...route, ...(override ? { automaticUpdates } : {}) }] };
+        const context = text(await hookResponse(client, payload, policy));
+        const operation = JSON.parse(context.split('\n\n').at(-1));
+        assert.equal(operation.automaticUpdates, automaticUpdates);
+        assert.equal(operation.skill, skill);
+        assert.equal(operation[folder ? 'notesDir' : 'destination'], folder ? notes : destination);
+        assert.equal(Object.hasOwn(operation, folder ? 'destination' : 'notesDir'), false);
+        if (folder) {
+          assert.match(context, /Use notesDir as the writer root and the shared stateDir/);
+          if (automaticUpdates) assert.doesNotMatch(context, /identify the proposed filename/i);
+          else assert.match(context, /When offering an interactive proposal, identify the proposed filename/);
+        } else assert.doesNotMatch(context, /When offering an interactive proposal/);
+        if (automaticUpdates) {
+          assert.match(context, /Automatic updates are enabled/);
+          assert.doesNotMatch(context, /Automatic updates are disabled|Do not autosave|without explicit user approval|silence, or timeout is not approval|Approval covers only/);
+        } else {
+          assert.match(context, /Automatic updates are disabled/);
+          assert.match(context, /read Suggestions at the JSON "skill" path/);
+          assert.match(context, /Do not autosave/);
+          assert.match(context, /without explicit user approval/);
+          assert.match(context, /default choice, silence, or timeout is not approval/);
+          assert.match(context, /Omit unsolicited proposals in non-interactive or uncertain runs/);
+          assert.match(context, /Approval covers only the previewed target, inspected note, and edit/);
+          assert.match(context, /if any changes, show a fresh preview and obtain new approval, even after "save it"/);
+          assert.doesNotMatch(context, /Automatic updates are enabled/);
+        }
+      }
+    }
+  }
+});
+test('Suggestions preserves the prior 8 KB context envelope for both clients and route types', async t => {
+  const f = await fixture(t);
+  // Keep real paths below macOS PATH_MAX; multibyte scope exercises the same
+  // byte pressure as longer Linux paths without mocking filesystem validation.
+  const suffix = Array(5).fill('n'.repeat(100));
+  const notes = path.join(f.notes, ...suffix);
+  const stateDir = path.join(f.stateDir, ...suffix);
+  await fs.mkdir(notes, { recursive: true });
+  for (const folder of [false, true]) for (const client of ['codex', 'claude']) {
+    const route = { projectRoot: f.project, stateDir,
+      ...(folder ? { notesDir: notes } : { destination: path.join(notes, 'knowledge.md') }) };
+    const config = { ...f.config, ...(folder ? { version: 2, minimumPluginVersion: '0.5.1' } : {}),
+      automaticUpdates: false, scope: 'a', routes: [route] };
+    const initial = text(await hookResponse(client, f.payload, config));
+    const operation = JSON.parse(initial.split('\n\n').at(-1));
+    // Fixed compatibility budgets include instructions and separators before
+    // the approval-scope reminder grew. Do not derive these from current prose.
+    const previousInstructionBytes = folder ? 2491 : 2106;
+    const scopeBytes = 8000 - previousInstructionBytes - (Buffer.byteLength(JSON.stringify(operation)) - 1);
+    assert.ok(scopeBytes >= 2000 && scopeBytes <= 6000);
+    const triples = Math.floor((scopeBytes - 2000) / 2);
+    const doubles = (scopeBytes - 2000) % 2;
+    config.scope = '界'.repeat(triples) + 'é'.repeat(doubles) + 'a'.repeat(2000 - triples - doubles);
+    const expected = { ...operation, scope: config.scope };
+    assert.equal(config.scope.length, 2000);
+    assert.equal(Buffer.byteLength(JSON.stringify(expected)) + previousInstructionBytes, 8000);
+
+    const context = text(await hookResponse(client, f.payload, config));
+    assert.doesNotMatch(context, /capture is skipped/);
+    assert.ok(Buffer.byteLength(context) <= 8000);
+    assert.deepEqual(JSON.parse(context.split('\n\n').at(-1)), expected);
+    assert.match(context, /Approval covers only the previewed target, inspected note, and edit/);
+
+    const oversized = text(await hookResponse(client, f.payload, { ...config, scope: '界'.repeat(2000) }));
+    assert.match(oversized, /capture is skipped.*context exceeds/);
+    assert.ok(Buffer.byteLength(oversized) <= 8000);
+  }
+  assert.deepEqual(await fs.readdir(notes), []);
+  await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
+});
 test('replayed and cross-session reminders remain stateless and never create notes or receipts', async t => {
   const { config, payload, directory, destination } = await fixture(t);
   await fs.writeFile(destination, '# T\n\n## Captured\n\nAlready recorded manually.\n');

@@ -2,7 +2,9 @@ Capture and organize your knowledge for fast recall—right on cue.
 
 Folder setup now preserves a collection of notes instead of choosing one
 catch-all file. Reuse relevant notes or name new files for their content;
-Suggestions identifies the proposed filename before asking to save. Explicit
+Suggestions offers an optional Save / Skip choice after interactive work is
+complete, using a suitable native prompt or plain text. Unattended runs omit
+unsolicited note proposals. Explicit
 file destinations remain supported and existing settings are not broadened.
 Folder policies use schema version 2 and record a minimum plugin version of
 0.5.1. Setup requires a compatibility check before first publishing that schema:

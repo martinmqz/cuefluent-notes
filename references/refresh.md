@@ -4,6 +4,8 @@ Use the shared writer for reviewed changes from Log, Prepare, Update, or Refresh
 It applies supplied Markdown; it does not summarize sources, merge prose, infer
 facts, or decide what should be deleted. Evidence review, chronology, useful
 vocabulary, and preservation of user edits remain the working agent's job.
+The writer checks inspected filesystem state, not user consent. Approval remains
+the working agent's responsibility; a plan hash is not proof of user approval.
 
 All helper processing is local. The agent's handling of material it reads is a
 separate boundary; do not describe agent-assisted preparation as wholly local.

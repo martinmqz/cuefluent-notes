@@ -35,8 +35,9 @@ Manual requests and configured [hooks](hooks.md) enter this same workflow. Hook
 guidance supplies the selected scope and destination; it does not authorize
 unrelated source discovery or override the current user's instructions. Read-only
 requests, recording opt-outs, disabled capture, and narrower scope take precedence.
-When automatic updates are disabled, show only useful in-scope proposals; do not
-save from hook guidance alone.
+For an enabled, applicable Suggestions route, show only useful in-scope proposals;
+do not save from hook guidance alone. Follow the [Suggestions interaction](../SKILL.md#suggestions)
+for when to offer a proposal and how to preserve its approval boundary.
 
 Before completing eligible work, consider whether it established new durable
 information within the configured scope. Inspect the useful destination and the

@@ -87,7 +87,7 @@ another confirmation of an explicit setup request with complete choices.
 | Choice | Behavior |
 | --- | --- |
 | Manual | Save only when asked; no automatic capture or setup reminders |
-| Suggestions | Offer useful changes from eligible work, without saving automatically |
+| Suggestions | Offer useful changes after eligible interactive work; stay quiet in unattended or uncertain runs and save only after approval. See [Suggestions](../SKILL.md#suggestions). |
 | Automatic | Save useful findings and decisions within the selected scope; no full-session transcripts |
 
 Manual needs no destination or project questionnaire. Once the user chooses it

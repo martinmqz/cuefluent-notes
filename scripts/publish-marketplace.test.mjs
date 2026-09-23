@@ -47,6 +47,7 @@ test('publisher creates only the snapshot branch, retries without a commit, and 
   const publish = version => run('bash', ['scripts/publish-marketplace.sh'], publishOptions(version));
   publish(built.version);
   const first = git('--git-dir', remote, 'rev-parse', 'marketplace');
+  assert.equal(git('--git-dir', remote, 'log', '-1', '--format=%s', 'marketplace'), `chore(release): publish v${built.version}`);
   const entries = git('--git-dir', remote, 'ls-tree', '--name-only', 'marketplace').split('\n');
   assert.deepEqual(entries, (await fs.readdir(snapshot)).sort());
   assert.match(publish(built.version), /already published/);
@@ -76,6 +77,7 @@ test('publisher creates only the snapshot branch, retries without a commit, and 
   }
   await fs.rm(path.join(snapshot, 'plugins/cuefluent-notes/skills/cuefluent-notes/examples/decision.md'));
   publish(release.version);
+  assert.equal(git('--git-dir', remote, 'log', '-1', '--format=%s', 'marketplace'), `chore(release): publish v${release.version}`);
   assert.equal(git('--git-dir', remote, 'rev-parse', 'marketplace^'), first);
   assert.equal(git('--git-dir', remote, 'ls-tree', '-r', '--name-only', 'marketplace', '--', 'plugins/cuefluent-notes/skills/cuefluent-notes/examples/decision.md'), '');
   const upgraded = git('--git-dir', remote, 'rev-parse', 'marketplace');

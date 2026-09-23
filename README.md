@@ -86,7 +86,8 @@ for this user. Clone the repository and run its install:codex npm script
 
 Installation leaves existing capture settings unchanged. On a fresh install,
 **capture stays off until you choose a mode**. Manual keeps it off; Suggestions
-asks before saving; Automatic captures eligible work within your chosen scope.
+offers an optional Save / Skip choice after completing work in an interactive
+conversation; Automatic captures eligible work within your chosen scope.
 You do not need the Cuefluent app. Keep your notes outside the plugin and source
 checkout.
 

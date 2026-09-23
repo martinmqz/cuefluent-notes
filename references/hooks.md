@@ -178,10 +178,14 @@ Before completing eligible work, the working agent should:
    and review the ordinary Markdown change, infer faithful search vocabulary,
    and apply it with the safe writer using the configured `stateDir` and inspected
    hashes. Preserve manual edits, stop on conflicts, and report actual limits.
-4. If there is no useful change, leave notes unchanged. With automatic updates
-   off, identify the proposed filename and useful change when warranted, but do
-   not save from hook policy alone. Missing routing requires a user choice before
-   any automatic save.
+4. If there is no useful change, leave notes unchanged. For an enabled,
+   applicable Suggestions route, read the JSON `skill` path and follow its
+   [Suggestions guidance](../SKILL.md#suggestions) for interaction timing,
+   unattended runs, declined proposals, and approval scope.
+   The working agent chooses an applicable question tool; hook JSON itself does
+   not open a prompt or detect interactivity; use the skill's host-context and
+   live-conversation criteria. Do not save from hook policy alone. Missing routing
+   requires a user choice before any automatic save.
 
 The adapter cannot mechanically recognize whether an agent already captured a
 fact. The native identity identifies the current operation, while destination
