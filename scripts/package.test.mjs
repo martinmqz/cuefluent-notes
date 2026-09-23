@@ -136,11 +136,12 @@ test('opt-in bundles preserve literal shell characters through host preprocessin
   for (const pkg of result.packages) {
     await checkDocumentation(pkg.root, await inventory(pkg.root));
     const config = JSON.parse(await fs.readFile(path.join(pkg.root, 'hooks/hooks.json'), 'utf8'));
-    assert.deepEqual(Object.keys(config.hooks), ['SessionStart', 'UserPromptSubmit']);
+    assert.deepEqual(Object.keys(config.hooks), ['SessionStart', 'UserPromptSubmit', 'Stop']);
     assert.equal(config.hooks.SessionStart[0].matcher, 'startup');
     const handler = config.hooks.UserPromptSubmit[0].hooks[0];
     assert.equal(handler.type, 'command');
     assert.deepEqual(config.hooks.SessionStart[0].hooks, [handler]);
+    assert.deepEqual(config.hooks.Stop, [{ hooks: [handler] }]);
     assert.ok(!handler.async);
     const setupStatus = run(path.join(pkg.skillRoot, 'scripts/setup.mjs'), ['status', '--client', pkg.client,
       '--config', configPath, '--cwd', directory], directory);
@@ -180,4 +181,41 @@ test('opt-in bundles preserve literal shell characters through host preprocessin
   }
   await assert.rejects(fs.stat(destination), { code: 'ENOENT' });
   await assert.rejects(fs.stat(path.join(directory, 'state')), { code: 'ENOENT' });
+});
+
+test('both detached bundles complete an opt-in Stop recovery through their bundled helper', async t => {
+  const directory = await fixture(t);
+  const result = await buildPackages({ outDir: path.join(directory, 'completion-packages'), withHooks: true });
+  const notes = path.join(directory, 'notes');
+  await fs.mkdir(notes);
+  for (const pkg of result.packages) {
+    const configPath = path.join(directory, `${pkg.client}-completion.json`);
+    run(path.join(pkg.skillRoot, 'scripts/setup.mjs'), ['init', '--client', pkg.client, '--mode', 'suggest',
+      '--project', directory, '--notes-dir', notes, '--scope', 'Synthetic decisions', '--config', configPath,
+      '--completion-check', 'yes', '--confirm-compatible-clients', 'yes'], directory);
+    const script = path.join(pkg.skillRoot, 'scripts/hooks.mjs');
+    const payload = { hook_event_name: 'Stop', permission_mode: 'default', stop_hook_active: false, session_id: 'detached-session', cwd: directory,
+      [pkg.client === 'codex' ? 'turn_id' : 'prompt_id']: 'native-turn' };
+    const invoke = () => spawnSync(process.execPath, [script, pkg.client, '--config', configPath], {
+      cwd: directory, input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, NODE_PATH: '' },
+    });
+    assert.equal(invoke().stdout, ''); // Access has not been demonstrated in this session.
+    const prompt = spawnSync(process.execPath, [script, pkg.client, '--config', configPath], {
+      cwd: directory, input: JSON.stringify({ ...payload, hook_event_name: 'UserPromptSubmit' }), encoding: 'utf8',
+    });
+    assert.equal(prompt.status, 0, prompt.stderr);
+    const op = JSON.parse(JSON.parse(prompt.stdout).hookSpecificOutput.additionalContext.split('\n\n').at(-1));
+    const { helper, ...selection } = op.completion;
+    assert.equal(helper, path.join(pkg.skillRoot, 'scripts/capture-completion.mjs'));
+    const marked = spawnSync(process.execPath, [helper], { cwd: directory, encoding: 'utf8',
+      env: { ...process.env, NODE_PATH: '' }, input: JSON.stringify({ ...selection,
+        client: pkg.client, session_id: op.session_id,
+        [pkg.client === 'codex' ? 'turn_id' : 'prompt_id']: 'native-turn', outcome: 'proposed' }),
+    });
+    assert.equal(marked.status, 0, marked.stderr);
+    assert.equal(invoke().stdout, '');
+    payload[pkg.client === 'codex' ? 'turn_id' : 'prompt_id'] = 'next-turn';
+    assert.equal(JSON.parse(invoke().stdout).decision, 'block');
+    assert.deepEqual(await fs.readdir(notes), []);
+  }
 });

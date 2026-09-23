@@ -34,7 +34,8 @@ async function validateChanges(config, previous, client, cwd, file) {
     !isDeepStrictEqual(config.defaultRoute, previous?.defaultRoute)) await validateCollectionState(config);
   const check = async (route, project) => {
     const settings = await captureSettings(client, project ?? cwd, {
-      version: config.version, ...(config.version === 2 ? { minimumPluginVersion: config.minimumPluginVersion } : {}),
+      version: config.version, ...(config.version >= 2 ? { minimumPluginVersion: config.minimumPluginVersion } : {}),
+      ...(config.version === 3 ? { completionCheck: config.completionCheck } : {}),
       enabled: true, clients: [client], automaticUpdates: false, scope: config.scope,
       ...(project ? { routes: [{ ...route, enabled: true }] } : { defaultRoute: route }),
     });

@@ -34,7 +34,8 @@ Explain the observed status in ordinary language:
   claim the user chose Manual here. For an explicit setup request, use the
   existing-settings flow below to add the client while preserving other settings.
 - `configured`: describe the mode, project being checked, destination, and scope.
-  Policy readiness does not prove the host runs the hook.
+  Also report whether the completion check is enabled when relevant. Policy
+  readiness does not prove the host runs the hook.
 - `inactive`: settings exist, but no enabled route covers this project. Preserve
   exclusions and other projects; do not offer to reset the file.
 - `invalid`: report the problem and stop setup writes. Preserve the existing file
@@ -48,9 +49,10 @@ Explain the observed status in ordinary language:
   Upgrade the client before editing the policy; do not repair it as malformed JSON
   or downgrade it to a version this client knows.
 
-`hookPackaged` reports whether this package includes both synchronous command-hook
+`hookPackaged` reports whether this package includes all three synchronous command-hook
 registrations invoking the bundled adapter for the selected client, with
-`SessionStart` matched on `startup`, and a valid client manifest. The manifest
+`SessionStart` matched on `startup`, `Stop` without a matcher, and a valid client
+manifest. The manifest
 check covers the metadata subset emitted by this builder, including plugin
 identity, semantic version (with installation suffixes), and client-specific
 fields. It is not a validator for arbitrary host plugins.
@@ -147,7 +149,8 @@ For an explicitly selected file, replace `--notes-dir` with
 Folder status reports `notesDir`, while file status reports `destination`.
 Explicit-file and Manual initialization keep schema version 1 and need no
 compatibility assertion. Folder initialization writes version 2 with
-`minimumPluginVersion: "0.5.1"`.
+`minimumPluginVersion: "0.5.1"`. These defaults leave completion checks off;
+explicit opt-in uses version 3 as described below.
 
 Use `--mode suggest` for suggestions. The helper chooses private writer state
 beside the configuration, keyed by the canonical notes folder so notes in that
@@ -200,6 +203,8 @@ Set `version` to `2` and `minimumPluginVersion` to `"0.5.1"`, then replace that
 route's `destination` with `notesDir` in the reviewed update. Pass
 `--confirm-compatible-clients yes` for that first schema upgrade; subsequent
 edits of a valid version 2 policy do not require the assertion again.
+If the policy is already version 3, retain that version, minimum plugin version,
+and completion setting when changing storage; do not downgrade it.
 For the same canonical folder, retain the existing `stateDir`. This changes
 routing only; it does not rename, split, or move existing notes. Correct existing
 note names only within the user's requested scope, preserving content and links.
@@ -249,3 +254,45 @@ Run Status again for the selected project. Never present a policy as active unti
 validated and the remaining host requirements are understood. Repairing malformed
 JSON requires an explicit repair request and its inspected file hash, available
 through the safe-update helper's `fingerprint` command; do not reset it through init.
+
+## Optional completion check
+
+For “enable the completion check,” explain that it catches a missed capture
+decision with one recovery attempt and keeps a small private decision marker.
+It adds no activity history, does not require saving on every turn, and never
+waits for a Save / Skip answer. A request to enable this behavior already supplies
+consent; do not ask again. An ordinary Suggestions/Automatic choice alone leaves
+the check off. For fresh setup, offer it as an optional follow-up rather than
+adding a mandatory onboarding question.
+
+Before enabling it, inspect **every installed reader of this policy**, including
+unlisted clients and other profiles: all must support **0.6.0+**. If compatibility
+cannot be established, leave the current policy intact and explain what remains.
+The setting applies to all active routes and listed clients, so preserve the
+user's intended scope. Newly registered Stop hooks also need host trust; use the
+normal client review flow and accept an already stated trust action.
+
+Also check that the working agent's ordinary permissions cover the helper command
+and the existing private state directory without a fresh permission prompt on
+each turn. Do not infer this from hook trust or hook-process access, and do not
+use an escalated smoke test as proof. Do not change host permissions or move
+writer state to bypass this boundary. If ordinary access is uncertain or denied,
+leave the completion check off and explain the limitation; normal note capture
+remains available. Plan mode never arms the check. In supported modes, recovery
+arms only after the first successful marker in that session; the initial decision
+before that success is not checked. A later mode/policy change requires new proof.
+
+For a fresh Suggestions or Automatic setup with explicit completion consent,
+add `--completion-check yes --confirm-compatible-clients yes` to `init`.
+For existing settings, follow the guarded update flow above with
+`version: 3`, `minimumPluginVersion: "0.6.0"`, and `completionCheck: true`, retaining
+all routes and other choices. Pass `--confirm-compatible-clients yes` on the first
+schema-3 publication only after the inspection. Setup writes no markers or notes.
+
+To turn the check off, update `completionCheck` to `false` while retaining schema
+3 and the existing capture mode. This stops marker instructions and recovery
+requests; it does not delete existing state or stop ordinary note suggestions.
+Status reports the effective `completionCheck` for an active route. A fresh task
+is the supported verification boundary after installing or updating a package.
+See [completion](completion.md) for helper use, marker retention, opt-outs, and
+the limits of what a Stop check proves.

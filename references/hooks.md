@@ -7,12 +7,13 @@ The adapter supplies policy and native identity; the agent decides whether its
 authorized work established useful information and applies ordinary Markdown
 updates through the [shared safe writer](refresh.md).
 
-These are stateless context adapters. They do not capture at prompt submission,
-extract facts from a transcript, generate text, or run another model. They have
-no Stop hook, completion gate, background worker, or recovery loop. The number
-of hook-requested continuations is zero. This keeps automatic capture best-effort:
-it cannot prove that an agent considered capture or guarantee exactly-once
-delivery, coverage of interruptions, or capture on every shutdown.
+The adapters are read-only. They do not capture at prompt submission, extract
+facts from a transcript, generate text, or run another model. An optional
+[Stop check](completion.md) reads a private working-agent completion marker and
+can request one recovery attempt for a missed decision. It requires separate
+opt-in; existing configurations request zero continuations. Capture remains
+best-effort: a marker cannot prove semantic consideration or guarantee
+exactly-once delivery, coverage of interruptions, or capture on every shutdown.
 
 ## Configuration and consent
 
@@ -22,7 +23,7 @@ does neither. Installing or trusting live hooks requires the user's explicit
 authorization. The current source implementation does not install hooks or edit
 host settings. [Standalone plugin packages](distribution.md) offer a manual
 variant with no registration and a hook variant registering `SessionStart`
-(matched on `startup`) and `UserPromptSubmit`.
+(matched on `startup`), `UserPromptSubmit`, and `Stop`.
 Choose one variant per client; installation, trust, and private policy remain
 separate from building the package.
 
@@ -33,8 +34,8 @@ notice. It supplies no model context or assistant-answer text. Unconfigured
 `UserPromptSubmit`, resumed sessions, and compaction stay quiet; no persisted
 reminder receipt is needed. Headless clients may expose the notice as a separate
 hook/informational event, not part of the assistant result. Choosing Manual saves
-a globally disabled policy and silences both hooks. Adding this startup handler
-requires host review/trust of the updated definition.
+a globally disabled policy and silences all hooks. Changes to packaged handlers
+require host review/trust of the updated definition.
 
 The adapter interface is:
 
@@ -68,8 +69,9 @@ versioned example directly as the runtime configuration.
 
 | Field | Meaning |
 | --- | --- |
-| `version` | `1` for legacy explicit-file policies; `2` supports file and folder routes |
-| `minimumPluginVersion` | Required in version 2, currently `"0.5.1"`; omitted from version 1 |
+| `version` | `1` for legacy explicit-file policies; `2` supports file and folder routes; `3` adds explicit completion-check settings |
+| `minimumPluginVersion` | `"0.5.1"` in version 2; `"0.6.0"` in version 3; omitted from version 1 |
+| `completionCheck` | Required boolean in version 3; `true` explicitly permits private completion markers and one Stop recovery. Absent from older schemas. Applies to every active route and listed client. |
 | `enabled` | Explicit global enablement; `false` is quiet |
 | `clients` | Enabled adapter names, selected from `codex` and `claude` |
 | `automaticUpdates` | Whether configured capture may save; `false` supplies proposal-only guidance |
@@ -98,8 +100,9 @@ must exist, while the note itself may be new. An existing note must be a regular
 file with a single hard link, matching the safe writer's replacement requirements.
 `stateDir` may be new beneath an existing directory, including an ancestor alias
 resolved to its real path.
-A symlink selected directly as the state directory is refused. It is the private state directory for the safe writer,
-not storage used by the hook. Reuse one state directory for all writes to the
+A symlink selected directly as the state directory is refused. It is the private
+state directory for the safe writer and, when opted in, its completion markers.
+Hooks inspect this metadata but never create it. Reuse one state directory for all writes to the
 same collection, as described in [refresh.md](refresh.md). The state directory
 is shared by every route/default targeting that canonical notes folder or an
 overlapping ancestor/descendant folder; Setup
@@ -118,9 +121,12 @@ supported; moving to a folder is an explicit configuration change. Before first
 publishing version 2, Setup requires a compatibility assertion after inspecting
 **every installed client that reads the policy**, including unlisted clients.
 All must support `notesDir` (0.5.1+); older clients cannot gain the early membership
-check retroactively. See [setup](setup.md) for the preflight and version fields.
+check retroactively. First publication of version 3 requires all installed readers
+to support 0.6.0+. See [setup](setup.md) for the preflight and version fields.
 Keep policy concise: oversized input,
 configuration, or emitted context produces bounded no-capture guidance.
+Optional completion data that would exceed the context budget is omitted from
+both prompt and Stop events while preserving ordinary capture guidance.
 
 ## Routing and inactive cases
 
@@ -140,7 +146,7 @@ specific than `/work/atlas`; neither matches `/work/atlas-old`.
   guidance and save nothing rather than choosing by array order.
 - Missing configuration supplies only the startup host notice. A client absent
   from an enabled policy also receives this startup notice, while its prompt
-  hook stays quiet. Global disablement silences both hooks. Unsupported events
+  hook stays quiet. Global disablement silences all hooks. Unsupported events
   or missing native identity are quiet, including when configuration is absent.
 - Malformed configuration, including a present JSON `null`, or unresolvable
   selected paths produce a bounded generic warning and no capture, without
@@ -153,7 +159,12 @@ requires `SessionStart` with `source: startup`, `session_id`, and an absolute
 invent an ID, substitute a timestamp, or mine a transcript. Presence of
 `agent_id` skips subagent capture. An `agent_type` alone can identify a custom
 root agent and does not disable capture. Automatic capture is scoped to eligible
-root sessions, not independently duplicated in subagents.
+root sessions, not independently duplicated in subagents. Stop requires that same
+native identity plus the explicit boolean `stop_hook_active: false`; true or
+missing guards are quiet before reading policy or state.
+Recovery also requires a known non-plan permission mode and an earlier successful
+marker for the same session, selected policy and mode. No prior marker means the
+check is unarmed, rather than evidence that a restricted agent should retry.
 
 ## Working-agent capture policy
 
@@ -186,11 +197,15 @@ Before completing eligible work, the working agent should:
    not open a prompt or detect interactivity; use the skill's host-context and
    live-conversation criteria. Do not save from hook policy alone. Missing routing
    requires a user choice before any automatic save.
+5. Only when routing JSON includes `completion`, follow the
+   [completion workflow](completion.md) to acknowledge the actual decision if
+   metadata writes are permitted. A sent proposal counts as handled; do not wait
+   for approval or repeat an unanswered question to satisfy the check.
 
 The adapter cannot mechanically recognize whether an agent already captured a
 fact. The native identity identifies the current operation, while destination
-inspection and semantic review provide duplicate avoidance. There are no
-persisted receipts or exactly-once claims. Replayed events can repeat guidance;
+inspection and semantic review provide duplicate avoidance. Optional markers
+acknowledge decisions, not note contents or exactly-once delivery. Replayed events can repeat guidance;
 they must not become instructions to append duplicate notes.
 
 ## Privacy and bounded behavior
@@ -200,6 +215,8 @@ stdin JSON. It does not read prompt text to extract facts, open `transcript_path
 persist raw payloads, inspect unrelated folders, or write notes. Emitted context
 contains policy, route, and native identity, not source bodies or transcript
 content. It never creates a skipped-event log, receipt, or hook state directory.
+An opted-in Stop check also reads bounded completion metadata; only the separate
+working-agent helper writes markers under the existing shared writer lock.
 
 The working agent still reads selected evidence and may write a reviewed note
 under the authorized policy. The host may retain its conversation and hook
@@ -223,6 +240,11 @@ that an installed version will always supply it.
 | --- | --- | --- |
 | Codex | `session_id` and `turn_id` | `hookSpecificOutput` with `hookEventName: "UserPromptSubmit"` and `additionalContext` |
 | Claude Code | `session_id` and `prompt_id` | The same event-specific `additionalContext` shape |
+
+Both clients' Stop check uses `decision: "block"` and `reason` on exit zero only
+for eligible missing decisions in an armed session. Recovery relies on the host's `stop_hook_active`
+guard; see [completion](completion.md) for native identity, failure and privacy
+limits. Live Stop delivery and agent adherence still need host verification.
 
 Both clients' startup notice uses the common `systemMessage` output and omits
 `additionalContext`. See the [Codex startup contract](https://learn.chatgpt.com/docs/hooks#sessionstart)

@@ -12,13 +12,13 @@ const SOURCE_FILES = [
   'references/workflow.md', 'references/authoring.md', 'references/evidence.md',
   'references/retrieval.md', 'references/refresh.md', 'references/hooks.md', 'references/distribution.md',
   'references/verification.md', 'references/publishing.md',
-  'references/setup.md',
+  'references/setup.md', 'references/completion.md',
   'examples/feature-behavior.md', 'examples/decision.md', 'examples/search-vocabulary.md',
   'examples/standup.md', 'examples/meeting-summary.md', 'examples/task-summary.md',
   'examples/knowledge-base.md', 'examples/check-cases.json', 'examples/hook-config.json',
   'scripts/check-notes.mjs', 'scripts/safe-update.mjs', 'scripts/hooks.mjs', 'scripts/runtime-paths.mjs', 'scripts/file-io.mjs',
   'scripts/capture-policy.mjs', 'scripts/setup.mjs', 'scripts/config-update.mjs', 'scripts/hook-definition.mjs',
-  'scripts/plugin-manifest.mjs',
+  'scripts/plugin-manifest.mjs', 'scripts/capture-completion.mjs',
 ];
 const EXCLUDED_DIRECTORIES = new Set(['node_modules', '.git', '.github', '.hg', '.svn', 'test', 'tests', '__tests__', '__mocks__', 'coverage', 'benchmark', 'benchmarks', 'scripts']);
 const EXCLUDED_FILES = /^(?:\.DS_Store|\.npmignore|\.gitignore|\.travis\.yml|Makefile|(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)|(?:tsconfig(?:\.[^.]+)?\.json)|(?:(?:rollup|webpack|vite|eslint|jest|vitest|babel)\.config\..+)|\.(?:eslint|babel|prettier|nyc|mocha)rc(?:\..+)?)$/;

@@ -60,13 +60,20 @@ session/turn identity to the working agent. Before completing eligible work,
 consider whether new durable information merits a normal Log or Update. Read
 the destination first, preserve prior manual saves, and use the same safe writer.
 No useful change means no note write. This is best-effort agent behavior, not an
-exactly-once capture guarantee or a completion gate.
+exactly-once capture guarantee. If routing JSON includes `completion`, follow
+[the optional completion check](references/completion.md) after handling the
+capture decision. A proposal counts as handled without waiting for its answer.
+Do not request extra permissions for completion bookkeeping. An uncertain or
+denied marker write is omitted; Stop recovery arms only after a successful marker
+in the same session and permission mode.
 
 Current user instructions, read-only scope, and recording opt-outs override the
 capture policy. Missing identity, excluded sessions, or disabled routes do not
 authorize automatic capture. Missing or ambiguous routing requires a user choice
-before saving. Hooks store no receipts, raw payloads, or transcripts; they make
-no separate model calls or continuation requests. See [hooks](references/hooks.md)
+before saving. Hooks are read-only and make no separate model calls. An explicitly
+enabled Stop check can request one recovery attempt; its working-agent helper
+stores only a private completion marker, never activity content. Read-only
+requests and all-logging opt-outs forbid marker writes too. See [hooks](references/hooks.md)
 for privacy, routing, per-client trust, and live-host verification limits.
 
 For source setup, package layout, and client-specific installation, read
@@ -98,7 +105,8 @@ is not approval; leave the proposal unsaved without polling or reminders.
 
 Skip leaves the capture mode unchanged. Do not re-offer a skipped proposal in
 this conversation unless its content materially changes or the user asks for it
-again. Use conversation context for this decision; do not create skip receipts.
+again. Use conversation context for this decision; do not create a skip history.
+An explicitly enabled completion marker records only that the decision was handled.
 
 Approval covers only the previewed target and edit against the inspected note.
 Recheck before saving: if the target, note, or proposed edit has changed, stop,

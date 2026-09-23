@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare } from './file-io.mjs';
+import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare, syncDirectory, sameFileIdentity } from './file-io.mjs';
 import { GUIDE_VERSION, MAX_BYTES, inspectMarkdown, reviewVocabulary } from './check-notes.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 
@@ -107,12 +107,6 @@ async function stateFile(stateDir, name) {
   if (stat && (stat.isSymbolicLink() || !stat.isFile())) fail('State metadata must be regular files, never symlinks.');
   return file;
 }
-async function syncDirectory(dir) {
-  const handle = await fs.open(dir, 'r');
-  try { await handle.sync(); }
-  catch (error) { if (!['EINVAL', 'ENOTSUP'].includes(error.code)) throw error; }
-  finally { await handle.close(); }
-}
 async function writeExclusive(file, bytes) {
   const handle = await fs.open(file, 'wx', 0o600);
   try {
@@ -171,8 +165,7 @@ async function lock(stateDir) {
   const identity = await fs.lstat(lockDir, { bigint: true });
   const sameDirectory = async () => {
     const current = await fs.lstat(lockDir, { bigint: true });
-    return current.isDirectory() && !current.isSymbolicLink() && current.dev === identity.dev &&
-      current.ino === identity.ino && current.birthtimeNs === identity.birthtimeNs;
+    return current.isDirectory() && !current.isSymbolicLink() && sameFileIdentity(identity, current);
   };
   try { await writeExclusive(path.join(lockDir, 'owner.json'), serialize(owner)); }
   catch (error) {
@@ -199,7 +192,7 @@ async function lock(stateDir) {
     } catch { return 'Lock cleanup could not safely finish; inspect the lock before retrying.'; }
   };
 }
-async function withLock(stateDir, operation) {
+export async function withLock(stateDir, operation) {
   const unlock = await lock(stateDir);
   let output, failure, failed = false;
   try { output = await operation(); }

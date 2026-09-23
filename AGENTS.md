@@ -13,7 +13,9 @@ the repository; keep detailed user workflows in the skill and its references.
   `scripts/config-update.mjs`: capture setup, route selection, schema
   compatibility, and guarded settings updates.
 - `scripts/hooks.mjs` and `scripts/hook-definition.mjs`: client context adapters
-  and hook definitions. See [hooks](references/hooks.md).
+  and hook definitions. `scripts/capture-completion.mjs` manages opt-in private
+  decision markers; hooks only read them. See [hooks](references/hooks.md) and
+  [completion checks](references/completion.md).
 - `scripts/safe-update.mjs`, `scripts/file-io.mjs`, and
   `scripts/runtime-paths.mjs`: inspected hashes, filesystem boundaries, writer
   locks, journals, and recovery. See [safe updates](references/refresh.md).
@@ -56,8 +58,10 @@ ranking. Keep relevant evidence limits in [verification](references/verification
 - Preserve Manual, Suggestions, and Automatic consent boundaries. Installation
   and hook trust do not select capture settings. Read-only requests and opt-outs
   override capture policy. Keep detailed interaction rules in `SKILL.md`.
-- Keep hooks stateless and advisory. They supply context; they must not write
-  notes or receipts, read transcripts, invoke another model, or force continuations.
+- Keep hooks read-only: no note/marker writes, transcript reads, or separate model
+  calls. Only an explicitly enabled Stop check may request one recovery continuation,
+  with native identity and `stop_hook_active: false`; errors must never block.
+  Keep opt-in completion markers separate from note content and activity history.
 - Preserve exact inspected hashes, bounded reads, path and link checks, locks,
   and journal recovery. Never bypass a conflict by refreshing hashes, discarding
   state, or choosing another lock directory. Preserve user edits.

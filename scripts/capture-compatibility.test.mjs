@@ -71,8 +71,8 @@ test('unlisted clients ignore unfamiliar policy schema while listed clients rece
   await initialize({ ...f, confirmCompatibleClients: true });
   const config = await load(f.configPath);
   for (const future of [
-    { ...config, version: 3, futureOption: true },
-    { ...config, minimumPluginVersion: '0.6.0', futureOption: true },
+    { ...config, version: 4, futureOption: true },
+    { ...config, minimumPluginVersion: '0.6.1', futureOption: true },
     { ...config, version: 999, routes: [{ futureRouteType: 'future' }] },
   ]) {
     await fs.writeFile(f.configPath, JSON.stringify(future));
@@ -113,4 +113,35 @@ test('readers validate applicable storage and all project selectors; writes stil
   await fs.writeFile(f.proposal, JSON.stringify(scoped));
   await assert.rejects(updateConfiguration({ ...f, expectedHash }), /Invalid capture configuration/);
   assert.equal(await fingerprint(f.configPath), expectedHash);
+});
+
+test('completion policies require explicit schema and installed-reader compatibility before update', async t => {
+  const f = await fixture(t);
+  await initialize({ ...f, confirmCompatibleClients: true });
+  const old = await load(f.configPath);
+  const proposed = { ...old, version: 3, minimumPluginVersion: '0.6.0', completionCheck: true };
+  assert.throws(() => configSchema({ ...old, completionCheck: true }), /Invalid/);
+  for (const change of [{ completionCheck: undefined }, { completionCheck: 'yes' }, { minimumPluginVersion: '0.5.1' }]) {
+    assert.throws(() => configSchema({ ...proposed, ...change }), /Invalid/);
+  }
+  await fs.writeFile(f.proposal, JSON.stringify(proposed));
+  const expectedHash = await fingerprint(f.configPath);
+  await assert.rejects(updateConfiguration({ ...f, expectedHash }), { code: 'CLIENT_UPGRADE_REQUIRED' });
+  assert.equal(await fingerprint(f.configPath), expectedHash);
+  await updateConfiguration({ ...f, expectedHash, confirmCompatibleClients: true });
+  assert.equal((await setupStatus(f)).status, 'configured');
+  await assert.rejects(fs.stat(old.routes[0].stateDir), { code: 'ENOENT' });
+  await fs.writeFile(f.proposal, JSON.stringify({ ...proposed, completionCheck: false }));
+  await updateConfiguration({ ...f, expectedHash: await fingerprint(f.configPath) });
+  assert.equal((await load(f.configPath)).completionCheck, false);
+});
+
+test('a supported reader minimum in the wrong schema reports invalid rather than an impossible upgrade', async t => {
+  const f = await fixture(t);
+  await initialize({ ...f, confirmCompatibleClients: true });
+  const config = await load(f.configPath);
+  await fs.writeFile(f.configPath, JSON.stringify({ ...config, minimumPluginVersion: '0.6.0' }));
+  assert.equal((await setupStatus(f)).status, 'invalid');
+  assert.throws(() => configSchema({ ...config, minimumPluginVersion: '0.6.0' }), /Invalid capture configuration/);
+  assert.throws(() => configSchema({ ...config, minimumPluginVersion: '0.6.1' }), { code: 'CONFIG_REQUIRES_UPGRADE' });
 });

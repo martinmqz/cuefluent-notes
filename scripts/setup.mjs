@@ -26,8 +26,8 @@ async function hookPackaged(client) {
       handler?.type === 'command' && handler.command === command &&
       (handler.async === undefined || handler.async === false)));
   if (!registered(hooks?.SessionStart) || !hooks.SessionStart.some(group => group.matcher === 'startup') ||
-    !registered(hooks?.UserPromptSubmit)) {
-    fail('The package requires synchronous startup and prompt hooks invoking the bundled adapter for this client, with the startup matcher.');
+    !registered(hooks?.UserPromptSubmit) || !registered(hooks?.Stop) || hooks.Stop.some(group => group.matcher !== undefined)) {
+    fail('The package requires synchronous startup, prompt and Stop hooks invoking the bundled adapter for this client, with only the startup matcher.');
   }
   return true;
 }
@@ -48,8 +48,9 @@ export async function setupStatus({ client, cwd, configPath } = {}) {
     if (!config.enabled) return { ...result, status: 'disabled', mode: 'manual' };
     const settings = await captureSettings(client, cwd, config);
     if (!settings) return { ...result, status: 'inactive', reason: 'No enabled route applies to this project.' };
-    const { skill, safeUpdate, automaticUpdates, ...route } = settings;
-    return { ...result, status: 'configured', mode: automaticUpdates ? 'automatic' : 'suggest', ...route };
+    const { skill, safeUpdate, completionHelper, automaticUpdates, ...route } = settings;
+    return { ...result, status: 'configured', mode: automaticUpdates ? 'automatic' : 'suggest',
+      completionCheck: config.version === 3 && config.completionCheck === true, ...route };
   } catch (error) {
     if (error.code === 'CONFIG_REQUIRES_UPGRADE') return { ...result, status: 'requires_upgrade', reason: error.message };
     if (error.code === 'DERIVED_STATE_CONFLICT') return { ...result, status: 'state_conflict', reason: error.message };
@@ -59,8 +60,9 @@ export async function setupStatus({ client, cwd, configPath } = {}) {
 }
 
 /** First-use setup only: publish a complete private config without replacing any existing entry. */
-export async function initialize({ client, mode, project, destination, notesDir, scope, stateDir, configPath, confirmCompatibleClients } = {}) {
+export async function initialize({ client, mode, project, destination, notesDir, scope, stateDir, configPath, confirmCompatibleClients, completionCheck = false } = {}) {
   if (!CLIENTS.has(client) || !modes.has(mode)) fail('Choose a supported client and manual, suggest, or automatic mode.');
+  if (typeof completionCheck !== 'boolean' || (mode === 'manual' && completionCheck)) fail('Completion checks require Suggestions or Automatic mode and explicit opt-in.');
   const requested = configurationPath(configPath);
   const selection = hookConfigurationSelection(requested);
   if (await lstatOrNull(requested)) fail('Configuration already exists. Inspect it with status; setup never resets existing settings.');
@@ -81,7 +83,8 @@ export async function initialize({ client, mode, project, destination, notesDir,
       : { destination: path.join(notesRoot, path.basename(destination)) };
     const collection = createHash('sha256').update(notesRoot).digest('hex');
     const selectedState = stateDir ?? path.join(path.dirname(file), 'state', collection);
-    config = { ...(notesDir !== undefined ? { version: 2, minimumPluginVersion: '0.5.1' } : { version: 1 }),
+    config = { ...(completionCheck ? { version: 3, minimumPluginVersion: '0.6.0', completionCheck: true }
+      : notesDir !== undefined ? { version: 2, minimumPluginVersion: '0.5.1' } : { version: 1 }),
       enabled: true, clients: [client], automaticUpdates: mode === 'automatic', scope,
       routes: [{ projectRoot, ...storage, stateDir: selectedState }] };
     configSchema(config);
@@ -127,12 +130,12 @@ export async function initialize({ client, mode, project, destination, notesDir,
 
 export async function main(args) {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('Usage: node scripts/setup.mjs status --client codex|claude --cwd /project [--config /private/config.json]\n       node scripts/setup.mjs init --client codex|claude --mode manual|suggest|automatic [--project /project (--notes-dir /notes | --destination /notes/topic.md) --scope "selected facts" --state-dir /private/state] [--config /private/config.json]\n       node scripts/setup.mjs update --client codex|claude --cwd /project --proposal /private/proposed-config.json --expected-hash SHA256 [--config /private/config.json]\nFolder init and version 1-to-2 updates require --confirm-compatible-clients yes after checking every installed reader, including unlisted clients, supports Cuefluent Notes 0.5.1+.\nFirst-use setup never overwrites configuration. Updates require inspected bytes and a validated proposal. Neither writes notes or trusts host hooks.\nA --config override applies only to this command. Packaged hooks use CUEFLUENT_NOTES_CONFIG from the host launch environment, or the default path.');
+    console.log('Usage: node scripts/setup.mjs status --client codex|claude --cwd /project [--config /private/config.json]\n       node scripts/setup.mjs init --client codex|claude --mode manual|suggest|automatic [--project /project (--notes-dir /notes | --destination /notes/topic.md) --scope "selected facts" --state-dir /private/state] [--config /private/config.json]\n       node scripts/setup.mjs update --client codex|claude --cwd /project --proposal /private/proposed-config.json --expected-hash SHA256 [--config /private/config.json]\nOptional --completion-check yes enables a private completion marker and one bounded Stop recovery in Suggestions/Automatic mode; requires schema 3 and every installed reader at 0.6.0+. First schema 3 publication also requires --confirm-compatible-clients yes.\nFolder init and version 1-to-2 updates require --confirm-compatible-clients yes after checking every installed reader, including unlisted clients, supports Cuefluent Notes 0.5.1+.\nFirst-use setup never overwrites configuration. Updates require inspected bytes and a validated proposal. Neither writes notes or trusts host hooks.\nA --config override applies only to this command. Packaged hooks use CUEFLUENT_NOTES_CONFIG from the host launch environment, or the default path.');
     return 0;
   }
   const [command, ...options] = args;
   const allowed = command === 'status' ? ['client', 'cwd', 'config'] : command === 'init'
-    ? ['client', 'mode', 'project', 'destination', 'notes-dir', 'scope', 'state-dir', 'config', 'confirm-compatible-clients'] : command === 'update'
+    ? ['client', 'mode', 'project', 'destination', 'notes-dir', 'scope', 'state-dir', 'config', 'confirm-compatible-clients', 'completion-check'] : command === 'update'
     ? ['client', 'cwd', 'proposal', 'expected-hash', 'config', 'confirm-compatible-clients'] : [];
   if (!allowed.length || options.length % 2) fail('Use status, init, or update with named options; see --help.');
   const parsed = {};
@@ -142,7 +145,8 @@ export async function main(args) {
     parsed[key] = options[i + 1];
   }
   if (parsed['confirm-compatible-clients'] !== undefined && parsed['confirm-compatible-clients'] !== 'yes') fail('--confirm-compatible-clients accepts only yes after checking installed plugins.');
-  const settings = { ...parsed, configPath: parsed.config, notesDir: parsed['notes-dir'], stateDir: parsed['state-dir'], expectedHash: parsed['expected-hash'], confirmCompatibleClients: parsed['confirm-compatible-clients'] === 'yes' };
+  if (parsed['completion-check'] !== undefined && parsed['completion-check'] !== 'yes') fail('--completion-check accepts only yes after the user enables completion checks.');
+  const settings = { ...parsed, configPath: parsed.config, notesDir: parsed['notes-dir'], stateDir: parsed['state-dir'], expectedHash: parsed['expected-hash'], confirmCompatibleClients: parsed['confirm-compatible-clients'] === 'yes', completionCheck: parsed['completion-check'] === 'yes' };
   const result = await (command === 'status' ? setupStatus(settings) : command === 'init' ? initialize(settings) : updateConfiguration(settings));
   console.log(JSON.stringify(result, null, 2));
   return ['invalid', 'state_conflict', 'recovery_required', 'requires_upgrade'].includes(result.status) ? 2 : 0;

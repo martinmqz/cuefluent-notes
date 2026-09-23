@@ -14,5 +14,6 @@ export function hookConfiguration(client) {
   return { hooks: {
     SessionStart: [{ matcher: 'startup', hooks: [handler] }],
     UserPromptSubmit: [{ hooks: [handler] }],
+    Stop: [{ hooks: [handler] }],
   } };
 }

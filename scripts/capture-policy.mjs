@@ -4,8 +4,14 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { absolute, within, lstatOrNull as lstat, readBoundedBytes, CONTROLS } from './file-io.mjs';
 import { PACKAGE_ROOT, SKILL_ROOT } from './runtime-paths.mjs';
+import pkg from '../package.json' with { type: 'json' };
 
 export const CLIENTS = new Set(['codex', 'claude']);
+// The schema's required minimum is separate from this reader's capabilities.
+const READER_VERSION = pkg.version.split(/[.+-]/).slice(0, 3).map(Number);
+export const completionEnabled = config => config?.version === 3 && config.completionCheck === true;
+export const completionPermissionMode = (client, mode) =>
+  ['default', 'acceptEdits', 'dontAsk', 'bypassPermissions', ...(client === 'claude' ? ['auto'] : [])].includes(mode);
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_ROUTES = 100;
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -39,17 +45,21 @@ export function configuredClient(config, client) {
 /** Common routing envelope; route contents are checked only after selection on reads. */
 export function configHeader(config) {
   if (!object(config) || !Number.isSafeInteger(config.version) || config.version < 1) invalid();
-  if (config.version > 2) requiresUpgrade();
-  if (config.version === 2 && config.minimumPluginVersion !== '0.5.1') {
+  if (config.version > 3) requiresUpgrade();
+  const minimum = config.version === 3 ? '0.6.0' : '0.5.1';
+  if (config.version >= 2 && config.minimumPluginVersion !== minimum) {
     if (typeof config.minimumPluginVersion === 'string' && /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(config.minimumPluginVersion)) {
-      const [major, minor, patch] = config.minimumPluginVersion.split('.').map(Number);
-      if (major > 0 || minor > 5 || (minor === 5 && patch > 1)) requiresUpgrade();
+      const requested = config.minimumPluginVersion.split('.').map(Number);
+      const difference = requested.findIndex((part, index) => part !== READER_VERSION[index]);
+      if (difference !== -1 && requested[difference] > READER_VERSION[difference]) requiresUpgrade();
     }
     invalid();
   }
   const keys = ['version', 'enabled', 'clients', 'automaticUpdates', 'scope', 'defaultRoute', 'routes', 'exclude'];
-  if (config.version === 2) keys.push('minimumPluginVersion');
+  if (config.version >= 2) keys.push('minimumPluginVersion');
+  if (config.version === 3) keys.push('completionCheck');
   if (!onlyKeys(config, keys) ||
+    (config.version === 3 && typeof config.completionCheck !== 'boolean') ||
     typeof config.enabled !== 'boolean' || typeof config.automaticUpdates !== 'boolean' ||
     !text(config.scope, 2000) || !Array.isArray(config.clients) || config.clients.length > CLIENTS.size ||
     config.clients.some(client => !CLIENTS.has(client)) || new Set(config.clients).size !== config.clients.length) invalid();
@@ -73,6 +83,9 @@ export function configSchema(config) {
 
 /** Older installed readers cannot learn the new schema retroactively. */
 export function assertCompatibleClients(config, previous, confirmed) {
+  if (config.version === 3 && previous?.version !== 3 && confirmed !== true) {
+    throw Object.assign(new Error('Completion checks require Cuefluent Notes 0.6.0+ in every installed client reading this policy, including clients absent from its clients list. Inspect installations before passing --confirm-compatible-clients yes. Otherwise retain the existing schema without completion checks.'), { code: 'CLIENT_UPGRADE_REQUIRED' });
+  }
   if (config.version === 2 && previous?.version !== 2 && confirmed !== true) {
     throw Object.assign(new Error('Folder policies require Cuefluent Notes 0.5.1+ in every installed client reading this policy, including clients absent from its clients list. Inspect Codex and Claude installations before passing --confirm-compatible-clients yes. Otherwise retain version 1 with explicit files.'), { code: 'CLIENT_UPGRADE_REQUIRED' });
   }
@@ -217,6 +230,7 @@ export async function captureSettings(client, directory, config, { skillRoot = S
   const automaticUpdates = route.automaticUpdates ?? config.automaticUpdates;
   return { skill: path.join(installedRoot, 'SKILL.md'),
     safeUpdate: path.join(installedRoot, 'scripts', 'safe-update.mjs'),
+    ...(completionEnabled(config) ? { completionHelper: path.join(installedRoot, 'scripts', 'capture-completion.mjs') } : {}),
     ...storage, stateDir, scope: route.scope ?? config.scope, automaticUpdates };
 }
 

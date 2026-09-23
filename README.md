@@ -218,7 +218,7 @@ for release automation, first publication, and public-directory submission mater
 
 ## Optional capture assistance
 
-The hook variant registers `SessionStart` and `UserPromptSubmit`. After explicit private policy
+The hook variant registers `SessionStart`, `UserPromptSubmit`, and `Stop`. After explicit private policy
 configuration and each client's setup/trust, it reminds the current agent to use
 the same workflow before completing eligible work. No useful change means no
 note write. Read-only requests, opt-outs, scope, manual edits, and configured
@@ -227,9 +227,17 @@ routing take precedence.
 Without configuration, a trusted startup hook displays a brief host notice and
 leaves capture off. It adds no instructions to the model and no sentence to
 assistant answers; unconfigured prompt hooks stay quiet. A saved manual
-preference disables the shared capture policy and its notices. Hooks store no payloads, transcripts, or
-receipts, call no other model, and request zero continuations. Duplicate avoidance
-depends on reading the destination and reviewing meaning; it is not an
+preference disables the shared capture policy and its notices. Hooks store no payloads,
+transcripts, or markers and call no other model. An optional Stop check can ask
+the working agent to finish a missed capture decision once. It requires separate
+opt-in because the agent keeps a small private completion marker. Existing
+settings stay unchanged; ask **“Enable the Cuefluent Notes completion check”**
+after upgrading all installed clients to 0.6.0+. A Save / Skip proposal settles
+the check without waiting for approval. See [completion checks](references/completion.md).
+Use the helper only with existing permission to write its private state, without
+requesting extra permission each turn. Recovery arms after the first successful marker
+in that session and permission mode, and stays off in plan or unknown modes.
+Duplicate avoidance depends on reading the destination and reviewing meaning; it is not an
 exactly-once guarantee. Read [hook guidance](references/hooks.md) before opting in.
 
 ## Verification and licensing

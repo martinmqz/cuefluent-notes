@@ -7,6 +7,27 @@ export const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/;
 export const absolute = value => typeof value === 'string' && value.trim().length > 0 &&
   value.length <= 4096 && !CONTROLS.test(value) && path.isAbsolute(value);
 export const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
+export const sameFileIdentity = (left, right) => left && right && left.dev === right.dev &&
+  left.ino === right.ino && left.birthtimeNs === right.birthtimeNs;
+
+export async function readInputJSON(stream, maxBytes) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > maxBytes) throw new Error('JSON input exceeds its limit.');
+    chunks.push(bytes);
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+}
+
+export async function syncDirectory(dir) {
+  const handle = await fs.open(dir, 'r');
+  try { await handle.sync(); }
+  catch (error) { if (!['EINVAL', 'ENOTSUP'].includes(error.code)) throw error; }
+  finally { await handle.close(); }
+}
 export function within(parent, child) {
   const relative = path.relative(parent, child);
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));

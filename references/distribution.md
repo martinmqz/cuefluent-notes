@@ -179,12 +179,13 @@ the packaged skill so its relative reference links remain usable.
 Choose one variant for each client. Both variants have the identity
 `cuefluent-notes`; do not install both or register the same adapter manually as
 well as through the plugin. Manual packages contain no hook registration. Hook
-packages add `SessionStart` matched on `startup` and `UserPromptSubmit`, with no
-Stop gate or continuation request. Missing private capture configuration produces
+packages add `SessionStart` matched on `startup`, `UserPromptSubmit`, and `Stop`.
+The [Stop check](completion.md) is inactive unless separately enabled in the private
+policy; it allows one recovery attempt for a missed capture decision. Missing private capture configuration produces
 one host notice at startup without enabling capture or adding model context;
-unconfigured prompts stay quiet. A saved manual preference leaves both quiet.
-The added startup registration changes the hook definition; review and trust
-the updated hooks through the host before relying on the startup notice.
+unconfigured prompts and Stop events stay quiet. A saved manual preference leaves
+all hooks quiet. The Stop registration changes the hook definition; review and
+trust the updated hooks through the host before relying on the check.
 
 ## Use a packaged helper without host installation
 

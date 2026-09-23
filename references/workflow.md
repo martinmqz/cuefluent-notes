@@ -43,14 +43,15 @@ Before completing eligible work, consider whether it established new durable
 information within the configured scope. Inspect the useful destination and the
 current task before deciding to write. A prior manual save or repeated hook
 delivery is not a reason to append the same facts again. If there is no useful
-change, leave the note unchanged. Do not create a receipt, skipped-capture log,
-parallel summary bundle, or another model call to prove the consideration happened.
+change, leave the note unchanged. Do not create an activity log, parallel summary
+bundle, or another model call. Only explicitly enabled
+[completion checks](completion.md) permit a minimal private decision marker.
 
 Missing or ambiguous routing requires a user choice before saving; do not invent
 a destination. An unsupported event or missing native identity leaves automatic
 capture inactive. Report a relevant conflict or failure without repeatedly
-blocking the task. The current adapters have no Stop gate and request zero
-continuations, so capture remains best-effort working-agent behavior.
+blocking the task. An enabled Stop check can request one recovery attempt; without
+that opt-in there are no continuation requests. Capture remains best-effort.
 
 ## Inspect evidence and useful originals
 
