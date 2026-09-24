@@ -188,8 +188,8 @@ test('Suggestions and Automatic guards stay distinct for file and folder routes 
         assert.equal(operation[folder ? 'notesDir' : 'destination'], folder ? notes : destination);
         assert.equal(Object.hasOwn(operation, folder ? 'destination' : 'notesDir'), false);
         if (folder) {
-          assert.match(context, /Use notesDir as the writer root and the shared stateDir/);
-          assert.match(context, /Flat organization/);
+          assert.match(context, /Keep notesDir as writer root with shared stateDir/);
+          assert.match(context, /Flat: inspect and keep notes directly in notesDir/);
         }
         if (automaticUpdates) {
           assert.match(context, /Automatic updates are enabled/);
@@ -251,7 +251,7 @@ test('Suggestions preserves the prior 8 KB context envelope for both clients and
   assert.deepEqual(await fs.readdir(notes), []);
   await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
 });
-test('schema-4 routes retain capture and armed completion at pre-change byte limits', async t => {
+test('schema-4 routes retain capture and armed completion within the previous flat-default byte limits', async t => {
   const f = await fixture(t);
   const notesDir = path.join(f.notes, 'n'.repeat(100), 'n'.repeat(100));
   const stateDir = path.join(f.stateDir, 's'.repeat(100), 's'.repeat(100));
@@ -262,7 +262,9 @@ test('schema-4 routes retain capture and armed completion at pre-change byte lim
   const priorBytes = {
     file: { ordinary: [1887, 1420], completion: [2116, 1771] },
     flat: { ordinary: [2165, 1698], completion: [2394, 2049] },
-    'by-type': { ordinary: [2546, 2079], completion: [2775, 2430] },
+    // New by-type setups must fit the old flat default, including the three
+    // extra routing bytes of by-type versus flat.
+    'by-type': { ordinary: [2162, 1695], completion: [2391, 2046] },
   };
   for (const client of ['codex', 'claude']) for (const kind of ['file', 'flat', 'by-type']) {
     for (const automaticUpdates of [false, true]) for (const completionCheck of [false, true]) {
@@ -475,17 +477,16 @@ test('organization guidance agrees across prompt and Stop, clients, modes and ro
           assert.ok(Buffer.byteLength(guidance) <= 8000);
           if (kind === 'file') {
             assert.match(guidance, /explicitly selected file/);
-            assert.doesNotMatch(guidance, /Flat organization|meetings\//);
+            assert.doesNotMatch(guidance, /Flat:|By-type:/);
           } else {
-            assert.match(guidance, /reuse suitable existing notes before creating/);
-            assert.match(guidance, /shared stateDir for the whole collection/);
+            assert.match(guidance, /Reuse suitable notes; preserve explicit paths/);
+            assert.match(guidance, /notesDir as writer root with shared stateDir/);
             if (kind === 'by-type') {
-              assert.match(guidance, /meetings\/, tasks\/, knowledge-base\/, decisions\//);
-              assert.match(guidance, /general\/unclear content stays at root/);
-              assert.match(guidance, /inspected directories and v2 authored plans/);
-              assert.match(guidance, /custom\/deeper paths use v1 with agent-side parent checks/);
-              assert.doesNotMatch(guidance, /Flat organization/);
-            } else assert.match(guidance, /Flat organization/);
+              assert.match(guidance, /By-type: infer from context; unclear stays at root/);
+              assert.match(guidance, /Read references\/workflow.md#note-placement/);
+              assert.match(guidance, /references\/refresh.md for compatible readers, inspected directories and v1\/v2 plans/);
+              assert.doesNotMatch(guidance, /Flat:/);
+            } else assert.match(guidance, /Flat: inspect and keep notes directly in notesDir; no subfolders unless explicitly selected/);
           }
           if (automaticUpdates) {
             assert.match(guidance, /apply only eligible reviewed changes through safe-write and verify before finishing/);

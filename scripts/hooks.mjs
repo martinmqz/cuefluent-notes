@@ -1,7 +1,6 @@
 import { captureSettings, configurationPath, readConfig, configuredClient, configHeader, assertConfigurationStorage, completionEnabled, completionPermissionMode, CLIENTS, object, text } from './capture-policy.mjs';
 import { absolute, isMain, readInputJSON } from './file-io.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
-import { NOTE_CATEGORIES } from './note-organization.mjs';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_CONTEXT_BYTES = 8000;
@@ -13,10 +12,10 @@ const response = additionalContext => ({ hookSpecificOutput: { hookEventName: 'U
 function locationContext(operation) {
   if (!operation.notesDir) return 'The destination is an explicitly selected file. Preserve that choice; a file route does not authorize saving elsewhere.';
   return [
-    'Use notesDir as the writer root and the shared stateDir for the whole collection. Preserve explicit destinations; reuse suitable existing notes before creating subject-named files. No catch-all, per-turn files, automatic plugin-name prefixes, or linked notes.',
+    'Keep notesDir as writer root with shared stateDir. Reuse suitable notes; preserve explicit paths. No catch-all, per-turn files or automatic plugin prefixes; do not follow links.',
     operation.organization === 'by-type'
-      ? `Follow references/workflow.md#note-placement: inspect relevant names/headings in the root and ${NOTE_CATEGORIES.map(name => `${name}/`).join(', ')}; reuse existing category spellings and read only candidate notes. Clear new types use those folders; general/unclear content stays at root. No unrelated recursion. V2 needs compatible readers per references/refresh.md; use inspected directories and v2 authored plans for root/immediate category paths. Selected existing custom/deeper paths use v1 with agent-side parent checks.`
-      : 'Flat organization: inspect and keep notes directly in notesDir; do not create subfolders unless the user explicitly selects another path.',
+      ? 'By-type: infer from context; unclear stays at root. Read references/workflow.md#note-placement for placement/discovery and references/refresh.md for compatible readers, inspected directories and v1/v2 plans.'
+      : 'Flat: inspect and keep notes directly in notesDir; no subfolders unless explicitly selected. Persistent layout requests require references/setup.md and refreshed routing.',
   ].join(' ');
 }
 

@@ -28,13 +28,17 @@ test('first folder publication warns about unlisted older clients before creatin
   // 0.5.0 readers validate the whole shared policy before checking membership.
   for (const confirmCompatibleClients of [undefined, false, 'yes']) {
     await assert.rejects(initialize({ ...f, confirmCompatibleClients }), error =>
-      error.code === 'CLIENT_UPGRADE_REQUIRED' && /including clients absent/.test(error.message));
+      error.code === 'CLIENT_UPGRADE_REQUIRED' && /including clients absent/.test(error.message) &&
+      /No configuration created/.test(error.message) && /--organization flat/.test(error.message) &&
+      !/retain the existing/.test(error.message) && error.message.length <= 400);
   }
   assert.deepEqual(await fs.readdir(f.root), ['notes']);
   await initialize({ ...f, confirmCompatibleClients: true });
   const config = await load(f.configPath);
-  assert.equal(config.version, 2);
-  assert.equal(config.minimumPluginVersion, '0.5.1');
+  assert.equal(config.version, 4);
+  assert.equal(config.minimumPluginVersion, '0.7.0');
+  assert.equal(config.routes[0].organization, 'by-type');
+  assert.equal(config.completionCheck, false);
   assert.deepEqual(config.clients, ['claude']);
   assert.equal(await captureSettings('codex', f.cwd, config), null);
   assert.equal((await setupStatus({ ...f, client: 'codex' })).status, 'client_not_configured');
@@ -118,7 +122,10 @@ test('readers validate applicable storage and all project selectors; writes stil
 test('completion policies require explicit schema and installed-reader compatibility before update', async t => {
   const f = await fixture(t);
   await initialize({ ...f, confirmCompatibleClients: true });
-  const old = await load(f.configPath);
+  const { completionCheck, ...created } = await load(f.configPath);
+  const old = { ...created, version: 2, minimumPluginVersion: '0.5.1',
+    routes: created.routes.map(({ organization, ...route }) => route) };
+  await fs.writeFile(f.configPath, JSON.stringify(old));
   const proposed = { ...old, version: 3, minimumPluginVersion: '0.6.0', completionCheck: true };
   assert.throws(() => configSchema({ ...old, completionCheck: true }), /Invalid/);
   for (const change of [{ completionCheck: undefined }, { completionCheck: 'yes' }, { minimumPluginVersion: '0.5.1' }]) {

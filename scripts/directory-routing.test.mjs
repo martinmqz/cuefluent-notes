@@ -148,7 +148,7 @@ test('mixed folder and file routes in one collection must use the same state', a
   assert.equal(Object.hasOwn(fallback, 'notesDir'), false);
   assert.equal(fallback.stateDir, before.stateDir);
   const current = await setupStatus({ ...f, cwd: f.project });
-  await fs.writeFile(proposal, JSON.stringify({ ...config, defaultRoute: { notesDir: alias, stateDir: before.stateDir } }));
+  await fs.writeFile(proposal, JSON.stringify({ ...config, defaultRoute: { notesDir: alias, stateDir: before.stateDir, organization: current.organization } }));
   await updateConfiguration({ ...f, cwd: f.project, proposal, expectedHash: current.configHash });
   const folderFallback = await setupStatus({ ...f, cwd: f.root });
   assert.equal(folderFallback.notesDir, f.notesDir);
@@ -197,7 +197,8 @@ test('ancestor and descendant collections share state even through aliases or di
       await fs.writeFile(proposal, JSON.stringify({ ...config, routes }));
       await assert.rejects(updateConfiguration({ ...f, cwd: f.project, proposal, expectedHash: before.configHash }), /overlapping notes folders/);
     }
-    await fs.writeFile(proposal, JSON.stringify({ ...config, defaultRoute: { ...storage, stateDir: before.stateDir } }));
+    await fs.writeFile(proposal, JSON.stringify({ ...config, defaultRoute: { ...storage, stateDir: before.stateDir,
+      ...(storage.notesDir ? { organization: before.organization } : {}) } }));
     const current = await setupStatus({ ...f, cwd: f.project });
     await updateConfiguration({ ...f, cwd: f.project, proposal, expectedHash: current.configHash });
     // Restore the original policy for the next candidate.

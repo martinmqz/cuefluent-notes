@@ -86,7 +86,7 @@ versioned example directly as the runtime configuration.
 | `scope` | A nonempty single-line description of eligible information, at most 2,000 characters |
 | `defaultRoute` | Optional `{notesDir, stateDir}` or `{destination, stateDir}` for sessions without a matching project route |
 | `routes` | Optional project routes with `projectRoot`, `stateDir`, and exactly one of `notesDir` or `destination`; each can override `scope`, `automaticUpdates`, or `enabled` |
-| `organization` | Optional `"flat"` or `"by-type"` on folder project/default routes in version 4 only. Omitted means flat; forbidden on explicit-file routes. |
+| `organization` | Optional `"flat"` or `"by-type"` on folder project/default routes in version 4 only. Omitted in stored policies means flat; new folder setup writes `"by-type"` by default. Forbidden on explicit-file routes. |
 | `exclude` | Optional absolute project roots to exclude, including their descendants |
 
 Complete policy writes reject unrecognized fields. Reads check client membership

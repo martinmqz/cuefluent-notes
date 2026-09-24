@@ -75,7 +75,8 @@ for (const client of ['codex', 'claude']) {
       { exclude: [f.root] }, { routes: [] }, { routes: [{ ...f.config.routes[0], enabled: false }] }]) {
       assert.equal(await f.invoke('Stop', { stop_hook_active: false }, { ...f.config, ...change }), null);
     }
-    const { completionCheck, ...old } = f.config;
+    const { completionCheck, ...created } = f.config;
+    const old = { ...created, routes: created.routes.map(({ organization, ...route }) => route) };
     assert.equal(await f.invoke('Stop', { stop_hook_active: false }, { ...old, version: 2, minimumPluginVersion: '0.5.1' }), null);
     assert.equal(await f.invoke('Stop', { stop_hook_active: false }, null), null);
     await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
@@ -183,7 +184,8 @@ test('opting into completion preserves ordinary capture at the previous context-
   for (const client of ['codex', 'claude']) {
     const f = await fixture(t, client);
     const { completionCheck, ...base } = f.config;
-    const legacy = { ...base, version: 2, minimumPluginVersion: '0.5.1', scope: '界'.repeat(1500) };
+    const legacy = { ...base, version: 2, minimumPluginVersion: '0.5.1', scope: '界'.repeat(1500),
+      routes: base.routes.map(({ organization, ...route }) => route) };
     const before = await f.invoke('UserPromptSubmit', {}, legacy);
     assert.doesNotMatch(before.hookSpecificOutput.additionalContext, /capture is skipped/);
     const enabled = { ...legacy, version: 3, minimumPluginVersion: '0.6.0', completionCheck: true };

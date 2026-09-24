@@ -22,7 +22,7 @@ test('both detached clients configure folder routes and save distinct subject fi
       return JSON.parse(result.stdout);
     };
     const init = ['init', '--client', pkg.client, '--mode', 'suggest', '--project', root,
-      '--notes-dir', notesDir, '--scope', 'Synthetic project findings.'];
+      '--notes-dir', notesDir, '--organization', 'flat', '--scope', 'Synthetic project findings.'];
     const unconfirmed = spawnSync(process.execPath, [path.join(pkg.skillRoot, 'scripts/setup.mjs'), ...init], { cwd: root, env, encoding: 'utf8' });
     assert.equal(unconfirmed.status, 2);
     assert.match(unconfirmed.stderr, /including clients absent/);
@@ -31,9 +31,11 @@ test('both detached clients configure folder routes and save distinct subject fi
     const config = JSON.parse(await fs.readFile(configPath));
     assert.equal(config.version, 2);
     assert.equal(config.minimumPluginVersion, '0.5.1');
+    assert.equal(Object.hasOwn(config.routes[0], 'organization'), false);
     const status = helper('setup.mjs', ['status', '--client', pkg.client, '--cwd', root]);
     assert.equal(status.notesDir, notesDir);
     assert.equal(status.mode, 'suggest');
+    assert.equal(status.organization, 'flat');
     assert.equal(status.hookPackaged, true);
     assert.equal(status.hookConfigMatches, true);
     assert.equal(Object.hasOwn(status, 'destination'), false);
@@ -66,7 +68,7 @@ test('both detached clients configure folder routes and save distinct subject fi
   }
 });
 
-test('all detached package variants support inspected type folders and root notes with shared state', async t => {
+test('all detached package variants default to type folders and support inspected saves with shared state', async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-types-package-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   for (const withHooks of [false, true]) {
@@ -84,7 +86,7 @@ test('all detached package variants support inspected type folders and root note
         return expected === 0 ? JSON.parse(result.stdout) : result.stderr;
       };
       run('setup.mjs', ['init', '--client', pkg.client, '--mode', 'suggest', '--project', work,
-        '--notes-dir', notesDir, '--organization', 'by-type', '--scope', 'Synthetic findings.', '--confirm-compatible-clients', 'yes']);
+        '--notes-dir', notesDir, '--scope', 'Synthetic findings.', '--confirm-compatible-clients', 'yes']);
       const config = JSON.parse(await fs.readFile(configPath));
       assert.equal(config.version, 4);
       assert.equal(config.minimumPluginVersion, '0.7.0');

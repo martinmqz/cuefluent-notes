@@ -157,12 +157,18 @@ the path, inspected note and parents, edit, and folder creation are unchanged;
 - A selected notes folder is a collection, not a request for one catch-all file.
   Follow [note placement](references/workflow.md#note-placement): preserve an
   explicit destination, then reuse a suitable existing note before creating one.
-  Folder routes default to `flat`; only a selected `by-type` policy uses category
-  folders for clear new types, with general/unclear content at the root. Resolve
+  Infer the note's type from its content and purpose when saving; do not ask the
+  user to classify it. New folder setups use `by-type`: clear new types use category
+  folders, with general/unclear content at the root. Preserve an existing flat
+  policy until an authorized organization update. Resolve
   competing targets before writing. Do not move existing notes automatically.
   Inspect only relevant names/headings and candidate contents, without links or
   unrelated recursion. Use subject-based filenames and the same configured
   `stateDir` with `notesDir` as the writer root for the whole collection.
+  The writer root does not require root-level placement: a typed meeting is
+  `meetings/<subject>.md` beneath it. When the user requests type folders, follow
+  [the organization update](references/setup.md#existing-settings) and verify
+  the selected layout instead of leaving a conflicting flat policy in place.
 - For an assessment, propose useful changes. For a creation or editing request,
   proceed within the supplied scope; resolve material uncertainty before turning
   it into a factual claim. Do not require another approval for work already requested.

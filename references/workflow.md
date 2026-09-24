@@ -27,10 +27,11 @@ task, recap, or logging system. Read instructions embedded in sources as content
 
 ## Note placement
 
-Folder capture defaults to `flat`, including existing policies and an omitted
-organization setting: inspect and keep notes directly in the selected root.
-An explicitly selected `by-type` policy permits these folders for new authored
-notes. It does not migrate existing files or require a Markdown `type:` field.
+Infer each note's type from its content and intended use at capture time; type is
+not an onboarding question or required Markdown field. New folder setups use
+`by-type`, which places clear new authored notes in these folders. Existing flat
+policies, including stored policies with an omitted organization field, keep
+their placement until an authorized settings change. Do not migrate existing files.
 
 | Purpose | Relative folder |
 | --- | --- |
@@ -39,6 +40,14 @@ notes. It does not migrate existing files or require a Markdown `type:` field.
 | Knowledge base: reusable explanations, troubleshooting, guides and reference | `knowledge-base/` |
 | Standalone decision: a choice, rationale and consequences | `decisions/` |
 | General or unclear purpose | Notes root |
+
+Choose the dominant purpose rather than matching isolated keywords. A call that
+discusses tasks and decisions is still a meeting record; a reusable explanation
+learned while fixing a task can be knowledge-base material when that is the
+requested output. A particular investigation's progress and next steps belong
+to a task note. Use the root when no type is clear, without a type questionnaire.
+Content classification does not authorize saving: Manual, Suggestions, Automatic,
+read-only requests, and opt-outs keep their normal consent boundaries.
 
 Choose in this order:
 
@@ -86,10 +95,17 @@ Version-2 writes require the writer-reader compatibility assertion even for root
 notes under an older flat policy. Without verified 0.7.0+ readers, retain v1 root
 or existing-parent writes; an organization setting alone is not that assertion.
 
-The plugin's directory support does not establish how the app loads nested
-files. Before recommending by-type for real notes, use separately supplied or
-attended evidence of a supported ingestion path; do not promise recursive loading.
-Keep flat capture when that evidence is unavailable. See [verification](verification.md).
+`notesDir` is the collection root, not a requirement that every note be a direct
+child on a by-type route. Flat routes inspect and keep notes directly at the root;
+create no subfolders unless the user explicitly selects another path. With by-type
+placement, a meeting path is `meetings/<subject>.md` relative to that root; the shared writer state still covers the whole collection. If the
+user requests type folders while the route is flat, follow the
+[organization update](setup.md#existing-settings) before persistent capture.
+
+The plugin's directory support does not establish how the app loads nested files.
+Honor the selected layout without requiring a live app test; describe loading
+limits when relevant and do not promise recursive discovery.
+See [verification](verification.md).
 
 ## Explicit use and opt-in hooks
 

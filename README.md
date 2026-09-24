@@ -104,20 +104,25 @@ an automatic plugin-name prefix. You can also
 select a specific Markdown file to keep using that file. Existing file-based
 settings stay unchanged until you request a folder instead.
 
-Folders default to a flat collection. Version **0.7.0+** also supports optional
-**by-type** organization: `meetings/`, `tasks/`, `knowledge-base/`, and `decisions/`.
+New folder setups use **by-type** organization. The agent infers each note's type
+from its content and purpose when saving: `meetings/`, `tasks/`, `knowledge-base/`,
+or `decisions/`. Users do not need to select note types during setup.
 For example, a new meeting could use `meetings/release-planning.md`; general or
 unclear content stays at the root. The agent first preserves explicit destinations
-and suitable existing notes, so enabling this option does not move files or create
+and suitable existing notes, so type placement does not move files or create
 duplicate category copies. There is no required `type:` field or task lifecycle.
 
 Suggestions show the complete proposed path, edit, and any folder creation before
 Save / Skip. Skipping or leaving it unanswered creates neither notes nor folders.
 Type folders require every installed reader of the shared policy to support
-0.7.0+; installation alone does not change organization or capture consent.
-Ask to change organization only after confirming a supported way to load those
-files into Cuefluent. App loading of nested files, including recursive discovery,
-has not been verified here; keep flat organization until it is. See
+0.7.0+; installation alone does not change existing organization or capture consent.
+Existing flat collections remain flat, and root-only placement can still be requested.
+To activate type folders for an existing collection, say: “Use Cuefluent Notes.
+Organize this project's notes by type; keep the current capture mode and notes root.”
+The agent applies and verifies the settings change after checking installed-reader
+compatibility. App loading of nested files, including recursive discovery, is a
+separate capability and has not been verified here; it does not block choosing
+where notes are saved. See
 [note placement](references/workflow.md#note-placement) and
 [verification](references/verification.md#note-type-folders-070).
 

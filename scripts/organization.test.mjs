@@ -63,27 +63,32 @@ test('organization is schema-4 folder-only data and omitted organization means f
   assert.equal(Object.hasOwn(await captureSettings('codex', f.project, { ...config, routes: [fileRoute] }), 'organization'), false);
 });
 
-test('first organization setup requires compatibility, retains consent, and creates no notes or state', async t => {
-  for (const client of ['codex', 'claude']) for (const mode of ['suggest', 'automatic']) {
-    const f = await fixture(t, { client, mode });
+test('new folder setup defaults to by-type, honors explicit layouts, and preserves consent without creating notes', async t => {
+  for (const client of ['codex', 'claude']) for (const mode of ['suggest', 'automatic']) for (const organization of [undefined, 'flat', 'by-type']) for (const completionCheck of [false, true]) {
+    const f = await fixture(t, { client, mode, organization, completionCheck });
     for (const confirmCompatibleClients of [undefined, false, 'yes']) {
       await assert.rejects(initialize({ ...f, confirmCompatibleClients }), { code: 'CLIENT_UPGRADE_REQUIRED' });
       await assert.rejects(fs.stat(path.dirname(f.configPath)), { code: 'ENOENT' });
     }
     await initialize(f);
     const config = await load(f.configPath);
-    assert.equal(config.version, 4);
-    assert.equal(config.minimumPluginVersion, '0.7.0');
-    assert.equal(config.completionCheck, false);
+    assert.equal(config.version, organization === 'flat' ? completionCheck ? 3 : 2 : 4);
+    assert.equal(config.minimumPluginVersion, organization === 'flat' ? completionCheck ? '0.6.0' : '0.5.1' : '0.7.0');
+    assert.equal(config.completionCheck, config.version === 2 ? undefined : completionCheck);
+    assert.equal(config.routes[0].organization, organization === 'flat' ? undefined : 'by-type');
     const status = await setupStatus(f);
-    assert.equal(status.organization, 'by-type');
+    assert.equal(status.organization, organization ?? 'by-type');
     assert.equal(status.mode, mode);
     assert.equal(status.notesDir, f.notesDir);
     assert.equal(status.stateDir, f.stateDir);
-    assert.equal(status.completionCheck, false);
+    assert.equal(status.completionCheck, completionCheck);
     assert.deepEqual(await fs.readdir(f.notesDir), []);
     await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
     assert.equal(await hookResponse(client, { ...payload(f.project), hook_event_name: 'Stop', stop_hook_active: false }, config), null);
+    const context = (await hookResponse(client, { ...payload(f.project), hook_event_name: 'UserPromptSubmit' }, config)).hookSpecificOutput.additionalContext;
+    const op = JSON.parse(context.split('\n\n').at(-1));
+    assert.equal(op.organization, status.organization);
+    assert.equal(op.automaticUpdates, mode === 'automatic');
   }
   const f = await fixture(t);
   for (const change of [{ mode: 'manual' }, { notesDir: undefined, destination: path.join(f.notesDir, 'topic.md') }, { organization: 'unknown' }]) {
@@ -91,10 +96,38 @@ test('first organization setup requires compatibility, retains consent, and crea
   }
 });
 
+test('new setup defaults do not reinterpret or migrate existing flat policies', async t => {
+  for (const client of ['codex', 'claude']) for (const version of [2, 3, 4]) {
+    const f = await fixture(t, { client });
+    const legacy = { ...schema4(f), version, minimumPluginVersion: version === 2 ? '0.5.1' : version === 3 ? '0.6.0' : '0.7.0' };
+    if (version === 2) delete legacy.completionCheck;
+    await fs.mkdir(path.dirname(f.configPath));
+    await fs.writeFile(f.configPath, JSON.stringify(legacy));
+    const before = await fingerprint(f.configPath);
+    assert.equal((await setupStatus(f)).organization, 'flat');
+    const context = (await hookResponse(client, { ...payload(f.project), hook_event_name: 'UserPromptSubmit' }, legacy)).hookSpecificOutput.additionalContext;
+    assert.equal(JSON.parse(context.split('\n\n').at(-1)).organization, 'flat');
+    assert.match(context, /directly in notesDir; no subfolders unless explicitly selected/);
+    await assert.rejects(initialize(f), /already exists/);
+    assert.equal(await fingerprint(f.configPath), before);
+    const proposed = { ...legacy, scope: 'Updated synthetic subject scope.' };
+    await fs.writeFile(f.proposal, JSON.stringify(proposed));
+    await updateConfiguration({ ...f, expectedHash: before, confirmCompatibleClients: false });
+    assert.deepEqual(await load(f.configPath), proposed);
+    assert.equal((await setupStatus(f)).organization, 'flat');
+    assert.deepEqual(await fs.readdir(f.notesDir), []);
+    await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
+  }
+});
+
 test('reviewed upgrade preserves legacy settings and notes, and subsequent schema-4 edits need no renewed compatibility assertion', async t => {
   const f = await fixture(t);
   await initialize({ ...f, organization: undefined, completionCheck: true });
-  const old = await load(f.configPath);
+  const created = await load(f.configPath);
+  const old = { ...created, version: 3, minimumPluginVersion: '0.6.0',
+    routes: created.routes.map(({ organization, ...route }) => route) };
+  await fs.writeFile(f.configPath, JSON.stringify(old));
+  assert.equal((await setupStatus(f)).organization, 'flat');
   const note = path.join(f.notesDir, 'existing.md');
   await fs.writeFile(note, '# Existing\n\n## Decision\n\nPreserve this note.\n');
   const beforeNote = await fingerprint(note);

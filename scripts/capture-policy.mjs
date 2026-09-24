@@ -87,7 +87,7 @@ export function configSchema(config) {
 /** Older installed readers cannot learn the new schema retroactively. */
 export function assertCompatibleClients(config, previous, confirmed) {
   if (config.version === 4 && previous?.version !== 4 && confirmed !== true) {
-    throw Object.assign(new Error('Organization policies require Cuefluent Notes 0.7.0+ in every installed client reading this policy, including clients absent from its clients list. Inspect installations before passing --confirm-compatible-clients yes. Otherwise retain the existing policy.'), { code: 'CLIENT_UPGRADE_REQUIRED' });
+    throw Object.assign(new Error('Type folders require Cuefluent Notes 0.7.0+ in all readers, including clients absent from the policy. Inspect installations before --confirm-compatible-clients yes. ' + (previous ? 'Otherwise retain the existing policy.' : 'No configuration created. Upgrade readers, or choose --organization flat for root-only notes (0.5.1+; 0.6.0+ with completion checks).')), { code: 'CLIENT_UPGRADE_REQUIRED' });
   }
   if (config.version === 3 && previous?.version !== 3 && confirmed !== true) {
     throw Object.assign(new Error('Completion checks require Cuefluent Notes 0.6.0+ in every installed client reading this policy, including clients absent from its clients list. Inspect installations before passing --confirm-compatible-clients yes. Otherwise retain the existing schema without completion checks.'), { code: 'CLIENT_UPGRADE_REQUIRED' });

@@ -108,13 +108,19 @@ existing notes instead of inventing a parallel collection. Create a missing
 notes folder only when it is the user's selected location. The helper requires
 that folder to exist and never creates a note during setup.
 
-Folder organization defaults to flat. When the user wants categories, explain
-[by-type placement](workflow.md#note-placement) and its root fallback, then use
-`--organization by-type` only for that selected choice. Existing notes remain
-where they are; setup creates no category folders. Verify a supported app loading
-path before recommending this layout for real notes; nested/recursive loading
-is not established by the plugin tests. An explicit file or Manual choice has
-no organization option. Do not turn an organization discussion into capture consent.
+New folder setups use `by-type` automatically. Do not add a layout or note-type
+question to onboarding: the agent infers each note's type from its content and
+purpose when saving, with general/unclear material at the root. Follow
+[note placement](workflow.md#note-placement). Honor an explicit root-only request
+with `--organization flat`. Existing notes remain where they are; setup creates
+no category folders. For by-type, explain the type folders and give an
+example such as `meetings/<subject>.md` below the chosen root; this is a setup
+summary, not another approval question. Verify Status reports the intended
+organization. State that automatic loading of nested files in Cuefluent has not
+been verified. Do not promise recursive discovery or require a live app test
+before honoring the selected layout.
+An explicit file or Manual choice has no organization option. Do not turn an
+organization discussion into capture consent.
 
 Summarize what will be eligible in plain language, such as “verified findings,
 decisions, and meaningful changes from this project.” Honor narrower or different
@@ -129,12 +135,15 @@ user. Substitute their actual choices; never execute the example paths literally
 
 Before introducing a folder policy, inspect installed Cuefluent Notes versions
 in both Codex and Claude, including user/project installations and profiles that
-read this configuration. All must be **0.5.1 or newer**, even clients absent from
-the policy's `clients` list: 0.5.0 validates the entire policy before checking that
-list. Upgrade or remove older installations within the user's authorized scope.
-If an installation cannot be verified or upgraded, retain file-based version 1
-settings and explain what remains needed for folders; do not silently replace the
-user's folder choice with a catch-all file.
+read this configuration. Default by-type setup uses schema 4, so all readers must
+support **0.7.0+**, including clients absent from the policy's `clients` list.
+An explicitly requested flat folder uses schema 2 (**0.5.1+**), or schema 3
+(**0.6.0+**) when completion checks are enabled.
+Upgrade or remove older installations within the user's authorized scope.
+If an installation cannot be verified or upgraded, preserve existing settings
+and explain the compatibility issue. Offer explicit flat placement as a
+compatible alternative when those reader requirements can be met; do not silently
+substitute it or a catch-all file for the intended collection.
 
 The helper warns and refuses the first publication of a newer schema unless the caller
 supplies `--confirm-compatible-clients yes`. Supply it only after this inspection;
@@ -156,16 +165,18 @@ For an explicitly selected file, replace `--notes-dir` with
 `--destination /absolute/private-notes/selected-topic.md`; use exactly one option.
 Folder status reports `notesDir`, while file status reports `destination`.
 Explicit-file and Manual initialization keep schema version 1 and need no
-compatibility assertion. Folder initialization writes version 2 with
-`minimumPluginVersion: "0.5.1"`. These defaults leave completion checks off;
-explicit opt-in uses version 3 as described below.
+compatibility assertion unless completion checks are explicitly enabled for a file.
+Default by-type folder initialization writes schema 4 with `minimumPluginVersion: "0.7.0"`,
+`organization: "by-type"`, and `completionCheck: false` unless separately enabled.
+Use `--organization flat` only for an explicit root-only preference; the optional
+`--organization by-type` spells out the default. Explicit flat setup writes schema
+2 with `minimumPluginVersion: "0.5.1"` and no organization field, or schema 3 with
+`minimumPluginVersion: "0.6.0"` and `completionCheck: true` when enabled. Supply
+`--confirm-compatible-clients yes` after the installed-reader inspection.
 
-An explicit `--organization flat` or `--organization by-type` selects schema 4
-with `minimumPluginVersion: "0.7.0"` and an explicit `completionCheck` boolean
-(false unless separately enabled). Before first schema-4 publication, inspect
-all installed readers as above: every reader must support **0.7.0+**. Supply
-`--confirm-compatible-clients yes` only after that inspection. Omit the option
-to retain the legacy initialization defaults; omission in schema 4 also means flat.
+This initialization default does not reinterpret saved policies: existing
+schema-2/3 folder routes and stored schema-4 routes with no organization field
+retain flat placement. Status and package updates do not migrate them.
 
 Use `--mode suggest` for suggestions. The helper chooses private writer state
 beside the configuration, keyed by the canonical notes folder so notes in that
@@ -212,15 +223,26 @@ onboarding and has not yet selected a mode or destination.
 stop. An explicit setup request for another project/client, or a mode change,
 uses `update`; never rewrite the active configuration with an ordinary file write.
 
+For a newly added folder collection, use schema 4 and `organization: "by-type"`
+unless root-only placement was explicitly requested. Flat folders can be added
+under schema 2 (schema 3 with completion checks); preserve any higher existing
+schema instead of downgrading. Apply the same installed-reader
+inspection as fresh folder setup, preserving existing routes' organization. A new
+route into an existing or overlapping collection must share its organization and
+state; changing that collection's layout requires the organization update below.
+
 Older configurations with `destination` remain file routes. Do not silently
 broaden them to folders. When the user requests a collection instead, perform the
 installed-client compatibility inspection above, including unlisted clients.
-Set `version` to `2` and `minimumPluginVersion` to `"0.5.1"`, then replace that
-route's `destination` with `notesDir` in the reviewed update. Pass
-`--confirm-compatible-clients yes` for that first schema upgrade; subsequent
-edits of a valid version 2 policy do not require the assertion again.
-If the policy is already version 3 or 4, retain that version, minimum plugin version,
-and completion setting when changing storage; do not downgrade it.
+Replace that route's `destination` with `notesDir`. For by-type, use schema 4
+with `minimumPluginVersion: "0.7.0"` and `organization: "by-type"`. An explicit
+root-only choice can use schema 2 (0.5.1+) or schema 3 with completion (0.6.0+),
+without an organization field; retain any higher existing schema instead of
+downgrading, setting `organization: "flat"` in schema 4. Preserve existing
+`completionCheck`; when introducing schema 4 from schemas 1–2, set it to false.
+Pass `--confirm-compatible-clients yes` on the first publication of the selected
+schema after checking all readers. Existing schema-2/3 folder policies remain
+readable and editable without changing their organization.
 For the same canonical folder, retain the existing `stateDir`. This changes
 routing only; it does not rename, split, or move existing notes. Correct existing
 note names only within the user's requested scope, preserving content and links.
@@ -233,6 +255,15 @@ First publication requires the compatibility assertion. Do not write an organiza
 field on a file route, downgrade a policy, or move notes as part of this change.
 Explain that switching back to flat limits automatic note discovery to the root;
 existing category notes stay in place and can still be explicitly selected.
+
+A request to organize notes into `meetings/`, `tasks/`, or other supported type
+folders selects `by-type`; do not merely explain that the existing route is flat
+and leave the requested change unapplied. Use the guarded update below, report
+any actual compatibility or configuration conflict, then verify Status before
+saving under the new layout. Use the refreshed routing instead of a stale flat
+hook context. Keep capture mode, subject scope, notes root, and shared state
+unchanged. A request for one explicit file is a one-time destination choice,
+not a persistent organization change; a status question alone authorizes no change.
 
 1. Run Status with the selected project and keep its `configHash`. Read that
    exact policy and prepare a complete proposed JSON in a separate private file.
@@ -293,7 +324,9 @@ the check off. For fresh setup, offer it as an optional follow-up rather than
 adding a mandatory onboarding question.
 
 Before enabling it, inspect **every installed reader of this policy**, including
-unlisted clients and other profiles: all must support **0.6.0+**. If compatibility
+unlisted clients and other profiles. Fresh by-type folder setup and existing
+schema-4 policies require **0.7.0+**; explicit-file or flat-folder setup and
+completion-only upgrades of schema-1/2 policies require **0.6.0+**. If compatibility
 cannot be established, leave the current policy intact and explain what remains.
 The setting applies to all active routes and listed clients, so preserve the
 user's intended scope. Newly registered Stop hooks also need host trust; use the
@@ -311,12 +344,13 @@ before that success is not checked. A later mode/policy change requires new proo
 
 For a fresh Suggestions or Automatic setup with explicit completion consent,
 add `--completion-check yes --confirm-compatible-clients yes` to `init`.
+By-type folder initialization uses schema 4; explicit files and flat folders use schema 3.
 For existing settings, follow the guarded update flow above with
 `version: 3`, `minimumPluginVersion: "0.6.0"`, and `completionCheck: true`, retaining
 all routes and other choices. If already schema 4, retain version 4, its 0.7.0
 minimum, and organization settings; its reader requirements still apply.
-Pass `--confirm-compatible-clients yes` on the first
-schema-3 publication only after the inspection. Setup writes no markers or notes.
+Pass `--confirm-compatible-clients yes` on the first publication of schema 3 or 4
+only after the applicable reader inspection. Setup writes no markers or notes.
 
 To turn the check off, update `completionCheck` to `false` while retaining schema
 3 or 4 as applicable and the existing capture mode. This stops marker instructions

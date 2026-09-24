@@ -335,10 +335,12 @@ each host rather than assuming both update the same way.
 
 ## Compatibility and verification status
 
-Optional by-type folder policies use schema 4 and require every installed reader
-of that shared configuration to support 0.7.0+. Setup requires an explicit caller
+New folder setups default to by-type placement using schema 4 and require every
+installed reader of that shared configuration to support 0.7.0+. Setup requires an explicit caller
 compatibility assertion after checking those installations; it does not discover
-them automatically. Existing schemas and explicit files remain supported, and
+them automatically. Explicit flat folder setup uses schema 2 (0.5.1+) or schema
+3 with completion checks (0.6.0+); it still requires the applicable compatibility
+assertion. Existing schemas and explicit files remain supported, and
 updating a package does not activate categories or move notes. Follow
 [setup](setup.md) to change organization while preserving consent and shared state.
 Directory-bound authored writes use journal version 2, which requires 0.7.0+
@@ -373,8 +375,9 @@ remain unverified. Check the
 [releases page](https://github.com/martinmqz/cuefluent-notes/releases) for publication status.
 The [type-folder checks](verification.md#note-type-folders-070) establish helper
 and package behavior, not model classification, native Save / Skip rendering,
-or a Cuefluent ingestion path. Keep flat organization until loading evidence is
-available; do not infer recursive discovery from directory support.
+or a Cuefluent ingestion path. App loading is separate from the user's chosen
+note layout; do not infer recursive discovery from directory support or require
+a live app test before honoring a type-folder request.
 
 The project has no assigned source license. Included third-party dependencies
 keep their own license notices; no project license is implied by those notices.
