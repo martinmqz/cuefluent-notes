@@ -3,6 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildPackages } from './package.mjs';
 import MarkdownIt from 'markdown-it';
@@ -74,6 +75,8 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     const manifest = JSON.parse(await fs.readFile(path.join(pkg.root, expectedManifest), 'utf8'));
     assert.equal(manifest.name, 'cuefluent-notes');
     assert.equal(manifest.version, sourceVersion);
+    const { READER_VERSION } = await import(pathToFileURL(path.join(pkg.skillRoot, 'scripts/capture-policy.mjs')));
+    assert.equal(READER_VERSION.join('.'), manifest.version);
     await assert.rejects(fs.stat(path.join(pkg.root, 'hooks')), { code: 'ENOENT' });
     const files = await inventory(pkg.root);
     await checkDocumentation(pkg.root, files);

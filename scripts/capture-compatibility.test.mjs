@@ -4,10 +4,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { initialize, setupStatus } from './setup.mjs';
-import { captureSettings, configSchema } from './capture-policy.mjs';
+import { captureSettings, configSchema, READER_VERSION } from './capture-policy.mjs';
 import { updateConfiguration } from './config-update.mjs';
 import { hookResponse } from './hooks.mjs';
 import { fingerprint } from './safe-update.mjs';
+
+const [major, minor, patch] = READER_VERSION;
+const futureReaderVersion = `${major}.${minor}.${patch + 1}`;
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-compatibility-')));
@@ -21,6 +24,21 @@ async function fixture(t) {
 const load = async file => JSON.parse(await fs.readFile(file));
 const payload = cwd => ({ hook_event_name: 'UserPromptSubmit', cwd, session_id: 'session', turn_id: 'turn', prompt_id: 'prompt' });
 const startup = cwd => ({ ...payload(cwd), hook_event_name: 'SessionStart', source: 'startup' });
+
+test('reader identity matches both plugin manifests without a false upgrade at the current version', async t => {
+  const f = await fixture(t);
+  await initialize({ ...f, confirmCompatibleClients: true });
+  const config = await load(f.configPath);
+  for (const client of ['codex', 'claude']) {
+    const manifest = JSON.parse(await fs.readFile(new URL(`../packaging/${client}/plugin.json`, import.meta.url)));
+    // Compare with an independent shipped identity, without reparsing package.json.
+    assert.equal(READER_VERSION.join('.'), manifest.version);
+    const policy = { ...config, minimumPluginVersion: manifest.version };
+    if (manifest.version === config.minimumPluginVersion) configSchema(policy);
+    else assert.throws(() => configSchema(policy), error =>
+      error.message === 'Invalid capture configuration.' && error.code !== 'CONFIG_REQUIRES_UPGRADE');
+  }
+});
 
 test('first folder publication warns about unlisted older clients before creating any configuration', async t => {
   const f = await fixture(t);
@@ -76,7 +94,7 @@ test('unlisted clients ignore unfamiliar policy schema while listed clients rece
   const config = await load(f.configPath);
   for (const future of [
     { ...config, version: 5, futureOption: true },
-    { ...config, minimumPluginVersion: '0.7.1', futureOption: true },
+    { ...config, minimumPluginVersion: futureReaderVersion, futureOption: true },
     { ...config, version: 999, routes: [{ futureRouteType: 'future' }] },
   ]) {
     await fs.writeFile(f.configPath, JSON.stringify(future));
@@ -150,5 +168,5 @@ test('a supported reader minimum in the wrong schema reports invalid rather than
   await fs.writeFile(f.configPath, JSON.stringify({ ...config, minimumPluginVersion: '0.6.0' }));
   assert.equal((await setupStatus(f)).status, 'invalid');
   assert.throws(() => configSchema({ ...config, minimumPluginVersion: '0.6.0' }), /Invalid capture configuration/);
-  assert.throws(() => configSchema({ ...config, minimumPluginVersion: '0.7.1' }), { code: 'CONFIG_REQUIRES_UPGRADE' });
+  assert.throws(() => configSchema({ ...config, minimumPluginVersion: futureReaderVersion }), { code: 'CONFIG_REQUIRES_UPGRADE' });
 });

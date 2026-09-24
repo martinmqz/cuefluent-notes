@@ -8,7 +8,7 @@ import pkg from '../package.json' with { type: 'json' };
 
 export const CLIENTS = new Set(['codex', 'claude']);
 // The schema's required minimum is separate from this reader's capabilities.
-const READER_VERSION = pkg.version.split(/[.+-]/).slice(0, 3).map(Number);
+export const READER_VERSION = Object.freeze(pkg.version.split(/[.+-]/).slice(0, 3).map(Number));
 export const completionEnabled = config => [3, 4].includes(config?.version) && config.completionCheck === true;
 export const completionPermissionMode = (client, mode) =>
   ['default', 'acceptEdits', 'dontAsk', 'bypassPermissions', ...(client === 'claude' ? ['auto'] : [])].includes(mode);

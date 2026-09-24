@@ -1,6 +1,6 @@
 {
   "name": "cuefluent-notes",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Capture and organize your knowledge for fast recall—right on cue.",
   "author": { "name": "Cuefluent Notes contributors" },
   "skills": "./skills/",
