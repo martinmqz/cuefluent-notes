@@ -57,8 +57,10 @@ context, answer text, or writes. A saved manual preference disables the shared
 capture policy and those notices. A configured
 `UserPromptSubmit` adapter supplies the configured scope, route, and native
 session/turn identity to the working agent. Before completing eligible work,
-consider whether new durable information merits a normal Log or Update. Read
-the destination first, preserve prior manual saves, and use the same safe writer.
+evaluate supplied or established evidence under the
+[selected-source rules](references/evidence.md#selected-sources-and-capture-scope)
+before a normal Log or Update. Read the destination first, preserve prior manual
+saves, and use the same safe writer.
 No useful change means no note write. This is best-effort agent behavior, not an
 exactly-once capture guarantee. If routing JSON includes `completion`, follow
 [the optional completion check](references/completion.md) after handling the
@@ -80,6 +82,26 @@ For source setup, package layout, and client-specific installation, read
 [distribution](references/distribution.md). Package construction does not install,
 trust, or publish anything. Keep private notes and configuration outside the
 replaceable skill package.
+
+### Automatic
+
+For an enabled, applicable route with `automaticUpdates: true`, apply only eligible,
+reviewed changes through the ordinary safe-write workflow and verify the result
+before responding. Loading the skill, inspecting the destination, or preparing
+an edit does not complete a save. Existing capture authorization covers in-scope
+changes; do not ask for a Suggestions approval unless current instructions
+require it.
+
+If the information is already captured or there is no useful change, leave notes
+unchanged and stay quiet on routine Automatic turns. Answer explicit save/status
+questions normally. Report verified saves and the specific reason an expected
+save was excluded or blocked. Preserve conflicts and stop on failure; do not
+claim a save that did not succeed.
+
+Automatic capture alone authorizes neither extra logs nor completion markers.
+When routing includes `completion`, its separate opt-in applies: follow
+[the completion check](references/completion.md), including its permission and
+opt-out rules, after handling the capture decision.
 
 ### Suggestions
 

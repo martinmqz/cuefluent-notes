@@ -190,10 +190,11 @@ it cannot authorize unrelated reads or override host filesystem permissions.
 
 Before completing eligible work, the working agent should:
 
-1. Consider whether the task established new durable information within the
-   selected scope. Mechanical edits, acknowledgments, and tool calls alone are
-   insufficient. Unknown dates remain unknown; occurrence dates and verification
-   limits follow the [evidence rules](evidence.md).
+1. Evaluate evidence under the
+   [selected-source rules](evidence.md#selected-sources-and-capture-scope);
+   hooks do not read those sources. Mechanical edits, acknowledgments, and tool
+   calls alone are insufficient. Unknown dates remain unknown; occurrence dates
+   and verification limits follow the [evidence rules](evidence.md).
 2. For a folder route, select an existing note or a descriptive new filename as
    described in [the skill](../SKILL.md). For a file route, keep its destination.
    Read the selected note and relevant current task evidence. Recognize a manual
@@ -202,7 +203,9 @@ Before completing eligible work, the working agent should:
 3. If automatic updates are permitted and a useful change is needed, prepare
    and review the ordinary Markdown change, infer faithful search vocabulary,
    and apply it with the safe writer using the configured `stateDir` and inspected
-   hashes. Preserve manual edits, stop on conflicts, and report actual limits.
+   hashes. Verify the result before responding, following the
+   [Automatic outcome](../SKILL.md#automatic). Preserve manual edits, stop on
+   conflicts, and report actual limits.
 4. If there is no useful change, leave notes unchanged. For an enabled,
    applicable Suggestions route, read the JSON `skill` path and follow its
    [Suggestions guidance](../SKILL.md#suggestions) for interaction timing,

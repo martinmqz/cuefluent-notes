@@ -104,11 +104,12 @@ For an enabled, applicable Suggestions route, show only useful in-scope proposal
 do not save from hook guidance alone. Follow the [Suggestions interaction](../SKILL.md#suggestions)
 for when to offer a proposal and how to preserve its approval boundary.
 
-Before completing eligible work, consider whether it established new durable
-information within the configured scope. Inspect the useful destination and the
-current task before deciding to write. A prior manual save or repeated hook
-delivery is not a reason to append the same facts again. If there is no useful
-change, leave the note unchanged. Do not create an activity log, parallel summary
+Before completing eligible work, follow the
+[selected-source rules](evidence.md#selected-sources-and-capture-scope) and the
+[Automatic outcome](../SKILL.md#automatic) when that mode applies. Inspect the
+useful destination and the current task before deciding to write. A prior manual
+save or repeated hook delivery is not a reason to append the same facts again.
+If there is no useful change, leave the note unchanged. Do not create an activity log, parallel summary
 bundle, or another model call. Only explicitly enabled
 [completion checks](completion.md) permit a minimal private decision marker.
 

@@ -2,7 +2,11 @@
 
 Read this when hook routing JSON contains `completion`, or when the user asks to
 enable the Stop check. It catches a missed capture decision; it does not require
-a note on every turn or create activity evidence for recaps.
+a note on every turn or create activity evidence for recaps. A marker acknowledges
+the agent's decision, not whether its eligibility judgment was correct: an incorrect
+`no-change` or `skipped` decision can satisfy the check without a note. Follow the
+[selected-source rules](evidence.md#selected-sources-and-capture-scope) and verify
+actual writes before recording `saved`.
 
 ## Handle the decision
 
