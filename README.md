@@ -8,10 +8,10 @@ evidence into clear, searchable Markdown. Directly saving user-selected material
 also works without session collection. Notes stay ordinary files with descriptive
 names and optional type folders.
 
-This source contains the replacement workflow. Published versions through
-**v0.7.1** use the prior workflow; this implementation has not been released.
-It does not import old capture settings. Fresh setup leaves collection off and
-processing Manual. Installation and hook trust enable neither process.
+**v0.8.0** introduces this replacement workflow. Published versions through
+**v0.7.1** use the prior workflow. The new workflow does not import old capture
+settings. Fresh setup leaves collection off and processing Manual. Installation
+and hook trust enable neither process.
 
 The plugin requires no Cuefluent app or Devlog. User notes, raw evidence and private
 settings belong outside the replaceable package; examples in this repository are

@@ -6,10 +6,11 @@ processes selected evidence into searchable Markdown. Collection starts off and
 processing starts Manual. Prompted processing requires approval; direct saves of
 user-selected material remain available without session collection.
 
-**Fresh setup is required.** The old capture policy, reminder hooks and optional
-Stop completion check have been removed. Old private files are preserved but not
-imported or activated. Keep unfinished old journals with the v0.7.1 reference
-helper. Installation and hook trust do not grant collection or processing consent.
+**Breaking change: fresh setup is required.** The old capture policy, reminder
+hooks and optional Stop completion check have been removed. Old private files are
+preserved but not imported or activated. Keep unfinished old journals with the
+v0.7.1 reference helper. Installation and hook trust do not grant collection or
+processing consent.
 
 Automatic collection is bounded by registered source offsets and native units;
 it does not read earlier history by default. Explicit historical capture selects
@@ -35,5 +36,6 @@ for automated coverage and live-client limitations.
 
 After publication, wait for **Publish marketplace** to finish before updating
 through the marketplace. Review changed hooks and run **Set up Cuefluent Notes**.
-`SHA256SUMS` covers all four plugin ZIPs and the marketplace snapshot. This source
-change does not itself publish a release or update an installed plugin.
+`SHA256SUMS` covers all four plugin ZIPs and the marketplace snapshot. Publishing
+does not update an installed plugin; update it through your client after the
+marketplace is ready.
