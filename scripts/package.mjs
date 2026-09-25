@@ -36,6 +36,7 @@ const SOURCE_FILES = [
   'scripts/collection-worker.mjs',
   'scripts/direct-save.mjs',
   'scripts/intake-io.mjs',
+  'scripts/intake-lock.mjs',
   'scripts/intake-recovery.mjs',
   'scripts/intake-store.mjs',
   'scripts/process-identity.mjs',

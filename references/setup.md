@@ -46,6 +46,19 @@ ID suggests platform-specific private paths. The user selects the Markdown locat
 private raw/intake/writer storage uses machine-local paths outside projects, notes,
 and the plugin. Do not place private state in a sync folder or the repository.
 
+The default raw folder is `.cuefluent-raw`. Its leading dot hides it from normal
+macOS/Linux browsing; after privacy validation, explicit `storage-prepare` attempts
+to set and verify the Hidden attribute on Windows, including custom paths. Only the raw root
+gets that attribute, not individual captures, finished notes, or state folders.
+Hidden folders retain the same private-storage permission requirements. Existing
+configured paths are preserved; setup never moves captures or renames a directory.
+For a custom raw location on macOS/Linux, choose a dot-prefixed folder name if you
+want it hidden.
+If Windows blocks the attribute change, setup returns `storage-ready` with a
+`STORAGE_VISIBILITY_FAILED` warning; report that the folder remains visible.
+Privacy, identity and policy failures still stop setup. Already-hidden roots
+require no attribute change.
+
 For a fresh collection:
 
 1. Inspect settings and retain the exact `configHash` (null for absent settings).
@@ -67,6 +80,21 @@ All overlapping note routes must share one writer state; do not create per-categ
 or per-session writers. A custom raw directory does not relocate intake state.
 
 ## Existing settings
+
+An upgrade does not rerun storage preparation. Existing Windows collections keep
+their visibility until an explicit `storage-prepare`; offer that operation when
+the user wants an existing raw folder hidden. Existing macOS/Linux `raw` folders
+keep their names and visibility. Do not replace an existing collection's paths
+with new defaults: preparation refuses a missing raw root paired with nonempty
+intake state (`PRIVATE_SETUP_CONFLICT`). Restore the original raw/state pairing
+after lost settings, or select fresh paths for a separate collection. Moving an
+existing collection needs a separately authorized migration.
+
+Preparation holds the shared intake lock through the empty-state check and raw
+folder setup. An active or unfamiliar owner blocks preparation (`INTAKE_BLOCKED`).
+If interrupted setup cannot safely clean up, preserve the remaining files and
+owner metadata and follow [explicit intake recovery](workflow-cli.md); do not
+delete the lock or select different paths to bypass it.
 
 Change only the requested fields in a complete inspected proposal and use its exact
 old hash. Collection and processing preferences remain independent. Preserve explicit

@@ -10,10 +10,10 @@ const stamp = '2026-09-24T00:00:00.000Z';
 const row = (type, payload) => JSON.stringify({ timestamp: stamp, type, payload }) + '\n';
 const turn = (id, text) => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: text }) + row('event_msg', { type: 'task_complete', turn_id: id });
 const exists = file => fs.stat(file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-async function until(check, message) {
+async function until(check, message, diagnostics) {
   const end = Date.now() + 20000;
   while (Date.now() < end) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 100)); }
-  assert.fail(message);
+  assert.fail(`${message}; ${JSON.stringify(await diagnostics())}`);
 }
 
 for (const client of ['codex', 'claude']) test(`${client}: shipped lifecycle command launches a private bounded worker and never Markdown processing`, async t => {
@@ -47,12 +47,14 @@ for (const client of ['codex', 'claude']) test(`${client}: shipped lifecycle com
   const registration = invoke(payload); assert.equal(registration.stderr, '');
   assert.match(JSON.parse(registration.stdout).hookSpecificOutput.additionalContext, /no verified current-turn binding/);
   const lock = path.join(f.collection.intakeStateDir, '.intake-lock'), statusFile = path.join(f.collection.intakeStateDir, 'ingress/status/record.json');
-  await until(async () => await exists(statusFile) && !await exists(lock), 'initial detached worker did not finish');
+  const diagnostics = async () => ({ locked: await exists(lock),
+    status: await fs.readFile(statusFile, 'utf8').then(JSON.parse, error => ({ error: error.code })) });
+  await until(async () => await exists(statusFile) && !await exists(lock), 'initial detached worker did not finish', diagnostics);
   await fs.appendFile(source, client === 'codex' ? turn(a, 'Excluded boundary') + turn(b, 'Meeting: ship the fixture.') : human(a, 'Excluded boundary') + human(b, 'Meeting: ship the fixture.'));
   const stopped = invoke({ ...payload, hook_event_name: 'Stop', stop_hook_active: false, [client === 'codex' ? 'turn_id' : 'prompt_id']: b });
   assert.equal(stopped.stdout, ''); assert.equal(stopped.stderr, '');
   const headFile = path.join(f.collection.intakeStateDir, 'heads', client, sessionId, `${b}.json`);
-  await until(async () => await exists(headFile) && !await exists(lock), 'detached worker did not publish the selected successor');
+  await until(async () => await exists(headFile) && !await exists(lock), 'detached worker did not publish the selected successor', diagnostics);
   assert.equal(await exists(path.join(f.collection.intakeStateDir, 'heads', client, sessionId, `${a}.json`)), false);
   const head = JSON.parse(await fs.readFile(headFile));
   const capturePath = path.join(f.collection.rawDir, client, sessionId, b, `${head.evidenceHash.slice(0, 20)}.json`);

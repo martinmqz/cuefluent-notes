@@ -92,7 +92,9 @@ export async function configureWorkflow({ configPath = workflowConfigPath(), exp
 
 /** Explicit setup step after disabled/manual settings are saved. Returns only
  * serializable status, never an opaque capability or implicit enablement. */
-export async function prepareConfiguredStorage(options) {
-  await prepareWorkflowStorage(options);
-  return { status: 'storage-ready', collectionId: options.collectionId, configHash: options.expectedConfigHash };
+export async function prepareConfiguredStorage(options, preparation = {}) {
+  const warnings = [];
+  await prepareWorkflowStorage(options, { ...preparation, onWarning: code => warnings.push(code) });
+  return { status: 'storage-ready', collectionId: options.collectionId, configHash: options.expectedConfigHash,
+    ...(warnings.length ? { warnings } : {}) };
 }

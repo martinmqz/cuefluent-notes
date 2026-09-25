@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { fail } from './workflow-values.mjs';
 import { inside } from './workflow-paths.mjs';
 import { workflowTimeout } from './workflow-budget.mjs';
+import { sameFileIdentity } from './file-io.mjs';
 
 const SID = /^S-1-(?:\d+-){1,14}\d+$/;
 const SYSTEM = 'S-1-5-18', ADMIN = 'S-1-5-32-544', FULL = 2032127;
@@ -40,6 +41,7 @@ export function windowsTools(env = process.env) {
   if (!root || !/^[a-z]:\\[^\r\n\u0000]*$/i.test(root)) fail('PRIVACY_TOOLS_UNAVAILABLE');
   const system = path.win32.join(root, 'System32');
   return { whoami: path.win32.join(system, 'whoami.exe'), icacls: path.win32.join(system, 'icacls.exe'),
+    attrib: path.win32.join(system, 'attrib.exe'),
     powershell: path.win32.join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe') };
 }
 
@@ -196,6 +198,7 @@ export async function privacyIdentity() {
 
 /** Metadata only. entries contain pinned lstat values; never read file bodies. */
 export async function verifyPrivateEntries(entries, identity, { fresh = false } = {}) {
+  const attributes = new Map();
   if (process.platform === 'win32') {
     for (let offset = 0; offset < entries.length; offset += 32) {
       const batch = entries.slice(offset, offset + 32);
@@ -211,6 +214,7 @@ export async function verifyPrivateEntries(entries, identity, { fresh = false } 
       for (let i = 0; i < batch.length; i++) {
         if (values[i].path !== batch[i].path) fail('PRIVACY_PROBE_FAILED');
         validateWindowsACL(values[i], identity, { directory: batch[i].stat.isDirectory(), root: batch[i].root });
+        attributes.set(batch[i].path, values[i].attributes);
       }
     }
   } else {
@@ -250,6 +254,29 @@ export async function verifyPrivateEntries(entries, identity, { fresh = false } 
       }
     }
   }
+  return attributes;
+}
+
+/** Explicit setup only, after privacy verification of this pinned raw root.
+ * Unix visibility comes from the chosen basename; never rename existing paths.
+ */
+export async function hidePrivateDirectory(entry, identity, guard, { command = systemCommand } = {}) {
+  if (process.platform !== 'win32') fail('PRIVACY_PLATFORM_UNSUPPORTED');
+  await stableACLEntry(entry, identity, aclVersion(entry, identity));
+  if (entry.attributes & 2) return; // Freshly verified Hidden bit: no metadata mutation.
+  await guard();
+  await stableACLEntry(entry, identity, aclVersion(entry, identity));
+  try {
+    // Affect only this directory. /L avoids following a substituted symbolic link.
+    await command(windowsTools().attrib, ['+H', entry.path, '/L']);
+  } catch { /* Visibility is optional; fresh privacy and identity checks still apply. */ }
+  const stat = await fs.lstat(entry.path, { bigint: true });
+  if (!sameFileIdentity(entry.stat, stat)) fail('PRIVATE_STORAGE_CHANGED');
+  const current = { ...entry, stat };
+  await stableACLEntry(current, identity, aclVersion(current, identity));
+  const attributes = await verifyPrivateEntries([current], identity);
+  await stableACLEntry(current, identity, aclVersion(current, identity));
+  return attributes.get(entry.path) & 2 ? undefined : 'STORAGE_VISIBILITY_FAILED';
 }
 
 /** Only the caller's newly created empty directory may be changed. */

@@ -20,7 +20,7 @@ try {
   $source = Join-Path $base 'source'
   $scripts = Join-Path $source 'scripts'
   New-Item -ItemType Directory -Path (Join-Path $scripts 'test-support') -Force | Out-Null
-  $files = @('storage-standard-user.mjs', 'storage-platform.mjs', 'workflow-storage.mjs', 'workflow-config.mjs', 'workflow-paths.mjs', 'workflow-routes.mjs', 'workflow-values.mjs', 'workflow-budget.mjs', 'collection-grant.mjs', 'file-io.mjs', 'runtime-paths.mjs', 'test-support\storage-fixture.mjs', 'test-support\core-storage.mjs')
+  $files = @('storage-standard-user.mjs', 'storage-platform.mjs', 'workflow-storage.mjs', 'intake-lock.mjs', 'process-identity.mjs', 'workflow-config.mjs', 'workflow-paths.mjs', 'workflow-routes.mjs', 'workflow-values.mjs', 'workflow-budget.mjs', 'collection-grant.mjs', 'file-io.mjs', 'runtime-paths.mjs', 'test-support\storage-fixture.mjs', 'test-support\core-storage.mjs')
   foreach ($file in $files) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $scripts $file) }
   $node = Join-Path $base 'node.exe'
   Copy-Item -LiteralPath (Get-Command node.exe).Source -Destination $node

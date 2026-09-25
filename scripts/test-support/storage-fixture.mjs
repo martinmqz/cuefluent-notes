@@ -7,13 +7,13 @@ import { privacyIdentity, protectNewDirectory } from '../storage-platform.mjs';
 import { digest } from '../workflow-values.mjs';
 import { coreStorageFixture } from './core-storage.mjs';
 
-export async function storageFixture(t, { privateConfig = false, fullSetup = true } = {}) {
+export async function storageFixture(t, { privateConfig = false, fullSetup = true, rawName = 'raw' } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-private-')));
   // Detached native children can briefly retain their cwd after publication.
   // Retry only owned-fixture teardown; assertion failures still propagate.
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const project = path.join(root, 'project'); await fs.mkdir(project);
-  const collection = { id: 'fixture', rawDir: path.join(root, 'raw'), intakeStateDir: path.join(root, 'state'),
+  const collection = { id: 'fixture', rawDir: path.join(root, rawName), intakeStateDir: path.join(root, 'state'),
     notes: { notesDir: path.join(root, 'notes'), writerStateDir: path.join(root, 'writer') } };
   const config = { format: 'cuefluent-workflow', schemaVersion: 1, collections: [collection],
     routes: [{ id: 'fixture', projectRoot: project, clients: ['codex', 'claude'], collectionId: 'fixture',

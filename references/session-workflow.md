@@ -454,6 +454,13 @@ execution-policy override or elevation. Current-user access is required even
 for administrators. Existing roots and children are inspected without permission
 repair. The probe limits module search to system modules and uses a qualified
 ACL command; it assumes a trusted host environment, including `SystemRoot`.
+After all roots pass privacy verification, explicit preparation uses system
+`attrib.exe` if the raw root is not already hidden, then verifies the attribute
+with a fresh native probe. An unsuccessful attribute change is a visibility
+warning; permission, identity and policy failures remain fatal. This applies only to the
+selected directory and does not rename existing paths or change capture filenames.
+The default folder uses `.cuefluent-raw` for macOS/Linux visibility as well;
+see [setup](setup.md#save-the-chosen-settings) for custom locations.
 The native environment is retained for Windows PowerShell's lazy command
 initialization. Windows directory/drive values, executable/module search paths
 and the selected path payload are overridden after removing inherited aliases

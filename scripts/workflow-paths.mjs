@@ -41,7 +41,7 @@ export function workflowDefaults({ platform = process.platform, home = os.homedi
   }
   if (collectionId === undefined) return { configPath };
   const root = api.join(base, 'collections', id(collectionId));
-  return { configPath, rawDir: api.join(root, 'raw'), intakeStateDir: api.join(root, 'state') };
+  return { configPath, rawDir: api.join(root, '.cuefluent-raw'), intakeStateDir: api.join(root, 'state') };
 }
 
 /** Resolve existing aliases, but never create a missing suffix. Leaf links are refused. */

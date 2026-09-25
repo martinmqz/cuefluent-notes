@@ -10,7 +10,7 @@ in the source repository for the current jobs.
 | --- | --- |
 | Session readers | Supported Codex and Claude record shapes across varying version metadata, selected boundaries, native identity/order, bounded reads, exclusions, partial records and immutable revisions |
 | Consent and controls | Independent collection/processing settings, opt-outs, stale settings, explicit selection and zero-write ingress for disabled or unconfigured projects |
-| Private storage | Native permissions, path/link replacement, owner checks, local storage requirements and explicit maintenance |
+| Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots and explicit maintenance |
 | Processing and writes | Exact input claims, acknowledged evidence pages, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
 | Distribution | Dependency and documentation closure, detached manual/hook packages, installers, shell launchers and reproducible archives |
 
@@ -23,6 +23,9 @@ Functional capture and scheduler tests use controlled budget clocks so native
 permission-check latency does not change their expected results. Separate tests
 exercise budget expiration, retry, and the default monotonic clock. CLI checks
 use the production clock; functional checks are not throughput benchmarks.
+On Windows, the real-clock hook and detached-package checks run serially before
+the other test files, so concurrent filesystem stress fixtures do not consume
+their timing budgets. Production hook and worker deadlines remain unchanged.
 
 ## Client registration checks
 

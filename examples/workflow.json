@@ -4,7 +4,7 @@
   "collections": [
     {
       "id": "example",
-      "rawDir": "/private-example/cuefluent/raw",
+      "rawDir": "/private-example/cuefluent/.cuefluent-raw",
       "intakeStateDir": "/private-example/cuefluent/intake",
       "notes": {
         "notesDir": "/private-example/notes",

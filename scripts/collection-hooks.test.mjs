@@ -90,18 +90,22 @@ test('replacement Codex bootstrap works through the native shell matrix', async 
   await fs.writeFile(script, "export async function main(){process.stdout.write(JSON.stringify({verified:process.env.PLUGIN_ROOT}))}");
   const shells = process.platform === 'win32' ? await windowsShells() : [['/bin/sh', ['-c'], 'POSIX sh']];
   const command = collectionHookConfiguration('codex').hooks.UserPromptSubmit[0].hooks[0].command;
+  // Shell quoting/launch compatibility is separate from the cold-ingress timing
+  // check above. Allow shell startup without extending the shipped hook deadline.
   for (const [shell, flags, name] of shells) await t.test(name, {
     skip: !shell && process.env.CUEFLUENT_REQUIRE_SHELLS !== '1' ? `${name} is not installed` : false,
   }, async () => {
     assert(shell, `${name} is required in CI`);
     const cmd = shell === 'cmd.exe';
     const result = spawnSync(shell, [...flags, cmd ? `"${command}"` : command], {
-      env: f.environment, encoding: 'utf8', input: '{}', timeout: 4000, windowsVerbatimArguments: cmd,
+      env: f.environment, encoding: 'utf8', input: '{}', timeout: 15000, windowsVerbatimArguments: cmd,
     });
-    assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).verified, f.root);
+    assert.equal(result.status, 0, JSON.stringify({ error: result.error?.code, signal: result.signal, stderr: result.stderr }));
+    assert.equal(JSON.parse(result.stdout).verified, f.root);
     const absent = spawnSync(shell, [...flags, cmd ? `"${command}"` : command], {
-      env: { ...f.environment, PLUGIN_ROOT: path.join(f.root, 'missing') }, encoding: 'utf8', input: '{}', timeout: 4000, windowsVerbatimArguments: cmd,
+      env: { ...f.environment, PLUGIN_ROOT: path.join(f.root, 'missing') }, encoding: 'utf8', input: '{}', timeout: 15000, windowsVerbatimArguments: cmd,
     });
-    assert.equal(absent.status, 0, absent.stderr); assert.equal(absent.stdout, '');
+    assert.equal(absent.status, 0, JSON.stringify({ error: absent.error?.code, signal: absent.signal, stderr: absent.stderr }));
+    assert.equal(absent.stdout, '');
   });
 });

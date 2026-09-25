@@ -1,4 +1,5 @@
 import { checkWorkflowBudget } from './workflow-budget.mjs';
+import { withIntakeDirectoryLock } from './intake-lock.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { collectionGrantHash } from './collection-grant.mjs';
@@ -7,7 +8,7 @@ import { lstatOrNull, sameFileIdentity, syncDirectory } from './file-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { validateWorkflowPlacement, canonicalWorkflowPath, inside } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
-import { privacyIdentity, verifyPrivateEntries, protectNewDirectory, rejectKnownSync } from './storage-platform.mjs';
+import { privacyIdentity, verifyPrivateEntries, protectNewDirectory, hidePrivateDirectory, rejectKnownSync } from './storage-platform.mjs';
 import { fail, canonicalJSON, hash, digest, list, keys } from './workflow-values.mjs';
 
 const capabilities = new WeakMap();
@@ -98,8 +99,8 @@ async function verifyRoots(roots, identity, options = { paths: [] }) {
           original.uid !== entry.stat.uid || original.gid !== entry.stat.gid) fail('PRIVATE_STORAGE_CHANGED');
       originals.set(entry.path, original);
     }
-    let probeChanged = false;
-    try { await verifyPrivateEntries(entries, identity, { fresh: attempt > 0 }); }
+    let probeChanged = false, attributes = new Map();
+    try { attributes = await verifyPrivateEntries(entries, identity, { fresh: attempt > 0 }); }
     catch (error) { if (error.code !== 'PRIVATE_STORAGE_CHANGED') throw error; probeChanged = true; }
     let changedDirectory = false;
     for (const entry of entries) {
@@ -114,7 +115,7 @@ async function verifyRoots(roots, identity, options = { paths: [] }) {
     }
     if (!changedDirectory) {
       if (probeChanged) fail('PRIVATE_STORAGE_CHANGED');
-      return entries.filter(item => item.root);
+      return entries.filter(item => item.root).map(item => ({ ...item, attributes: attributes.get(item.path) }));
     }
     // Child creation changes directory ctime/link count without changing ACLs.
     // A retry must inspect fresh permissions; never waive version checks.
@@ -128,49 +129,129 @@ export async function verifyPrivateDirectories(roots, options = { paths: [] }) {
 }
 
 /** Explicit setup only; never called by a hook. Existing permissions are not repaired. */
-export async function prepareWorkflowStorage({ configPath, expectedConfigHash, collectionId }) {
+export async function prepareWorkflowStorage({ configPath, expectedConfigHash, collectionId }, {
+  visibility = hidePrivateDirectory,
+  onWarning = code => console.error(`Cuefluent Notes: raw folder remains visible (${code}).`),
+} = {}) {
   const selected = await checkedSelection(configPath, expectedConfigHash, collectionId);
   const identity = await privacyIdentity();
-  async function create(file) {
+  const initialRaw = await lstatOrNull(selected.collection.rawDir, { bigint: true });
+  let createdRaw;
+  async function create(file, expected, beforeCreate) {
     rejectKnownSync(file);
-    const old = await lstatOrNull(file);
+    const old = await lstatOrNull(file, { bigint: true });
+    // Preserve the decision that required (or skipped) the intake preflight.
+    // An existing raw root may not disappear, and an absent one may not appear.
+    if (expected !== undefined && (expected ? !sameFileIdentity(expected, old) : old)) fail('PRIVATE_STORAGE_CHANGED');
     if (old) {
       if (!old.isDirectory() || old.isSymbolicLink() || await fs.realpath(file) !== file) fail('UNSAFE_PRIVATE_STORAGE');
-      return;
+      return old;
     }
     await create(path.dirname(file));
     await checkedSelection(configPath, expectedConfigHash, collectionId);
+    await beforeCreate?.();
     await fs.mkdir(file, { mode: 0o700 }); // EEXIST is a conflict, never adopt.
     const original = await fs.lstat(file, { bigint: true });
+    if (file === selected.collection.rawDir && !initialRaw) createdRaw = original;
     await protectNewDirectory(file, identity);
     const current = await fs.lstat(file, { bigint: true });
     if (!sameFileIdentity(original, current)) fail('PRIVATE_STORAGE_CHANGED');
     await verifyPrivateEntries([{ path: file, stat: current, root: true }], identity);
     await syncDirectory(path.dirname(file));
+    return current;
   }
-  for (const root of rootsOf(selected.collection)) await create(root);
-  for (const root of [selected.collection.intakeStateDir, selected.collection.notes.writerStateDir]) await create(path.join(root, 'metadata-stages'));
-  // Hooks publish beneath stable nested parents to minimize intake-root churn.
-  // Worker/writer child changes still require a fresh bounded privacy retry.
-  for (const name of ['stages', 'status', 'scheduler', 'registrations/codex', 'registrations/claude',
-    'wake/codex', 'wake/claude', 'wake-acks/codex', 'wake-acks/claude', 'drained/codex', 'drained/claude', 'suspended/codex', 'suspended/claude']) {
-    await create(path.join(selected.collection.intakeStateDir, 'ingress', ...name.split('/')));
-  }
-  // Verify inheritance without source text, and remove only the exact empty
-  // probe owned by this setup. Existing roots receive no permission mutation.
-  for (const root of rootsOf(selected.collection)) {
-    await verifyRoots([root], identity, { paths: null });
-    const probe = path.join(root, `.privacy-probe-${randomUUID()}`);
-    await fs.mkdir(probe, { mode: 0o700 });
-    const stat = await fs.lstat(probe, { bigint: true });
-    try { await verifyPrivateEntries([{ path: probe, stat, root: false }], identity); }
-    finally {
-      const now = await fs.lstat(probe, { bigint: true });
-      if (!sameFileIdentity(stat, now) || now.isSymbolicLink()) fail('PRIVATE_STORAGE_CHANGED');
-      await fs.rmdir(probe); await syncDirectory(root);
+  async function finish(preparedRaw) {
+    await create(selected.collection.notes.writerStateDir);
+    for (const root of [selected.collection.intakeStateDir, selected.collection.notes.writerStateDir]) await create(path.join(root, 'metadata-stages'));
+    // Hooks publish beneath stable nested parents to minimize intake-root churn.
+    // Worker/writer child changes still require a fresh bounded privacy retry.
+    for (const name of ['stages', 'status', 'scheduler', 'registrations/codex', 'registrations/claude',
+      'wake/codex', 'wake/claude', 'wake-acks/codex', 'wake-acks/claude', 'drained/codex', 'drained/claude', 'suspended/codex', 'suspended/claude']) {
+      await create(path.join(selected.collection.intakeStateDir, 'ingress', ...name.split('/')));
     }
+    // Verify inheritance without source text, and remove only the exact empty
+    // probe owned by this setup. Existing roots receive no permission mutation.
+    for (const root of rootsOf(selected.collection)) {
+      await verifyRoots([root], identity, { paths: null });
+      const probe = path.join(root, `.privacy-probe-${randomUUID()}`);
+      await fs.mkdir(probe, { mode: 0o700 });
+      const stat = await fs.lstat(probe, { bigint: true });
+      try { await verifyPrivateEntries([{ path: probe, stat, root: false }], identity); }
+      finally {
+        const now = await fs.lstat(probe, { bigint: true });
+        if (!sameFileIdentity(stat, now) || now.isSymbolicLink()) fail('PRIVATE_STORAGE_CHANGED');
+        await fs.rmdir(probe); await syncDirectory(root);
+      }
+    }
+    let capability = await verifyWorkflowStorage({ configPath, expectedConfigHash, collectionId });
+    if (!sameFileIdentity(preparedRaw, capabilities.get(capability).roots[0].stat)) fail('PRIVATE_STORAGE_CHANGED');
+    if (process.platform === 'win32') {
+      const original = capabilities.get(capability);
+      await visibility(original.roots[0], identity,
+        () => checkedSelection(configPath, expectedConfigHash, collectionId));
+      // Visibility commands can outlive changes to any root. Recheck privacy and
+      // preserve the original identities before returning a fresh capability.
+      capability = await verifyWorkflowStorage({ configPath, expectedConfigHash, collectionId });
+      const current = capabilities.get(capability);
+      if (current.identity !== original.identity) fail('PRIVATE_STORAGE_CHANGED');
+      for (let i = 0; i < current.roots.length; i++)
+        if (!sameFileIdentity(current.roots[i].stat, original.roots[i].stat)) fail('PRIVATE_STORAGE_CHANGED');
+      if (!(current.roots[0].attributes & 2)) onWarning('STORAGE_VISIBILITY_FAILED');
+    }
+    return capability;
   }
-  return verifyWorkflowStorage({ configPath, expectedConfigHash, collectionId });
+
+  const intake = selected.collection.intakeStateDir;
+  const preparedIntake = await create(intake, await lstatOrNull(intake, { bigint: true }));
+  const guardIntake = async () => {
+    const [current] = await verifyRoots([intake], identity);
+    if (!sameFileIdentity(preparedIntake, current.stat)) fail('PRIVATE_STORAGE_CHANGED');
+  };
+  let preserveLock = false;
+  const result = await withIntakeDirectoryLock(intake, guardIntake, async guard => {
+    let emptyVersion;
+    const unchangedIntake = async () => {
+      await guard();
+      const current = await fs.lstat(intake, { bigint: true });
+      if (!sameFileIdentity(emptyVersion, current) ||
+          ['ctimeNs', 'mtimeNs', 'nlink', 'size'].some(key => emptyVersion[key] !== current[key])) fail('PRIVATE_STORAGE_CHANGED');
+    };
+    if (!initialRaw) {
+      // The owned intake lock is the only allowed entry. Keep it through raw
+      // creation and setup so collectors cannot publish against half a pair.
+      emptyVersion = await fs.lstat(intake, { bigint: true });
+      const directory = await fs.opendir(intake, { bufferSize: 1 });
+      try {
+        await unchangedIntake();
+        for (let entry = await directory.read(); entry; entry = await directory.read())
+          if (entry.name !== '.intake-lock') fail('PRIVATE_SETUP_CONFLICT');
+        await unchangedIntake();
+      } finally { await directory.close(); }
+    }
+    let preparedRaw;
+    try {
+      preparedRaw = await create(selected.collection.rawDir, initialRaw, emptyVersion ? unchangedIntake : undefined);
+      if (emptyVersion) await unchangedIntake();
+    } catch (error) {
+      if (createdRaw) {
+        // Roll back only our still-private, unchanged, empty new root. Never
+        // remove content or a replacement while rejecting a changed intake.
+        try {
+          const [raw] = await verifyRoots([selected.collection.rawDir], identity);
+          if (!sameFileIdentity(createdRaw, raw.stat)) fail('PRIVATE_STORAGE_CHANGED');
+          await fs.rmdir(raw.path);
+          await syncDirectory(path.dirname(raw.path));
+        } catch {
+          preserveLock = true;
+          error.cleanupWarnings = ['New raw-root cleanup was unsafe; preserve it for inspection.'];
+        }
+      }
+      throw error;
+    }
+    return { capability: await finish(preparedRaw) };
+  }, { preserveOnError: () => preserveLock });
+  if (result.cleanupWarnings?.length) fail('INTAKE_BLOCKED');
+  return result.capability;
 }
 
 /** Opaque, process-local capability; serialization cannot turn it into authority. */

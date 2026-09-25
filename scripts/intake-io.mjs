@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { openGuarded, lstatOrNull, sameFileIdentity, readBoundedBytes, syncDirectory, isOwnedStage, removeOwnedStage } from './file-io.mjs';
 import { canonicalWorkflowProject, canonicalWorkflowPath, overlaps, inside } from './workflow-paths.mjs';
@@ -8,7 +7,7 @@ import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { canonicalJSON, digest, fail, keys, nativeId, list, unique } from './workflow-values.mjs';
 import { assertWorkflowStorage, assertPrivatePaths, workflowProcessingContext } from './workflow-storage.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
-import { ownProcessIdentity } from './process-identity.mjs';
+import { withIntakeDirectoryLock } from './intake-lock.mjs';
 
 const stores = new WeakMap(), transactions = new WeakMap();
 export const MAX_INTAKE_METADATA_BYTES = 1024 * 1024;
@@ -272,63 +271,12 @@ export async function replaceIntakeJSON(transaction, name, value, expectedHash) 
 }
 
 /** No stealing, including incomplete owners. */
-export async function withIntakeLock(store, operation, { probeOwner = ownProcessIdentity } = {}) {
-  await guardStore(store);
-  const evidence = await probeOwner(process.pid);
-  const owner = { version: 1, pid: process.pid, hostname: os.hostname(), createdAt: new Date().toISOString(),
-    nonce: randomUUID(), processStart: evidence.processStart ?? null, boot: evidence.boot ?? null };
-  const bytes = Buffer.from(canonicalJSON(owner) + '\n');
-  if (bytes.length > 16 * 1024) fail('INVALID_INTAKE_OWNER');
-  const lock = path.join(store.intakeStateDir, '.intake-lock');
-  await guardStore(store);
-  try { await fs.mkdir(lock, { mode: 0o700 }); }
-  catch (error) { if (error.code === 'EEXIST') fail('INTAKE_BLOCKED'); throw error; }
-  const identity = await fs.lstat(lock, { bigint: true });
-  const ownerPath = path.join(lock, 'owner.json');
-  const guardDirectory = async () => {
-    await guardStore(store);
-    const stat = await fs.lstat(lock, { bigint: true });
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !sameFileIdentity(identity, stat)) fail('INTAKE_LOCK_CHANGED');
-  };
-  let ownerIdentity;
-  try {
-    const handle = await fs.open(ownerPath, 'wx', 0o600);
-    try { await handle.writeFile(bytes); await handle.sync(); }
-    finally {
-      try { ownerIdentity = await handle.stat({ bigint: true }); } catch { ownerIdentity = undefined; }
-      await handle.close();
-    }
-    await syncDirectory(lock); await syncDirectory(store.intakeStateDir);
-  } catch (error) {
-    try {
-      await guardDirectory();
-      if (ownerIdentity && !await removeOwnedStage(ownerPath, ownerIdentity, bytes, { partial: true, guard: guardDirectory })) throw new Error();
-      await guardDirectory(); await fs.rmdir(lock); await syncDirectory(store.intakeStateDir);
-    } catch { cleanupWarning(error, 'Incomplete intake lock cleanup was unsafe; preserve it for inspection.'); }
-    throw error;
-  }
-  const guard = async () => {
-    await guardDirectory();
-    const ownerStat = await fs.lstat(ownerPath);
-    if (!ownerStat.isFile() || ownerStat.nlink !== 1 || !(await readBoundedBytes(ownerPath, { noFollow: true, maxBytes: 16 * 1024 })).equals(bytes)) fail('INTAKE_LOCK_CHANGED');
-  };
-  const transaction = Object.freeze({});
-  transactions.set(transaction, { store, guard, active: true });
-  let output, failure, failed = false, warning;
-  try { await guard(); output = await operation(transaction); }
-  catch (error) { failed = true; failure = error; }
-  transactions.get(transaction).active = false;
-  try {
-    await guard();
-    const entries = await fs.readdir(lock);
-    if (entries.length !== 1 || entries[0] !== 'owner.json') fail('INTAKE_LOCK_CHANGED');
-    await fs.unlink(ownerPath);
-    const current = await fs.lstat(lock, { bigint: true });
-    if (!sameFileIdentity(identity, current)) fail('INTAKE_LOCK_CHANGED');
-    await fs.rmdir(lock); await syncDirectory(store.intakeStateDir);
-  } catch (error) {
-    warning = `Intake lock cleanup failed (${error.code ?? 'filesystem error'}); preserve its owner metadata and inspect before retrying.`;
-  }
-  if (failed) { if (warning) cleanupWarning(failure, warning); throw failure; }
-  return warning ? { ...output, warnings: (output?.warnings ?? 0) + 1, cleanupWarnings: [...(output?.cleanupWarnings ?? []), warning] } : output;
+export async function withIntakeLock(store, operation, options) {
+  if (!stores.has(store)) fail('UNRECOGNIZED_INTAKE_STORE');
+  return withIntakeDirectoryLock(store.intakeStateDir, () => guardStore(store), async guard => {
+    const transaction = Object.freeze({});
+    transactions.set(transaction, { store, guard, active: true });
+    try { return await operation(transaction); }
+    finally { transactions.get(transaction).active = false; }
+  }, options);
 }
