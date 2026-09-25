@@ -6,8 +6,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare, syncDirectory, sameFileIdentity, openGuarded, windowsComponent, isOwnedStage, removeOwnedStage } from './file-io.mjs';
 import { GUIDE_VERSION, MAX_BYTES, inspectMarkdown, reviewVocabulary } from './check-notes.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
+import { canonicalJSON } from './workflow-values.mjs';
+import { assertWriterAccess, validateWriterCoordination, publishWriterReceipt, readWriterReceipt } from './writer-protocol.mjs';
 import { NOTE_CATEGORIES, isNoteCategory } from './note-organization.mjs';
 
+const heldWriterGuards = new WeakMap();
 const MAX_FILES = 100;
 const MAX_SOURCES = 1000;
 const HASH = /^[a-f0-9]{64}$/;
@@ -22,7 +25,7 @@ const pathKey = value => process.platform === 'darwin'
   : process.platform === 'win32' ? value.toLowerCase() : value;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const serialize = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
-const fail = message => { throw new Error(message); };
+const fail = message => { throw Object.assign(new Error(message), { code: 'SAFE_UPDATE_REJECTED', safeMessage: message }); };
 const validHash = (value, nullable = false) => (nullable && value === null) || (typeof value === 'string' && HASH.test(value));
 const regularString = value => typeof value === 'string' && value.trim() && value.length <= 4096;
 function privatePath(file) {
@@ -169,6 +172,26 @@ export async function inspectDirectories(rootInput, paths) {
   await checkDirectories(root, directories);
   return { root, directories, createDirectories };
 }
+
+/** Existing custom/deeper parents are inspected explicitly, never discovered
+ * recursively or created. Processing retains these identities in its proposal. */
+export async function inspectExistingDirectories(rootInput, paths) {
+  if (!Array.isArray(paths) || !paths.length || paths.length > MAX_FILES) fail('Inspect 1–100 explicit note paths.');
+  const root = await directory(rootInput), parents = new Set(['.']);
+  for (const name of paths) {
+    const parts = relativeNote(name).split('/');
+    for (let count = 1; count < parts.length; count++) parents.add(parts.slice(0, count).join('/'));
+    if (parents.size > 1000) fail('Selected note parents exceed the inspection limit.');
+  }
+  const directories = [];
+  for (const parent of [...parents].sort(compare)) {
+    const identity = await directoryIdentity(path.join(root, parent));
+    if (identity === null) fail('Selected custom note parents must already exist.');
+    directories.push({ path: parent, identity });
+  }
+  await checkDirectories(root, directories);
+  return { root, directories, createDirectories: [] };
+}
 async function stateFile(stateDir, name) {
   const directoryStat = await existsStat(stateDir);
   if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink() || await fs.realpath(stateDir) !== stateDir) fail('The state directory changed or became a symlink.');
@@ -235,25 +258,46 @@ async function prepareStageMetadata(file, target) {
     await handle.sync();
   } finally { await handle.close(); }
 }
-async function writeMetadata(stateDir, name, value) {
+async function writeMetadata(stateDir, name, value, guard) {
+  await guard?.();
   const bytes = serialize(value);
   if (bytes.length > MAX_BYTES) fail('State metadata exceeds 2 MiB.');
   const target = await stateFile(stateDir, name);
-  const temp = path.join(stateDir, `.metadata-${randomUUID()}.tmp`);
-  let identity;
+  const stageRoot = path.join(stateDir, 'metadata-stages');
+  if (await directory(stageRoot, { create: true }) !== stageRoot) fail('Metadata stage directory changed.');
+  const stageIdentity = await fs.lstat(stageRoot, { bigint: true });
+  const temp = path.join(stageRoot, `.metadata-${randomUUID()}.tmp`);
+  const stageGuard = async () => {
+    await guard?.([stageRoot, temp]);
+    const current = await fs.lstat(stageRoot, { bigint: true });
+    if (!sameFileIdentity(stageIdentity, current) || !current.isDirectory() || current.isSymbolicLink() ||
+        await fs.realpath(stageRoot) !== stageRoot) fail('Metadata stage directory changed.');
+  };
+  let identity, renamed = false, failure;
   try {
-    identity = await writeExclusive(temp, bytes);
+    identity = await writeExclusive(temp, bytes, stageGuard);
+    await stageGuard();
     await stateFile(stateDir, name);
     if (!await isOwnedStage(temp, identity, bytes)) fail('Metadata stage ownership changed; preserve it for inspection.');
-    await fs.rename(temp, target);
-    await syncDirectory(stateDir);
-  } finally {
+    await stageGuard();
+    await fs.rename(temp, target); renamed = true;
+    await syncDirectory(stageRoot); await syncDirectory(stateDir);
+  } catch (error) { failure = error; throw error; } finally {
     // writeExclusive owns cleanup on write failure. Do not override a decision
     // to retain unfamiliar bytes with unconditional pathname removal here.
-    if (identity) await removeOwnedStage(temp, identity, bytes);
+    if (identity && !renamed) {
+      try {
+        if (!await removeOwnedStage(temp, identity, bytes, { guard: stageGuard })) fail('Metadata stage retained; cleanup could not be verified.');
+      } catch (error) {
+        if (!failure) throw error;
+        if (Object.isExtensible(failure)) failure.cleanupWarnings = [...(failure.cleanupWarnings ?? []), 'Metadata stage retained; cleanup could not be verified.'];
+      }
+    }
   }
 }
 async function lock(stateDir) {
+  const stateIdentity = await fs.lstat(stateDir, { bigint: true });
+  if (!stateIdentity.isDirectory() || stateIdentity.isSymbolicLink() || await fs.realpath(stateDir) !== stateDir) fail('Writer state is unsafe.');
   const lockDir = path.join(stateDir, '.lock');
   try { await fs.mkdir(lockDir, { mode: 0o700 }); }
   catch (error) { if (error.code === 'EEXIST') fail('State directory is locked. Do not steal locks; inspect the owner and resolve an abandoned lock before retrying.'); throw error; }
@@ -268,8 +312,17 @@ async function lock(stateDir) {
     try { if (await sameDirectory()) await fs.rmdir(lockDir); } catch { /* Keep unfamiliar contents and the primary error. */ }
     throw error;
   }
-  return async () => {
+  const guard = async () => {
+    const currentState = await fs.lstat(stateDir, { bigint: true });
+    if (!sameFileIdentity(stateIdentity, currentState) || currentState.isSymbolicLink() || await fs.realpath(stateDir) !== stateDir || !await sameDirectory()) fail('Writer lock ownership changed.');
+    const ownerPath = path.join(lockDir, 'owner.json'), stat = await fs.lstat(ownerPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+        !(await readBoundedBytes(ownerPath, { noFollow: true, maxBytes: 16384 })).equals(serialize(owner))) fail('Writer lock ownership changed.');
+  };
+  const release = async () => {
     try {
+      const currentState = await fs.lstat(stateDir, { bigint: true });
+      if (!sameFileIdentity(stateIdentity, currentState) || currentState.isSymbolicLink() || await fs.realpath(stateDir) !== stateDir) return 'Writer state ownership changed; inspect the lock before retrying.';
       if (!await sameDirectory()) return 'Lock directory ownership changed; inspect it before retrying.';
       const ownerPath = path.join(lockDir, 'owner.json');
       const ownerStat = await existsStat(ownerPath);
@@ -287,13 +340,18 @@ async function lock(stateDir) {
       return null;
     } catch { return 'Lock cleanup could not safely finish; inspect the lock before retrying.'; }
   };
+  return { guard, release };
 }
 export async function withLock(stateDir, operation) {
-  const unlock = await lock(stateDir);
+  const held = await lock(stateDir);
   let output, failure, failed = false;
-  try { output = await operation(); }
+  let active = true;
+  const guard = async () => { if (!active) fail('Writer lock is no longer held.'); await held.guard(); };
+  heldWriterGuards.set(guard, await fs.realpath(stateDir));
+  try { await guard(); output = await operation(guard); }
   catch (error) { failure = error; failed = true; }
-  const warning = await unlock();
+  active = false; heldWriterGuards.delete(guard);
+  const warning = await held.release();
   if (failed) {
     if (warning) {
       if (failure instanceof Error && Object.isExtensible(failure)) failure.cleanupWarnings = [...(failure.cleanupWarnings ?? []), warning];
@@ -301,7 +359,96 @@ export async function withLock(stateDir, operation) {
     }
     throw failure;
   }
-  return warning ? { ...output, warnings: (output.warnings ?? 0) + 1, cleanupWarnings: [warning] } : output;
+  return warning ? { ...output, warnings: (output?.warnings ?? 0) + 1, cleanupWarnings: [warning] } : output;
+}
+
+async function writerOperation(stateDir, options, operation) {
+  const run = async held => {
+    const coordination = options.coordination ?? null;
+    if (coordination && !options.writerGuard) fail('Coordinated writes require the active writer capability.');
+    const guard = async (privatePaths = []) => {
+      await held(); await options.authorize?.(privatePaths);
+      return assertWriterAccess(stateDir, coordination);
+    };
+    const transaction = await guard(); return operation({ ...options, guard, transaction });
+  };
+  if (options.writerGuard) {
+    if (heldWriterGuards.get(options.writerGuard) !== stateDir) fail('Invalid or expired writer capability.');
+    return run(options.writerGuard);
+  }
+  return withLock(stateDir, run);
+}
+
+async function completeCoordinatedWrite(journal, stateDir, options) {
+  if (!journal.processing) return;
+  if (canonicalJSON(journal.processing) !== canonicalJSON(options.coordination)) fail('Processing writer binding changed.');
+  await options.guard();
+  await options.afterVerification?.();
+  const verify = async () => {
+    // Receipt publication runs its current step guard immediately before this.
+    for (const file of journal.files) {
+      const target = await targetPath(journal.root, file.path, stateDir);
+      if (await fingerprint(target) !== file.newHash) fail('Output changed before its durable processing receipt.');
+    }
+    await sourceChecks(journal.files, new Set(journal.files.map(file => path.join(journal.root, file.path))));
+    await checkDirectories(journal.root, journal.directories);
+  };
+  const receipt = await publishWriterReceipt(journal.processing,
+    journal.files.map(file => ({ path: file.path, hash: file.newHash })),
+    journal.mode === 'derived' ? sha256(serialize(journal.proposedManifest)) : null, options.guard, verify);
+  await options.afterReceipt?.(receipt);
+}
+
+/** Metadata only; maintenance must never read note bodies or follow source paths. */
+export async function inspectWriterMaintenance(stateDirInput) {
+  const stateDir = await directory(stateDirInput);
+  const read = async name => {
+    const file = await stateFile(stateDir, name);
+    const opened = await openGuarded(file, { missing: true, maxBytes: MAX_BYTES, singleLink: true });
+    if (!opened) return { value: null, hash: null };
+    try {
+      const bytes = Buffer.alloc(Number(opened.stat.size));
+      let offset = 0;
+      while (offset < bytes.length) {
+        const read = await opened.handle.read(bytes, offset, bytes.length - offset, offset);
+        if (!read.bytesRead) fail('Writer metadata changed.');
+        offset += read.bytesRead;
+      }
+      const current = await fs.lstat(file, { bigint: true }), after = await opened.handle.stat({ bigint: true });
+      if (!sameFileIdentity(opened.stat, current) || current.ctimeNs !== opened.stat.ctimeNs || after.ctimeNs !== current.ctimeNs ||
+          current.size !== opened.stat.size || after.size !== current.size || current.nlink !== 1n) fail('Writer metadata changed.');
+      return { value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), hash: sha256(bytes) };
+    } finally { await opened.handle.close(); }
+  };
+  const entries = await fs.opendir(stateDir);
+  for await (const entry of entries) {
+    if (/^aborted-journal-[a-f0-9]{64}\.json$/.test(entry.name)) {
+      const archive = await read(entry.name);
+      if (entry.name !== `aborted-journal-${archive.hash}.json`) fail('Retained journal archive changed.');
+      await validateJournal(archive.value, stateDir, { checkStorage: false });
+      continue;
+    }
+    if (/^(?:\.metadata-|\.privacy-probe-)/.test(entry.name)) fail('Owned setup or metadata staging may remain; inspect it before maintenance.');
+    if (['metadata-stages', 'processing-stages'].includes(entry.name)) {
+      const stageRoot = path.join(stateDir, entry.name), stat = await fs.lstat(stageRoot);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.realpath(stageRoot) !== stageRoot) fail(`Unsafe ${entry.name === 'metadata-stages' ? 'metadata' : 'processing'} stage directory.`);
+      continue; // Unpublished stages are inert; preserve them without adopting or deleting them.
+    }
+    if (!['.lock', 'manifest.json', 'journal.json', 'claims', 'proposals', 'transactions', 'processed'].includes(entry.name)) fail('Unrecognized writer state blocks maintenance.');
+  }
+  // Even unknown or malformed journal/claim/proposal state blocks maintenance.
+  if (await existsStat(await stateFile(stateDir, 'journal.json'))) fail('Writer recovery is pending.');
+  for (const name of ['claims', 'proposals', 'transactions']) {
+    const selected = path.join(stateDir, name), stat = await existsStat(selected);
+    if (!stat) continue;
+    if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.realpath(selected) !== selected) fail('Unsafe processing state.');
+    const stream = await fs.opendir(selected);
+    for await (const _entry of stream) fail('Processing work is pending.');
+  }
+  const data = await read('manifest.json');
+  if (data.value !== null && !absolute(data.value.root)) fail('Invalid derived manifest root.');
+  const manifest = data.value === null ? null : manifestSchema(data.value, data.value.root);
+  return { stateDir, manifestHash: data.hash, sources: (manifest?.files ?? []).flatMap(file => file.sources.map(source => source.path)) };
 }
 
 function sourcesSchema(sources, { required = false, stored = false } = {}) {
@@ -396,11 +543,24 @@ function result(updated, manifestChanged, diagnostics = []) {
     warnings: diagnostics.filter(item => item.severity === 'warning').length, diagnostics: diagnostics.slice(0, 100), limitations: LIMITATIONS };
 }
 
+/** Check an approved processing plan before reserving its writer. The caller
+ * holds the writer lock; applyPlan still repeats these checks to catch races. */
+export async function verifyPlanTargets(plan) {
+  const root = await directory(plan.root), stateDir = await directory(plan.stateDir);
+  if (root !== plan.root || stateDir !== plan.stateDir) fail('Reviewed processing directories changed.');
+  await checkDirectories(root, plan.version === 2 ? plan.directories : undefined);
+  const currentManifest = await manifestHash(stateDir);
+  if (plan.mode === 'derived' ? currentManifest !== plan.expectedManifestHash : currentManifest !== null) fail('Reviewed processing manifest changed.');
+  for (const file of plan.files) {
+    const target = await targetPath(root, file.path, stateDir, { allowMissingParents: plan.version === 2 });
+    if (await fingerprint(target) !== file.expectedHash) fail('An output changed since inspection; preserve current edits and prepare a new plan.');
+  }
+}
+
 export async function applyPlan(plan, options = {}) {
   if (!plan || ![1, 2].includes(plan.version) || !['authored', 'derived'].includes(plan.mode) || !Array.isArray(plan.files) || plan.files.length > MAX_FILES) fail('Plan requires version 1 or 2, authored/derived mode, and at most 100 explicit files.');
   if (plan.version === 1 && ['directories', 'createDirectories'].some(key => Object.hasOwn(plan, key))) fail('Directory intents require a version-2 authored plan.');
   if (plan.version === 2 && (plan.mode !== 'authored' || !Array.isArray(plan.createDirectories))) fail('Version 2 requires authored mode and explicit createDirectories.');
-  if (plan.version === 2 && plan.confirmCompatibleReaders !== true) fail('Version-2 plans require confirmCompatibleReaders: true after verifying every reader of this collection supports Cuefluent Notes 0.7.0+. Otherwise retain version 1 and existing parents.');
   const directories = plan.version === 2 ? directorySchema(plan.directories, plan.files, plan.createDirectories) : undefined;
   const createdDirectories = [];
   const retire = retireSchema(plan.retire);
@@ -426,7 +586,9 @@ export async function applyPlan(plan, options = {}) {
   }
   const stateDir = await directory(selectedState, { create: true });
   if (root === stateDir) fail('Use a separate private state directory, not the notes root itself.');
-  try { return await withLock(stateDir, async () => {
+  try { return await writerOperation(stateDir, options, async ownedOptions => {
+    options = ownedOptions;
+    if (options.coordination && (options.coordination.binding.root !== root || options.transaction.planHash !== sha256(canonicalJSON(plan)))) fail('Reviewed processing plan changed.');
     if (await existsStat(await stateFile(stateDir, 'journal.json'))) fail('An interrupted update needs recovery before applying another plan.');
     const old = await jsonFile(await stateFile(stateDir, 'manifest.json'));
     const manifest = manifestSchema(old.value, root);
@@ -456,6 +618,8 @@ export async function applyPlan(plan, options = {}) {
       proposalPaths.add(proposal);
       const bytes = await readBytes(proposal);
       if (!bytes) fail('A selected proposal is missing.');
+      if ((options.coordination || file.expectedContentHash !== undefined) &&
+          (!validHash(file.expectedContentHash) || sha256(bytes) !== file.expectedContentHash)) fail('Approved proposal content changed.');
       const checked = inspectMarkdown(new TextDecoder('utf-8', { fatal: true }).decode(bytes), target);
       if (checked.diagnostics.some(item => item.severity === 'error')) fail('A proposed document fails the bundled Markdown check; run check-notes for bounded diagnostics.');
       diagnostics.push(...checked.diagnostics);
@@ -498,11 +662,15 @@ export async function applyPlan(plan, options = {}) {
     const proposedManifestHash = proposedManifest ? sha256(serialize(proposedManifest)) : null;
     const manifestChanged = plan.mode === 'derived' && proposedManifestHash !== old.hash;
     await checkDirectories(root, directories);
-    if (prepared.every(file => file.oldHash === file.newHash) && !manifestChanged) return { ...result([], false, diagnostics), ...(directories ? { createdDirectories } : {}) };
+    if (prepared.every(file => file.oldHash === file.newHash) && !manifestChanged) {
+      await completeCoordinatedWrite({ root, files: prepared, mode: plan.mode, proposedManifest, directories, processing: options.coordination }, stateDir, options);
+      return { ...result([], false, diagnostics), ...(directories ? { createdDirectories } : {}) };
+    }
     for (const file of prepared) if (file.oldHash !== file.newHash) {
       file.stagePath = path.join(path.dirname(file.target), `.cuefluent-stage-${randomUUID()}.tmp`);
     }
     const journal = { version: plan.version, phase: 'staging', mode: plan.mode, root, stateDir, guideVersion: GUIDE_VERSION,
+      ...(options.coordination ? { processing: options.coordination } : {}),
       ...(directories ? { directories } : {}),
       expectedManifestHash: plan.mode === 'derived' ? old.hash : null, previousManifest: manifest, proposedManifest, retire,
       files: prepared.map(({ path: relative, oldHash, newHash, metadata, sources, entries, stagePath }) => ({ path: relative, oldHash, newHash, metadata, sources, entries, stagePath })) };
@@ -511,6 +679,7 @@ export async function applyPlan(plan, options = {}) {
     if (serialize(sized).length > MAX_BYTES) fail('Recovery journal exceeds 2 MiB.');
     if (directories) {
       const recheck = async () => {
+        await options.guard();
         await checkDirectories(root, directories);
         if (await manifestHash(stateDir) !== null) fail('Authored update conflicts with derived state.');
         await sourceChecks(prepared, outputPaths, proposalPaths);
@@ -536,16 +705,16 @@ export async function applyPlan(plan, options = {}) {
     await validateJournal(journal, stateDir);
     await preflight(journal, stateDir, { staging: true });
     // Reserve all stage names durably before writing any note content.
-    await writeMetadata(stateDir, 'journal.json', journal);
+    await writeMetadata(stateDir, 'journal.json', journal, options.guard);
     for (const file of prepared) if (file.stagePath) {
       await checkDirectories(root, directories);
       await targetPath(root, file.path, stateDir);
-      await writeExclusive(file.stagePath, file.bytes, directories ? () => checkDirectories(root, directories) : undefined);
+      await writeExclusive(file.stagePath, file.bytes, async () => { await options.guard(); await checkDirectories(root, directories); });
       await syncDirectory(path.dirname(file.stagePath));
       if (options.afterStage) await options.afterStage({ path: file.path, stagePath: file.stagePath });
     }
     journal.phase = 'ready';
-    await writeMetadata(stateDir, 'journal.json', journal);
+    await writeMetadata(stateDir, 'journal.json', journal, options.guard);
     const applied = await finishJournal(journal, stateDir, options);
     return { ...applied, ...(directories ? { createdDirectories } : {}), warnings: diagnostics.filter(item => item.severity === 'warning').length, diagnostics: diagnostics.slice(0, 100) };
   }); } catch (error) {
@@ -554,13 +723,14 @@ export async function applyPlan(plan, options = {}) {
   }
 }
 
-async function validateJournal(value, stateDir, { checkStorage = true } = {}) {
+async function validateJournal(value, stateDir, { checkStorage = true, allowVersion1Metadata = false } = {}) {
+  if (value?.processing) { validateWriterCoordination(value.processing); if (value.processing.binding.stateDir !== stateDir || value.processing.binding.root !== value.root) fail('Processing journal binding mismatch.'); }
   if (!value || ![1, 2].includes(value.version) || !['authored', 'derived'].includes(value.mode) || value.stateDir !== stateDir ||
     !Array.isArray(value.files) || value.files.length > MAX_FILES || !validHash(value.expectedManifestHash, true) ||
     (value.phase !== undefined && !['staging', 'ready', 'aborting'].includes(value.phase))) fail('Invalid recovery journal.');
   const retire = retireSchema(value.retire);
   if ((!value.files.length && !retire.length) || value.files.length + retire.length > MAX_FILES) fail('Invalid recovery operation count.');
-  if (!checkStorage && value.version !== 2) fail('Only version-2 journals support preservation without traversing note storage.');
+  if (!checkStorage && value.version !== 2 && !allowVersion1Metadata) fail('Only version-2 journals support preservation without traversing note storage.');
   if (!absolute(value.root)) fail('Recovery root must be an absolute directory.');
   const root = checkStorage ? await directory(value.root) : path.resolve(value.root);
   privatePath(root);
@@ -631,6 +801,7 @@ async function preflight(journal, stateDir, { staging = false, cache } = {}) {
   for (const file of journal.files) await preflightFile(journal, file, stateDir, { staging });
 }
 async function finishJournal(journal, stateDir, options) {
+  await options.guard?.();
   // Recheck every file before resuming: a conflict later in the batch must not
   // permit an earlier untouched file to be replaced first.
   const cache = new Map();
@@ -638,6 +809,7 @@ async function finishJournal(journal, stateDir, options) {
   await preflight(journal, stateDir, { cache });
   const updated = [];
   for (const file of journal.files) {
+    await options.guard?.();
     // Only this output and its evidence need checking here. Stable source
     // identities/timestamps reuse a hash from the full preflight; any metadata
     // change forces another bounded read. The final full pass hashes anew.
@@ -651,6 +823,7 @@ async function finishJournal(journal, stateDir, options) {
     if (await fingerprint(target) !== file.oldHash) fail('Output changed before replacement.');
     await checkReplacementMetadata(file, target, file.oldHash);
     await checkDirectories(journal.root, journal.directories);
+    await options.guard?.();
     await fs.rename(file.stagePath, target);
     await syncDirectory(path.dirname(target));
     updated.push(file.path);
@@ -666,30 +839,91 @@ async function finishJournal(journal, stateDir, options) {
     const desired = sha256(serialize(journal.proposedManifest));
     if (await manifestHash(stateDir) !== desired) {
       await expectedManifest(stateDir, journal.expectedManifestHash);
-      await writeMetadata(stateDir, 'manifest.json', journal.proposedManifest);
+      await writeMetadata(stateDir, 'manifest.json', journal.proposedManifest, options.guard);
       manifestChanged = true;
     }
   }
   for (const file of journal.files) if (file.stagePath && await existsStat(file.stagePath)) {
+    await options.guard?.();
     await checkDirectories(journal.root, journal.directories);
     if (await fingerprint(file.stagePath) !== file.newHash) fail('A remaining stage changed; inspect it before cleanup.');
     await checkDirectories(journal.root, journal.directories);
     await fs.unlink(file.stagePath);
   }
   await checkDirectories(journal.root, journal.directories);
+  await completeCoordinatedWrite(journal, stateDir, options);
+  await options.guard?.();
   await fs.unlink(await stateFile(stateDir, 'journal.json'));
   await syncDirectory(stateDir);
+  await options.afterJournalRemoval?.();
   return { ...result(updated, manifestChanged), retired: (journal.retire ?? []).map(file => file.path) };
 }
 
 export async function recover(stateDirInput, options = {}) {
   if (options.afterReplace !== undefined && typeof options.afterReplace !== 'function') fail('afterReplace must be a function.');
   const stateDir = await directory(stateDirInput);
-  return withLock(stateDir, async () => {
+  return writerOperation(stateDir, options, async ownedOptions => {
+    options = ownedOptions;
     const journal = await jsonFile(await stateFile(stateDir, 'journal.json'));
+    if (options.expectedJournalHash !== undefined &&
+        (!validHash(options.expectedJournalHash) || journal.hash !== options.expectedJournalHash)) fail('Inspected recovery journal changed.');
     if (journal.value === null) return result([], false);
     await validateJournal(journal.value, stateDir);
+    if (options.coordination) {
+      const plan = options.transaction.plan;
+      if (canonicalJSON(journal.value.processing ?? null) !== canonicalJSON(options.coordination) || journal.value.phase === 'aborting' ||
+          canonicalJSON(journal.value.retire ?? []) !== canonicalJSON(plan.retire ?? []) ||
+          journal.value.expectedManifestHash !== (plan.mode === 'derived' ? plan.expectedManifestHash : null) ||
+          options.transaction.planHash !== sha256(canonicalJSON(plan)) || plan.root !== journal.value.root || plan.stateDir !== stateDir ||
+          plan.mode !== journal.value.mode || plan.version !== journal.value.version || plan.files.length !== journal.value.files.length) fail('Processing recovery plan changed.');
+      for (let i = 0; i < plan.files.length; i++) {
+        const wanted = plan.files[i], actual = journal.value.files[i];
+        if (wanted.path !== actual.path || wanted.expectedHash !== actual.oldHash || wanted.expectedContentHash !== actual.newHash ||
+            canonicalJSON(sourcesSchema(wanted.sources, { required: plan.mode === 'derived' })) !== canonicalJSON(actual.sources) ||
+            canonicalJSON(entriesSchema(wanted.entries, actual.sources)) !== canonicalJSON(actual.entries)) fail('Processing recovery output changed.');
+      }
+      if (plan.mode === 'derived') {
+        // The journal may not add manifest ownership beyond the exact approved
+        // updates. Generated manifests have one canonical serialization.
+        const prior = journal.value.previousManifest;
+        if ((prior ? sha256(serialize(prior)) : null) !== plan.expectedManifestHash) fail('Processing recovery manifest changed.');
+        const records = new Map((prior?.files ?? []).map(file => [file.path, file]));
+        for (const file of plan.retire ?? []) records.delete(file.path);
+        for (const file of journal.value.files) records.set(file.path, { path: file.path, hash: file.newHash,
+          sources: file.sources.map(source => ({ path: source.path, hash: source.expectedHash })), entries: file.entries });
+        const expected = { version: 1, mode: 'derived', root: plan.root, guideVersion: GUIDE_VERSION,
+          files: [...records.values()].sort((a, b) => compare(a.path, b.path)) };
+        if (canonicalJSON(journal.value.proposedManifest) !== canonicalJSON(expected)) fail('Processing recovery manifest changed.');
+      }
+    }
     return journal.value.phase === 'aborting' ? await finishAbort(journal.value, stateDir) : await finishJournal(journal.value, stateDir, options);
+  });
+}
+
+/** Clear only metadata after a durable exact output receipt. Never roll forward
+ * note content or reopen source bodies in this consent-independent branch.
+ */
+export async function finalizeRecordedWriter(stateDirInput, expectedReceiptHash, options) {
+  const stateDir = await directory(stateDirInput);
+  if (!options?.coordination || !validHash(expectedReceiptHash)) fail('An exact processing receipt is required.');
+  return writerOperation(stateDir, options, async owned => {
+    const receipt = await readWriterReceipt(stateDir, owned.coordination.binding.operationId);
+    if (receipt?.hash !== expectedReceiptHash || canonicalJSON(receipt.value.coordination) !== canonicalJSON(owned.coordination)) fail('Processing receipt changed.');
+    const journal = await jsonFile(await stateFile(stateDir, 'journal.json'));
+    if (journal.value !== null) {
+      const value = journal.value;
+      await validateJournal(value, stateDir, { checkStorage: false, allowVersion1Metadata: true });
+      if (value.phase !== 'ready' || value.root !== owned.coordination.binding.root || value.stateDir !== stateDir ||
+          canonicalJSON(value.processing) !== canonicalJSON(owned.coordination) ||
+          canonicalJSON(value.files.map(file => ({ path: file.path, hash: file.newHash }))) !== canonicalJSON(receipt.value.outputs)) fail('Processing journal changed.');
+      for (const file of value.files) if (file.stagePath !== null && await existsStat(file.stagePath)) fail('Unexpected stage remains after processing receipt.');
+      if (await manifestHash(stateDir) !== receipt.value.manifestHash) fail('Recorded writer manifest changed.');
+      if ((value.proposedManifest ? sha256(serialize(value.proposedManifest)) : null) !== receipt.value.manifestHash) fail('Processing journal manifest changed.');
+      await owned.guard();
+      if (await fingerprint(await stateFile(stateDir, 'journal.json')) !== journal.hash) fail('Processing journal changed.');
+      await fs.unlink(await stateFile(stateDir, 'journal.json')); await syncDirectory(stateDir);
+    }
+    return { status: 'recorded', receipt };
   });
 }
 
@@ -790,7 +1024,8 @@ export async function abortUpdate(plan) {
   if (!plan || plan.version !== 1 || !validHash(plan.expectedJournalHash) || !validHash(plan.expectedManifestHash, true)) fail('Abort needs version 1 and inspected journal and manifest hashes.');
   if (Object.hasOwn(plan, 'preserveStages') && typeof plan.preserveStages !== 'boolean') fail('preserveStages must be a boolean.');
   const stateDir = await directory(plan.stateDir);
-  return withLock(stateDir, async () => {
+  return withLock(stateDir, async guard => {
+    await guard(); await assertWriterAccess(stateDir);
     const pending = await jsonFile(await stateFile(stateDir, 'journal.json'));
     if (pending.hash !== plan.expectedJournalHash) fail('Recovery journal changed since inspection.');
     if (plan.preserveStages === true) return preserveAbortedJournal(plan, pending, stateDir);

@@ -1,157 +1,97 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
+import os from 'node:os';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { buildPackages } from './package.mjs';
+import { canonicalJSON } from './workflow-values.mjs';
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const stamp = '2026-09-24T00:00:00.000Z';
+const row = (type, payload) => JSON.stringify({ timestamp: stamp, type, payload }) + '\n';
 
-test('both detached clients configure folder routes and save distinct subject files with one writer state', async t => {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-directory-package-')));
+for (const withHooks of [false, true]) test(`detached ${withHooks ? 'hook' : 'manual'} packages complete selected capture, processing and guarded category writes`, async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-complete-package-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const { packages } = await buildPackages({ outDir: path.join(root, 'packages'), withHooks: true });
+  const { packages } = await buildPackages({ outDir: path.join(root, 'packages'), withHooks });
   for (const pkg of packages) {
-    const notesDir = path.join(root, `${pkg.client}-notes`);
-    await fs.mkdir(notesDir);
-    const configPath = path.join(root, `${pkg.client}-private/config.json`);
-    const env = { ...process.env, CUEFLUENT_NOTES_CONFIG: configPath };
-    const helper = (script, args, input) => {
-      const result = spawnSync(process.execPath, [path.join(pkg.skillRoot, 'scripts', script), ...args],
-        { cwd: root, env, input, encoding: 'utf8' });
-      assert.equal(result.status, 0, result.stderr);
-      return JSON.parse(result.stdout);
+    const work = path.join(root, `${pkg.client}-private`), project = path.join(work, 'project'), notes = path.join(work, 'notes');
+    await fs.mkdir(project, { recursive: true }); await fs.mkdir(notes);
+    const configPath = path.join(work, 'settings/workflow.json'), requestFile = path.join(work, 'request.json');
+    const collection = { id: 'test', rawDir: path.join(work, 'raw'), intakeStateDir: path.join(work, 'intake'),
+      notes: { notesDir: notes, writerStateDir: path.join(work, 'writer') } };
+    const proposal = { format: 'cuefluent-workflow', schemaVersion: 1, collections: [collection],
+      routes: [{ id: 'test', projectRoot: project, clients: [pkg.client], collectionId: 'test' }] };
+    const run = async (command, request = {}, expected = 0) => {
+      await fs.writeFile(requestFile, JSON.stringify(request), { mode: 0o600 });
+      const result = spawnSync(process.execPath, [path.join(pkg.skillRoot, 'scripts/workflow.mjs'), command, '--config', configPath, '--request', requestFile],
+        { cwd: work, env: { ...process.env, NODE_PATH: '' }, encoding: 'utf8', timeout: 60000 });
+      assert.equal(result.status, expected, `${pkg.client}/${command}: ${result.stderr || result.stdout}`);
+      return expected === 0 ? JSON.parse(result.stdout) : result.stderr;
     };
-    const init = ['init', '--client', pkg.client, '--mode', 'suggest', '--project', root,
-      '--notes-dir', notesDir, '--organization', 'flat', '--scope', 'Synthetic project findings.'];
-    const unconfirmed = spawnSync(process.execPath, [path.join(pkg.skillRoot, 'scripts/setup.mjs'), ...init], { cwd: root, env, encoding: 'utf8' });
-    assert.equal(unconfirmed.status, 2);
-    assert.match(unconfirmed.stderr, /including clients absent/);
-    await assert.rejects(fs.stat(path.dirname(configPath)), { code: 'ENOENT' });
-    helper('setup.mjs', [...init, '--confirm-compatible-clients', 'yes']);
-    const config = JSON.parse(await fs.readFile(configPath));
-    assert.equal(config.version, 2);
-    assert.equal(config.minimumPluginVersion, '0.5.1');
-    assert.equal(Object.hasOwn(config.routes[0], 'organization'), false);
-    const status = helper('setup.mjs', ['status', '--client', pkg.client, '--cwd', root]);
-    assert.equal(status.notesDir, notesDir);
-    assert.equal(status.mode, 'suggest');
-    assert.equal(status.organization, 'flat');
-    assert.equal(status.hookPackaged, true);
-    assert.equal(status.hookConfigMatches, true);
-    assert.equal(Object.hasOwn(status, 'destination'), false);
-    const response = helper('hooks.mjs', [pkg.client], JSON.stringify({ hook_event_name: 'UserPromptSubmit',
-      cwd: root, session_id: 'session', turn_id: 'turn', prompt_id: 'prompt' }));
-    const operation = JSON.parse(response.hookSpecificOutput.additionalContext.split('\n\n').at(-1));
-    assert.equal(operation.notesDir, notesDir);
-    assert.equal(operation.stateDir, status.stateDir);
-    assert.equal(operation.automaticUpdates, false);
-    assert.deepEqual(await fs.readdir(notesDir), []);
-    await assert.rejects(fs.stat(status.stateDir), { code: 'ENOENT' });
-
-    // Simulate approved authored saves through the packaged writer, not hook autosave.
-    for (const [filename, heading, body] of [
-      ['orchid-release-1.0.md', 'Release 1.0', 'The fictional release passed its checks.'],
-      ['cache-expiry-decisions.md', 'Cache expiry decisions', 'The prototype uses a 30-minute TTL.'],
-    ]) {
-      const contentPath = path.join(root, `${pkg.client}-${filename}`);
-      const content = `# Orchid\n\n## ${heading}\n\n${body}\n`;
-      await fs.writeFile(contentPath, content);
-      const planPath = path.join(root, `${pkg.client}-plan.json`);
-      await fs.writeFile(planPath, JSON.stringify({ version: 1, mode: 'authored', root: operation.notesDir,
-        stateDir: operation.stateDir, files: [{ path: filename, contentPath, expectedHash: null }] }));
-      assert.deepEqual(helper('safe-update.mjs', ['apply', planPath]).updated, [filename]);
-      assert.equal(await fs.readFile(path.join(notesDir, filename), 'utf8'), content);
+    const initial = await run('configure', { expectedHash: null, proposal });
+    assert.equal(initial.config.collections[0].notes.organization, 'by-type');
+    let configHash = initial.configHash;
+    const envelope = args => ({ collectionId: 'test', expectedConfigHash: configHash, args });
+    await run('storage-prepare', { collectionId: 'test', expectedConfigHash: configHash });
+    const next = structuredClone(initial.config); next.routes[0].processing.mode = 'prompted';
+    configHash = (await run('configure', { expectedHash: configHash, proposal: next })).configHash;
+    const configured = await run('status');
+    assert.equal(configured.runtime.hookRegistration, withHooks ? 'packaged' : 'absent');
+    assert.equal(configured.runtime.hostTrust, 'unknown'); assert.equal(configured.transport.automaticProcessing, false);
+    assert.equal(configured.config.routes[0].collection.enabled, false);
+    const sessionId = randomUUID(), unitId = randomUUID(), sourcePath = path.join(project, 'selected.jsonl');
+    let prefix = '', body;
+    if (pkg.client === 'codex') {
+      prefix = row('session_meta', { id: sessionId, session_id: sessionId, cwd: project, cli_version: '0.156.1', source: 'cli', history_mode: 'legacy' });
+      body = row('event_msg', { type: 'task_started', turn_id: unitId }) + row('event_msg', { type: 'user_message', message: 'Meeting: keep the rollout paused.' }) + row('event_msg', { type: 'task_complete', turn_id: unitId });
+    } else body = JSON.stringify({ type: 'user', uuid: randomUUID(), timestamp: stamp, sessionId, version: '2.1.280', isSidechain: false,
+      parentUuid: null, cwd: project, promptId: unitId, message: { role: 'user', content: 'Meeting: keep the rollout paused.' } }) + '\n';
+    await fs.writeFile(sourcePath, prefix + body);
+    const selection = { client: pkg.client, sessionId, cwd: project, unitId: null };
+    const source = (await run('capture-status', envelope({ selection, sourcePath }))).source;
+    const control = { selection, sourcePath, expectedSourceIdentity: source.fileIdentity, expectedSelectionHash: null,
+      operationId: randomUUID(), kind: 'historical', unitIds: [unitId], readRange: { fromByte: Buffer.byteLength(prefix), endByte: source.eofByte } };
+    assert.equal((await run('capture-preview', envelope(control))).status, 'selection-verified');
+    const selected = await run('capture-select', envelope(control));
+    assert.equal((await run('capture-run', envelope({ selection, scopeId: control.operationId, expectedSelectionHash: selected.hash, unitIds: [unitId] }))).saved, 1);
+    const pending = await run('processing-pending', envelope({ selection })); assert.equal(pending.pending.length, 1);
+    const args = { selection, operationId: randomUUID() }, identity = { client: pkg.client, sessionId, unitId };
+    let claim = await run('processing-prepare', envelope({ ...args, inputs: pending.pending.map(({ identity, headHash }) => ({ identity, headHash })) }));
+    for (let page = 0; page < claim.packet.pages.length; page++) {
+      const issued = await run('processing-page', envelope({ ...args, expectedClaimHash: claim.claimHash, page }));
+      assert.match(JSON.stringify(issued.evidence), /rollout paused/);
+      claim = await run('processing-ack', envelope({ ...args, expectedClaimHash: issued.claimHash, pages: [{ index: page, hash: issued.hash }] }));
     }
-    assert.deepEqual(await fs.readdir(notesDir), ['cache-expiry-decisions.md', 'orchid-release-1.0.md']);
-    assert.equal(helper('safe-update.mjs', ['inspect', operation.stateDir]).recoveryPending, false);
-    assert.equal(helper('setup.mjs', ['status', '--client', pkg.client, '--cwd', root]).mode, 'suggest');
-  }
-});
-
-test('all detached package variants default to type folders and support inspected saves with shared state', async t => {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-types-package-')));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  for (const withHooks of [false, true]) {
-    const { packages } = await buildPackages({ outDir: path.join(root, withHooks ? 'hooks' : 'manual'), withHooks });
-    for (const pkg of packages) {
-      const work = path.join(root, `${pkg.client}-${withHooks}-Résumé notes`);
-      const notesDir = path.join(work, 'notes');
-      await fs.mkdir(notesDir, { recursive: true });
-      const configPath = path.join(work, 'private', 'config.json');
-      const env = { ...process.env, NODE_PATH: '', CUEFLUENT_NOTES_CONFIG: configPath };
-      const run = (script, args, input, expected = 0) => {
-        const result = spawnSync(process.execPath, [path.join(pkg.skillRoot, 'scripts', script), ...args],
-          { cwd: work, env, input, encoding: 'utf8' });
-        assert.equal(result.status, expected, result.stderr || result.stdout);
-        return expected === 0 ? JSON.parse(result.stdout) : result.stderr;
-      };
-      run('setup.mjs', ['init', '--client', pkg.client, '--mode', 'suggest', '--project', work,
-        '--notes-dir', notesDir, '--scope', 'Synthetic findings.', '--confirm-compatible-clients', 'yes']);
-      const config = JSON.parse(await fs.readFile(configPath));
-      assert.equal(config.version, 4);
-      assert.equal(config.minimumPluginVersion, '0.7.0');
-      assert.equal(config.completionCheck, false);
-      const statusArgs = ['status', '--client', pkg.client, '--cwd', work];
-      const status = run('setup.mjs', statusArgs);
-      assert.equal(status.organization, 'by-type');
-      assert.equal(status.mode, 'suggest');
-      assert.equal(status.hookPackaged, withHooks);
-      assert.equal(status.hostTrust, 'not_checked');
-      assert.equal(status.notesDir, notesDir);
-      if (withHooks) {
-        const response = run('hooks.mjs', [pkg.client], JSON.stringify({ hook_event_name: 'UserPromptSubmit',
-          cwd: work, session_id: 'synthetic', turn_id: 'turn', prompt_id: 'prompt' }));
-        const op = JSON.parse(response.hookSpecificOutput.additionalContext.split('\n\n').at(-1));
-        assert.equal(op.organization, 'by-type');
-        assert.equal(op.stateDir, status.stateDir);
-        assert.equal(op.automaticUpdates, false);
-      } else await assert.rejects(fs.stat(path.join(pkg.root, 'hooks')), { code: 'ENOENT' });
-      const names = ['overview.md', 'meetings/planning.md', 'tasks/windows.md', 'knowledge-base/cache.md', 'decisions/ttl.md'];
-      const inspected = run('safe-update.mjs', ['inspect-directories', notesDir, ...names]);
-      assert.deepEqual(inspected.createDirectories, ['meetings', 'tasks', 'knowledge-base', 'decisions']);
-      assert.deepEqual(await fs.readdir(notesDir), []);
-      await assert.rejects(fs.stat(status.stateDir), { code: 'ENOENT' });
-      const files = [];
-      for (const [index, name] of names.entries()) {
-        const contentPath = path.join(work, `proposal-${index}.md`);
-        await fs.writeFile(contentPath, `# Synthetic ${index}\n\n## Finding\n\nReviewed material ${index}.\n`);
-        files.push({ path: name, contentPath, expectedHash: null });
-      }
-      const planPath = path.join(work, 'plan.json');
-      const apply = async (snapshot, entries = files, expected = 0) => {
-        await fs.writeFile(planPath, JSON.stringify({ version: 2, mode: 'authored', confirmCompatibleReaders: true, stateDir: status.stateDir,
-          ...snapshot, files: entries }));
-        return run('safe-update.mjs', ['apply', planPath], undefined, expected);
-      };
-      // A folder appearing after preview invalidates that proposal; never adopt it.
-      await fs.mkdir(path.join(notesDir, 'meetings'));
-      assert.match(await apply(inspected, files, 2), /directory changed/);
-      assert.deepEqual(await fs.readdir(notesDir), ['meetings']);
-      await assert.rejects(fs.stat(status.stateDir), { code: 'ENOENT' });
-      // A newly inspected and separately approved proposal uses the observed parent.
-      const approved = run('safe-update.mjs', ['inspect-directories', notesDir, ...names]);
-      const saved = await apply(approved);
-      assert.deepEqual(saved.updated, names);
-      assert.deepEqual(saved.createdDirectories, ['decisions', 'knowledge-base', 'tasks']);
-      for (const file of files) assert.deepEqual(await fs.readFile(path.join(notesDir, file.path)), await fs.readFile(file.contentPath));
-      const current = run('safe-update.mjs', ['inspect-directories', notesDir, ...names]);
-      assert.deepEqual(current.createDirectories, []);
-      for (const file of files) file.expectedHash = run('safe-update.mjs', ['fingerprint', path.join(notesDir, file.path)]).files[0].hash;
-      const before = await Promise.all(names.map(name => fs.stat(path.join(notesDir, name), { bigint: true })));
-      assert.equal((await apply(current)).status, 'unchanged');
-      for (const [index, file] of files.entries()) {
-        assert.equal((await fs.stat(path.join(notesDir, file.path), { bigint: true })).mtimeNs, before[index].mtimeNs);
-        assert.deepEqual(await fs.readFile(path.join(notesDir, file.path)), await fs.readFile(file.contentPath));
-      }
-      const meeting = files[1];
-      await fs.appendFile(meeting.contentPath, '\nApproved clarification.\n');
-      assert.deepEqual((await apply(current)).updated, [meeting.path]);
-      const savedBytes = await fs.readFile(path.join(notesDir, meeting.path));
-      assert.match(await apply(current, files, 2), /changed since inspection/);
-      assert.deepEqual(await fs.readFile(path.join(notesDir, meeting.path)), savedBytes);
-      assert.equal(run('safe-update.mjs', ['inspect', status.stateDir]).recoveryPending, false);
-      assert.equal(run('setup.mjs', statusArgs).stateDir, status.stateDir);
-      assert.equal(JSON.parse(await fs.readFile(configPath)).automaticUpdates, false);
+    const contentPath = path.join(work, 'proposal.md'), content = '# Rollout meeting\n\n## Decision\n\nKeep the rollout paused.\n';
+    await fs.writeFile(contentPath, content);
+    const proposed = await run('processing-propose', envelope({ ...args, expectedClaimHash: claim.claimHash,
+      proposal: { files: [{ path: 'meetings/rollout.md', expectedHash: null, contentPath, expectedContentHash: hash(content) }], mappings: [{ identity, paths: ['meetings/rollout.md'] }] } }));
+    assert.deepEqual(await fs.readdir(notes), []); // Prompted means proposal only until exact approval.
+    assert.equal((await run('processing-save', envelope({ ...args, expectedClaimHash: proposed.claimHash, approvedProposalHash: proposed.proposalHash, trigger: 'approved' }))).status, 'saved');
+    assert.equal(await fs.readFile(path.join(notes, 'meetings/rollout.md'), 'utf8'), content);
+    const operation = await run('processing-status', envelope({ operationId: args.operationId }));
+    assert.equal((await run('processing-recover', envelope({ operationId: args.operationId, expectedRecoveryHash: operation.recoveryHash }))).status, 'saved');
+    assert.equal((await run('processing-pending', envelope({ selection }))).pending.length, 0);
+    const names = ['overview.md', 'tasks/windows.md', 'knowledge-base/cache.md', 'decisions/ttl.md'];
+    const inspect = () => run('inspect-notes', { root: notes, paths: names });
+    const inspected = await inspect();
+    const files = [];
+    for (const [index, name] of names.entries()) {
+      const selectedContent = path.join(work, `direct-${index}.md`); await fs.writeFile(selectedContent, content);
+      files.push({ path: name, expectedHash: null, contentPath: selectedContent, expectedContentHash: hash(content) });
     }
+    const save = (parents, expected = 0) => { const plan = { version: 2, mode: 'authored', ...parents, stateDir: collection.notes.writerStateDir, files };
+      return run('direct-save', { collectionId: 'test', expectedConfigHash: configHash, plan, approvedPlanHash: hash(canonicalJSON(plan)) }, expected); };
+    await fs.mkdir(path.join(notes, 'tasks'));
+    assert.match(await save(inspected, 1), /directory changed/);
+    assert.deepEqual((await save(await inspect())).updated, names);
+    const preserved = await fs.readFile(path.join(notes, 'meetings/rollout.md'));
+    files.forEach(file => file.expectedHash = hash(content));
+    assert.equal((await save(await inspect())).status, 'unchanged');
+    assert.deepEqual(await fs.readFile(path.join(notes, 'meetings/rollout.md')), preserved);
+    assert.equal((await run('writer-status', { stateDir: collection.notes.writerStateDir })).recoveryPending, false);
+    assert.equal((await run('status')).configHash, configHash);
   }
 });

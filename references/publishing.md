@@ -20,7 +20,8 @@ settings are separate from publishing a plugin release.
 
 ## Build and inspect a release
 
-From the source checkout, use Node.js 22+, Git, and `unzip`/`tar` for the extraction tests:
+From the source checkout, use Node.js 22+, Git, Bash, and `unzip`/`tar` for the
+extraction tests:
 
 ```sh
 npm ci --ignore-scripts
@@ -68,7 +69,7 @@ Validate with `claude plugin validate --strict --json dist/release` and
 Use the Plugin Creator validator for the Codex package when that tooling is
 available. Test fresh-client installation against the prepared local catalog,
 including first-use setup and hook trust, before advertising a release. The
-[verification record](verification.md) distinguishes automated checks from live tests.
+[verification scope](verification.md) distinguishes automated checks from live tests.
 
 ## Publish the GitHub marketplace
 
@@ -129,10 +130,10 @@ Use the existing product wording:
 
 - Name: **Cuefluent Notes**.
 - Short description: **Capture and organize your knowledge for fast recall—right on cue.**
-- Details: **Turn work, meetings, and ideas into clear, searchable Markdown.
-  Capture decisions, create summaries, and maintain documentation and knowledge-base
-  notes—Cuefluent-ready, with smart search keywords and optional automatic capture
-  across sessions.**
+- Details: **Collect selected parts of Codex and Claude sessions as private evidence,
+  then turn reviewed sources into clear, searchable Markdown. Capture decisions,
+  meeting summaries, tasks and knowledge-base notes with independent collection
+  and processing controls. Direct saves are also supported.**
 - Category: **Productivity**.
 - Starter prompts: **Set up Cuefluent Notes for this project.**;
   **Check these notes for evidence and useful search vocabulary.**;

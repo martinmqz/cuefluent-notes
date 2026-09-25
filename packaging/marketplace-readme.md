@@ -21,8 +21,9 @@ claude plugin install cuefluent-notes@cuefluent --scope user
 ```
 
 Start a fresh session, review/trust hooks in your client, then say **Set up
-Cuefluent Notes**. Choose Manual, Suggestions, or Automatic. Capture stays off
-until configured; installation preserves existing private settings. Keep notes
+Cuefluent Notes**. Choose collection and processing separately. Collection starts off; processing
+starts Manual. Old capture settings are preserved but not imported. Use explicit
+processing commands until live current-turn transport is verified. Keep notes
 outside the installed package. Remove any previous standalone or source-installer
 copy before switching installation methods, so only one copy is active.
 

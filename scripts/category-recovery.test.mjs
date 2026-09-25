@@ -13,7 +13,7 @@ async function fixture(t) {
   await fs.mkdir(root);
   const contentPath = path.join(temp, 'proposal.md');
   await fs.writeFile(contentPath, '# Meeting\n\n## Decision\n\nA synthetic decision.\n');
-  const plan = { version: 2, mode: 'authored', confirmCompatibleReaders: true, stateDir,
+  const plan = { version: 2, mode: 'authored', stateDir,
     ...await inspectDirectories(root, ['meetings/topic.md']), files: [{ path: 'meetings/topic.md', expectedHash: null, contentPath }] };
   const interrupt = async () => {
     await assert.rejects(applyPlan(plan, { afterStage() { throw new Error('Interrupted'); } }), /Interrupted/);
@@ -22,17 +22,6 @@ async function fixture(t) {
   };
   return { temp, root, stateDir, plan, interrupt };
 }
-
-test('v2 writers require reader compatibility even for root-only flat/manual saves', async t => {
-  const f = await fixture(t);
-  const plan = { ...f.plan, ...await inspectDirectories(f.root, ['root.md']), files: [{ ...f.plan.files[0], path: 'root.md' }] };
-  for (const confirmCompatibleReaders of [undefined, false, 'true', 1]) {
-    await assert.rejects(applyPlan({ ...plan, confirmCompatibleReaders }), /confirmCompatibleReaders.*0.7.0/);
-    assert.deepEqual(await fs.readdir(f.root), []);
-    await assert.rejects(fs.stat(f.stateDir), { code: 'ENOENT' });
-  }
-  assert.equal((await applyPlan(plan)).status, 'updated');
-});
 
 test('malformed v2 file entries report a path error before creating state or categories', async t => {
   const f = await fixture(t);
@@ -166,6 +155,7 @@ test('preservation abort rejects malformed or legacy journals without altering e
   const journalPath = path.join(f.stateDir, 'journal.json');
   const original = JSON.parse(await fs.readFile(journalPath, 'utf8'));
   const stageBytes = await fs.readFile(original.files[0].stagePath);
+  const stateBefore = await fs.readdir(f.stateDir);
   for (const mutate of [
     journal => { journal.version = 1; delete journal.directories; },
     journal => { journal.root = 'relative'; },
@@ -183,7 +173,7 @@ test('preservation abort rejects malformed or legacy journals without altering e
     await assert.rejects(abortUpdate({ ...plan, expectedJournalHash }));
     assert.deepEqual(await fs.readFile(journalPath), bytes);
     assert.deepEqual(await fs.readFile(original.files[0].stagePath), stageBytes);
-    assert.deepEqual(await fs.readdir(f.stateDir), ['journal.json']);
+    assert.deepEqual(await fs.readdir(f.stateDir), stateBefore);
   }
 });
 

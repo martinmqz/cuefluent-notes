@@ -17,7 +17,7 @@ hook definition, plus the complete runtime. Catalog paths are relative to the
 marketplace root.
 
 The catalogs select the hook-enabled variant. Installation does not choose
-capture mode or notes destinations. Keep only one active copy per client;
+collection or processing permission or notes destinations. Keep only one active copy per client;
 remove a previous standalone or source-installer registration before switching.
 If the `marketplace` branch is absent, the first release has not completed;
 use the guided installer or follow the [publisher guide](publishing.md).
@@ -48,10 +48,12 @@ scripts also work. WSL, administrator access, and developer-mode symlink
 privileges are not prerequisites for ordinary installation or capture.
 
 `~` in this guide means the current user's home (`%USERPROFILE%` on Windows).
-The default private policy remains `.config/cuefluent-notes/config.json` under
-that home on every platform, preserving existing configuration. Keep private
-configuration, state, and notes in directories whose Windows ACL permits only
-the intended readers: Node's `chmod(0600)` does not establish a private ACL.
+Workflow settings default to `%LOCALAPPDATA%\CuefluentNotes\workflow.json` on
+Windows and `~/.config/cuefluent-notes/workflow.json` on macOS/Linux. Raw evidence
+and managed state must be private and machine-local. Setup verifies ownership and
+permissions and only applies private permissions to newly created managed roots;
+it never repairs an existing directory's ACL. Node chmod alone is insufficient
+on Windows. See [private storage](session-workflow.md#private-storage-and-explicit-pruning).
 Use full drive paths such as `C:\Users\Ada\Documents\Notes` or an explicit
 UNC share; drive-relative paths such as `C:Notes`, device namespaces, reserved
 device filenames, alternate streams, and trailing-dot/space aliases are refused.
@@ -83,9 +85,8 @@ client-reported installed paths resolve OS and dotfiles aliases before compariso
 
 Use `npm run install:codex -- --manual` or `npm run install:claude -- --manual`
 to omit hooks. Repeating either installer replaces its own package, including
-when switching variants. Existing capture settings keep their values. Both
-clients share the default private capture policy; setup can select which clients
-and projects participate.
+when switching variants. Existing files are preserved; old capture settings are not imported or activated.
+Both clients can use the same new workflow settings with explicit client/project routes.
 
 Previous packages are retained under `~/plugins/.cuefluent-installer/` for Codex,
 or `~/.claude/.cuefluent-installer/` for Claude (respecting `CLAUDE_CONFIG_DIR`).
@@ -136,8 +137,8 @@ Clone again when you next need to update.
 
 The installer supports native Windows, macOS, and Linux. The automated installer
 checks use disposable user and checkout-lock directories and stub client commands; they verify package
-contents, settings preservation, conflicts, retries, and updates. Actual host
-loading is covered separately in [verification results](verification.md).
+contents, settings preservation, conflicts, retries, and updates. Pinned-client
+registration checks and their limits are described in [verification](verification.md).
 
 ## Build and inspect
 
@@ -197,13 +198,11 @@ the packaged skill so its relative reference links remain usable.
 Choose one variant for each client. Both variants have the identity
 `cuefluent-notes`; do not install both or register the same adapter manually as
 well as through the plugin. Manual packages contain no hook registration. Hook
-packages add `SessionStart` matched on `startup`, `UserPromptSubmit`, and `Stop`.
-The [Stop check](completion.md) is inactive unless separately enabled in the private
-policy; it allows one recovery attempt for a missed capture decision. Missing private capture configuration produces
-one host notice at startup without enabling capture or adding model context;
-unconfigured prompts and Stop events stay quiet. A saved manual preference leaves
-all hooks quiet. The Stop registration changes the hook definition; review and
-trust the updated hooks through the host before relying on the check.
+packages register SessionStart, UserPromptSubmit, Stop, SessionEnd, and Codex
+Interrupt or Claude StopFailure. No startup-only matcher or SubagentStop is used.
+Hooks do nothing in unconfigured or entirely disabled projects. Trust is separate
+from collection consent; processing requires explicit selection until the live
+transport gate passes. See [hooks](hooks.md).
 
 ## Use a packaged helper without host installation
 
@@ -256,7 +255,7 @@ For normal installation, use the [README quickstart](../README.md#install-in-cod
 The commands below are for fitting a separately built package into another
 existing catalog.
 
-The reviewed Codex `0.146.0` CLI does not provide a `--plugin-dir` or plugin
+The pinned Codex `0.156.1` CLI does not provide a `--plugin-dir` or plugin
 validation command. Do not treat a folder build as a live Codex load test.
 Persistent setup uses a marketplace selected by the user; the builder does not
 create a personal marketplace or change a catalog.
@@ -296,8 +295,8 @@ codex plugin marketplace add /absolute/selected-marketplace-root
 codex plugin add cuefluent-notes@selected-local-catalog
 ```
 
-These commands were exercised with a disposable local marketplace in the
-[live CLI smoke test](verification.md). The desktop plugin UI is another
+Disposable-client smoke checks exercise these commands with a local marketplace;
+see [verification scope](verification.md). The desktop plugin UI is another
 documented installation path. Restart or begin a fresh session
 after installation and verify the skill is available. For the hook variant,
 review and trust its current definition through `/hooks`; enabling a plugin does
@@ -305,27 +304,17 @@ not itself establish hook trust. Follow the [Codex hooks reference](https://lear
 
 ## Opt in, update, or disable
 
-After installing, start a fresh task and say **“Set up Cuefluent Notes.”** The
-bundled [Setup flow](setup.md) reads current status, asks for missing choices, and
-saves the selected first-use policy. Manual use needs no notes destination;
-Suggestions and Automatic require a project, destination, and capture scope.
-First-use initialization preserves existing settings; guarded updates replace
-only an inspected, approved policy. Neither operation writes notes.
+Start a fresh task and say **“Set up Cuefluent Notes.”** The [setup flow](setup.md)
+saves reviewed settings with collection disabled and processing Manual, prepares
+private storage, then activates only separately authorized choices. It does not
+write notes or import v0.7.1 settings. Use [explicit controls](workflow-cli.md)
+for one-time capture, pause/exclude, pending discovery and note processing.
 
-Host installation and trust are separate from implementation authorization.
-After choosing the hook variant, select private policy and note/state locations
-using [hooks.md](hooks.md). The synthetic config starts with `enabled: false` and
-`automaticUpdates: false`. Enable only the desired clients and routes after
-reviewing their concrete scope. The Setup flow handles this first-use configuration
-without asking the user to edit JSON. Do not save real policy in the installed plugin
-or public repository.
-
-Setting the private policy's `enabled` to `false` disables capture; removing a
-client from `clients` disables that adapter. A route can be disabled, and an
-exclusion overrides eligible routes. These choices leave the manual workflow
-available. Removing the host registration or switching to the manual variant
-also removes hook assistance; review the host's current update/removal process
-before modifying its configuration.
+A route's `collection.enabled: false` stops ongoing collection. Processing mode
+is independent; `excluded: true` denies the route. Removing hook registration
+or switching to the manual variant also removes background collection ingress.
+Direct user-selected saves remain available with a chosen destination/writer.
+Never save real settings or evidence inside the plugin or public repository.
 
 For upgrades, rebuild into a fresh directory, review the package and changes,
 then update the one installed variant through that client's supported process.
@@ -335,49 +324,28 @@ each host rather than assuming both update the same way.
 
 ## Compatibility and verification status
 
-New folder setups default to by-type placement using schema 4 and require every
-installed reader of that shared configuration to support 0.7.0+. Setup requires an explicit caller
-compatibility assertion after checking those installations; it does not discover
-them automatically. Explicit flat folder setup uses schema 2 (0.5.1+) or schema
-3 with completion checks (0.6.0+); it still requires the applicable compatibility
-assertion. Existing schemas and explicit files remain supported, and
-updating a package does not activate categories or move notes. Follow
-[setup](setup.md) to change organization while preserving consent and shared state.
-Directory-bound authored writes use journal version 2, which requires 0.7.0+
-for recovery or abort; older writers refuse it. Preserve pending journals during
-upgrades and resolve them with a compatible helper. See [safe updates](refresh.md).
-This also applies to root-only v2 plans under older capture schemas or manual use:
-the writer requires its own `confirmCompatibleReaders: true` assertion. Retain v1
-for mixed-version collections until every installed reader supports 0.7.0+.
+The replacement has its own workflow configuration and no legacy migration or
+mixed-version support. Keep unfinished old journals with the v0.7.1 reference
+helper; this implementation does not adopt old policy, completion markers or
+session state. Existing user Markdown remains ordinary, reusable source material.
+By-type writes preserve inspected directory identities and the collection's one
+writer state. Version-1 plans handle existing/custom parents and derived outputs;
+version-2 authored plans can create inspected immediate type folders. See
+[safe updates](refresh.md).
 
-The declared Node baseline is `>=22`; development and isolated helper checks
-run locally on macOS with Node `26.2.0`. CI checks native Windows, Linux, and
-macOS with Node 22 and compares release checksums across all three. Bundled
-hooks use a fixed Node bootstrap that reads the client-exported plugin root
-inside Node, so path contents never become shell source. Native Windows tests
-exercise Command Prompt, Windows PowerShell, PowerShell 7, and Git Bash. Live model
-hooks on Windows and Linux remain unverified. Reviewed host contracts are Codex
-`0.146.0` and Claude Code `2.1.278`; see [hooks.md](hooks.md) for native identity
-requirements and the Claude `prompt_id` version boundary.
+Node 22+ is required. The fixed Codex shell bootstrap reads the plugin root as
+environment data; Claude uses direct executable/argument invocation. Native tests
+cover Command Prompt, Windows PowerShell, PowerShell 7 and Git Bash. Client
+registration checks use pinned Codex 0.156.1 and Claude Code 2.1.280 in disposable
+profiles without auth or model calls. See [verification](verification.md) for
+automated coverage and the remaining live-client limits.
 
-Standalone verification checks packaged dependency resolution, synthetic note
-checking and vocabulary, safe update/no-op behavior, conflicts and recovery,
-and adapter policy/routing without a Cuefluent app checkout. Semantic review
-checks source fidelity, useful-change decisions, manual-save duplication, and
-opt-out behavior on synthetic examples. These checks do not certify that an
-agent will always make the right capture decision.
-
-Authorized [live CLI smoke tests](verification.md) exercised temporary host setup
-and synthetic capture. The results distinguish those checks from the reviewed
-host contracts above. Already-open session reload, desktop capture, real-user
-usefulness, and actual Cuefluent admission, rendering, image loading, and ranking
-remain unverified. Check the
-[releases page](https://github.com/martinmqz/cuefluent-notes/releases) for publication status.
-The [type-folder checks](verification.md#note-type-folders-070) establish helper
-and package behavior, not model classification, native Save / Skip rendering,
-or a Cuefluent ingestion path. App loading is separate from the user's chosen
-note layout; do not infer recursive discovery from directory support or require
-a live app test before honoring a type-folder request.
+`workflow.mjs status` reports packaged hook integrity, the current Node version,
+and the unverified transport. Host hook trust, restrictions/feature flags and
+desktop Node PATH remain unknown; inspect the client's hook controls and launch
+configuration. A packaged handler does not prove it is loaded or trusted. Live
+current-turn binding, native prompts, already-open session reload and Cuefluent
+recursive discovery/ranking remain unverified.
 
 The project has no assigned source license. Included third-party dependencies
 keep their own license notices; no project license is implied by those notices.

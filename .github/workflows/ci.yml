@@ -16,7 +16,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Native Windows ACL fixtures exceeded 20 minutes while still making progress.
+    # This bounds the full job; production worker/probe deadlines stay unchanged.
+    timeout-minutes: ${{ matrix.os == 'windows-2025' && 45 || 20 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -26,9 +28,29 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - name: Record native runtime
-        run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release()})"
+        run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release(),parallelism:require('os').availableParallelism()})"
       - run: npm ci --ignore-scripts
-      - run: npm test
+      - name: Verify Windows privacy probe before the full suite
+        if: runner.os == 'Windows'
+        timeout-minutes: 2
+        run: node scripts/windows-probe-smoke.mjs
+      - name: Verify private storage under a real standard-user token
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/test-windows-standard-user.ps1
+      - name: Run tests
+        if: runner.os != 'Windows'
+        run: npm test
+        env:
+          CUEFLUENT_REQUIRE_SHELLS: '1'
+      # Raise Node's default on small runners without lowering it on larger ones.
+      # Files are isolated; tests inside a file remain sequential for fault injection.
+      - name: Run Windows tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testConcurrency = node -p "Math.max(2, require('os').availableParallelism() - 1)"
+          npm test -- --test-concurrency=$testConcurrency
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
       - run: npm run check:examples

@@ -66,13 +66,14 @@ test('all CLI entry points execute through symlinked directories and main-file l
   const directory = await fixture(t);
   const linked = path.join(directory, 'linked-scripts');
   await fs.symlink(scripts, linked, 'dir');
-  for (const name of ['check-notes', 'safe-update', 'package', 'hooks']) {
+  for (const name of ['check-notes', 'safe-update', 'package', 'workflow', 'collection-hooks']) {
     const fileLink = path.join(directory, `${name}.mjs`);
     await fs.symlink(path.join(scripts, `${name}.mjs`), fileLink);
     for (const entry of [fileLink, path.join(linked, `${name}.mjs`)]) {
-      const run = spawnSync(process.execPath, [entry, name === 'hooks' ? 'codex' : '--help'], { input: '{broken', encoding: 'utf8', timeout: 5000 });
+      const run = spawnSync(process.execPath, [entry, name === 'collection-hooks' ? 'codex' : '--help'], { input: '{broken', encoding: 'utf8', timeout: 5000 });
       assert.equal(run.status, 0, run.stderr);
-      assert.match(run.stdout, name === 'hooks' ? /capture is skipped/ : /Usage:/);
+      if (name === 'collection-hooks') { assert.equal(run.stdout, ''); assert.match(run.stderr, /collection unavailable/); }
+      else assert.match(run.stdout, name === 'workflow' ? /commands/ : /Usage:/);
     }
   }
 });

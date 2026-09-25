@@ -152,14 +152,9 @@ inspected fingerprint to detect concurrent manifest changes.
 
 ## Reviewed category directory creation
 
-Version-2 journals require every installed reader/writer of the collection to
-support 0.7.0+, even when the capture policy is still schema 2/3 or no policy exists.
-Inspect those installations before setting `confirmCompatibleReaders: true` in
-each v2 plan. This is a caller compatibility assertion, not another user consent
-question or automatic discovery. Without that evidence, retain v1 for root notes
-and existing parents; do not create categories or publish a v2 journal. A schema-4
-preflight can supply this evidence only while its installed-reader inventory is
-still current. Do not infer compatibility from the active client alone.
+Version-2 authored plans bind inspected parent directories and explicit creation
+intents. They require no legacy installed-reader assertion. This replacement has
+no mixed-version runtime support; do not share in-flight state with an old writer.
 
 For an authorized v2 root note or an immediate file under `meetings/`, `tasks/`,
 `knowledge-base/`, or `decisions/`, use `inspect-directories ROOT RELATIVE-NOTE...`
@@ -188,7 +183,6 @@ plan alongside the existing collection `stateDir` and ordinary `files` entries:
 {
   "version": 2,
   "mode": "authored",
-  "confirmCompatibleReaders": true,
   "root": "/absolute/private-notes",
   "stateDir": "/absolute/private-state",
   "directories": [
@@ -212,7 +206,7 @@ Adding directory intent to version 1 is rejected. Notes and state must not
 contain each other in version 2.
 
 Preview the complete note path, content change, and any category creation. In
-Suggestions, wait for approval before applying; Skip or silence creates no note
+Prompted processing, wait for approval before applying; Skip or silence creates no note
 or folder. If a parent appears, disappears, changes identity, or changes spelling
 after inspection, preserve it and obtain fresh approval for any revised proposal.
 Do not refresh identities under the old approval. A helper plan is not proof of
@@ -224,8 +218,8 @@ may leave an empty created folder; the error reports those names, and the helper
 retains the folders. Do not remove them or their contents automatically.
 
 Version-2 writes use version-2 recovery journals with root and parent identities.
-They require Cuefluent Notes 0.7.0+ for recovery and abort; older writers refuse
-them. Recovery and abort preserve unfamiliar replacement directories, even when
+Use this runtime for recovery and abort; preserve the journal and inspected
+hashes. Recovery and abort preserve unfamiliar replacement directories, even when
 copied stage bytes match. `inspect` reports a directory conflict without reading
 notes, sources or stages through the changed path. Normal recovery/cleanup stays
 blocked; the preservation abort below provides a reviewed exit. Version-1 journals
@@ -274,7 +268,7 @@ make it fit version 2. `inspect-directories` supports only root notes and immedi
 category children; it cannot inspect this custom path, and version 1 cannot carry
 directory expectations or create missing parents.
 
-Before a Suggestions preview for such a path, perform a read-only inspection of
+Before a Prompted processing preview for such a path, perform a read-only inspection of
 the root and every existing parent between it and the note. Retain each canonical
 path spelling and stable identity: Node's `lstat` with `{ bigint: true }` supplies
 `dev`, `ino`, and `birthtimeNs`. Reject symlinks/junctions and non-directories;
@@ -286,7 +280,7 @@ the approved v1 plan. Any appearance, disappearance or replacement requires a
 fresh preview and approval; do not refresh recorded identities under old approval.
 If the inspection cannot be completed, stop the save and explain the conflict.
 Automatic or explicitly authorized writes also inspect and recheck parents, but
-do not add a Suggestions question when authorization already covers the write.
+do not add a Prompted processing question when authorization already covers the write.
 
 These are agent-side checks. The v1 helper checks current path safety and note
 hashes; it does not enforce the previously inspected parent identities. Even an

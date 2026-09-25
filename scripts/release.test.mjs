@@ -71,9 +71,9 @@ test('release catalogs resolve complete client packages and all four archives wo
     const report = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/check-notes.mjs'), path.join(skill, 'examples/decision.md')], { cwd: root, env: { ...process.env, NODE_PATH: '' } }));
     assert.equal(report.errors, 0);
     const config = path.join(root, 'missing-private-config.json');
-    const status = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/setup.mjs'), 'status', '--client', archive.client, '--config', config, '--cwd', root], { cwd: root }));
-    assert.equal(status.status, 'unconfigured');
-    assert.equal(status.hookPackaged, archive.variant === 'hooks');
+    const status = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/workflow.mjs'), 'status', '--config', config], { cwd: root }));
+    assert.equal(status.configHash, null);
+    assert.equal(status.runtime.hookRegistration, archive.variant === 'hooks' ? 'packaged' : 'absent');
     await assert.rejects(fs.stat(config), { code: 'ENOENT' });
     if (archive.variant === 'manual') {
       const hooks = await archiveFiles(path.join(root, `${archive.client}-hooks/cuefluent-notes`));

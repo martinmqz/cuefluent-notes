@@ -1,4 +1,4 @@
-import { CLIENTS, object } from './capture-policy.mjs';
+import { object, CLIENTS } from './workflow-values.mjs';
 
 const numeric = '(?:0|[1-9][0-9]*)';
 const prerelease = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)';
@@ -11,7 +11,7 @@ const fields = (value, names) => object(value) && Object.keys(value).length === 
 /** Validate the manifest subset emitted by this package, not the full host schema. */
 export function validatePluginManifest(manifest, client) {
   const common = ['name', 'version', 'description', 'author'];
-  const validCommon = CLIENTS.has(client) && fields(manifest, client === 'codex' ? [...common, 'skills', 'interface'] : common) &&
+  const validCommon = CLIENTS.includes(client) && fields(manifest, client === 'codex' ? [...common, 'skills', 'interface'] : common) &&
     manifest.name === 'cuefluent-notes' && text(manifest.version) && manifest.version === manifest.version.trim() && semver.test(manifest.version) &&
     text(manifest.description) && fields(manifest.author, ['name']) && text(manifest.author.name);
   let validInterface = true;

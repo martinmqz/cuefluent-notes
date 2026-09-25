@@ -3,7 +3,7 @@
   "version": "0.7.1",
   "private": true,
   "type": "module",
-  "description": "Standalone Markdown capture guidance and local checks for Cuefluent Notes",
+  "description": "Selected session evidence and searchable Markdown notes with independent collection and processing.",
   "engines": {
     "node": ">=22"
   },

@@ -121,10 +121,10 @@ for (const client of ['codex', 'claude']) {
     assert.equal(result.destination, f.destination);
     assert.equal(result.backup, null);
     assert.equal(result.identity, `cuefluent-notes@${client === 'codex' ? 'personal' : 'skills-dir'}`);
-    const statusArgs = ['status', '--client', client, '--cwd', f.root, '--config', path.join(f.root, 'absent-policy.json')];
-    const status = helper(f.destination, 'setup.mjs', statusArgs);
-    assert.equal(status.status, 'unconfigured');
-    assert.equal(status.hookPackaged, true);
+    const statusArgs = ['status', '--config', path.join(f.root, 'absent-policy.json')];
+    const status = helper(f.destination, 'workflow.mjs', statusArgs);
+    assert.equal(status.configHash, null);
+    assert.equal(status.runtime.hookRegistration, 'packaged');
     assert.equal(helper(f.destination, 'check-notes.mjs', [path.join(f.destination, 'skills/cuefluent-notes/examples/decision.md')]).errors, 0);
     const manifestFile = path.join(f.destination, `.${client}-plugin/plugin.json`);
     const firstVersion = (await readJSON(manifestFile)).version;
@@ -133,7 +133,7 @@ for (const client of ['codex', 'claude']) {
     assert.equal(await fs.readFile(path.join(updated.backup, 'local-extra.txt'), 'utf8'), 'preserve this in the backup');
     await fs.stat(path.join(updated.backup, 'hooks/hooks.json'));
     await absent(path.join(f.destination, 'hooks'));
-    assert.equal(helper(f.destination, 'setup.mjs', statusArgs).hookPackaged, false);
+    assert.equal(helper(f.destination, 'workflow.mjs', statusArgs).runtime.hookRegistration, 'absent');
     assert.deepEqual(await fs.readFile(settings), before);
     await absent(path.join(f.root, 'absent-policy.json'));
     assert.equal(f.calls.filter(call => call.exe === 'npm').length, 2);

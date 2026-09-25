@@ -3,7 +3,6 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildPackages } from './package.mjs';
 import MarkdownIt from 'markdown-it';
@@ -75,11 +74,16 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     const manifest = JSON.parse(await fs.readFile(path.join(pkg.root, expectedManifest), 'utf8'));
     assert.equal(manifest.name, 'cuefluent-notes');
     assert.equal(manifest.version, sourceVersion);
-    const { READER_VERSION } = await import(pathToFileURL(path.join(pkg.skillRoot, 'scripts/capture-policy.mjs')));
-    assert.equal(READER_VERSION.join('.'), manifest.version);
     await assert.rejects(fs.stat(path.join(pkg.root, 'hooks')), { code: 'ENOENT' });
     const files = await inventory(pkg.root);
+    for (const obsolete of ['setup', 'hooks', 'hook-definition', 'capture-policy', 'config-update', 'capture-completion']) assert(!files.includes(`skills/cuefluent-notes/scripts/${obsolete}.mjs`));
+    assert(!files.some(file => /AGENTS\.md|references\/completion\.md|examples\/hook-config\.json/.test(file)));
     await checkDocumentation(pkg.root, files);
+    const workflow = path.join(pkg.skillRoot, 'scripts/workflow.mjs');
+    assert(run(workflow, ['--help'], directory).commands.includes('processing-prepare'));
+    const emptyWorkflow = run(workflow, ['status', '--config', path.join(directory, `${pkg.client}-workflow.json`)], directory);
+    assert.equal(emptyWorkflow.configHash, null);
+    assert.equal(emptyWorkflow.transport.automaticProcessing, false);
     assert.ok(files.some(f => f.endsWith('node_modules/markdown-it/LICENSE')));
     assert.ok(!files.some(f => /(?:^|\/)\.git(?:\/|$)|\.test\.mjs$|(?:^|\/)journal\.json$|(?:^|\/)manifest\.json$/.test(f)));
     const checker = path.join(pkg.skillRoot, 'scripts/check-notes.mjs');
@@ -91,23 +95,6 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     const work = path.join(directory, `private-${pkg.client}`);
     const notes = path.join(work, 'notes');
     await fs.mkdir(notes, { recursive: true });
-    const setup = path.join(pkg.skillRoot, 'scripts/setup.mjs');
-    const config = path.join(work, 'capture.json');
-    const setupArgs = ['--client', pkg.client, '--config', config];
-    const initial = run(setup, ['status', ...setupArgs, '--cwd', directory], directory);
-    assert.equal(initial.status, 'unconfigured');
-    assert.equal(initial.hookPackaged, false);
-    assert.equal(run(setup, ['init', ...setupArgs, '--mode', 'manual'], directory).status, 'created');
-    const manualStatus = run(setup, ['status', ...setupArgs, '--cwd', directory], directory);
-    assert.equal(manualStatus.status, 'disabled');
-    const policyProposal = path.join(work, 'proposed-config.json');
-    await fs.writeFile(policyProposal, JSON.stringify({ version: 1, enabled: true, clients: [pkg.client],
-      automaticUpdates: false, scope: 'Synthetic findings only.',
-      routes: [{ projectRoot: directory, destination: path.join(notes, 'note.md'), stateDir: path.join(work, 'state') }] }));
-    assert.equal(run(setup, ['update', ...setupArgs, '--cwd', directory, '--proposal', policyProposal,
-      '--expected-hash', manualStatus.configHash], directory).status, 'updated');
-    assert.equal(run(setup, ['status', ...setupArgs, '--cwd', directory], directory).mode, 'suggest');
-    assert.deepEqual(await fs.readdir(notes), []);
     const proposal = path.join(work, 'proposal.md');
     await fs.writeFile(proposal, '# Synthetic\n\n## Portable write\n\nVerified from an isolated package.\n');
     const planFile = path.join(work, 'plan.json');
@@ -129,96 +116,4 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     await assert.rejects(fs.stat(path.join(pkg.root, 'note.md')), { code: 'ENOENT' });
   }
   await assert.rejects(buildPackages({ outDir: result.outDir }), /exist|fresh|overwrite/i);
-});
-test('opt-in bundles preserve literal shell characters through host preprocessing', async t => {
-  const directory = await fixture(t);
-  const result = await buildPackages({ outDir: path.join(directory, 'opt in $HOME packages'), withHooks: true });
-  const configPath = path.join(directory, 'private-config.json');
-  const destination = path.join(directory, 'knowledge.md');
-  await fs.writeFile(configPath, JSON.stringify({ version: 1, enabled: true, clients: ['codex', 'claude'], automaticUpdates: true, scope: 'Synthetic facts only', defaultRoute: { destination, stateDir: path.join(directory, 'state') } }));
-  for (const pkg of result.packages) {
-    await checkDocumentation(pkg.root, await inventory(pkg.root));
-    const config = JSON.parse(await fs.readFile(path.join(pkg.root, 'hooks/hooks.json'), 'utf8'));
-    assert.deepEqual(Object.keys(config.hooks), ['SessionStart', 'UserPromptSubmit', 'Stop']);
-    assert.equal(config.hooks.SessionStart[0].matcher, 'startup');
-    const handler = config.hooks.UserPromptSubmit[0].hooks[0];
-    assert.equal(handler.type, 'command');
-    assert.deepEqual(config.hooks.SessionStart[0].hooks, [handler]);
-    assert.deepEqual(config.hooks.Stop, [{ hooks: [handler] }]);
-    assert.ok(!handler.async);
-    const setupStatus = run(path.join(pkg.skillRoot, 'scripts/setup.mjs'), ['status', '--client', pkg.client,
-      '--config', configPath, '--cwd', directory], directory);
-    assert.equal(setupStatus.hookPackaged, true);
-    assert.equal(setupStatus.status, 'configured');
-    const payload = { hook_event_name: 'UserPromptSubmit', session_id: 'package-session', turn_id: 'package-turn', prompt_id: 'package-prompt', cwd: directory };
-    const command = pkg.client === 'codex'
-      ? handler.command.replaceAll('${PLUGIN_ROOT}', pkg.root).replaceAll('${CLAUDE_PLUGIN_ROOT}', pkg.root)
-      : handler.command;
-    const invoke = (input, selectedConfig = configPath) => spawnSync(command, { shell: true, input: JSON.stringify(input), encoding: 'utf8', cwd: directory,
-      env: { ...process.env, PLUGIN_ROOT: pkg.root, CLAUDE_PLUGIN_ROOT: pkg.root, CUEFLUENT_NOTES_CONFIG: selectedConfig, NODE_PATH: '' } });
-    const output = invoke(payload);
-    assert.equal(output.status, 0, output.stderr);
-    const response = JSON.parse(output.stdout);
-    assert.equal(response.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
-    assert.ok(response.hookSpecificOutput.additionalContext.includes(JSON.stringify(path.join(pkg.skillRoot, 'SKILL.md')).slice(1, -1)));
-    assert.ok(!response.decision);
-    const startup = { hook_event_name: 'SessionStart', source: 'startup', session_id: payload.session_id, cwd: directory };
-    const configuredStart = invoke(startup);
-    assert.equal(configuredStart.status, 0, configuredStart.stderr);
-    assert.equal(configuredStart.stdout, '');
-    const absentConfig = path.join(directory, `${pkg.client}-absent.json`);
-    const firstStart = invoke(startup, absentConfig);
-    assert.equal(firstStart.status, 0, firstStart.stderr);
-    const notice = JSON.parse(firstStart.stdout);
-    assert.deepEqual(Object.keys(notice), ['systemMessage']);
-    assert.match(notice.systemMessage, /Set up Cuefluent Notes/);
-    const unconfiguredPrompt = invoke(payload, absentConfig);
-    assert.equal(unconfiguredPrompt.status, 0, unconfiguredPrompt.stderr);
-    assert.equal(unconfiguredPrompt.stdout, '');
-    const resume = invoke({ ...startup, source: 'resume' }, absentConfig);
-    assert.equal(resume.status, 0, resume.stderr);
-    assert.equal(resume.stdout, '');
-    await assert.rejects(fs.stat(absentConfig), { code: 'ENOENT' });
-    const manual = run(path.join(pkg.skillRoot, 'scripts/check-notes.mjs'), [path.join(pkg.skillRoot, 'examples/feature-behavior.md')], directory);
-    assert.equal(manual.errors, 0);
-  }
-  await assert.rejects(fs.stat(destination), { code: 'ENOENT' });
-  await assert.rejects(fs.stat(path.join(directory, 'state')), { code: 'ENOENT' });
-});
-
-test('both detached bundles complete an opt-in Stop recovery through their bundled helper', async t => {
-  const directory = await fixture(t);
-  const result = await buildPackages({ outDir: path.join(directory, 'completion-packages'), withHooks: true });
-  const notes = path.join(directory, 'notes');
-  await fs.mkdir(notes);
-  for (const pkg of result.packages) {
-    const configPath = path.join(directory, `${pkg.client}-completion.json`);
-    run(path.join(pkg.skillRoot, 'scripts/setup.mjs'), ['init', '--client', pkg.client, '--mode', 'suggest',
-      '--project', directory, '--notes-dir', notes, '--scope', 'Synthetic decisions', '--config', configPath,
-      '--completion-check', 'yes', '--confirm-compatible-clients', 'yes'], directory);
-    const script = path.join(pkg.skillRoot, 'scripts/hooks.mjs');
-    const payload = { hook_event_name: 'Stop', permission_mode: 'default', stop_hook_active: false, session_id: 'detached-session', cwd: directory,
-      [pkg.client === 'codex' ? 'turn_id' : 'prompt_id']: 'native-turn' };
-    const invoke = () => spawnSync(process.execPath, [script, pkg.client, '--config', configPath], {
-      cwd: directory, input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, NODE_PATH: '' },
-    });
-    assert.equal(invoke().stdout, ''); // Access has not been demonstrated in this session.
-    const prompt = spawnSync(process.execPath, [script, pkg.client, '--config', configPath], {
-      cwd: directory, input: JSON.stringify({ ...payload, hook_event_name: 'UserPromptSubmit' }), encoding: 'utf8',
-    });
-    assert.equal(prompt.status, 0, prompt.stderr);
-    const op = JSON.parse(JSON.parse(prompt.stdout).hookSpecificOutput.additionalContext.split('\n\n').at(-1));
-    const { helper, ...selection } = op.completion;
-    assert.equal(helper, path.join(pkg.skillRoot, 'scripts/capture-completion.mjs'));
-    const marked = spawnSync(process.execPath, [helper], { cwd: directory, encoding: 'utf8',
-      env: { ...process.env, NODE_PATH: '' }, input: JSON.stringify({ ...selection,
-        client: pkg.client, session_id: op.session_id,
-        [pkg.client === 'codex' ? 'turn_id' : 'prompt_id']: 'native-turn', outcome: 'proposed' }),
-    });
-    assert.equal(marked.status, 0, marked.stderr);
-    assert.equal(invoke().stdout, '');
-    payload[pkg.client === 'codex' ? 'turn_id' : 'prompt_id'] = 'next-turn';
-    assert.equal(JSON.parse(invoke().stdout).decision, 'block');
-    assert.deepEqual(await fs.readdir(notes), []);
-  }
 });

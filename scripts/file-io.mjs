@@ -69,9 +69,10 @@ export async function isMain(url) {
 /** Open an ordinary file without trusting a path that changed during open. */
 export async function openGuarded(file, { flags = constants.O_RDONLY, missing = false, singleLink = false, maxBytes = Infinity } = {}) {
   const check = stat => {
-    if (!stat.isFile() || (singleLink && stat.nlink !== 1n) || stat.size > maxBytes) {
+    if (!stat.isFile() || (singleLink && stat.nlink !== 1n)) {
       throw new Error('Expected a regular file within the size limit' + (singleLink ? ' with a single hard link.' : '.'));
     }
+    if (stat.size > maxBytes) throw Object.assign(new Error('Expected a regular file within the size limit.'), { code: 'FILE_SIZE_LIMIT_EXCEEDED' });
   };
   let handle;
   try {

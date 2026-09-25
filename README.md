@@ -1,15 +1,21 @@
 # Cuefluent Notes
 
-Capture and maintain useful information as ordinary Markdown. Standups, meeting
-and task summaries, decisions, documentation, bug findings, and KB entries use
-one workflow: preserve evidence and meaningful dates, infer search vocabulary,
-and update the appropriate document without making parallel copies.
+Capture and organize your knowledge for fast recall—right on cue.
 
-The workflow is self-contained. It requires no Cuefluent app, source checkout,
-workspace packages, or Devlog. Suitable existing notes remain authoritative;
-derived documents are created only when the requested purpose warrants them.
-User notes, private evidence, local configuration, and update state stay outside
-this public repository. The bundled examples are fictional.
+Cuefluent Notes has two independent steps: a local worker collects selected parts
+of Codex or Claude sessions as immutable JSON evidence; an agent turns selected
+evidence into clear, searchable Markdown. Directly saving user-selected material
+also works without session collection. Notes stay ordinary files with descriptive
+names and optional type folders.
+
+This source contains the replacement workflow. Published versions through
+**v0.7.1** use the prior workflow; this implementation has not been released.
+It does not import old capture settings. Fresh setup leaves collection off and
+processing Manual. Installation and hook trust enable neither process.
+
+The plugin requires no Cuefluent app or Devlog. User notes, raw evidence and private
+settings belong outside the replaceable package; examples in this repository are
+fictional.
 
 ## Install in Codex or Claude Code
 
@@ -18,7 +24,7 @@ this public repository. The bundled examples are fictional.
 For a [published release](https://github.com/martinmqz/cuefluent-notes/releases),
 you need **Git, Node.js 22+, and a current client CLI** on Windows, macOS, or
 Linux. Runtime dependencies are included; no npm install or source checkout is
-needed. Windows requires plugin version **0.6.0+**.
+needed. The commands install the published version, which may differ from this source.
 
 **Codex:**
 
@@ -82,49 +88,34 @@ for this user. Clone the repository and run its install:codex npm script
 
 ### Start using it
 
-1. **Start a new session** after installation. Restart the client if the plugin
-   is not visible.
-2. **Review the plugin hooks** in your client. Codex requires hook trust through
-   its hook controls (`/hooks` in the CLI).
-3. Say **“Set up Cuefluent Notes.”** Choose **Manual**, **Suggestions**, or
-   **Automatic**. The agent guides you through any project and notes-location
-   choices, then verifies the result.
+1. Start a fresh session after installation and review the plugin's hooks in
+   your client. Codex exposes hook trust through `/hooks`.
+2. Say **“Set up Cuefluent Notes.”** Select a project and where Markdown should go.
+   The agent prepares private, machine-local evidence and state directories.
+3. Choose collection and processing separately. Collection can cover selected
+   sessions or future sessions in the project. Processing can be Manual,
+   Prompted (approve Save / Skip), or Automatic within your chosen scope.
 
-Installation leaves existing capture settings unchanged. On a fresh install,
-**capture stays off until you choose a mode**. Manual keeps it off; Suggestions
-offers an optional Save / Skip choice after completing work in an interactive
-conversation; Automatic captures eligible work within your chosen scope.
-You do not need the Cuefluent app. Keep your notes outside the plugin and source
-checkout.
+The current client transport is not verified for automatic processing or
+conversational current-turn controls. **Use an explicit processing request** and
+select the native session/units; the agent must not infer identity from the current
+folder. Automatic collection can run after setup and hook trust. New selection
+starts at the current file boundary, excluding the initial boundary unit; it does
+not sweep historical session contents. Explicit historical capture reviews a
+fixed byte window and named units.
 
-Choose a notes folder to keep multiple files named for their content. The agent
-reuses a relevant note or proposes a descriptive filename, such as
-`v1.0-release.md`, when there is something useful to save. Filenames do not get
-an automatic plugin-name prefix. You can also
-select a specific Markdown file to keep using that file. Existing file-based
-settings stay unchanged until you request a folder instead.
+For example: “Process the pending captures from this selected session into a
+meeting note; show me the proposed change before saving.” Or: “Save this supplied
+meeting summary to my notes.” The latter needs no session capture setup.
+See [setup](references/setup.md) and [explicit controls](references/workflow-cli.md).
 
-New folder setups use **by-type** organization. The agent infers each note's type
-from its content and purpose when saving: `meetings/`, `tasks/`, `knowledge-base/`,
-or `decisions/`. Users do not need to select note types during setup.
-For example, a new meeting could use `meetings/release-planning.md`; general or
-unclear content stays at the root. The agent first preserves explicit destinations
-and suitable existing notes, so type placement does not move files or create
-duplicate category copies. There is no required `type:` field or task lifecycle.
-
-Suggestions show the complete proposed path, edit, and any folder creation before
-Save / Skip. Skipping or leaving it unanswered creates neither notes nor folders.
-Type folders require every installed reader of the shared policy to support
-0.7.0+; installation alone does not change existing organization or capture consent.
-Existing flat collections remain flat, and root-only placement can still be requested.
-To activate type folders for an existing collection, say: “Use Cuefluent Notes.
-Organize this project's notes by type; keep the current capture mode and notes root.”
-The agent applies and verifies the settings change after checking installed-reader
-compatibility. App loading of nested files, including recursive discovery, is a
-separate capability and has not been verified here; it does not block choosing
-where notes are saved. See
-[note placement](references/workflow.md#note-placement) and
-[verification](references/verification.md#note-type-folders-070).
+New folder destinations default to type folders. The agent infers the type from
+context: `meetings/`, `tasks/`, `knowledge-base/`, or `decisions/`; general content
+stays at the root. Explicit files and suitable existing notes take precedence.
+No type questionnaire, automatic renaming, or duplicate category copy is needed.
+Prompted processing shows the complete proposed path, edit and new folders before
+approval; Skip creates no notes or folders. An explicit flat layout is supported.
+Cuefluent's recursive loading and search ranking remain separately unverified.
 
 ### Update a marketplace installation
 
@@ -171,11 +162,10 @@ the generated `marketplace` branch contains released, directly installable packa
 
 ## Use the workflow
 
-After installation, start a fresh task and say **“Set up Cuefluent Notes”** or
-**“Use Cuefluent Notes.”** The skill checks its status and walks you through
-manual use, suggested updates, or automatic capture. For capture, it asks which
-project to cover and where notes should go, then saves and verifies the settings.
-You do not need to write JSON. See [first-use setup](references/setup.md).
+Say **“Use Cuefluent Notes”** with selected sources and the desired outcome.
+The agent follows the configured collection/processing boundaries and checks
+[status](references/setup.md). Direct saves use the same guarded writer as
+processed session evidence.
 
 Start with [SKILL.md](SKILL.md), or ask an agent to use it with selected evidence
 and a requested destination. For example:
@@ -199,7 +189,7 @@ not infer facts, merge competing edits, or make a collection-wide transaction.
 
 ## Run from the source checkout
 
-Use Node 22 or later and Git, plus `unzip` and `tar` for the release extraction
+Use Node 22 or later, Git and Bash, plus `unzip` and `tar` for the release extraction
 tests. From this repository:
 
 ```sh
@@ -244,44 +234,38 @@ npm run release:build
 This creates a fresh `dist/release`. See the [publisher guide](references/publishing.md)
 for release automation, first publication, and public-directory submission materials.
 
-## Optional capture assistance
+## Optional session collection
 
-The hook variant registers `SessionStart`, `UserPromptSubmit`, and `Stop`. After explicit private policy
-configuration and each client's setup/trust, it reminds the current agent to use
-the same workflow before completing eligible work. No useful change means no
-note write. Read-only requests, opt-outs, scope, manual edits, and configured
-routing take precedence.
+Hook packages register SessionStart, UserPromptSubmit, Stop, SessionEnd, and
+Codex Interrupt or Claude StopFailure. Ingress stores bounded native metadata
+and launches a short-lived local worker only with fresh collection permission.
+Unconfigured and fully disabled projects cause zero filesystem writes.
+Synchronous hooks never scan source text, call models, write Markdown, block a
+prompt, or request a recovery continuation. There is no old Stop completion check.
 
-Without configuration, a trusted startup hook displays a brief host notice and
-leaves capture off. It adds no instructions to the model and no sentence to
-assistant answers; unconfigured prompt hooks stay quiet. A saved manual
-preference disables the shared capture policy and its notices. Hooks store no payloads,
-transcripts, or markers and call no other model. An optional Stop check can ask
-the working agent to finish a missed capture decision once. It requires separate
-opt-in because the agent keeps a small private completion marker. Existing
-settings stay unchanged; ask **“Enable the Cuefluent Notes completion check”**
-after upgrading all installed clients to 0.6.0+. A Save / Skip proposal settles
-the check without waiting for approval. See [completion checks](references/completion.md).
-Use the helper only with existing permission to write its private state, without
-requesting extra permission each turn. Recovery arms after the first successful marker
-in that session and permission mode, and stays off in plan or unknown modes.
-Duplicate avoidance depends on reading the destination and reviewing meaning; it is not an
-exactly-once guarantee. Read [hook guidance](references/hooks.md) before opting in.
+The worker reads only selected source ranges. Codex supports verified turn
+boundaries and completed/interrupted/failed flags. Claude currently retains
+proven human input only, marked unconfirmed; assistant parentage is insufficient
+proof of ownership. Source text is untrusted evidence, not instructions.
+See the [reader coverage matrix](references/session-workflow.md) and
+[hook limits](references/hooks.md).
+
+Collection and processing can be paused independently; user opt-outs override
+saved permission. Raw evidence is private and may contain sensitive information;
+collection does not automatically redact it. Pruning and abandoned-lock recovery
+require explicit, reviewed commands. Intake and writer state must stay on local
+storage, outside projects, notes and the plugin.
 
 ## Verification and licensing
 
-Verification covers synthetic content and vocabulary, safe-update conflicts and
-recovery, adapter routing and privacy, and standalone packaged helpers. Live
-model checks used macOS with Node `26.2.0`. CI uses Node 22 on native Windows,
-Linux, and macOS for helpers, shell hooks, packaging, and matching release
-checksums. Real CLI registration checks use disposable Windows/macOS profiles;
-live model hook behavior on Windows and Linux remains unverified.
-
-Authorized live CLI smoke tests also exercised temporary plugin loading and
-synthetic capture; see [verification results](references/verification.md) for
-the tested clients, cases, and remaining limits. Real-user pilot usefulness,
-actual Cuefluent rendering/loading/ranking, and already-open session reload
-behavior remain unverified. Publication status is shown on the
+Verification covers synthetic readers, consent boundaries, private storage,
+writer conflicts/recovery and detached packages. CI uses Node 22 on native
+Windows, Linux and macOS, including Windows shells and a standard-user ACL check.
+See [verification scope](references/verification.md) for automated coverage,
+pinned-client registration tests and remaining limits. Historical live-model
+checks for v0.7.1 do not certify this replacement. Live current-turn transport,
+native Save / Skip rendering, desktop launch PATH and Cuefluent loading/ranking
+remain unverified. Publication status is on the
 [releases page](https://github.com/martinmqz/cuefluent-notes/releases).
 
 The project has no assigned license. Bundled dependencies retain their own

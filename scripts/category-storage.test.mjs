@@ -4,7 +4,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { applyPlan, inspectDirectories, fingerprint, inspectState, recover, abortUpdate, withLock } from './safe-update.mjs';
-import { captureSettings } from './capture-policy.mjs';
 
 async function fixture(t, names = ['meetings/topic.md']) {
   const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-categories-')));
@@ -18,7 +17,7 @@ async function fixture(t, names = ['meetings/topic.md']) {
     await fs.writeFile(contentPath, `# Synthetic meeting\n\n## Finding ${index}\n\nKeep the tested decision.\n`);
     files.push({ path: name, expectedHash: null, contentPath });
   }
-  const plan = { version: 2, mode: 'authored', confirmCompatibleReaders: true, stateDir, ...await inspectDirectories(root, names), files };
+  const plan = { version: 2, mode: 'authored', stateDir, ...await inspectDirectories(root, names), files };
   return { temp, root, stateDir, plan };
 }
 const recheck = async f => {
@@ -162,9 +161,7 @@ test('new journals recover partial replacements and block capture while pending'
   const journal = JSON.parse(await fs.readFile(path.join(f.stateDir, 'journal.json')));
   assert.equal(journal.version, 2);
   assert.ok(journal.directories.every(item => typeof item.identity === 'string'));
-  await assert.rejects(captureSettings('codex', f.temp, { version: 4, minimumPluginVersion: '0.7.0', completionCheck: false,
-    enabled: true, clients: ['codex'], automaticUpdates: false, scope: 'Synthetic.',
-    routes: [{ projectRoot: f.temp, notesDir: f.root, stateDir: f.stateDir, organization: 'by-type' }] }), { code: 'STATE_RECOVERY_REQUIRED' });
+  assert.equal((await inspectState(f.stateDir)).recoveryPending, true);
   assert.deepEqual((await recover(f.stateDir)).updated, ['tasks/second.md']);
   assert.equal((await inspectState(f.stateDir)).recoveryPending, false);
 });

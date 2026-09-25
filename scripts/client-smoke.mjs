@@ -60,10 +60,10 @@ try {
     const skill = path.join(destination, 'skills/cuefluent-notes');
     const checker = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/check-notes.mjs'), path.join(skill, 'examples/decision.md')]));
     assert.equal(checker.errors, 0);
-    const status = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/setup.mjs'), 'status', '--client', client, '--cwd', home]));
-    assert.equal(status.status, 'unconfigured');
-    assert.equal(status.hookPackaged, true);
-    await assert.rejects(fs.stat(env.CUEFLUENT_NOTES_CONFIG), { code: 'ENOENT' });
+    const status = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/workflow.mjs'), 'status']));
+    assert.equal(status.configHash, null);
+    assert.equal(status.runtime.hookRegistration, 'packaged');
+    await assert.rejects(fs.stat(env.CUEFLUENT_WORKFLOW_CONFIG), { code: 'ENOENT' });
     console.log(JSON.stringify({ platform: process.platform, client, version, freshInstall: true,
       repeatUpdate: true, registrations: 1, capture: 'unconfigured', liveModel: false }));
   }

@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { within, lstatOrNull as statOrNull, isMain, compare, CONTROLS } from './file-io.mjs';
-import { hookConfiguration } from './hook-definition.mjs';
+import { collectionHookConfiguration } from './collection-hook-definition.mjs';
 import { validatePluginManifest } from './plugin-manifest.mjs';
 
 const SOURCE_ROOT = await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
@@ -12,14 +12,54 @@ const SOURCE_FILES = [
   'references/workflow.md', 'references/authoring.md', 'references/evidence.md',
   'references/retrieval.md', 'references/refresh.md', 'references/hooks.md', 'references/distribution.md',
   'references/verification.md', 'references/publishing.md',
-  'references/setup.md', 'references/completion.md',
+  'references/setup.md', 'references/session-workflow.md', 'references/processing.md', 'references/workflow-cli.md',
+  'examples/workflow.json',
   'examples/feature-behavior.md', 'examples/decision.md', 'examples/search-vocabulary.md',
   'examples/standup.md', 'examples/meeting-summary.md', 'examples/task-summary.md',
-  'examples/knowledge-base.md', 'examples/check-cases.json', 'examples/hook-config.json',
-  'scripts/check-notes.mjs', 'scripts/safe-update.mjs', 'scripts/hooks.mjs', 'scripts/runtime-paths.mjs', 'scripts/file-io.mjs',
-  'scripts/capture-policy.mjs', 'scripts/setup.mjs', 'scripts/config-update.mjs', 'scripts/hook-definition.mjs',
-  'scripts/plugin-manifest.mjs', 'scripts/capture-completion.mjs',
+  'examples/knowledge-base.md', 'examples/check-cases.json',
+  'scripts/check-notes.mjs', 'scripts/safe-update.mjs', 'scripts/writer-protocol.mjs', 'scripts/workflow-values.mjs', 'scripts/runtime-paths.mjs', 'scripts/file-io.mjs',
+  'scripts/plugin-manifest.mjs',
   'scripts/note-organization.mjs',
+  'scripts/capture-contract.mjs',
+  'scripts/capture-controls.mjs',
+  'scripts/capture-evidence.mjs',
+  'scripts/capture-maintenance.mjs',
+  'scripts/capture-retention.mjs',
+  'scripts/capture-selection.mjs',
+  'scripts/claude-reader.mjs',
+  'scripts/codex-reader.mjs',
+  'scripts/collection-hook-definition.mjs',
+  'scripts/collection-hooks.mjs',
+  'scripts/collection-ingress.mjs',
+  'scripts/collection-grant.mjs',
+  'scripts/collection-scheduler.mjs',
+  'scripts/collection-worker.mjs',
+  'scripts/direct-save.mjs',
+  'scripts/intake-io.mjs',
+  'scripts/intake-recovery.mjs',
+  'scripts/intake-store.mjs',
+  'scripts/process-identity.mjs',
+  'scripts/processing-contract.mjs',
+  'scripts/processing-inventory.mjs',
+  'scripts/processing-packet.mjs',
+  'scripts/processing-page.mjs',
+  'scripts/processing-proposal.mjs',
+  'scripts/processing-state.mjs',
+  'scripts/processing.mjs',
+  'scripts/reader-checkpoint.mjs',
+  'scripts/reader-pages.mjs',
+  'scripts/session-jsonl.mjs',
+  'scripts/storage-platform.mjs',
+  'scripts/workflow-budget.mjs',
+  'scripts/workflow-config.mjs',
+  'scripts/workflow-context.mjs',
+  'scripts/workflow-paths.mjs',
+  'scripts/workflow-routes.mjs',
+  'scripts/workflow-selection.mjs',
+  'scripts/workflow-settings.mjs',
+  'scripts/workflow-diagnostics.mjs',
+  'scripts/workflow-storage.mjs',
+  'scripts/workflow.mjs',
 ];
 const EXCLUDED_DIRECTORIES = new Set(['node_modules', '.git', '.github', '.hg', '.svn', 'test', 'tests', '__tests__', '__mocks__', 'coverage', 'benchmark', 'benchmarks', 'scripts']);
 const EXCLUDED_FILES = /^(?:\.DS_Store|\.npmignore|\.gitignore|\.travis\.yml|Makefile|(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)|(?:tsconfig(?:\.[^.]+)?\.json)|(?:(?:rollup|webpack|vite|eslint|jest|vitest|babel)\.config\..+)|\.(?:eslint|babel|prettier|nyc|mocha)rc(?:\..+)?)$/;
@@ -143,7 +183,7 @@ async function canonicalOutput(requested) {
   return path.join(canonical, ...missing, path.basename(requested));
 }
 export function packageReadme(client, version, withHooks) {
-  return `# Cuefluent Notes ${version}\n\n${client === 'codex' ? 'Codex' : 'Claude Code'} plugin, ${withHooks ? 'optional hook-enabled' : 'manual'} package. Requires Node.js 22 or later on the host PATH. Runtime dependencies and their license notices are included.\n\nStart a fresh task and ask **Set up Cuefluent Notes** to choose manual use, suggestions, or automatic capture. Read the [setup guide](skills/cuefluent-notes/references/setup.md), [usage guide](skills/cuefluent-notes/README.md), and [distribution instructions](skills/cuefluent-notes/references/distribution.md). Building or copying this package does not install or trust it. ${withHooks ? 'Hook capture remains disabled without a separate private configuration and client trust.' : 'This package has no hook registration.'}\n`;
+  return `# Cuefluent Notes ${version}\n\n${client === 'codex' ? 'Codex' : 'Claude Code'} plugin, ${withHooks ? 'optional hook-enabled' : 'manual'} package. Requires Node.js 22 or later on the host PATH. Runtime dependencies and their license notices are included.\n\nStart a fresh task and ask **Set up Cuefluent Notes** to choose collection and processing separately. Read the [setup guide](skills/cuefluent-notes/references/setup.md), [usage guide](skills/cuefluent-notes/README.md), and [distribution instructions](skills/cuefluent-notes/references/distribution.md). Building or copying this package does not install or trust it. ${withHooks ? 'Session collection remains disabled without a separate private configuration and client trust.' : 'This package has no hook registration.'}\n`;
 }
 
 /** Build local, fresh plugin directories. Never installs, registers or trusts a plugin. */
@@ -189,7 +229,7 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
       await writeNew(path.join(skillRoot, 'package.json'), asJSON(runtimePackage));
       await writeNew(path.join(skillRoot, 'package-lock.json'), asJSON(runtimeLock));
       await writeNew(path.join(root, client === 'codex' ? '.codex-plugin' : '.claude-plugin', 'plugin.json'), asJSON(manifests.get(client)));
-      if (withHooks) await writeNew(path.join(root, 'hooks', 'hooks.json'), asJSON(hookConfiguration(client)));
+      if (withHooks) await writeNew(path.join(root, 'hooks', 'hooks.json'), asJSON(collectionHookConfiguration(client)));
       await writeNew(path.join(root, 'README.md'), packageReadme(client, pkg.version, withHooks));
     }
     // Exclusive reservation prevents two builders from publishing over an existing result.

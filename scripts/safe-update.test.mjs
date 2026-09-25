@@ -542,10 +542,11 @@ test('lock cleanup failures preserve both successful output and the primary fail
         return true;
       });
     } else {
-      const outcome = await applyPlan(f.plan, { afterReplace: changeOwner });
-      assert.equal(outcome.status, 'updated');
-      assert.deepEqual(outcome.updated, ['note.md']);
-      assert.equal(outcome.cleanupWarnings.length, 1);
+      await assert.rejects(applyPlan(f.plan, { afterReplace: changeOwner }), error => {
+        assert.match(error.message, /lock ownership changed/i);
+        assert.equal(error.cleanupWarnings.length, 1); return true;
+      });
+      assert(await fingerprint(path.join(f.stateDir, 'journal.json')));
     }
     assert.equal((await inspectState(f.stateDir)).locked, true);
     assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
@@ -554,25 +555,24 @@ test('lock cleanup failures preserve both successful output and the primary fail
 test('missing owner metadata releases only the original empty lock, never replacement ownership', async t => {
   const f = await fixture(t);
   const lock = path.join(f.stateDir, '.lock');
-  await applyPlan(f.plan, { afterReplace: () => fs.unlink(path.join(lock, 'owner.json')) });
+  await assert.rejects(applyPlan(f.plan, { afterReplace: () => fs.unlink(path.join(lock, 'owner.json')) }), { code: 'ENOENT' });
   assert.equal((await inspectState(f.stateDir)).locked, false);
+  await recover(f.stateDir);
   await reinspect(f.plan);
   await fs.appendFile(f.proposal, '\nReviewed second change.\n');
-  const outcome = await applyPlan(f.plan, { async afterReplace() {
+  await assert.rejects(applyPlan(f.plan, { async afterReplace() {
     await fs.rename(lock, path.join(f.stateDir, 'original-lock'));
     await fs.mkdir(lock);
     await fs.writeFile(path.join(lock, 'owner.json'), '{"token":"another-owner"}');
-  } });
-  assert.equal(outcome.status, 'updated');
-  assert.match(outcome.cleanupWarnings[0], /ownership changed/);
+  } }), error => { assert.match(error.message, /lock ownership changed/i); assert.match(error.cleanupWarnings[0], /ownership changed/); return true; });
   assert.equal(await fs.readFile(path.join(lock, 'owner.json'), 'utf8'), '{"token":"another-owner"}');
 });
 test('a changed lock token is retained with a cleanup warning', async t => {
   const f = await fixture(t);
   const owner = path.join(f.stateDir, '.lock', 'owner.json');
-  const result = await applyPlan(f.plan, { afterReplace: () => fs.writeFile(owner, '{"token":"different"}') });
-  assert.equal(result.status, 'updated');
-  assert.match(result.cleanupWarnings[0], /token changed/);
+  await assert.rejects(applyPlan(f.plan, { afterReplace: () => fs.writeFile(owner, '{"token":"different"}') }), error => {
+    assert.match(error.message, /lock ownership changed/i); assert.match(error.cleanupWarnings[0], /token changed/); return true;
+  });
   assert.equal((await inspectState(f.stateDir)).locked, true);
 });
 test('manifest hashes and no-op timestamps are stable across German and Swedish locales', async t => {

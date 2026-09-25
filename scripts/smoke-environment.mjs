@@ -16,7 +16,7 @@ export function smokeEnvironment(root, inherited = process.env) {
     XDG_CONFIG_HOME: path.join(home, '.config'), XDG_CACHE_HOME: path.join(home, '.cache'),
     XDG_DATA_HOME: path.join(home, '.local/share'), XDG_STATE_HOME: path.join(home, '.local/state'),
     TMPDIR: path.join(root, 'tmp'), TMP: path.join(root, 'tmp'), TEMP: path.join(root, 'tmp'),
-    CUEFLUENT_NOTES_CONFIG: path.join(home, 'capture.json'),
+    CUEFLUENT_WORKFLOW_CONFIG: path.join(home, 'capture.json'),
     // One task-local cache for the CLI bootstrap and all default-runner installs.
     npm_config_cache: path.join(root, 'npm-cache'), npm_config_prefer_offline: 'true',
     npm_config_userconfig: path.join(root, 'empty-user.npmrc'),
