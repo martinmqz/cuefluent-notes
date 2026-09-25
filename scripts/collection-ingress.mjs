@@ -7,6 +7,7 @@ import { inspectIntakeStore, intakePath, intakeSnapshot, intakeJSON, writeIntake
 import { removeOwnedStage, syncDirectory, sameFileIdentity, lstatOrNull } from './file-io.mjs';
 import { collectionGrantHash } from './collection-grant.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
+import { CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
 import { readSelection } from './intake-store.mjs';
 import { canonicalWorkflowProject, canonicalWorkflowPath } from './workflow-paths.mjs';
 import { nativeContextEnvelope } from './workflow-context.mjs';
@@ -20,6 +21,8 @@ export const registrationPath = identity => `ingress/registrations/${choice(iden
 export const wakePath = identity => `ingress/wake/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const suspendedPath = identity => `ingress/suspended/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const drainedPath = identity => `ingress/drained/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
+// Shape version only; reader-owned rules revisions invalidate cached results.
+export const READER_SUSPENSION_VERSION = 2;
 
 /** Hook-only boundary: filesystem metadata, no open/read of transcript bytes. */
 export async function snapshotSourceMetadata(file) {
@@ -161,11 +164,11 @@ export async function collectionIngress(client, payload, { configPath = workflow
       drained = intakeJSON(await intakeSnapshot(store, 'state', drainedPath(envelope), { maxBytes: 16384 }));
       if (drained) { keys(drained, ['version', 'selectionHash']); hash(drained.selectionHash); }
       suspended = intakeJSON(await intakeSnapshot(store, 'state', suspendedPath(envelope), { maxBytes: 16384 }));
-      if (suspended) { keys(suspended, ['version', 'selectionHash']); hash(suspended.selectionHash); }
+      if (suspended) { keys(suspended, ['version', 'selectionHash'], ['readerRulesRevision']); hash(suspended.selectionHash); }
     } catch { drained = suspended = null; } // Large pending intents and damaged hints never suppress work.
     if (pendingFree && ((selected.state.intervals.length === 0 && selected.state.explicitScopes.length === 0) ||
         (drained?.version === 1 && drained.selectionHash === selected.hash) ||
-        (suspended?.version === 1 && suspended.selectionHash === selected.hash))) {
+        (suspended?.version === READER_SUSPENSION_VERSION && suspended.readerRulesRevision === CLAUDE_READER_RULES_REVISION && suspended.selectionHash === selected.hash))) {
       return { status: 'paused', intakeBlocked: blocked, context: null, notice, selection: envelope };
     }
   }

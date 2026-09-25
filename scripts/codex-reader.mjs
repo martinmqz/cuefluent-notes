@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readSessionRange, readSessionHeader } from './session-jsonl.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
-import { createCapture } from './capture-contract.mjs';
+import { createCapture, clientVersion } from './capture-contract.mjs';
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
 import { absolutePath } from './workflow-paths.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
@@ -10,7 +10,6 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { nativeId, integer, timestamp, string, choice, canonicalJSON, fail } from './workflow-values.mjs';
 
 export const CODEX_READER_VERSION = '1';
-export const CODEX_CLIENT_VERSIONS = Object.freeze(['0.156.1']);
 const structural = new Set(['compacted', 'token_usage_record', 'world_state', 'retained_context', 'security_risk_score',
   'inter_agent_communication', 'inter_agent_communication_metadata', 'realtime_item']);
 const ignoredEvents = new Set(['token_count', 'thread_goal_updated', 'thread_settings_applied', 'agent_reasoning',
@@ -43,7 +42,9 @@ const terminalCursor = (source, record) => ({ sourceIdentity: source.fileIdentit
 
 export async function verifyCodexHeader(line, source) {
   const meta = line?.payload;
-  if (line?.type !== 'session_meta' || !meta || !CODEX_CLIENT_VERSIONS.includes(meta.cli_version)) fail('UNSUPPORTED_CODEX_VERSION');
+  if (line?.type !== 'session_meta' || !meta) fail('UNSUPPORTED_CODEX_HEADER');
+  // The client version is provenance; compatibility comes from the native shape.
+  clientVersion(meta.cli_version);
   if (meta.id !== source.sessionId || meta.session_id !== source.sessionId || source.client !== 'codex' ||
       !['cli', 'vscode', 'exec', 'mcp'].includes(meta.source) || (meta.thread_source != null && meta.thread_source !== 'user') ||
       meta.parent_thread_id != null || meta.agent_path != null || meta.subagent_history_start_ordinal != null || meta.history_base != null ||
@@ -220,12 +221,18 @@ export async function readCodexSelection({ state, scopeId, cursor = null, captur
     const line = record.value, p = line?.payload;
     if (!line || !p || typeof p !== 'object') fail('UNSUPPORTED_CODEX_RECORD');
     timestamp(line.timestamp);
+    if (line.type === 'session_meta') {
+      const metadata = await verifyCodexHeader(line, source);
+      if (metadata.historyMode !== scan.metadata.historyMode) fail('UNSUPPORTED_CODEX_HISTORY');
+    }
     if (scan.metadata.historyMode === 'paginated') {
       integer(line.ordinal);
       if (line.ordinal <= previousOrdinal) fail('UNSUPPORTED_CODEX_ORDER'); previousOrdinal = line.ordinal;
       record.id = `codex:ordinal:${line.ordinal}`;
     } else record.id = `codex:byte:${record.startByte}:${record.hash.slice(0, 20)}`;
-    if (line.type === 'session_meta') { await verifyCodexHeader(line, source); frames.push({ ...range(record), kind: 'structural' }); continue; }
+    if (line.type === 'session_meta') {
+      frames.push({ ...range(record), kind: 'structural' }); continue;
+    }
     if (structural.has(line.type)) { frames.push({ ...range(record), kind: 'structural' }); continue; }
     if (line.type === 'event_msg' && p.type === 'task_started') {
       const unitId = nativeId(p.turn_id);
@@ -321,7 +328,7 @@ export async function readCodexSelection({ state, scopeId, cursor = null, captur
     const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2,
       identity: { client: 'codex', sessionId: source.sessionId, unitId: unit.id }, projectRoot: source.projectRoot,
       source: { path: source.path, fileIdentity: source.fileIdentity, ranges: compactRanges(unit.records) },
-      reader: { name: 'codex-rollout', version: CODEX_READER_VERSION, clientVersion: scan.metadata.version },
+      reader: { name: 'codex-rollout', version: CODEX_READER_VERSION, headerClientVersion: scan.metadata.version },
       occurredAt, capturedAt, terminal: unit.terminal,
       coverage: { partial: unit.terminal !== 'completed' || collected.omissions.length > 0, omissions: collected.omissions }, evidence: collected.evidence });
     candidates.push({ capture, proof, scopeId });

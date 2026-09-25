@@ -8,17 +8,17 @@ import { digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy } from './intake-io.mjs';
 import { readCaptureHead } from './intake-store.mjs';
-import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './capture-controls.mjs';
+import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
 const row = (type, payload) => JSON.stringify({ timestamp: '2026-09-24T00:00:00.000Z', type, payload }) + '\n';
 const turn = (id, text) => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: text }) + row('event_msg', { type: 'task_complete', turn_id: id });
-async function fixture(t, { enabled = false } = {}) {
+async function fixture(t, { enabled = false, version = '0.156.1' } = {}) {
   const f = await storageFixture(t), sourcePath = path.join(f.project, 'session.jsonl');
   f.config.routes[0].collection.enabled = enabled;
   const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes);
   const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
-  const header = row('session_meta', { id: S, session_id: S, cwd: f.project, cli_version: '0.156.1', source: 'cli', history_mode: 'legacy' });
+  const header = row('session_meta', { id: S, session_id: S, cwd: f.project, cli_version: version, source: 'cli', history_mode: 'legacy' });
   await fs.writeFile(sourcePath, header + turn(A, 'Meeting: decision Alpha') + turn(B, 'Task: unrelated Beta'));
   const selection = { client: 'codex', sessionId: S, cwd: f.project, unitId: A };
   const status = await captureSelectionStatus(capability, { selection, sourcePath });
@@ -28,7 +28,7 @@ async function fixture(t, { enabled = false } = {}) {
 }
 
 test('one-time capture with collection disabled reads the selected window and publishes only named native units', async t => {
-  const f = await fixture(t), before = await fs.readdir(f.collection.intakeStateDir), reads = [];
+  const f = await fixture(t, { version: '0.146.0' }), before = await fs.readdir(f.collection.intakeStateDir), reads = [];
   assert.equal((await previewExplicitCapture(f.capability, f.request, { observeRead: read => reads.push(read) })).status, 'selection-verified');
   assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
   assert(reads.filter(r => r.purpose === 'range').every(r => r.offset >= f.request.readRange.fromByte && r.offset + r.bytes <= f.request.readRange.endByte));
@@ -37,9 +37,30 @@ test('one-time capture with collection disabled reads the selected window and pu
   const args = { selection: f.selection, scopeId: f.request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A] };
   const result = await runSelectedCapture(f.capability, args);
   assert.equal(result.saved, 1); assert.equal((await runSelectedCapture(f.capability, args)).saved, 0);
-  assert.match((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).capture.evidence[0].text, /Alpha/);
+  const capture = (await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).capture;
+  assert.match(capture.evidence[0].text, /Alpha/); assert.equal(capture.reader.headerClientVersion, '0.146.0');
   assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B })).head, null);
   assert.equal(JSON.parse(await fs.readFile(f.options.configPath)).routes[0].collection.enabled, false);
+});
+
+test('each capture control enforces its budget and preserves selection for retry', async t => {
+  const f = await fixture(t, { enabled: true });
+  const expiredClock = () => { let ticks = 0; return { now: () => ticks++ === 0 ? 0 : 10000 }; };
+  const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+    expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+  for (const [operation, request] of [[controlCapture, control], [previewExplicitCapture, f.request], [selectExplicitCapture, f.request]]) {
+    const reads = [];
+    await assert.rejects(operation(f.capability, request, { ...expiredClock(), observeRead: read => reads.push(read) }),
+      { code: 'WORKER_TIME_BUDGET' });
+    assert.deepEqual(reads, []);
+    assert.equal((await captureSelectionStatus(f.capability, { selection: f.selection })).state, null);
+  }
+  const chosen = await selectExplicitCapture(f.capability, f.request);
+  const args = { selection: f.selection, scopeId: f.request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A] };
+  await assert.rejects(runSelectedCapture(f.capability, args, expiredClock()), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal((await captureSelectionStatus(f.capability, { selection: f.selection })).hash, chosen.hash);
+  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head, null);
+  assert.equal((await runSelectedCapture(f.capability, args)).saved, 1);
 });
 
 test('explicit scope refuses proof JSON, stale state, missing IDs, wrong source identity and scope escalation', async t => {
@@ -91,7 +112,7 @@ test('restrictive CLI controls remain available when capture privacy is unavaila
 test('Claude explicit historical window retains human evidence and never reads a later append', async t => {
   const f = await fixture(t), stamp = '2026-09-24T00:00:00.000Z';
   const human = (id, text, parentUuid) => ({ type: 'user', uuid: randomUUID(), timestamp: stamp, sessionId: S,
-    version: '2.1.280', isSidechain: false, parentUuid, cwd: f.project, promptId: id, message: { role: 'user', content: text } });
+    version: '2.1.282', isSidechain: false, parentUuid, cwd: f.project, promptId: id, message: { role: 'user', content: text } });
   const a = human(A, 'Meeting: keep the rollout paused.', null), b = human(B, 'Unselected human input.', a.uuid);
   const prefix = JSON.stringify(a) + '\n', body = prefix + JSON.stringify(b) + '\n';
   await fs.writeFile(f.sourcePath, body);
@@ -106,6 +127,7 @@ test('Claude explicit historical window retains human evidence and never reads a
   assert.equal(result.saved, 1);
   assert(reads.filter(read => read.purpose === 'range').every(read => read.offset + read.bytes <= request.readRange.endByte));
   const capture = (await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: A })).capture;
+  assert.equal(capture.reader.headerClientVersion, '2.1.282');
   assert.equal(capture.terminal, 'unconfirmed'); assert.equal(capture.evidence.length, 1); assert.match(capture.evidence[0].text, /rollout paused/);
   assert.equal((await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: B })).head, null);
 });

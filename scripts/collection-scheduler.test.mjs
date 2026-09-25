@@ -8,7 +8,7 @@ import { openWorkflowIntake, inspectIntakeStore } from './intake-io.mjs';
 import { registrationPath, registrationShard } from './collection-ingress.mjs';
 import { collectionJobs, readCollectionScheduler, reserveCollectionAttempt } from './collection-scheduler.mjs';
 import { withWorkflowBudget } from './workflow-budget.mjs';
-import { runCollectionWorker } from './collection-worker.mjs';
+import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 
 async function fixture(t) { const f = await storageFixture(t); return { ...f, store: await inspectIntakeStore(f.collection) }; }
 async function register(f, sessionId, body = '{}') {

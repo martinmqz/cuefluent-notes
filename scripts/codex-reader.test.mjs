@@ -31,7 +31,8 @@ async function fixture(t, entries = ordinary(), { mode = 'paginated', prefix = '
   t.after(() => fs.rm(root, { force: true, recursive: true }));
   const source = { client: 'codex', sessionId: S, path: path.join(root, 'session.jsonl'), projectRoot: root, fileIdentity: '' };
   const header = { type: 'session_meta', payload: { id: S, session_id: S, cwd: root, cli_version: '0.156.1', source: 'cli', history_mode: mode, ...headerChanges } };
-  const rows = [header, ...(future ? [start(C)] : []), ...entries].map((value, ordinal) => ({ timestamp: time, ...(mode === 'paginated' ? { ordinal } : {}), ...value }));
+  const rows = [header, ...(future ? [start(C)] : []), ...entries].map((value, ordinal) => ({ timestamp: time, ...(mode === 'paginated' ? { ordinal } : {}), ...value,
+    ...(value.type === 'session_meta' ? { payload: { ...header.payload, ...value.payload } } : {}) }));
   let bytes = Buffer.from(JSON.stringify(rows[0]) + '\n' + prefix), offset = bytes.length;
   const anchors = [];
   for (const row of rows.slice(1)) {
@@ -204,13 +205,71 @@ test('partial tails remain pending and fixed EOF excludes concurrent appends', a
   assert.equal(result.candidates.length, 1);
 });
 
-test('unsupported versions, modes, roots and child sessions are explicit diagnostics', async t => {
-  for (const [changes, code] of [[{ cli_version: '0.999.0' }, 'UNSUPPORTED_CODEX_VERSION'], [{ history_mode: 'future-mode' }, 'UNSUPPORTED_CODEX_HISTORY'],
+test('compatible Codex formats register and extract across client release and prerelease versions', async t => {
+  for (const version of ['0.146.0', '0.155.0-alpha.16.4', '0.156.2', '999.0.0+fixture', 'development-build']) {
+    for (const mode of ['legacy', 'paginated']) {
+      const text = 'Meeting: selected source.';
+      const entries = [start(A), mode === 'legacy' ? evt('user_message', { message: text }) : user(A, text), end(A)];
+      const f = await fixture(t, entries, { mode, headerChanges: { cli_version: version } });
+      const { fileIdentity: _identity, ...selected } = f.source;
+      const registration = await inspectSourceBoundary(selected, { currentUnitId: A, verifyHeader: codexRegistrationHeader(selected) });
+      assert.equal(registration.status, 'registered');
+      const result = await readCodexSelection(f.args);
+      assert.equal(result.blocked, null); assert.deepEqual(result.pending, []); assert.equal(result.candidates.length, 1);
+      const { capture } = result.candidates[0];
+      assert.equal(capture.reader.headerClientVersion, version);
+      assert.deepEqual(capture.evidence.map(item => item.text), [text]);
+      assert.equal(capture.terminal, 'completed');
+    }
+  }
+});
+
+test('Codex requires bounded version metadata at registration and extraction', async t => {
+  for (const cli_version of [undefined, null, 1, {}, '', ' ', 'v'.repeat(129), '\u0000', '\ud800']) {
+    const f = await fixture(t, ordinary(), { headerChanges: { cli_version } });
+    const { fileIdentity: _identity, ...selected } = f.source;
+    await assert.rejects(inspectSourceBoundary(selected, { verifyHeader: codexRegistrationHeader(selected) }), { code: 'INVALID_SESSION_CLIENT_VERSION' });
+    await assert.rejects(readCodexSelection(f.args), { code: 'INVALID_SESSION_CLIENT_VERSION' });
+  }
+});
+
+test('resumed Codex sessions accept version changes but block history-mode or identity drift', async t => {
+  for (const mode of ['legacy', 'paginated']) {
+    const input = (id, text) => mode === 'legacy' ? evt('user_message', { message: text }) : user(id, text);
+    for (const [metadata, code] of [
+      [{ history_mode: mode }, null],
+      [{ history_mode: mode === 'legacy' ? 'paginated' : 'legacy' }, 'UNSUPPORTED_CODEX_HISTORY'],
+      [{ session_id: C }, 'UNSUPPORTED_SESSION_OWNERSHIP'],
+      [{ cli_version: null }, 'INVALID_SESSION_CLIENT_VERSION'],
+    ]) {
+      const f = await fixture(t, [start(A), input(A, 'Before update'), end(A),
+        { type: 'session_meta', ordinal: metadata.history_mode === 'legacy' ? undefined : 4,
+          payload: { cli_version: '0.200.0', ...metadata } },
+        start(B), input(B, 'After update'), end(B)], { mode });
+      const result = await readCodexSelection(f.args);
+      assert.deepEqual(result.candidates.map(item => item.capture.identity.unitId), code ? [A] : [A, B]);
+      if (code) {
+        assert.deepEqual(result.blocked, { code, offset: f.anchors[3].startByte });
+        assert.equal(codexPublicationPlan(result, A).heldReason, null);
+      } else {
+        assert.equal(result.blocked, null);
+        assert.deepEqual(result.candidates.map(item => item.capture.evidence[0].text), ['Before update', 'After update']);
+        for (const { capture } of result.candidates) {
+          assert.equal(capture.reader.headerClientVersion, '0.156.1');
+          assert.equal(Object.hasOwn(capture.reader, 'clientVersion'), false);
+        }
+      }
+    }
+  }
+});
+
+test('unsupported modes, roots and child sessions remain explicit diagnostics on another client version', async t => {
+  for (const [changes, code] of [[{ history_mode: 'future-mode' }, 'UNSUPPORTED_CODEX_HISTORY'],
     ...[{ parent_thread_id: B }, { source: { subagent: 'review' } }, { session_id: B }, { forked_from_id: B }].map(item => [item, 'UNSUPPORTED_SESSION_OWNERSHIP'])]) {
-    const f = await fixture(t, ordinary(), { headerChanges: changes });
+    const f = await fixture(t, ordinary(), { headerChanges: { cli_version: '999.0.0', ...changes } });
     await assert.rejects(readCodexSelection(f.args), { code });
   }
-  const f = await fixture(t, [start(A), { type: 'future-record', payload: {} }, end(A)]);
+  const f = await fixture(t, [start(A), { type: 'future-record', payload: {} }, end(A)], { headerChanges: { cli_version: '999.0.0' } });
   assert.equal((await readCodexSelection(f.args)).blocked.code, 'UNSUPPORTED_CODEX_RECORD');
 });
 

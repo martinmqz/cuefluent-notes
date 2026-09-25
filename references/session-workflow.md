@@ -223,10 +223,19 @@ cannot provide directory fsync, so sudden power-loss durability is weaker.
 
 ## Codex reader contract
 
-Selected-range extraction and preview use the same parser. The supported fixture
-matrix is Codex **0.156.1**, uncompressed JSONL,
+Selected-range extraction and preview use the same parser. Compatibility is
+checked from native record structure, identity and boundaries, not a client-version
+allowlist. The fixtures originate from Codex **0.156.1**, uncompressed JSONL,
 `legacy` history without ordinals and `paginated` history with native rollout
-ordinals. Other versions, compressed files, missing native sequence, unknown record shapes and uncertain
+ordinals. The same shapes are accepted with other client version strings, including
+prereleases. `reader.headerClientVersion` retains the bounded, nonempty version
+string from the session header. It does not identify the client that emitted
+each later record after an update; readers never scan before the selected floor
+to infer that. Existing captures with `reader.clientVersion` have the same
+header-only meaning and remain readable without rewriting their bytes.
+Malformed version metadata reports `INVALID_SESSION_CLIENT_VERSION`, separately
+from configuration errors.
+Compressed files, missing native sequence, unsupported record types/content and uncertain
 ownership report diagnostics. This is not a claim of live-client validation or
 support for every format produced by that client. Missing/replaced sources stay
 unresolved; the reader does not search another session or follow history-base
@@ -250,9 +259,10 @@ ordered rollout queue. Consequently a complete persisted native terminal record
 is the reader's fence. Hook notifications and quiet EOF are not such fences.
 Evidence appearing after that fence in the inspected snapshot is a conflict.
 
-Root session metadata must match both native IDs, source ownership, version,
-history mode and canonical project. Native `task_started` records establish full
-units. `turn_context` alone does not. Turn IDs on response metadata and completed
+Root session metadata must match both native IDs, source ownership,
+history mode and canonical project. A later `session_meta` may change the version
+label, but a history-mode change blocks at that record. Native `task_started`
+records establish full units. `turn_context` alone does not. Turn IDs on response metadata and completed
 items establish ownership, independently of native ordinal/lifecycle succession. Untagged
 legacy events require one unambiguous open native unit. A matching command-unit
 boundary seen after the authorization floor can resolve a stored anchor; readers
@@ -312,13 +322,15 @@ capture or create storage.
 
 ## Claude reader contract
 
-The Claude reader supports the verified Claude Code **2.1.280** ordinary root
-transcript subset. Public hook documentation establishes native hook identities, but does
+The Claude reader accepts the ordinary root transcript shapes verified against
+Claude Code **2.1.280**, including when another client version emits those shapes.
+It validates native identity and record structure instead of an exact client version.
+Public hook documentation establishes native hook identities, but does
 not establish a transcript flush fence. Read-only inspection of Anthropic's
 published 2.1.280 package found asynchronous transcript writes, cancellation and
 batched prompts. A duration record, assistant `stop_reason`, next human prompt,
 Stop hook, or quiet EOF cannot prove finality or causal assistant ownership.
-This is a pinned format contract, not a live-client compatibility claim.
+These are format constraints, not a claim that every live client version is verified.
 
 The initial supported evidence is **proven human input only**, including supplied
 text and attachment references. Native `promptId` identifies the logical prompt;
@@ -334,11 +346,18 @@ They must not be described downstream as complete dialogue or completed work.
 The header may have known native metadata before its first identity row; the
 entire header read is still bounded to 64 KiB. The header fixes the registered project, tolerating its stored canonical path
 when the project later moves. Later root rows must match session and ownership;
-their working directory may change. A newer unsupported version in the range
-blocks at that row while preserving the supported prefix. Unsupported history relocation,
+their working directory and client version may change. Version strings must be
+bounded and nonempty; `reader.headerClientVersion` explicitly records only the
+header's client version, not the emitting version of later rows.
+Malformed metadata or unsupported record types block at that row while preserving
+the supported prefix. Unsupported history relocation,
 rewinds or native ownership produce diagnostics. Compaction summaries, injected
 context, sidechain/child records, reasoning and queued attachment records are
 excluded. Selected human prose is not filtered by instruction-like words.
+Classification uses the documented native types, ownership fields and known
+injection flags. Neither reader validates every optional field: a future producer
+that changes human/injected-message semantics under a known type needs a reader
+update. Version-label fixtures do not establish compatibility with such changes.
 Repeated exact record UUIDs are deduplicated; a changed mirror is a conflict.
 Claude source ranges retain each full native record hash. Replaying a partially
 advanced scope checks that exact record and byte range against the active head,
@@ -572,6 +591,13 @@ Claude has no verified terminal proof. Pausing freezes automatic inspection at t
 saved upper EOF, for both range and header reads. The worker processes complete,
 eligible records within that ceiling, then persists a source/interval/cursor-bound
 inspection suspension. Matching suspensions are checked before hydrating carry pages.
+Reader suspensions and the `ingress/suspended` hook hint are bound to the Claude
+reader's rules revision; bump that revision when its compatibility or classification
+rules change. Other suspension-cache versions are stale and revalidated.
+The `ingress/drained` hint instead represents committed terminal progress and
+does not expire with the reader's rules revision.
+The worker revalidates stale caches only within the saved ceiling, preserving
+selection, capture and checkpoint identities.
 Completed explicit windows also stop at their committed end. Transient head/storage
 errors remain retryable instead of becoming permanent suspensions. A partial tail or unresolved boundary retains its backlog
 and diagnostic; it never reads future bytes to resolve it. This is a suspension,

@@ -51,7 +51,7 @@ test('cold real ingress remains below three seconds and unconfigured hooks creat
   assert.deepEqual(await fs.readdir(f.root), before);
 });
 
-test('version-gated hook shapes retain native identity and reject child or missing identities', () => {
+test('hook shapes retain native identity and reject child or missing identities', () => {
   const base = { session_id: '10000000-0000-4000-8000-000000000001', cwd: path.resolve('fixture'), transcript_path: path.resolve('fixture/session.jsonl') };
   for (const client of ['codex', 'claude']) {
     const config = collectionHookConfiguration(client), identity = { [client === 'codex' ? 'turn_id' : 'prompt_id']: '20000000-0000-4000-8000-000000000001' };

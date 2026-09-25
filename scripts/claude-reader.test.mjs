@@ -20,12 +20,12 @@ const message = (type, content, extra = {}) => ({ type, uuid: randomUUID(), time
   version: '2.1.280', isSidechain: false, parentUuid: null, message: { role: type, content }, ...extra });
 const human = (promptId = A, text = 'Meeting: selected source.', extra = {}) => message('user', text, { promptId, ...extra });
 const assistant = (text = 'UNOWNED RESPONSE', extra = {}) => message('assistant', [{ type: 'text', text }], extra);
-async function fixture(t, entries, { future = false, prefix = '', link = true, missingLower = false } = {}) {
+async function fixture(t, entries, { future = false, prefix = '', link = true, missingLower = false, headerChanges = {} } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-claude-reader-')));
   t.after(() => fs.rm(root, { force: true, recursive: true }));
   const source = { client: 'claude', sessionId: S, projectRoot: root, path: path.join(root, 'session.jsonl'), fileIdentity: '' };
   const control = human(C, 'Before selection.');
-  const header = { ...message('system', '', { subtype: 'init' }), cwd: root };
+  const header = { ...message('system', '', { subtype: 'init' }), cwd: root, ...headerChanges };
   let previous = header.uuid;
   const rows = [header, ...(future ? [control] : []), ...entries].map((row, i) => {
     const result = { ...row, ...(row.uuid ? { cwd: root, parentUuid: i && link ? previous : row.parentUuid } : {}) };
@@ -145,9 +145,36 @@ test('a partial trailing record waits and fixed-source mismatches refuse capture
   const f = await fixture(t, [human()]); await fs.appendFile(f.source.path, '{"type":');
   const result = await readClaudeSelection(f.args); assert.equal(result.candidates.length, 1); assert.equal(result.diagnostics.pendingTail, true);
   const unsupported = await fixture(t, [human()]);
-  const changed = unsupported.rows.map(row => ({ ...row, version: '999.0.0' }));
+  const changed = unsupported.rows.map(row => ({ ...row, sessionId: B }));
   await fs.writeFile(unsupported.source.path, changed.map(row => JSON.stringify(row) + '\n').join(''));
-  await assert.rejects(readClaudeSelection(unsupported.args), { code: 'UNSUPPORTED_CLAUDE_VERSION' });
+  await assert.rejects(readClaudeSelection(unsupported.args), { code: 'SOURCE_IDENTITY_MISMATCH' });
+});
+
+test('compatible Claude formats register and extract across client release and prerelease versions', async t => {
+  for (const version of ['2.1.279', '2.1.282', '3.0.0-rc.1+fixture', '999.0.0', 'development-build']) {
+    const f = await fixture(t, [human(A, 'Meeting: selected source.', { version }), assistant('UNOWNED RESPONSE', { version })],
+      { headerChanges: { version } });
+    const { fileIdentity: _identity, ...selected } = f.source;
+    const registration = await inspectSourceBoundary(selected, { currentUnitId: A, verifyHeader: claudeRegistrationHeader(selected) });
+    assert.equal(registration.status, 'registered');
+    const result = await readClaudeSelection(f.args);
+    assert.equal(result.blocked, null); assert.deepEqual(result.pending, []); assert.equal(result.candidates.length, 1);
+    const { capture } = result.candidates[0];
+    assert.equal(capture.reader.headerClientVersion, version);
+    assert.deepEqual(capture.evidence.map(item => item.text), ['Meeting: selected source.']);
+    assert.equal(capture.terminal, 'unconfirmed'); assert.equal(capture.coverage.partial, true);
+    assert.equal(result.diagnostics.unownedRecords, 1);
+  }
+});
+
+test('Claude requires bounded version metadata at registration and extraction', async t => {
+  const f = await fixture(t, [human()]), { fileIdentity: _identity, ...selected } = f.source;
+  for (const version of [undefined, null, 1, {}, '', ' ', 'v'.repeat(129), '\u0000', '\ud800']) {
+    const rows = [{ ...f.rows[0], version }, ...f.rows.slice(1)];
+    await fs.writeFile(f.source.path, rows.map(row => JSON.stringify(row) + '\n').join(''));
+    await assert.rejects(inspectSourceBoundary(selected, { verifyHeader: claudeRegistrationHeader(selected) }), { code: 'INVALID_SESSION_CLIENT_VERSION' });
+    await assert.rejects(readClaudeSelection(f.args), { code: 'INVALID_SESSION_CLIENT_VERSION' });
+  }
 });
 
 test('header registration accepts bounded metadata prefixes and checks exact source identity', async t => {
@@ -288,10 +315,38 @@ test('native compaction logical parent preserves human ancestry while excluding 
   assert.doesNotMatch(JSON.stringify(result.candidates), /DO NOT COPY SUMMARY/);
 });
 
-test('source version changes preserve the supported prefix with an explicit blocked offset', async t => {
-  const f = await fixture(t, [human(A), assistant('new version', { version: '999.0.0' })]);
+test('client updates within a Claude session preserve incremental capture and replay', async t => {
+  const f = await fixture(t, [human(A)]), initial = await readClaudeSelection(f.args);
+  // An existing immutable capture uses the former header-version field name.
+  const initialCapture = initial.candidates[0].capture;
+  initialCapture.reader.clientVersion = initialCapture.reader.headerClientVersion;
+  delete initialCapture.reader.headerClientVersion;
+  const first = await publish(f, initial);
+  const head = await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: A });
+  await append(f, [assistant('UNOWNED RESPONSE', { version: '2.1.282' }), human(A, 'Additional supplied source.', { version: '999.0.0' })]);
+  const result = await readClaudeSelection({ ...f.args, cursor: first.cursor, checkpoint: first.checkpoint, heads: new Map([[A, head]]) });
+  assert.equal(result.blocked, null); assert.equal(result.candidates.length, 1);
+  const { capture } = result.candidates[0];
+  assert.deepEqual(capture.evidence.map(item => item.text), ['Meeting: selected source.', 'Additional supplied source.']);
+  assert.equal(capture.reader.headerClientVersion, f.rows[0].version);
+  assert.equal(Object.hasOwn(capture.reader, 'clientVersion'), false);
+  const saved = await publish(f, result, A, first.cursorHash);
+  const replay = await readClaudeSelection({ ...f.args, cursor: saved.cursor, checkpoint: saved.checkpoint,
+    heads: new Map([[A, await readCaptureHead(f.store, head.head.identity)]]) });
+  assert.equal(replay.blocked, null); assert.equal(replay.candidates.length, 0);
+});
+
+test('malformed later version metadata preserves the supported prefix with an explicit blocked offset', async t => {
+  const f = await fixture(t, [human(A), assistant('invalid version metadata', { version: null })]);
   const result = await readClaudeSelection(f.args);
-  assert.equal(result.candidates.length, 1); assert.equal(result.blocked.code, 'UNSUPPORTED_CLAUDE_VERSION');
+  assert.equal(result.candidates.length, 1); assert.equal(result.blocked.code, 'INVALID_SESSION_CLIENT_VERSION');
+  assert.equal(result.to.offset, f.anchors[0].endByte);
+});
+
+test('unknown later record shapes still block on a different client version', async t => {
+  const f = await fixture(t, [human(A), message('future-record', 'Do not copy.', { version: '999.0.0' })]);
+  const result = await readClaudeSelection(f.args);
+  assert.equal(result.candidates.length, 1); assert.equal(result.blocked.code, 'UNSUPPORTED_CLAUDE_RECORD');
   assert.equal(result.to.offset, f.anchors[0].endByte);
 });
 

@@ -17,7 +17,7 @@ import { keys, nativeId, hash, integer, list, unique, choice, canonicalJSON, dig
 
 const identityOf = ({ client, sessionId }) => ({ client, sessionId });
 const oldHash = value => { if (value !== null) hash(value); };
-const bounded = run => withWorkflowBudget({}, () => withStorageProbes(run));
+const bounded = (now, run) => withWorkflowBudget({ now }, () => withStorageProbes(run));
 const reader = client => client === 'codex' ? readCodexSelection : readClaudeSelection;
 // Public retries bind the original request, including its inspected hash. They
 // reuse the saved effect without deriving another EOF or rereading evidence.
@@ -49,12 +49,12 @@ export async function captureSelectionStatus(capability, { selection, sourcePath
 
 /** Future start/resume freezes EOF. With no verified current native anchor the
  * first subsequent full native unit establishes (and is excluded by) the floor. */
-export async function controlCapture(capability, request) {
+export async function controlCapture(capability, request, { now } = {}) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation']);
   const selection = await selected(request.selection), { operationId, operation, expectedSelectionHash } = request;
   nativeId(operationId); oldHash(expectedSelectionHash); choice(operation, ['start', 'resume', 'pause', 'exclude']);
   if (['pause', 'exclude'].includes(operation) && selection.unitId === null) fail('NATIVE_BOUNDARY_REQUIRED');
-  return bounded(async () => {
+  return bounded(now, async () => {
     const restrictive = ['pause', 'exclude'].includes(operation), authority = restrictive ? 'maintenance' : 'collect';
     await assertWorkflowStorage(capability, selection, authority);
     const store = await openWorkflowIntake(capability, selection, authority);
@@ -146,9 +146,9 @@ async function deriveExplicitScope(capability, request, selection, observeRead) 
 }
 
 /** Preview reads only the explicitly authorized byte window of the named source. */
-export async function previewExplicitCapture(capability, request, { observeRead = () => {} } = {}) {
+export async function previewExplicitCapture(capability, request, { observeRead = () => {}, now } = {}) {
   const selection = await explicitRequest(request);
-  return bounded(async () => {
+  return bounded(now, async () => {
     const store = await openWorkflowIntake(capability), current = await readSelection(store, identityOf(selection));
     if (current.hash !== request.expectedSelectionHash) fail('STALE_SELECTION');
     const { source, scope } = await deriveExplicitScope(capability, request, selection, observeRead);
@@ -160,9 +160,9 @@ export async function previewExplicitCapture(capability, request, { observeRead 
 
 /** Persist one bounded selection without enabling ongoing collection. Run it
  * separately so a worker budget failure leaves a reviewable, retryable scope. */
-export async function selectExplicitCapture(capability, request, { observeRead = () => {} } = {}) {
+export async function selectExplicitCapture(capability, request, { observeRead = () => {}, now } = {}) {
   const selection = await explicitRequest(request);
-  return bounded(async () => {
+  return bounded(now, async () => {
     const store = await openExplicitCaptureIntake(capability, selection, { scopeId: request.operationId, unitIds: request.unitIds });
     return withIntakeLock(store, async tx => {
       const current = await readSelection(store, identityOf(selection));
@@ -180,11 +180,11 @@ export async function selectExplicitCapture(capability, request, { observeRead =
 }
 
 /** A run names one inspected scope; explicit scopes never sweep future intervals. */
-export async function runSelectedCapture(capability, request, { observeRead = () => {} } = {}) {
+export async function runSelectedCapture(capability, request, { observeRead = () => {}, now } = {}) {
   keys(request, ['selection', 'scopeId', 'expectedSelectionHash'], ['unitIds']);
   const selection = await selected(request.selection); nativeId(request.scopeId); hash(request.expectedSelectionHash);
   if (request.unitIds !== undefined) { list(request.unitIds, 100, { empty: false }).forEach(nativeId); unique(request.unitIds); }
-  return bounded(async () => {
+  return bounded(now, async () => {
     const operation = request.unitIds ? 'explicitCollect' : 'collect';
     const authorize = async context => {
       if (context?.scopeId && context.scopeId !== request.scopeId) fail('CAPTURE_NOT_SELECTED');

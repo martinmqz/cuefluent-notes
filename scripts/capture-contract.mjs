@@ -7,6 +7,22 @@ export const MAX_TOOL_BYTES = 32 * 1024;
 export const MAX_CAPTURE_TOOL_BYTES = 256 * 1024;
 const recordId = value => string(value, 256);
 
+// Client labels are bounded provenance, not a supported-version allowlist.
+export function clientVersion(value) {
+  try { return string(value, 128); }
+  catch { fail('INVALID_SESSION_CLIENT_VERSION'); }
+}
+
+// Preserve existing immutable captures without mistaking header provenance for
+// the version that emitted every record in a resumed session.
+export function captureReader(reader) {
+  keys(reader, ['name', 'version'], ['clientVersion', 'headerClientVersion']);
+  for (const field of ['name', 'version']) string(reader[field], 128);
+  if (Object.hasOwn(reader, 'clientVersion') === Object.hasOwn(reader, 'headerClientVersion')) fail('INVALID_CAPTURE_READER');
+  return { name: reader.name, version: reader.version,
+    headerClientVersion: clientVersion(reader.headerClientVersion ?? reader.clientVersion) };
+}
+
 export function logicalCaptureIdentity(value) {
   keys(value, ['client', 'sessionId', 'unitId']);
   return { client: choice(value.client, ['codex', 'claude']), sessionId: nativeId(value.sessionId), unitId: nativeId(value.unitId) };
@@ -66,8 +82,7 @@ function validateShape(value) {
   const sourceIds = ranges.flatMap(range => range.recordIds);
   if (new Set(sourceIds).size !== sourceIds.length) fail('INVALID_CAPTURE_RANGE');
   for (let i = 1; i < ranges.length; i++) if (ranges[i].startByte < ranges[i - 1].endByte) fail('INVALID_CAPTURE_RANGE');
-  keys(value.reader, ['name', 'version', 'clientVersion']);
-  for (const field of ['name', 'version', 'clientVersion']) string(value.reader[field], 128);
+  captureReader(value.reader);
   timestamp(value.occurredAt); timestamp(value.capturedAt);
   choice(value.terminal, ['unconfirmed', 'completed', 'interrupted', 'failed']);
   keys(value.coverage, ['partial', 'omissions']);
@@ -121,7 +136,8 @@ export function assertCaptureExtension(previous, next) {
   validateCapture(previous); validateCapture(next);
   if (previous.evidenceHash === next.evidenceHash) return;
   if (previous.terminal !== 'unconfirmed') fail('FINAL_CAPTURE_CONFLICT');
-  for (const field of ['identity', 'projectRoot', 'reader', 'occurredAt']) {
+  if (canonicalJSON(captureReader(previous.reader)) !== canonicalJSON(captureReader(next.reader))) fail('CAPTURE_REVISION_CONFLICT');
+  for (const field of ['identity', 'projectRoot', 'occurredAt']) {
     if (canonicalJSON(previous[field]) !== canonicalJSON(next[field])) fail('CAPTURE_REVISION_CONFLICT');
   }
   if (previous.source.path !== next.source.path || previous.source.fileIdentity !== next.source.fileIdentity) fail('CAPTURE_REVISION_CONFLICT');

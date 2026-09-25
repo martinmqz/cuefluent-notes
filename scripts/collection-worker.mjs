@@ -11,10 +11,10 @@ import { inspectIntakeStore, openWorkflowIntake, intakePath, intakeSnapshot, int
 import { readSelection, controlSelection, resolveStoredSelectionAnchor, readCaptureHead, publishCapture, commitReaderProgress, recoverPendingPublication, inspectPendingPublication, readReaderProgress } from './intake-store.mjs';
 import { newSelectionState, inspectSourceBoundary, currentIntervals, stableSourceIdentity } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexProgressPlan, codexCheckpoint } from './codex-reader.mjs';
-import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan } from './claude-reader.mjs';
+import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan, CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
 import { hydrateReaderCheckpoint } from './reader-pages.mjs';
 import { readTombstone } from './capture-retention.mjs';
-import { validateRegistration, publishIngressMetadata, wakePath, collectionStatusPath, registrationPath, drainedPath, suspendedPath, assertRegistrationGrant } from './collection-ingress.mjs';
+import { validateRegistration, publishIngressMetadata, wakePath, collectionStatusPath, registrationPath, drainedPath, suspendedPath, READER_SUSPENSION_VERSION, assertRegistrationGrant } from './collection-ingress.mjs';
 import { withWorkflowBudget, checkWorkflowBudget } from './workflow-budget.mjs';
 import { CLIENTS, fail, nativeId, keys, hash, integer, choice, canonicalJSON, digest } from './workflow-values.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
@@ -85,6 +85,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
     if (scope?.end && cursor?.offset === scope.end.endByte) return { saved, pending: null, incomplete: false, drained: true };
     const suspensionName = `reader-suspensions/${identity.client}/${identity.sessionId}/${scopeId}.json`;
     const suspensionBinding = scope?.upper && identity.client === 'claude' ? {
+      readerRulesRevision: CLAUDE_READER_RULES_REVISION,
       sourceIdentity: selection.state.source.fileIdentity, intervalHash: digest(canonicalJSON(scope)), cursorHash: progress.hash,
       ceilingByte: scope.upper.eofByte } : null;
     let suspensionSnapshot = null;
@@ -92,19 +93,25 @@ export async function processScope(transaction, store, selection, scopeId, autho
       await authorize();
       if ((await readSelection(store, identity)).hash !== selection.hash) fail('STALE_SELECTION');
       if (!suspensionSnapshot) suspensionSnapshot = await intakeSnapshot(store, 'state', suspensionName);
-      await replaceIntakeJSON(transaction, suspensionName, { version: 1, ...suspensionBinding, reason, diagnostic }, suspensionSnapshot.hash);
+      await replaceIntakeJSON(transaction, suspensionName, { version: READER_SUSPENSION_VERSION, ...suspensionBinding, reason, diagnostic }, suspensionSnapshot.hash);
       return { saved, pending: diagnostic, incomplete: false, suspended: true, suspensionReason: reason };
     };
     if (suspensionBinding) {
       suspensionSnapshot = await intakeSnapshot(store, 'state', suspensionName);
       const old = intakeJSON(suspensionSnapshot);
       if (old) {
-        keys(old, ['version', 'sourceIdentity', 'intervalHash', 'cursorHash', 'ceilingByte', 'reason', 'diagnostic']);
-        if (old.version !== 1) fail('INVALID_READER_SUSPENSION');
-        choice(old.reason, ['pause-boundary', 'partial-tail', 'unresolved-boundary']);
-        if (old.diagnostic !== null && typeof old.diagnostic !== 'string') fail('INVALID_READER_SUSPENSION');
-        const { version: _version, reason, diagnostic, ...binding } = old;
-        if (canonicalJSON(binding) === canonicalJSON(suspensionBinding)) return { saved, pending: diagnostic, incomplete: false, suspended: true, suspensionReason: reason };
+        if (!Number.isSafeInteger(old.version) || old.version < 1) fail('INVALID_READER_SUSPENSION');
+        // Unknown cache shapes and stale reader rules are misses, not permanent
+        // errors. Re-read only the already-authorized, frozen range.
+        if (old.version === READER_SUSPENSION_VERSION && old.readerRulesRevision === CLAUDE_READER_RULES_REVISION) {
+          keys(old, ['version', 'readerRulesRevision', 'sourceIdentity', 'intervalHash', 'cursorHash', 'ceilingByte', 'reason', 'diagnostic']);
+          choice(old.reason, ['pause-boundary', 'partial-tail', 'unresolved-boundary']);
+          if (old.diagnostic !== null && typeof old.diagnostic !== 'string') fail('INVALID_READER_SUSPENSION');
+          const { version: _version, reason, diagnostic, ...binding } = old;
+          if (canonicalJSON(binding) === canonicalJSON(suspensionBinding)) {
+            return { saved, pending: diagnostic, incomplete: false, suspended: true, suspensionReason: reason };
+          }
+        }
       }
     }
     // A contiguous committed Codex prefix cannot cross an unfinished selected
@@ -170,7 +177,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
     }
     const frozenBlock = !result.blocked || ['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
       'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
-      'UNSUPPORTED_CLAUDE_CONTENT', 'UNSUPPORTED_CLAUDE_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
+      'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
       'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW'].includes(result.blocked.code);
     if (suspensionBinding && result.diagnostics.automaticCeilingReached && frozenBlock &&
         result.pending.every(item => item.reason === 'anchor-unresolved')) {
@@ -241,7 +248,8 @@ async function runRegistration(capability, registration, registrationHash, route
       await publishIngressMetadata(store, drainedPath(identity), { version: 1, selectionHash: selection.hash });
     }
     if (selection.state.paused && suspended && !incomplete && !await inspectPendingPublication(store)) {
-      await publishIngressMetadata(store, suspendedPath(identity), { version: 1, selectionHash: selection.hash });
+      await publishIngressMetadata(store, suspendedPath(identity), { version: READER_SUSPENSION_VERSION,
+        readerRulesRevision: CLAUDE_READER_RULES_REVISION, selectionHash: selection.hash });
     }
     return { saved, pending: pending ?? (selection.state.paused ? 'COLLECTION_PAUSED' : null), incomplete, boundaryExcluded };
   });
@@ -281,14 +289,14 @@ async function recoverOwner(capability, store, snapshot, collectionId) {
 
 const passStopCodes = new Set(['INTAKE_BLOCKED', 'INTAKE_RECOVERY_REQUIRED', 'WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET']);
 
-export async function runCollectionWorker({ configPath, collectionId, milliseconds = 10000, bytes = 64 * 1024 * 1024, observeRead = () => {}, trigger = null, maxJobs = 32 }) {
+export async function runCollectionWorker({ configPath, collectionId, milliseconds = 10000, bytes = 64 * 1024 * 1024, now, observeRead = () => {}, trigger = null, maxJobs = 32 }) {
   integer(maxJobs); if (maxJobs < 1 || maxJobs > 32) fail('INVALID_COLLECTION_JOB_LIMIT');
   if (trigger !== null) { keys(trigger, ['client', 'sessionId']); choice(trigger.client, CLIENTS); nativeId(trigger.sessionId); }
   const snapshot = await readWorkflowSnapshot(configPath), collection = snapshot.config?.collections.find(item => item.id === collectionId);
   if (!collection || !snapshot.config.routes.some(route => route.collectionId === collectionId && !route.excluded && route.collection.enabled)) return { status: 'disabled', saved: 0 };
   let output = { status: 'idle', saved: 0, pending: [], diagnostics: [], boundaryExcluded: [], updatedAt: new Date().toISOString() };
   try {
-    await withWorkflowBudget({ milliseconds, bytes }, () => withStorageProbes(async () => {
+    await withWorkflowBudget({ milliseconds, bytes, now }, () => withStorageProbes(async () => {
       const capability = await verifyWorkflowStorage({ configPath, collectionId, expectedConfigHash: snapshot.hash });
       const store = await openWorkflowIntake(capability);
       if (await lstatOrNull(await intakePath(store, 'state', '.intake-maintenance'))) fail('INTAKE_OFFLINE_MAINTENANCE');

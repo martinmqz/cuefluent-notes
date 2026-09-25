@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { storageFixture } from './test-support/storage-fixture.mjs';
-import { collectionIngress, snapshotSourceMetadata, registrationPath } from './collection-ingress.mjs';
-import { runCollectionWorker } from './collection-worker.mjs';
+import { collectionIngress, snapshotSourceMetadata, registrationPath, READER_SUSPENSION_VERSION } from './collection-ingress.mjs';
+import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock, openWorkflowIntake } from './intake-io.mjs';
 import { readSelection, readCaptureHead, controlSelection, publishCapture, inspectPendingPublication, recoverPendingPublication } from './intake-store.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
@@ -12,6 +12,7 @@ import { inspectSourceBoundary } from './capture-selection.mjs';
 import { randomUUID } from 'node:crypto';
 import { withWorkflowBudget, consumeWorkflowBytes, workflowTimeout } from './workflow-budget.mjs';
 import { collectionHookOutput } from './collection-hooks.mjs';
+import { canonicalJSON, digest } from './workflow-values.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -19,9 +20,9 @@ const stamp = '2026-09-24T00:00:00.000Z';
 const row = (type, payload) => JSON.stringify({ timestamp: stamp, type, payload }) + '\n';
 const turn = (id, text) => row('event_msg', { type: 'task_started', turn_id: id }) +
   (text ? row('event_msg', { type: 'user_message', message: text }) : '') + row('event_msg', { type: 'task_complete', turn_id: id });
-async function fixture(t) {
+async function fixture(t, { version = '0.156.1' } = {}) {
   const f = await storageFixture(t, { privateConfig: true }), source = path.join(f.project, 'session.jsonl');
-  await fs.writeFile(source, row('session_meta', { id: S, session_id: S, cwd: f.project, cli_version: '0.156.1', source: 'cli', history_mode: 'legacy' }));
+  await fs.writeFile(source, row('session_meta', { id: S, session_id: S, cwd: f.project, cli_version: version, source: 'cli', history_mode: 'legacy' }));
   const payload = { session_id: S, turn_id: A, cwd: f.project, transcript_path: source, hook_event_name: 'UserPromptSubmit', prompt: 'Not persisted by ingress' };
   const options = { configPath: f.options.configPath, launch: async () => {} };
   const run = extra => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id, ...extra });
@@ -70,7 +71,7 @@ test('processing-only and paused notices expose a fresh blocked intake without a
 });
 
 test('frozen ingress EOF excludes its boundary turn and collects the next complete turn', async t => {
-  const f = await fixture(t), before = await snapshotSourceMetadata(f.source);
+  const f = await fixture(t, { version: '0.155.0-alpha.16.4' }), before = await snapshotSourceMetadata(f.source);
   assert.equal((await collectionIngress('codex', f.payload, f.options)).status, 'queued');
   await fs.appendFile(f.source, turn(A, 'Excluded boundary') + turn(B, 'Decision: ship the synthetic fixture.'));
   const outcome = await f.run();
@@ -79,6 +80,7 @@ test('frozen ingress EOF excludes its boundary turn and collects the next comple
   assert.equal(selected.state.intervals[0].lower.eofByte, before.eofByte);
   assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head, null);
   const head = await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B });
+  assert.equal(head.capture.reader.headerClientVersion, '0.155.0-alpha.16.4');
   assert.match(head.capture.evidence[0].text, /Decision/);
   assert.equal((await f.run()).saved, 0);
 });
@@ -383,7 +385,7 @@ test('pending recovery compares the inspected descriptor hash under lock', async
   assert.equal((await inspectPendingPublication(f.store)).hash, pending.hash);
 });
 
-test('an explicit-only historical selection preserves its scope and arms later automatic work', async t => {
+test('explicit historical and automatic selections survive a deterministic worker budget stop', async t => {
   const { digest } = await import('./workflow-values.mjs');
   const f = await fixture(t), C = randomUUID(); await fs.appendFile(f.source, turn(C, 'Explicit history'));
   const observed = await inspectedBoundary(f), content = await fs.readFile(f.source, 'utf8');
@@ -397,14 +399,18 @@ test('an explicit-only historical selection preserves its scope and arms later a
       scope: { unitIds: [C], start: anchors[1], end: anchors.at(-1) } } }));
   await collectionIngress('codex', f.payload, f.options);
   await fs.appendFile(f.source, turn(A, 'New boundary') + turn(B, 'New automatic evidence'));
-  // A loaded native runner may need another bounded pass for both scopes.
-  // Completed publications survive a budget exit even if saved was not returned.
-  let result;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    result = await f.run();
-    if (!result.pending.length) break;
-    assert.deepEqual(result.pending, ['WORKER_TIME_BUDGET']);
-  }
+  // Expire the default ten-second budget after automatic publication, when the
+  // historical range is read. Keep functional assertions independent of native
+  // ACL latency while explicitly exercising partial progress and retry.
+  let clock = 0, expired = false;
+  const stopped = await f.run({ now: () => clock, observeRead: read => {
+    if (read.purpose === 'range' && read.offset === anchors[1].startByte) { clock = 10000; expired = true; }
+  } });
+  assert.equal(expired, true); assert.deepEqual(stopped.pending, ['WORKER_TIME_BUDGET']);
+  const automatic = await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B });
+  assert(automatic.capture, 'the completed automatic publication must survive the budget stop');
+  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: C })).head, null);
+  const result = await f.run({ now: () => 0 });
   assert.deepEqual(result.pending, []);
   const selection = await readSelection(f.store, { client: 'codex', sessionId: S });
   assert.equal(selection.state.active, true); assert.equal(selection.state.explicitScopes[0].id, explicitId);
@@ -413,7 +419,8 @@ test('an explicit-only historical selection preserves its scope and arms later a
     assert(capture.evidence.some(item => item.text === text));
   }
   assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head, null);
-  const idle = await f.run(); assert.deepEqual(idle.pending, []); assert.equal(idle.saved, 0);
+  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B })).hash, automatic.hash);
+  const idle = await f.run({ now: () => 0 }); assert.deepEqual(idle.pending, []); assert.equal(idle.saved, 0);
 });
 
 test('owner recovery accepts a canonical workspace reached through a parent alias', async t => {
@@ -478,7 +485,7 @@ test('processing edits preserve registration progress; revoked grants require an
   const { configureWorkflow } = await import('./workflow-settings.mjs');
   const { readWorkflowSnapshot } = await import('./workflow-config.mjs');
   const { verifyWorkflowStorage } = await import('./workflow-storage.mjs');
-  const { controlCapture, runSelectedCapture } = await import('./capture-controls.mjs');
+  const { controlCapture, runSelectedCapture } = await import('./test-support/capture-workflow.mjs');
   const { readClaudeSelection } = await import('./claude-reader.mjs');
   const f = await fixture(t);
   const update = async change => {
@@ -531,7 +538,7 @@ test('a fresh grant cannot absorb an unpublished intent from the retired grant',
   const { configureWorkflow } = await import('./workflow-settings.mjs');
   const { readWorkflowSnapshot } = await import('./workflow-config.mjs');
   const { verifyWorkflowStorage } = await import('./workflow-storage.mjs');
-  const { controlCapture } = await import('./capture-controls.mjs');
+  const { controlCapture } = await import('./test-support/capture-workflow.mjs');
   const f = await fixture(t), pending = await interruptedPublication(f);
   let config;
   for (const enabled of [false, true]) {
@@ -555,7 +562,7 @@ test('a fresh grant cannot absorb an unpublished intent from the retired grant',
 });
 
 test('an explicit fresh start can bind an initially missing registered source', async t => {
-  const { controlCapture } = await import('./capture-controls.mjs');
+  const { controlCapture } = await import('./test-support/capture-workflow.mjs');
   const f = await fixture(t), header = await fs.readFile(f.source); await fs.rm(f.source);
   assert.equal((await collectionIngress('codex', f.payload, f.options)).status, 'pending-source');
   await fs.writeFile(f.source, header + turn(A, 'History before explicit start'));
@@ -613,7 +620,7 @@ test('Claude cd within the selected route keeps its registered native source cwd
 });
 
 test('a foreign publication preserves its exact intent while another session starts or rebinds', async t => {
-  const { controlCapture } = await import('./capture-controls.mjs');
+  const { controlCapture } = await import('./test-support/capture-workflow.mjs');
   const { configureWorkflow } = await import('./workflow-settings.mjs');
   const { readWorkflowSnapshot } = await import('./workflow-config.mjs');
   const { verifyWorkflowStorage } = await import('./workflow-storage.mjs');
@@ -871,8 +878,65 @@ test('hook routing and worker arming accept an existing project directory alias'
   assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state.source.projectRoot, f.project);
 });
 
+for (const staleCache of [
+  { version: 1 },
+  { version: 2 }, // Same shape, before reader-owned revisions were introduced.
+  { version: READER_SUSPENSION_VERSION, readerRulesRevision: 0 },
+  { version: READER_SUSPENSION_VERSION + 1, futureCacheField: true },
+]) test(`stale Claude suspension ${JSON.stringify(staleCache)} is retried inside the original pause ceiling`, async t => {
+  const { controlCapture } = await import('./test-support/capture-workflow.mjs');
+  const { suspendedPath, publishIngressMetadata } = await import('./collection-ingress.mjs');
+  const { replaceIntakeJSON } = await import('./intake-io.mjs');
+  const { CLAUDE_READER_RULES_REVISION } = await import('./claude-reader.mjs');
+  const f = await fixture(t), P = randomUUID(), later = randomUUID(); let previous = null;
+  const message = (type, text, promptId, version = '2.1.280') => {
+    const record = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version,
+      isSidechain: false, cwd: f.project, message: { role: type, content: text }, ...(promptId ? { promptId } : {}) };
+    previous = record.uuid; return JSON.stringify(record) + '\n';
+  };
+  const identity = { client: 'claude', sessionId: S }, payload = { ...f.payload, prompt_id: A };
+  await fs.writeFile(f.source, message('system', ''));
+  await collectionIngress('claude', payload, f.options);
+  await fs.appendFile(f.source, message('user', 'Boundary', A)); await f.run();
+  await fs.appendFile(f.source, message('user', 'Meeting decision after client update', B, '2.1.282') + message('user', 'Pause now', P, '2.1.282'));
+  const selected = await readSelection(f.store, identity);
+  const paused = await controlCapture(f.capability, { selection: { ...identity, cwd: f.project, unitId: P }, sourcePath: f.source,
+    expectedSourceIdentity: selected.state.source.fileIdentity, expectedSelectionHash: selected.hash,
+    operationId: randomUUID(), operation: 'pause' });
+  const scope = paused.state.intervals[0], ceiling = scope.upper.eofByte;
+  const progress = await intakeSnapshot(f.store, 'state', `progress/claude/${S}/${scope.id}.json`);
+  const suspensionName = `reader-suspensions/claude/${S}/${scope.id}.json`;
+  // Persist the former worker's cache shape without altering its frozen source,
+  // selection or cursor. Neither cache is capture authority.
+  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, suspensionName, {
+    ...staleCache, sourceIdentity: paused.state.source.fileIdentity, intervalHash: digest(canonicalJSON(scope)),
+    cursorHash: progress.hash, ceilingByte: ceiling, reason: 'unresolved-boundary', diagnostic: 'UNSUPPORTED_CLAUDE_VERSION',
+  }, null));
+  await publishIngressMetadata(f.store, suspendedPath(identity), { ...staleCache, selectionHash: paused.hash });
+  await fs.appendFile(f.source, message('user', 'Late evidence', B, '2.1.282') + message('user', 'After pause', later, '2.1.282'));
+  let launches = 0;
+  await collectionIngress('claude', { ...payload, prompt_id: later }, { ...f.options, launch: () => { launches++; } });
+  assert.equal(launches, 1, 'an old ingress suspension must not suppress the upgraded reader');
+  const reads = [], result = await f.run({ observeRead: row => reads.push(row) });
+  assert.equal(result.saved, 1); assert.deepEqual(result.pending, ['COLLECTION_PAUSED']);
+  assert(reads.length); assert(reads.every(row => row.offset + row.bytes <= ceiling));
+  const capture = (await readCaptureHead(f.store, { ...identity, unitId: B })).capture;
+  assert.deepEqual(capture.evidence.map(item => item.text), ['Meeting decision after client update']);
+  for (const unitId of [A, P, later]) assert.equal((await readCaptureHead(f.store, { ...identity, unitId })).head, null);
+  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspensionName)).version, READER_SUSPENSION_VERSION);
+  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspendedPath(identity))).version, READER_SUSPENSION_VERSION);
+  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspensionName)).readerRulesRevision, CLAUDE_READER_RULES_REVISION);
+  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspendedPath(identity))).readerRulesRevision, CLAUDE_READER_RULES_REVISION);
+  // A later append misses the ordinary source ACK, so this proves that the
+  // refreshed reader suspension itself prevents further native reads.
+  await fs.appendFile(f.source, message('user', 'Still paused', randomUUID(), '2.1.282'));
+  const again = [], retry = await f.run({ observeRead: row => again.push(row) });
+  assert.equal(retry.saved, 0); assert.deepEqual(again, []);
+  await collectionIngress('claude', { ...payload, prompt_id: later }, { ...f.options, launch: () => assert.fail('fresh suspension must not launch') });
+});
+
 test('Claude pause freezes automatic reads and resumes only a new interval; late evidence needs explicit capture', async t => {
-  const { controlCapture, selectExplicitCapture, runSelectedCapture } = await import('./capture-controls.mjs');
+  const { controlCapture, selectExplicitCapture, runSelectedCapture } = await import('./test-support/capture-workflow.mjs');
   const { suspendedPath } = await import('./collection-ingress.mjs');
   const f = await fixture(t), P = randomUUID(), later = randomUUID(); let previous = null;
   const message = (type, text, promptId) => {
@@ -925,7 +989,7 @@ test('Claude pause freezes automatic reads and resumes only a new interval; late
 });
 
 for (const partial of [false, true]) test(`Claude pause suspends unresolved boundaries${partial ? ' with a partial tail' : ''} without reading later bytes`, async t => {
-  const { controlCapture } = await import('./capture-controls.mjs');
+  const { controlCapture } = await import('./test-support/capture-workflow.mjs');
   const f = await fixture(t), P = randomUUID(); let previous = null;
   const message = (type, text, promptId) => {
     const value = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version: '2.1.280',
@@ -949,7 +1013,7 @@ for (const partial of [false, true]) test(`Claude pause suspends unresolved boun
 });
 
 test('a temporary head read failure is retried inside the frozen Claude pause window', async t => {
-  const { controlCapture } = await import('./capture-controls.mjs');
+  const { controlCapture } = await import('./test-support/capture-workflow.mjs');
   const f = await fixture(t), P = randomUUID(); let previous = null;
   const message = (type, text, promptId) => {
     const value = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version: '2.1.280',

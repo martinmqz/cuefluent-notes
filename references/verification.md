@@ -8,7 +8,7 @@ in the source repository for the current jobs.
 
 | Area | Automated coverage |
 | --- | --- |
-| Session readers | Pinned Codex and Claude formats, selected boundaries, native identity/order, bounded reads, exclusions, partial records and immutable revisions |
+| Session readers | Supported Codex and Claude record shapes across varying version metadata, selected boundaries, native identity/order, bounded reads, exclusions, partial records and immutable revisions |
 | Consent and controls | Independent collection/processing settings, opt-outs, stale settings, explicit selection and zero-write ingress for disabled or unconfigured projects |
 | Private storage | Native permissions, path/link replacement, owner checks, local storage requirements and explicit maintenance |
 | Processing and writes | Exact input claims, acknowledged evidence pages, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
@@ -19,12 +19,23 @@ private-storage check under a real standard-user token. Tests for unavailable
 local shells or another operating system skip explicitly; such skips are not
 verification of that platform.
 
+Functional capture and scheduler tests use controlled budget clocks so native
+permission-check latency does not change their expected results. Separate tests
+exercise budget expiration, retry, and the default monotonic clock. CLI checks
+use the production clock; functional checks are not throughput benchmarks.
+
 ## Client registration checks
 
 `node scripts/client-smoke.mjs` downloads locked Codex **0.156.1** and Claude Code
 **2.1.280** into temporary profiles and checks plugin registration. CI runs this
 separately on macOS and Windows. It does not use the user's profile,
 authentication, model calls or hook trust.
+
+These versions pin reproducible registration tests; they are not runtime reader
+requirements. Synthetic fixtures also vary release, prerelease and build version
+labels and exercise Codex and Claude sessions across a client update, including
+rejection of Codex history-mode changes. Changing a fixture's version label does
+not verify that client's actual emitted format or future injection flags.
 
 The [session workflow](session-workflow.md) documents the supported reader
 formats and their source evidence. A matching client version or successful

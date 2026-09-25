@@ -282,6 +282,24 @@ test('logical identity, evidence fingerprint, and exact file hash remain distinc
   assert.equal(canonicalJSON({ b: 1, a: [true, null] }), '{"a":[true,null],"b":1}');
 });
 
+test('header version provenance preserves existing capture bytes and rejects malformed or ambiguous labels', () => {
+  const previous = capture(), current = copy(previous);
+  const originalBytes = serializeCapture(previous);
+  current.reader = { name: previous.reader.name, version: previous.reader.version,
+    headerClientVersion: previous.reader.clientVersion };
+  assert.equal(createCapture(current).evidenceHash, previous.evidenceHash);
+  assert.deepEqual(serializeCapture(previous), originalBytes);
+  assert.notDeepEqual(serializeCapture(current), originalBytes);
+  for (const field of ['clientVersion', 'headerClientVersion']) {
+    for (const value of [undefined, null, 1, {}, '', ' ', 'v'.repeat(129), '\u0000', '\ud800']) {
+      assert.throws(() => createCapture({ ...current, reader: { name: 'fixture', version: '1', [field]: value } }),
+        { code: 'INVALID_SESSION_CLIENT_VERSION' });
+    }
+  }
+  assert.throws(() => createCapture({ ...current, reader: { ...current.reader, clientVersion: 'other' } }), { code: 'INVALID_CAPTURE_READER' });
+  assert.throws(() => createCapture({ ...current, reader: { name: 'fixture', version: '1' } }), { code: 'INVALID_CAPTURE_READER' });
+});
+
 test('capture validates ordered provenance, partial coverage and binary exclusions', () => {
   for (const mutate of [
     c => c.evidence[0].range.startByte = 0,

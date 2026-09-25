@@ -7,11 +7,13 @@ import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, 
 import { verifySourceCursor } from './intake-store.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
-import { createCapture, validateCapture, assertCaptureExtension } from './capture-contract.mjs';
+import { createCapture, validateCapture, assertCaptureExtension, clientVersion, captureReader } from './capture-contract.mjs';
 import { nativeId, timestamp, canonicalJSON, fail } from './workflow-values.mjs';
 
 export const CLAUDE_READER_VERSION = '1';
-export const CLAUDE_CLIENT_VERSIONS = Object.freeze(['2.1.280']);
+// Bump when compatibility or classification rules change. This expires only
+// disposable suspensions, independently of immutable captures/checkpoints.
+export const CLAUDE_READER_RULES_REVISION = 1;
 const metadataTypes = new Set(['summary', 'custom-title', 'ended-by-model', 'ai-title', 'last-prompt', 'tag',
   'agent-name', 'agent-color', 'agent-setting', 'pr-link', 'frame-link', 'artifact-comment-monitor',
   'artifact-autoreact-ledger', 'file-history-snapshot', 'file-history-delta', 'attribution-snapshot',
@@ -56,7 +58,8 @@ export async function readClaudeHeader({ readHeader, size }) {
 }
 async function verifyClaudeIdentity(row, source, { header = false } = {}) {
   if (source.client !== 'claude' || row.sessionId !== source.sessionId) fail('SOURCE_IDENTITY_MISMATCH');
-  if (!CLAUDE_CLIENT_VERSIONS.includes(row.version)) fail('UNSUPPORTED_CLAUDE_VERSION');
+  // Resumed sessions can contain different client versions with the same format.
+  clientVersion(row.version);
   if (row.isSidechain !== false || row.agentId != null || row.forkedFrom != null || row.foreignToBridgeSession != null ||
       row.sessionKind != null) fail('UNSUPPORTED_SESSION_OWNERSHIP');
   if (header) {
@@ -252,7 +255,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
         validateCapture(baseline);
         if (baseline.identity.client !== 'claude' || baseline.identity.sessionId !== source.sessionId || baseline.identity.unitId !== unitId ||
             baseline.source.fileIdentity !== source.fileIdentity || baseline.source.path !== source.path || baseline.projectRoot !== source.projectRoot ||
-            baseline.reader.name !== 'claude-transcript' || baseline.reader.version !== CLAUDE_READER_VERSION || baseline.reader.clientVersion !== scan.metadata.version) fail('CAPTURE_REVISION_CONFLICT');
+            baseline.reader.name !== 'claude-transcript' || baseline.reader.version !== CLAUDE_READER_VERSION || captureReader(baseline.reader).headerClientVersion !== scan.metadata.version) fail('CAPTURE_REVISION_CONFLICT');
       }
       const oldHuman = (checkpoint?.records ?? []).filter(item => item.kind === 'human' && item.unitId === unitId);
       if (oldHuman.length && (!baseline || oldHuman.some(item => !baseline.source.ranges.some(r => r.recordIds.includes(item.id))))) fail('CAPTURE_BASELINE_REQUIRED');
@@ -279,7 +282,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity: { client: 'claude', sessionId: source.sessionId, unitId },
         projectRoot: source.projectRoot, source: { path: source.path, fileIdentity: source.fileIdentity,
           ranges: [...(baseline?.source.ranges ?? []), ...additions.map(captureRange)] },
-        reader: { name: 'claude-transcript', version: CLAUDE_READER_VERSION, clientVersion: scan.metadata.version },
+        reader: { name: 'claude-transcript', version: CLAUDE_READER_VERSION, headerClientVersion: scan.metadata.version },
         occurredAt: baseline?.occurredAt ?? carry.units.find(unit => unit.id === unitId).occurredAt, capturedAt, terminal: 'unconfirmed',
         coverage: { partial: true, omissions: out.omissions }, evidence: out.evidence });
       if (baseline) assertCaptureExtension(baseline, capture);
