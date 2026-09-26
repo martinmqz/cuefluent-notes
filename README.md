@@ -119,6 +119,13 @@ Cuefluent's recursive loading and search ranking remain separately unverified.
 
 ### Update a marketplace installation
 
+Before updating from v0.8.0 to v0.9.0, follow the
+[coordinated upgrade steps](references/setup.md#existing-settings): stop collection
+and processing and update every client sharing its storage before starting fresh
+sessions. Mixed-version access and downgrades of that storage are unsupported.
+Existing workflow settings, paths and notes are preserved; fresh setup is not
+required.
+
 For Codex:
 
 ```sh
@@ -133,13 +140,14 @@ claude plugin marketplace update cuefluent
 claude plugin update cuefluent-notes@cuefluent --scope user
 ```
 
-Start a fresh session after updating and review changed hook definitions.
-Private capture settings and notes stay outside the replaceable package.
+Review changed hook definitions after updating.
 
 ### Update or customize a source installation
 
 To update an installation made by these commands, pull the repository changes
-and repeat the command for your client:
+and repeat the command for your client. Follow the same
+[coordinated upgrade steps](references/setup.md#existing-settings) before updating
+any clients that share storage:
 
 ```sh
 git pull --ff-only

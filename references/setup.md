@@ -81,6 +81,19 @@ or per-session writers. A custom raw directory does not relocate intake state.
 
 ## Existing settings
 
+For the v0.8.0-to-v0.9.0 upgrade, preserve the existing workflow settings and
+storage paths; fresh setup is not required. Before updating, stop collection
+entrypoints and processing, close affected client sessions, and let running
+workers finish. Update every client plugin/helper sharing the collection to
+v0.9.0 before starting fresh sessions or resuming work, including both Codex and
+Claude when used. A worker may process registrations from either client.
+
+The new reader accepts v0.8.0 captures, but writes `reader.headerClientVersion`
+provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
+these formats. Mixed-version access and downgrading a collection used by v0.9.0
+to v0.8.0 are unsupported. Existing immutable capture bytes are preserved;
+reader caches can be replaced under the current reader's rules.
+
 An upgrade does not rerun storage preparation. Existing Windows collections keep
 their visibility until an explicit `storage-prepare`; offer that operation when
 the user wants an existing raw folder hidden. Existing macOS/Linux `raw` folders
@@ -92,6 +105,8 @@ existing collection needs a separately authorized migration.
 
 Preparation holds the shared intake lock through the empty-state check and raw
 folder setup. An active or unfamiliar owner blocks preparation (`INTAKE_BLOCKED`).
+If a known worker or other live owner is still running, let it finish and then
+retry preparation; contention alone does not mean storage is damaged.
 If interrupted setup cannot safely clean up, preserve the remaining files and
 owner metadata and follow [explicit intake recovery](workflow-cli.md); do not
 delete the lock or select different paths to bypass it.

@@ -6,6 +6,10 @@ This branch contains complete generated plugins for Codex and Claude Code.
 Requires Git, Node.js 22+ on your client's PATH, and a current client CLI.
 No npm install or source checkout is needed.
 
+Existing users: read the
+[coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.9.0/references/setup.md#existing-settings)
+before running update or installation commands against shared storage.
+
 ## Codex
 
 ```sh
@@ -20,12 +24,26 @@ claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#m
 claude plugin install cuefluent-notes@cuefluent --scope user
 ```
 
-Start a fresh session, review/trust hooks in your client, then say **Set up
-Cuefluent Notes**. Choose collection and processing separately. Collection starts off; processing
-starts Manual. Old capture settings are preserved but not imported. Use explicit
-processing commands until live current-turn transport is verified. Keep notes
-outside the installed package. Remove any previous standalone or source-installer
-copy before switching installation methods, so only one copy is active.
+For a **fresh installation or an upgrade from v0.7.1 or earlier**, start a fresh
+session, review/trust hooks, then say **Set up Cuefluent Notes**. Choose collection
+and processing separately: collection starts off and processing starts Manual.
+Only the v0.7.1-or-earlier capture settings are preserved without import.
+
+**Upgrading from v0.8.0 to v0.9.0:** keep the existing workflow settings, paths and
+captures; fresh setup is not required. Before updating, stop collection
+entrypoints and processing, close affected sessions, and let running workers
+finish. Update every client plugin/helper sharing the collection, including both
+Codex and Claude when used, before starting fresh sessions or resuming work.
+New stored captures and suspension metadata are unreadable by v0.8.0; mixed-version
+access and downgrading that collection are unsupported. Updating does not rename
+existing raw folders or rerun storage preparation. Follow the
+[upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.9.0/references/setup.md#existing-settings)
+before changing storage visibility or handling a blocked intake lock.
+
+Use explicit processing commands until live current-turn transport is verified.
+Keep notes outside the installed package. Remove any previous standalone or
+source-installer copy before switching installation methods, so only one copy is
+active per client. Review changed hooks after updating.
 
 For packages without hooks, use the client-specific `manual.zip` files on the
 [release page](https://github.com/martinmqz/cuefluent-notes/releases).
