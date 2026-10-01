@@ -2,7 +2,8 @@
 
 Capture and organize your knowledge for fast recall—right on cue.
 
-This branch contains complete generated plugins for Codex and Claude Code.
+This snapshot contains complete generated plugins for Codex and Claude Code.
+Its catalogs and packages are also published on the repository's `main` branch.
 Requires Git, Node.js 22+ on your client's PATH, and a current client CLI.
 No npm install or source checkout is needed.
 
@@ -13,14 +14,14 @@ before running update or installation commands against shared storage.
 ## Codex
 
 ```sh
-codex plugin marketplace add martinmqz/cuefluent-notes --ref marketplace
+codex plugin marketplace add martinmqz/cuefluent-notes --ref main
 codex plugin add cuefluent-notes@cuefluent
 ```
 
 ## Claude Code
 
 ```sh
-claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#marketplace
+claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#main
 claude plugin install cuefluent-notes@cuefluent --scope user
 ```
 
@@ -52,4 +53,6 @@ Both variants use the same plugin identity; choose one per client.
 This is a publisher-hosted marketplace, not an OpenAI or Anthropic public-directory
 listing. For usage, updates, and source installation, see the
 [source repository](https://github.com/martinmqz/cuefluent-notes).
-This branch is generated; submit changes against `main`.
+Edit the source and templates on `main`; do not edit generated packages.
+If your existing marketplace registration selects the old `marketplace` branch,
+follow the [branch migration instructions](https://github.com/martinmqz/cuefluent-notes#switch-an-older-marketplace-registration-to-main).

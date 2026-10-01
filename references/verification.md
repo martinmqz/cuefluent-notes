@@ -12,7 +12,7 @@ in the source repository for the current jobs.
 | Consent and controls | Independent collection/processing settings, opt-outs, stale settings, explicit selection and zero-write ingress for disabled or unconfigured projects |
 | Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots and explicit maintenance |
 | Processing and writes | Exact input claims, acknowledged evidence pages, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
-| Distribution | Dependency and documentation closure, detached manual/hook packages, installers, shell launchers and reproducible archives |
+| Distribution | Dependency and documentation closure, detached manual/hook packages, installers, shell launchers, reproducible archives, published-package digests and source-preserving package-update branches, pre-commit digest validation and legacy migration notices |
 
 Windows CI includes Windows PowerShell, PowerShell 7, Git Bash, and a separate
 private-storage check under a real standard-user token. Tests for unavailable
@@ -33,6 +33,15 @@ their timing budgets. Production hook and worker deadlines remain unchanged.
 **2.1.280** into temporary profiles and checks plugin registration. CI runs this
 separately on macOS and Windows. It does not use the user's profile,
 authentication, model calls or hook trust.
+
+The registration checks cover both source installation and the released catalogs
+committed on `main`, including removing and re-adding the `cuefluent` marketplace
+without duplicate plugin registrations. Source-install checks use the full main
+layout, including repo-scoped catalogs. Marketplace checks verify the installed
+identity, release version and cached checker/workflow helpers. They use local
+catalogs; remote Git
+authentication, GitHub PR creation/CI dispatch and protected-branch merging still
+require separate checks.
 
 These versions pin reproducible registration tests; they are not runtime reader
 requirements. Synthetic fixtures also vary release, prerelease and build version

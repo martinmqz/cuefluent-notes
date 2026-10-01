@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  actions: write
 
 concurrency:
   group: marketplace-publication
@@ -23,6 +25,7 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+      - run: npm ci --ignore-scripts
       - name: Download and verify the published marketplace snapshot
         env:
           GH_TOKEN: ${{ github.token }}
@@ -33,7 +36,28 @@ jobs:
           gh release download "$RELEASE_TAG" --pattern "cuefluent-notes-${RELEASE_TAG#v}-marketplace.tar.gz" --pattern SHA256SUMS --dir "$RUNNER_TEMP/release-assets"
           (cd "$RUNNER_TEMP/release-assets" && sha256sum --ignore-missing --check SHA256SUMS)
           tar -xzf "$RUNNER_TEMP/release-assets/cuefluent-notes-${RELEASE_TAG#v}-marketplace.tar.gz" -C dist/published-marketplace
-      - name: Advance the marketplace branch without changing source history
+      - name: Prepare the package-update branch
+        id: packages
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: bash scripts/publish-marketplace.sh
+      - name: Open the package-update PR and start its checks
+        if: steps.packages.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PUBLICATION_BRANCH: ${{ steps.packages.outputs.branch }}
+        run: |
+          pr=$(gh pr list --base main --head "$PUBLICATION_BRANCH" --state open --json url --jq '.[0].url // empty')
+          if test -z "$pr"; then
+            cat > "$RUNNER_TEMP/publication-pr.md" <<'BODY'
+          Update the marketplace catalogs and complete plugin packages from the verified published release snapshot. Source files and the root README are preserved.
+
+          Review the generated changes and wait for the explicitly dispatched Checks workflow before merging. Packages become available from main only after this PR is merged. Existing installations pinned to the former marketplace branch must follow the migration instructions in the repository README.
+          BODY
+            gh pr create --draft --base main --head "$PUBLICATION_BRANCH" --title "chore(release): publish $RELEASE_TAG" --body-file "$RUNNER_TEMP/publication-pr.md"
+          fi
+          # GITHUB_TOKEN-created PRs do not trigger pull_request workflows.
+          gh workflow run ci.yml --ref "$PUBLICATION_BRANCH"
+      - name: Leave a final migration notice on the old marketplace branch
+        run: bash scripts/marketplace-notice.sh

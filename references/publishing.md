@@ -14,8 +14,9 @@ and artifacts; deleting a file from the current branch does not remove history.
 
 Require pull requests and passing CI on `main`, prevent force pushes and branch
 deletion, and enable secret scanning and push protection when GitHub supports
-those settings for the repository. Keep workflow tokens read-only by default and
-require actions to use full commit pins. Repository visibility and security
+those settings. Publication prepares a package-update PR and explicitly dispatches
+CI; it does not push to `main`, bypass branch rules or merge the PR. Keep workflow
+tokens read-only by default and actions pinned. Repository visibility and security
 settings are separate from publishing a plugin release.
 
 ## Build and inspect a release
@@ -78,9 +79,10 @@ including first-use setup and hook trust, before advertising a release. The
    all have the same stable `major.minor.patch` version. Each update needs a
    higher version so installed clients discover it. The project license is a
    publisher decision; dependency licenses do not license the project itself.
-2. Enable GitHub Actions for this repository and allow the release jobs'
-   `contents: write` permission. Branch rules must allow the automation to
-   create/update `marketplace`. The jobs use `GITHUB_TOKEN`; no extra secret is
+2. Enable GitHub Actions and allow it to create pull requests. The publication
+   job uses `GITHUB_TOKEN` with `contents: write` for its temporary branch and the
+   old branch's README notice, `pull-requests: write` for the draft PR, and
+   `actions: write` to dispatch CI. No main-branch bypass or extra secret is
    required. Keep the default branch as `main`.
 3. From the reviewed commit on `main`, create and push `v` followed by that exact
    version (for example, `v0.5.0` when all manifests say `0.5.0`). Do not move or
@@ -92,16 +94,41 @@ including first-use setup and hook trust, before advertising a release. The
    add version-specific changes to the prepared release notes. Keep the snapshot
    and its checksums together. Use GitHub's **Publish release** action when ready.
 5. **Publish marketplace** downloads that release's snapshot, verifies its
-   checksum and versions, then advances the generated `marketplace` branch.
-   Wait for success before advertising the [installation commands](../README.md#from-the-marketplace).
+   checksum, layout and package digests, and prepares `chore/publish-vVERSION`
+   from current `main`. It opens a **draft package-update PR** and explicitly
+   dispatches **Checks** on that branch: PRs created with `GITHUB_TOKEN` do not
+   trigger `pull_request` workflows automatically.
+6. Review that PR, verify its current commit's checks, and merge it through the
+   normal protected-main process. Only then are the packages available through
+   the [installation commands](../README.md#from-the-marketplace). There is no
+   automatic merge or direct main push.
 
 Both release paths require the source tag to belong to `main` history. Only
-stable releases update the marketplace. The generated branch contains only its
-catalogs, complete packages, README, and release manifest; source history and
-the source checkout's index are not replaced. Never edit generated files there.
+stable releases prepare marketplace updates. The canonical path list is
+`scripts/marketplace-layout.mjs`. Publication replaces only these paths in its
+review branch:
 
-Ordinary PRs only run checks and upload preview artifacts. Neither merging a PR
-nor running `release:build` creates a public release or installs anything.
+- `.agents/plugins/marketplace.json`
+- `.claude-plugin/marketplace.json`
+- `plugins/cuefluent-notes/`
+- `claude/cuefluent-notes/`
+- `release.json`
+
+The snapshot's README is for the downloadable archive; it does not replace the
+source README. Source files, unrelated package paths, history, and the checkout's
+index are preserved. Never edit generated packages directly. Their installed
+version follows `release.json`, independently of unreleased source changes.
+Unexpected snapshot entries are rejected instead of silently discarded; the
+archive README is the sole deliberate omission. The package digests are checked
+against the actual staged Git bytes before creating a commit. The former
+`marketplace` branch receives a final README migration notice, retaining its
+existing packages and catalog bytes. Existing users must
+[switch their registration](../README.md#switch-an-older-marketplace-registration-to-main)
+to receive future releases.
+
+Ordinary source PRs run checks and upload preview artifacts. Merging the generated
+package-update PR makes its already-published release installable from main.
+Neither kind of merge creates a GitHub Release or updates an installed plugin.
 Publishing a draft manually triggers the publication event; if publishing via
 automation, remember that events produced with `GITHUB_TOKEN` generally do not
 start another workflow. See [GitHub workflow triggering](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow).
@@ -114,15 +141,19 @@ start another workflow. See [GitHub workflow triggering](https://docs.github.com
   a new version committed to `main` and a new version tag; never move the old tag.
   If a draft already exists, inspect its assets before using it; preparation
   refuses to overwrite a release with the same tag.
-- If publication fails, users keep the prior marketplace branch. Fix permissions,
-  missing/corrupt assets, or branch access, then rerun **Publish marketplace**
+- If publication fails, users keep the prior packages on `main`. Fix permissions,
+  missing/corrupt assets, or PR/dispatch access, then rerun **Publish marketplace**
   against that published release. Retain the original reviewed assets.
 - A retry of an already-published snapshot is a no-op. Same-version replacement
   with different archive digests or a changed marketplace tree is refused, as
   is publishing an older version.
-  A concurrent branch change makes the non-force push fail; inspect it and retry.
+  An identical prepared branch is reused. If it differs from the update prepared
+  against current main, the publisher refuses to overwrite the existing PR;
+  review and update that PR through the normal process. Concurrent publication
+  branch updates reject the non-force push. Required checks and merge rules
+  govern source changes landing on main while the PR is open.
 - To roll back behavior, publish a **newer version** containing the corrected
-  implementation. Do not force-push the marketplace or replace existing assets.
+  implementation. Do not force-push `main` or replace existing assets.
 
 ## Public listing materials
 
@@ -172,10 +203,10 @@ and [Claude-to-OpenAI package support](https://developers.openai.com/plugins/gui
 
 Validate the complete Claude package, then use the
 [Claude Console submission form](https://platform.claude.com/plugins/submit).
-Supply the released plugin location on the `marketplace` branch at
+Supply the released plugin location on `main` at
 `claude/cuefluent-notes`, with its exact commit, when asked for source details;
-the source `main` root is not an installable plugin. Follow the form's supported
-repository/ref/subdirectory fields rather than substituting a source-only URL.
+the repository root is a marketplace, not an individual installable plugin.
+Follow the form's supported repository/ref/subdirectory fields rather than substituting a source-only URL.
 
 Approved third-party submissions enter **claude-community**. Users add
 `anthropics/claude-plugins-community` before installing from that catalog.

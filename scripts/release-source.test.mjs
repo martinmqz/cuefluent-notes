@@ -18,10 +18,11 @@ test('shallow release checks fetch main ancestry only and reject tags outside ma
     return result.stdout.trim();
   };
   git(remote, 'init', '--initial-branch=main');
+  git(remote, 'config', 'uploadpack.allowFilter', 'true');
   git(remote, 'config', 'user.name', 'Synthetic Release');
   git(remote, 'config', 'user.email', 'release@example.invalid');
   await fs.mkdir(path.join(remote, 'scripts'));
-  for (const file of ['check-release-source.sh', 'release-policy.mjs', 'file-io.mjs']) {
+  for (const file of ['check-release-source.sh', 'release-policy.mjs', 'marketplace-layout.mjs', 'file-io.mjs']) {
     await fs.copyFile(path.join(source, file), path.join(remote, 'scripts', file));
   }
   await fs.writeFile(path.join(remote, 'package.json'), JSON.stringify({ version: '1.0.0' }));
@@ -34,6 +35,7 @@ test('shallow release checks fetch main ancestry only and reject tags outside ma
     git(remote, 'add', '.');
     git(remote, 'commit', '-m', 'Later main change');
   }
+  const laterBlob = git(remote, 'rev-parse', 'main:later.txt');
   git(remote, 'switch', '-c', 'unmerged', sourceTag);
   await fs.writeFile(path.join(remote, 'package.json'), JSON.stringify({ version: '2.0.0' }));
   git(remote, 'add', '.');
@@ -59,8 +61,8 @@ test('shallow release checks fetch main ancestry only and reject tags outside ma
     assert.equal(checked.status, accepted ? 0 : 1, checked.stderr || checked.stdout);
     assert.equal(git(checkout, 'rev-parse', 'HEAD'), head);
     assert.equal(git(checkout, 'rev-parse', 'origin/main'), git(remote, 'rev-parse', 'main'));
-    for (const absent of accepted ? [marketplace, unmerged] : [marketplace]) {
-      assert.notEqual(spawnSync('git', ['cat-file', '-e', absent], { cwd: checkout }).status, 0);
+    for (const absent of accepted ? [marketplace, unmerged, laterBlob] : [marketplace, laterBlob]) {
+      assert.notEqual(spawnSync('git', ['-c', 'remote.origin.promisor=false', 'cat-file', '-e', absent], { cwd: checkout, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } }).status, 0);
     }
     assert.equal(git(checkout, 'for-each-ref', '--format=%(refname)', 'refs/remotes'), 'refs/remotes/origin/main');
   }

@@ -16,6 +16,9 @@ the repository; keep detailed user workflows in the skill and its references.
   `packaging/`, and `.github/workflows/`: installation, packages, releases, and CI.
   See [distribution](references/distribution.md) and
   [publishing](references/publishing.md).
+- `scripts/marketplace-layout.mjs`: canonical generated-package paths on `main`.
+  Preserve released bytes; edit source/templates and publish a new version.
+  See the [publication boundary](references/publishing.md#publish-the-github-marketplace).
 - `scripts/*.test.mjs`: Node's built-in test suite, including detached packages
   and disposable filesystem fixtures.
 - `scripts/workflow-*.mjs` and `scripts/capture-contract.mjs`: session-workflow

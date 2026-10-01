@@ -11,3 +11,7 @@ dist/
 !.env.example
 *.pem
 *.key
+
+# Generated release copies are tracked; omit them from ordinary source searches.
+/plugins/cuefluent-notes/
+/claude/cuefluent-notes/

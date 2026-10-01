@@ -60,8 +60,16 @@ Complete Codex and Claude packages require Node.js 22+. Consult the
 [verification scope](https://github.com/martinmqz/cuefluent-notes/blob/v0.9.0/references/verification.md)
 for automated coverage and live-client limitations.
 
-After publication, wait for **Publish marketplace** to finish before updating
-through the marketplace. Review any changed hooks; run **Set up Cuefluent Notes**
+**Marketplace branch migration:** new releases use `main`. Existing registrations
+pinned to `marketplace` do not switch automatically and will remain on their old
+version after an ordinary refresh. Follow the
+[one-time migration instructions](https://github.com/martinmqz/cuefluent-notes#switch-an-older-marketplace-registration-to-main)
+for Codex and Claude. Keep notes, workflow settings and evidence storage; the
+branch change does not require fresh setup.
+
+After release publication, **Publish marketplace** opens a package-update PR and
+starts its CI checks. Wait for that PR to be reviewed and merged into `main`
+before updating through the marketplace. Review any changed hooks; run **Set up Cuefluent Notes**
 for a fresh installation or an upgrade from v0.7.1 or earlier.
 `SHA256SUMS` covers all four plugin ZIPs and the marketplace snapshot. Publishing
 does not update an installed plugin; update it through your client after the

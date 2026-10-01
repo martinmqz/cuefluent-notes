@@ -9,7 +9,7 @@ available to the client.
 ## GitHub-hosted marketplace
 
 The [README marketplace commands](../README.md#from-the-marketplace) install
-released packages from the `marketplace` branch under the marketplace name
+released packages from `main` under the marketplace name
 `cuefluent`. Codex reads `.agents/plugins/marketplace.json` and installs
 `plugins/cuefluent-notes`; Claude reads `.claude-plugin/marketplace.json` and
 installs `claude/cuefluent-notes`. Each package has its own host manifest and
@@ -19,8 +19,11 @@ marketplace root.
 The catalogs select the hook-enabled variant. Installation does not choose
 collection or processing permission or notes destinations. Keep only one active copy per client;
 remove a previous standalone or source-installer registration before switching.
-If the `marketplace` branch is absent, the first release has not completed;
-use the guided installer or follow the [publisher guide](publishing.md).
+The catalogs and packages coexist with development source on `main`. The
+published package version is recorded in root `release.json` and can lag the
+source version during development. See the [publication boundary](publishing.md#publish-the-github-marketplace)
+for managed paths and the reviewed release process. Existing registrations that
+select the former branch need the [one-time migration](../README.md#switch-an-older-marketplace-registration-to-main).
 
 Release assets also provide separate manual ZIPs without hook registration.
 Extract one and use the client-specific local installation instructions below;

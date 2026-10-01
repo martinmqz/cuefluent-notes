@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { isMain } from './file-io.mjs';
+import { MARKETPLACE_PATHS, MARKETPLACE_PLUGINS } from './marketplace-layout.mjs';
 
 export function stableVersionParts(version) {
   if (typeof version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
@@ -25,6 +26,7 @@ export function checkMarketplaceAdvance(next, previous) {
   return 'same-version';
 }
 export async function main(args) {
+  if (args.length === 1 && args[0] === 'paths') return MARKETPLACE_PATHS.join('\n');
   const read = async file => JSON.parse(await fs.readFile(file, 'utf8'));
   if (args[0] === 'check-tag' && args.length === 3) {
     checkReleaseTag((await read(args[1])).version, args[2]);
@@ -35,8 +37,8 @@ export async function main(args) {
   }
   const next = await read(path.join(args[0], 'release.json'));
   checkReleaseTag(next.version, args[1]);
-  for (const [client, directory] of [['codex', 'plugins'], ['claude', 'claude']]) {
-    const manifest = await read(path.join(args[0], directory, 'cuefluent-notes', `.${client}-plugin/plugin.json`));
+  for (const { client, root } of MARKETPLACE_PLUGINS) {
+    const manifest = await read(path.join(args[0], root, `.${client}-plugin/plugin.json`));
     if (manifest.name !== 'cuefluent-notes' || manifest.version !== next.version) throw new Error('Marketplace plugin identity/version mismatch.');
   }
   return checkMarketplaceAdvance(next, args[2] ? await read(args[2]) : null);

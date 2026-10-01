@@ -36,6 +36,7 @@ jobs:
         with:
           name: release-preview-ubuntu-24.04
           path: dist/release-assets
+      - run: npm ci --ignore-scripts
       - name: Create a draft with complete release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,4 +46,5 @@ jobs:
           mkdir -p dist/prepared-marketplace
           tar -xzf "dist/release-assets/cuefluent-notes-${RELEASE_TAG#v}-marketplace.tar.gz" -C dist/prepared-marketplace
           node scripts/release-policy.mjs dist/prepared-marketplace "$RELEASE_TAG"
+          node scripts/marketplace-content.mjs snapshot dist/prepared-marketplace "$RELEASE_TAG"
           gh release create "$RELEASE_TAG" dist/release-assets/* --verify-tag --draft --title "Cuefluent Notes $RELEASE_TAG" --notes-file packaging/release-notes.md

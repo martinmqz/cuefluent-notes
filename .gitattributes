@@ -3,3 +3,10 @@
 *.jpg binary
 *.zip binary
 *.gz binary
+
+# Preserve published bytes; edit source/templates and publish a new release.
+plugins/cuefluent-notes/** -text linguist-generated=true
+claude/cuefluent-notes/** -text linguist-generated=true
+# Third-party whitespace is part of the immutable published package bytes.
+plugins/cuefluent-notes/skills/cuefluent-notes/node_modules/** -whitespace
+claude/cuefluent-notes/skills/cuefluent-notes/node_modules/** -whitespace
