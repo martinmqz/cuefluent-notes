@@ -85,8 +85,12 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     assert.equal(emptyWorkflow.configHash, null);
     assert.equal(emptyWorkflow.transport.automaticProcessing, false);
     assert.ok(files.some(f => f.endsWith('node_modules/markdown-it/LICENSE')));
+    assert.ok(files.some(f => f.endsWith('node_modules/yaml/LICENSE')));
     assert.ok(!files.some(f => /(?:^|\/)\.git(?:\/|$)|\.test\.mjs$|(?:^|\/)journal\.json$|(?:^|\/)manifest\.json$/.test(f)));
     const checker = path.join(pkg.skillRoot, 'scripts/check-notes.mjs');
+    const metadataExample = path.join(directory, `${pkg.client}-metadata.md`);
+    await fs.writeFile(metadataExample, '<!-- cuefluent\nschema_version: 1\nid: note_detached\n-->\n\n# Synthetic\n\n## Metadata\n\nPortable evidence.\n');
+    assert.equal(run(checker, [metadataExample], directory).errors, 0);
     const examples = path.join(pkg.skillRoot, 'examples');
     const report = run(checker, ['--cases', path.join(examples, 'check-cases.json'),
       ...['feature-behavior', 'decision', 'standup', 'meeting-summary', 'task-summary', 'knowledge-base'].map(name => path.join(examples, `${name}.md`))], directory);

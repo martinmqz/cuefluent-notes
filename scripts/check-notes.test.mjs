@@ -53,6 +53,18 @@ test('HTML visibility and all images remain explicitly unverified', () => {
   assert.ok(codes(image).includes('image-unchecked'));
   assert.ok(!codes(image).includes('empty-body'));
 });
+test('abrupt and alternate comment endings preserve adjacent visible HTML diagnostics', () => {
+  for (const comment of ['<!-->', '<!--->', '<!-- c --!>', '<!-- c -->', '<!-- c --->']) {
+    for (const html of ['<b>visible</b>', '<img src=x onerror=alert(1)>']) {
+      const source = '# Topic\n\n## Result\n\n' + comment + ' ' + html + '\n';
+      const report = codes(inspectMarkdown(source));
+      assert(report.includes('html-unchecked'), source);
+      assert(report.includes('html-only-body'), source);
+      assert(!report.includes('empty-body'), source);
+    }
+    assert(codes(inspectMarkdown('# Topic\n\n## Result\n\n' + comment)).includes('empty-body'));
+  }
+});
 async function fixture(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-check-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

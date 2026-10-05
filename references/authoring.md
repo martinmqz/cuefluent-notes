@@ -20,6 +20,12 @@ vocabulary in H1/H2 headings or faithful aliases; no required `type:` frontmatte
 is added. Plugin filesystem support does not establish app ingestion of nested
 files or recursive folder discovery; keep that evidence separate.
 
+An optional leading `cuefluent` HTML comment carries portable note metadata;
+see the [metadata contract](note-metadata.md). The standalone checker validates
+its structure and detects duplicate note IDs among selected files. These fields
+do not supply app search terms or establish series-aware retrieval. Ordinary
+notes need no metadata. Keep summaries, decisions and event dates visible.
+
 ```markdown
 # Topic context
 

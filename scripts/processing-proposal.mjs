@@ -1,12 +1,14 @@
+import { inspectNoteMetadata, registerNoteIdentity } from './note-metadata.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { captureRelativePath, logicalCaptureIdentity } from './capture-contract.mjs';
 import { unitKey } from './capture-retention.mjs';
-import { fingerprint, inspectDirectories, inspectExistingDirectories } from './safe-update.mjs';
+import { inspectDirectories, inspectExistingDirectories, readRetainedOutputs } from './safe-update.mjs';
 import { isNoteCategory } from './note-organization.mjs';
 import { readBoundedBytes, windowsComponent } from './file-io.mjs';
 import { inspectMarkdown } from './check-notes.mjs';
 import { processingSnapshot, writeProcessingBytes } from './processing-state.mjs';
+import { intakeJSON } from './intake-io.mjs';
 import { canonicalJSON, digest, fail, keys, list, hash, choice, unique } from './workflow-values.mjs';
 
 const LIMIT = 900 * 1024;
@@ -40,7 +42,7 @@ export async function buildProcessingProposal(ctx, claim, request) {
   if (rootReal !== root) fail('PROCESSING_NOTES_ROOT_CHANGED');
   unique(request.files.map(file => outputPath(file.path).normalize('NFC').toLowerCase()));
   validateMappings(request.mappings, claim.inputs, request.files);
-  const copies = [], files = []; let total = 0;
+  const copies = [], files = [], noteIdentities = new Set(); let total = 0;
   for (const [index, file] of request.files.entries()) {
     keys(file, ['path', 'expectedHash', 'contentPath', 'expectedContentHash']); outputPath(file.path);
     if (file.expectedHash !== null) hash(file.expectedHash); hash(file.expectedContentHash);
@@ -53,8 +55,18 @@ export async function buildProcessingProposal(ctx, claim, request) {
     const bytes = await readBoundedBytes(file.contentPath, { maxBytes: LIMIT, noFollow: true });
     if (digest(bytes) !== file.expectedContentHash) fail('PROCESSING_PROPOSAL_CHANGED');
     total += bytes.length; if (total > LIMIT) fail('PROCESSING_PROPOSAL_CAPACITY');
-    if (inspectMarkdown(new TextDecoder('utf-8', { fatal: true }).decode(bytes), file.path).diagnostics.some(item => item.severity === 'error')) fail('INVALID_PROCESSING_MARKDOWN');
-    if (await fingerprint(path.join(root, file.path)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');
+    const checked = inspectMarkdown(new TextDecoder('utf-8', { fatal: true }).decode(bytes), file.path);
+    if (checked.diagnostics.some(item => item.severity === 'error')) fail('INVALID_PROCESSING_MARKDOWN');
+    registerNoteIdentity(checked.metadata, noteIdentities);
+    const currentBytes = await readBoundedBytes(path.join(root, file.path), { missing: true });
+    if ((currentBytes === null ? null : digest(currentBytes)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');
+    const currentMetadata = currentBytes === null ? null : inspectNoteMetadata(new TextDecoder('utf-8', { fatal: true }).decode(currentBytes), file.path);
+    if (currentMetadata?.status === 'invalid') {
+      fail('INVALID_EXISTING_NOTE_METADATA');
+    }
+    if (currentMetadata?.status === 'unsupported' && currentMetadata.block.raw !== checked.metadata.block?.raw) {
+      fail('NOTE_METADATA_OPAQUE_CHANGED');
+    }
     const ownedPath = `proposals/${claim.operationId}/${index}.md`;
     copies.push({ path: ownedPath, source: file.contentPath, hash: file.expectedContentHash });
     const sources = claim.inputs.filter(input => request.mappings.some(item => unitKey(item.identity) === unitKey(input.identity) && item.paths.includes(file.path)))
@@ -69,7 +81,13 @@ export async function buildProcessingProposal(ctx, claim, request) {
     ...(mode === 'derived' ? { expectedManifestHash: request.expectedManifestHash } : {}) };
   if (mode === 'derived') {
     if (request.expectedManifestHash !== null) hash(request.expectedManifestHash);
-    if ((await processingSnapshot(ctx, 'manifest.json')).hash !== request.expectedManifestHash) fail('PROCESSING_MANIFEST_CHANGED');
+    const snapshot = await processingSnapshot(ctx, 'manifest.json');
+    if (snapshot.hash !== request.expectedManifestHash) fail('PROCESSING_MANIFEST_CHANGED');
+    for await (const { target, bytes } of readRetainedOutputs(plan, intakeJSON(snapshot))) {
+      const metadata = inspectNoteMetadata(new TextDecoder('utf-8', { fatal: true }).decode(bytes), target);
+      if (metadata.status === 'invalid') fail('INVALID_EXISTING_NOTE_METADATA');
+      registerNoteIdentity(metadata, noteIdentities);
+    }
   } else if (request.expectedManifestHash !== undefined) fail('INVALID_PROCESSING_PROPOSAL');
   return { format: 'cuefluent-processing-proposal', version: 1, operationId: claim.operationId, bindingHash: ctx.bindingHash,
     inputsHash: claim.inputsHash, plan, mappings: structuredClone(request.mappings), copies, directories: inspected.directories };

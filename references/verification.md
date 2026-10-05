@@ -12,6 +12,7 @@ in the source repository for the current jobs.
 | Consent and controls | Independent collection/processing settings, opt-outs, stale settings, explicit selection and zero-write ingress for disabled or unconfigured projects |
 | Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots and explicit maintenance |
 | Processing and writes | Exact input claims, acknowledged evidence pages, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
+| Portable note metadata | Bounded YAML structure, comment placement, safe unknown fields, unsupported schemas, selected-file ID collisions, descriptive dates/source references and unchanged heading/alias vocabulary; no app indexing or hash-freshness claim |
 | Distribution | Dependency and documentation closure, detached manual/hook packages, installers, shell launchers, reproducible archives, published-package digests and source-preserving package-update branches, pre-commit digest validation and legacy migration notices |
 
 Windows CI includes Windows PowerShell, PowerShell 7, Git Bash, and a separate

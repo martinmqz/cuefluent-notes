@@ -652,3 +652,188 @@ test('POSIX read-only stages can finish after interrupted rename; Windows refuse
   assert.equal((await recover(f.stateDir)).status, 'updated');
   assert.equal((await fs.stat(f.target)).mode & 0o7777, 0o440);
 });
+
+test('metadata validation accepts valid and opaque blocks but preserves malformed existing notes on refusal', async t => {
+  for (const schema of [1, 2]) {
+    const f = await fixture(t);
+    const metadata = `<!-- cuefluent\nschema_version: ${schema}\nid: note_writer\nextensions: {decimal: 1_000, hex: 0x1_0}\n-->\n\n`;
+    f.plan.files[0].entries[0].heading = 'Evidence';
+    await fs.writeFile(f.proposal, metadata + '# Note\n\n## Evidence\n\nSupported content.\n');
+    assert.equal((await applyPlan(f.plan)).status, 'updated');
+    assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+    await reinspect(f.plan);
+    await fs.appendFile(f.proposal, '\nAdditional supported content.\n');
+    assert.equal((await applyPlan(f.plan)).status, 'updated');
+    assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+    const malformed = '# Note\n\n## Evidence\n\n<!-- cuefluent review pending -->\n\nPreserved human content.\n';
+    await fs.writeFile(f.target, malformed);
+    f.plan.files[0].expectedHash = await fingerprint(f.target);
+    await fs.writeFile(f.proposal, malformed + '\nProposed addition.\n');
+    await assert.rejects(applyPlan(f.plan), /Markdown check/);
+    assert.equal(await fs.readFile(f.target, 'utf8'), malformed);
+    assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+  }
+});
+
+test('replacement proposals cannot remove or repair malformed existing metadata', async t => {
+  for (const mode of ['authored', 'derived']) for (const replacement of ['remove', 'repair']) {
+    const f = await fixture(t, mode);
+    const body = await fs.readFile(f.proposal, 'utf8');
+    if (mode === 'derived') await applyPlan(f.plan);
+    const malformed = '<!-- cuefluent\nschema_version: 1\nid: note_existing\ncreated: yesterday\n-->\n\n' + body;
+    await fs.writeFile(f.target, malformed);
+    if (mode === 'derived') {
+      // Model a legacy generated note whose malformed bytes are already tracked.
+      const file = path.join(f.stateDir, 'manifest.json');
+      const manifest = JSON.parse(await fs.readFile(file, 'utf8'));
+      manifest.files[0].hash = await fingerprint(f.target);
+      await fs.writeFile(file, JSON.stringify(manifest));
+    }
+    await reinspect(f.plan);
+    const manifestHash = await fingerprint(path.join(f.stateDir, 'manifest.json'));
+    const next = replacement === 'remove' ? body : '<!-- cuefluent\nschema_version: 1\nid: note_existing\n-->\n\n' + body;
+    await fs.writeFile(f.proposal, next);
+    await assert.rejects(applyPlan(f.plan), /existing.*metadata/i, `${mode}: ${replacement}`);
+    assert.equal(await fs.readFile(f.target, 'utf8'), malformed);
+    assert.equal(await fingerprint(path.join(f.stateDir, 'manifest.json')), manifestHash);
+    assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+    assert.deepEqual(await fs.readdir(f.root), ['note.md']);
+  }
+});
+
+test('metadata preflight still permits repair of ordinary Markdown structure', async t => {
+  const f = await fixture(t);
+  await fs.writeFile(f.target, 'An existing note without headings.\n');
+  await reinspect(f.plan);
+  assert.equal((await applyPlan(f.plan)).status, 'updated');
+  assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+});
+
+test('C1 metadata controls block writer replacements without changing notes or manifests', async t => {
+  for (const mode of ['authored', 'derived']) {
+    const f = await fixture(t, mode), body = await fs.readFile(f.proposal, 'utf8');
+    await applyPlan(f.plan); await reinspect(f.plan);
+    const manifestHash = await fingerprint(path.join(f.stateDir, 'manifest.json'));
+    for (const schema of [1, 2]) {
+      await fs.writeFile(f.proposal, `<!-- cuefluent\nschema_version: ${schema}\nid: note_controls\nextension: "\\N"\n-->\n\n` + body);
+      await assert.rejects(applyPlan(f.plan), /Markdown check/);
+      assert.equal(await fs.readFile(f.target, 'utf8'), body);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'manifest.json')), manifestHash);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+      assert.deepEqual(await fs.readdir(f.root), ['note.md']);
+    }
+  }
+});
+
+test('unquoted timestamp proposals cannot replace authored or derived notes', async t => {
+  const stamp = '2026-10-01T07:42:00Z';
+  for (const mode of ['authored', 'derived']) {
+    const f = await fixture(t, mode), body = await fs.readFile(f.proposal, 'utf8');
+    await applyPlan(f.plan); await reinspect(f.plan);
+    const manifestHash = await fingerprint(path.join(f.stateDir, 'manifest.json'));
+    for (const field of ['created', 'updated']) for (const value of [stamp, `|-\n  ${stamp}`, `>-\n  ${stamp}`]) {
+      await fs.writeFile(f.proposal, `<!-- cuefluent\nschema_version: 1\nid: note_timestamp\n${field}: ${value}\n-->\n\n` + body);
+      await assert.rejects(applyPlan(f.plan), /Markdown check/);
+      assert.equal(await fs.readFile(f.target, 'utf8'), body);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'manifest.json')), manifestHash);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+      assert.deepEqual(await fs.readdir(f.root), ['note.md']);
+    }
+    const quoted = `<!-- cuefluent\nschema_version: 1\nid: note_timestamp\ncreated: "${stamp}"\nupdated: '${stamp}'\n-->\n\n` + body;
+    await fs.writeFile(f.proposal, quoted);
+    assert.equal((await applyPlan(f.plan)).status, 'updated');
+    assert.equal(await fs.readFile(f.target, 'utf8'), quoted);
+  }
+});
+
+test('writers preserve opaque metadata bytes while allowing body-only updates', async t => {
+  for (const mode of ['authored', 'derived']) {
+    const f = await fixture(t, mode), body = await fs.readFile(f.proposal, 'utf8');
+    const block = '<!-- cuefluent\r\nschema_version: 2\r\nid: note_future\r\nextension: "keep me"\r\n-->\r\n';
+    const original = '\uFEFF' + block + '\r\n' + body;
+    await fs.writeFile(f.proposal, original); await applyPlan(f.plan); await reinspect(f.plan);
+    const manifestHash = await fingerprint(path.join(f.stateDir, 'manifest.json'));
+    for (const next of ['', block.replace('2', '1'), block.replace('keep me', 'changed'),
+      block.replace('"keep me"', "'keep me'"), block.replaceAll('\r\n', '\n')]) {
+      await fs.writeFile(f.proposal, '\uFEFF' + next + '\n' + body + '\nUpdated body.\n');
+      await assert.rejects(applyPlan(f.plan), /opaque.*metadata/i);
+      assert.equal(await fs.readFile(f.target, 'utf8'), original);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'manifest.json')), manifestHash);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+      assert.deepEqual(await fs.readdir(f.root), ['note.md']);
+    }
+    const updated = original + '\nUpdated body.\n';
+    await fs.writeFile(f.proposal, updated);
+    assert.equal((await applyPlan(f.plan)).status, 'updated');
+    assert.equal(await fs.readFile(f.target, 'utf8'), updated);
+  }
+});
+
+test('writers reject duplicate note IDs across proposed and retained outputs before publication', async t => {
+  for (const mode of ['authored', 'derived']) {
+    const f = await fixture(t, mode);
+    const content = '<!-- cuefluent\nschema_version: 1\nid: note_shared\n-->\n\n' + await fs.readFile(f.proposal, 'utf8');
+    await fs.writeFile(f.proposal, content);
+    const other = path.join(f.directory, 'other-proposal.md'); await fs.writeFile(other, content);
+    const extra = { ...f.plan.files[0], path: 'other.md', contentPath: other };
+    await assert.rejects(applyPlan({ ...f.plan, files: [f.plan.files[0], extra] }), /NOTE_METADATA_ID_COLLISION/);
+    assert.deepEqual(await fs.readdir(f.root), []);
+    assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+    if (mode === 'derived') {
+      await applyPlan(f.plan); await reinspect(f.plan);
+      const manifest = await fs.readFile(path.join(f.stateDir, 'manifest.json'));
+      await assert.rejects(applyPlan({ ...f.plan, files: [extra] }), /NOTE_METADATA_ID_COLLISION/);
+      assert.equal(await fs.readFile(f.target, 'utf8'), content);
+      assert.deepEqual(await fs.readFile(path.join(f.stateDir, 'manifest.json')), manifest);
+      assert.equal(await fingerprint(path.join(f.root, 'other.md')), null);
+    }
+  }
+});
+
+test('a marker beyond Markdown nesting limits cannot pass shared-writer checks', async t => {
+  const f = await fixture(t);
+  await fs.appendFile(f.proposal, '\n' + '>'.repeat(100) + ' <!-- cuefluent\nschema_version: 1\nid: hidden\n-->\n');
+  await assert.rejects(applyPlan(f.plan), /Markdown check/);
+  assert.equal(await fingerprint(f.target), null);
+  assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+});
+
+test('malformed marker punctuation blocks a writer save before publication', async t => {
+  const f = await fixture(t);
+  await fs.appendFile(f.proposal, '\n<!-- cuefluent? -->\n');
+  await assert.rejects(applyPlan(f.plan), /Markdown check/);
+  assert.equal(await fingerprint(f.target), null);
+  assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+});
+
+test('named footnote markers block writer publication without changing existing notes', async t => {
+  for (const mode of ['authored', 'derived']) {
+    const f = await fixture(t, mode), body = await fs.readFile(f.proposal, 'utf8');
+    await applyPlan(f.plan); await reinspect(f.plan);
+    const manifestHash = await fingerprint(path.join(f.stateDir, 'manifest.json'));
+    for (const fragment of ['[^<!--cuefluent]: text', 'See [^<!--cuefluent]\n\n[^<!--cuefluent]: text',
+      '[^unused]: text <!-- cuefluent -->', '[^unused]: [link](url "<!-- cuefluent")']) {
+      await fs.writeFile(f.proposal, body + '\n' + fragment + '\n');
+      await assert.rejects(applyPlan(f.plan), /Markdown check/);
+      assert.equal(await fs.readFile(f.target, 'utf8'), body);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'manifest.json')), manifestHash);
+      assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+      assert.deepEqual(await fs.readdir(f.root), ['note.md']);
+    }
+  }
+});
+
+test('Unicode comment names survive writer creation and replacement', async t => {
+  for (const mode of ['authored', 'derived']) for (const metadata of ['', '<!-- cuefluent\nschema_version: 1\nid: note_unicode\n-->\n\n']) {
+    const f = await fixture(t, mode);
+    const body = await fs.readFile(f.proposal, 'utf8');
+    const comments = ['é', '文', '١', '\u0301', '𐐀'].map(suffix => `<!-- cuefluent${suffix} -->`).join('\n');
+    await fs.writeFile(f.proposal, metadata + body + '\n' + comments + '\n');
+    assert.equal((await applyPlan(f.plan)).status, 'updated');
+    assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+    await reinspect(f.plan);
+    await fs.appendFile(f.proposal, '\nA reviewed addition.\n');
+    assert.equal((await applyPlan(f.plan)).status, 'updated');
+    assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+  }
+});

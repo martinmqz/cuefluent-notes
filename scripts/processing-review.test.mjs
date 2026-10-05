@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { processingFixture, inspectedClaim, proposedClaim } from './test-support/processing-fixture.mjs';
-import { prepareProcessing, readProcessingPage, saveProcessing, completeProcessing, inspectProcessing } from './processing.mjs';
+import { prepareProcessing, readProcessingPage, proposeProcessing, saveProcessing, completeProcessing, inspectProcessing } from './processing.mjs';
 import { renderProcessingPacket } from './processing-packet.mjs';
 import { validateClaim, associationPath } from './processing-contract.mjs';
 import { captureRelativePath, serializeCapture } from './capture-contract.mjs';
 import { dispositionPath } from './capture-retention.mjs';
-import { fingerprint, inspectWriterMaintenance } from './safe-update.mjs';
+import { fingerprint, inspectWriterMaintenance, applyPlan } from './safe-update.mjs';
 import { previewCapturePrune, applyCapturePrune } from './capture-maintenance.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { assertWorkflowAuthorizations, workflowProcessingBinding, verifyWorkflowStorage } from './workflow-storage.mjs';
@@ -289,3 +289,147 @@ for (const kind of ['foreign-coordination', 'incomplete-directory']) {
     assert(injected); assert.equal(await fingerprint(p.target), null);
   });
 }
+
+test('processing proposal metadata rejection preserves existing authored bytes and accepts opaque schemas', async t => {
+  for (const schema of [1, 2]) {
+    const f = await processingFixture(t);
+    const content = `<!-- cuefluent\nschema_version: ${schema}\nid: note_processing\n-->\n\n# Meeting\n\n## Decision\n\nKeep rollout paused.\n`;
+    const proposed = await proposedClaim(f, { name: 'meeting.md', content });
+    assert.equal(await fs.readFile(proposed.plan.files[0].contentPath, 'utf8'), content);
+  }
+  const f = await processingFixture(t), target = path.join(f.collection.notes.notesDir, 'meeting.md');
+  const malformed = '<!-- cuefluent\nschema_version: 1\nid: note_processing\ncreated: yesterday\n-->\n\n# Meeting\n\n## Decision\n\nHuman correction.\n';
+  await fs.writeFile(target, malformed);
+  await assert.rejects(proposedClaim(f, { name: 'meeting.md', content: malformed + '\nProposed addition.\n' }), /INVALID_PROCESSING_MARKDOWN/);
+  assert.equal(await fs.readFile(target, 'utf8'), malformed);
+});
+
+test('processing cannot propose removal or repair of malformed existing metadata', async t => {
+  for (const replacement of ['remove', 'repair']) {
+    const f = await processingFixture(t), claim = await inspectedClaim(f);
+    const body = '# Meeting\n\n## Decision\n\nHuman correction.\n';
+    const metadata = '<!-- cuefluent\nschema_version: 1\nid: note_processing\n';
+    const malformed = metadata + 'created: yesterday\n-->\n\n' + body;
+    const target = path.join(f.collection.notes.notesDir, 'meeting.md');
+    await fs.writeFile(target, malformed);
+    const content = replacement === 'remove' ? body : metadata + '-->\n\n' + body;
+    await assert.rejects(proposedClaim(f, { name: 'meeting.md', content, claim }), /INVALID_EXISTING_NOTE_METADATA/);
+    assert.equal(await fs.readFile(target, 'utf8'), malformed);
+    const stateDir = f.collection.notes.writerStateDir;
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, 'record.json')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, '0.md')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+    assert.equal(await fingerprint(path.join(stateDir, 'journal.json')), null);
+  }
+});
+
+test('processing preserves opaque metadata before recording a replacement proposal', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f);
+  const block = '<!-- cuefluent\r\nschema_version: 2\r\nid: note_future\r\nextension: "keep me"\r\n-->\r\n';
+  const body = '# Meeting\n\n## Decision\n\nHuman correction.\n';
+  const original = block + '\n' + body, target = path.join(f.collection.notes.notesDir, 'meeting.md');
+  await fs.writeFile(target, original);
+  for (const next of ['', block.replace('2', '1'), block.replace('keep me', 'changed'),
+    block.replace('"keep me"', "'keep me'"), block.replaceAll('\r\n', '\n')]) {
+    await assert.rejects(proposedClaim(f, { name: 'meeting.md', content: next + '\n' + body, claim }), { code: 'NOTE_METADATA_OPAQUE_CHANGED' });
+    assert.equal(await fs.readFile(target, 'utf8'), original);
+    const stateDir = f.collection.notes.writerStateDir;
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, 'record.json')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, '0.md')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+  }
+  const content = original + '\nSupported addition.\n';
+  const proposed = await proposedClaim(f, { name: 'meeting.md', content, claim });
+  assert.equal(await fs.readFile(proposed.plan.files[0].contentPath, 'utf8'), content);
+  assert.equal(await fs.readFile(target, 'utf8'), original);
+});
+
+test('processing rejects unused footnote body markers before recording a proposal', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f);
+  const body = '# Meeting\n\n## Decision\n\nVisible evidence.\n';
+  for (const fragment of ['[^unused]: text <!-- cuefluent -->', '[^unused]: [link](url "<!-- cuefluent")']) {
+    await assert.rejects(proposedClaim(f, { name: 'meeting.md', content: body + '\n' + fragment + '\n', claim }), { code: 'INVALID_PROCESSING_MARKDOWN' });
+    const stateDir = f.collection.notes.writerStateDir;
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, 'record.json')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, '0.md')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }
+});
+
+test('processing rejects C1 metadata controls before recording a proposal', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f);
+  for (const schema of [1, 2]) {
+    const content = `<!-- cuefluent\nschema_version: ${schema}\nid: note_controls\nextension: "\\N"\n-->\n\n# Meeting\n\n## Decision\n\nVisible evidence.\n`;
+    await assert.rejects(proposedClaim(f, { name: 'meeting.md', content, claim }), { code: 'INVALID_PROCESSING_MARKDOWN' });
+    const stateDir = f.collection.notes.writerStateDir;
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, 'record.json')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'proposals', f.operationId, '0.md')), null);
+    assert.equal(await fingerprint(path.join(stateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }
+});
+
+test('processing rejects unquoted timestamps before recording intent and preserves existing bytes', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f), stateDir = f.collection.notes.writerStateDir;
+  const body = '# Meeting\n\n## Decision\n\nVisible evidence.\n', stamp = '2026-10-01T07:42:00Z';
+  const target = path.join(f.collection.notes.notesDir, 'meeting.md'); await fs.writeFile(target, body);
+  for (const field of ['created', 'updated']) for (const value of [stamp, `|-\n  ${stamp}`, `>-\n  ${stamp}`]) {
+    const content = `<!-- cuefluent\nschema_version: 1\nid: note_timestamp\n${field}: ${value}\n-->\n\n` + body;
+    await assert.rejects(proposedClaim(f, { name: 'meeting.md', content, claim }), { code: 'INVALID_PROCESSING_MARKDOWN' });
+    assert.equal(await fs.readFile(target, 'utf8'), body);
+    for (const name of [`proposals/${f.operationId}/record.json`, `proposals/${f.operationId}/0.md`, 'journal.json']) {
+      assert.equal(await fingerprint(path.join(stateDir, name)), null, name);
+    }
+    assert.equal(await fingerprint(path.join(stateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+  }
+  const quoted = `<!-- cuefluent\nschema_version: 1\nid: note_timestamp\ncreated: "${stamp}"\nupdated: '${stamp}'\n-->\n\n` + body;
+  const approved = await proposedClaim(f, { name: 'meeting.md', content: quoted, claim });
+  assert.equal((await save(f, approved)).status, 'saved');
+  assert.equal(await fs.readFile(target, 'utf8'), quoted);
+});
+
+test('processing rejects duplicate proposed identities and deeply hidden markers before proposal publication', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f);
+  const metadata = `<!-- cuefluent\nschema_version: 1\nid: note_duplicate\nsources:\n  - type: session\n    client: ${f.identity.client}\n    session_id: ${f.identity.sessionId}\n    unit_id: ${f.identity.unitId}\n    revision: ${f.capture.evidenceHash}\n-->\n\n`;
+  const content = metadata + '# Meeting\n\n## Decision\n\nKeep rollout paused.\n';
+  const files = [];
+  for (const name of ['first.md', 'second.md']) {
+    const contentPath = path.join(f.root, 'proposal-' + name); await fs.writeFile(contentPath, content);
+    files.push({ path: name, expectedHash: null, contentPath, expectedContentHash: await fingerprint(contentPath) });
+  }
+  const proposal = { files, mappings: [{ identity: f.identity, paths: files.map(file => file.path) }] };
+  await assert.rejects(proposeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, proposal }), /NOTE_METADATA_ID_COLLISION/);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  for (const malformed of ['>'.repeat(100) + ' <!-- cuefluent\nid: hidden\n-->\n', '<!-- cuefluent? -->\n']) {
+    const separate = await processingFixture(t);
+    await assert.rejects(proposedClaim(separate, { content: content + '\n' + malformed }), /INVALID_PROCESSING_MARKDOWN/);
+    assert.deepEqual(await fs.readdir(separate.collection.notes.notesDir), []);
+  }
+});
+
+test('derived processing rejects retained identity collisions before recording proposal intent', async t => {
+  const f = await processingFixture(t), stateDir = f.collection.notes.writerStateDir;
+  const content = '<!-- cuefluent\nschema_version: 1\nid: note_retained\n-->\n\n# Meeting\n\n## Decision\n\nVisible evidence.\n';
+  const seed = path.join(f.root, 'seed.md'); await fs.writeFile(seed, content);
+  await applyPlan({ version: 1, mode: 'derived', root: f.collection.notes.notesDir, stateDir, expectedManifestHash: null,
+    files: [{ path: 'a.md', expectedHash: null, contentPath: seed, sources: [{ path: f.source.path, expectedHash: await fingerprint(f.source.path) }] }] });
+  const manifestHash = await fingerprint(path.join(stateDir, 'manifest.json'));
+  const claim = await inspectedClaim(f), contentPath = path.join(f.root, 'next.md');
+  await fs.writeFile(contentPath, content + '\nNew evidence.\n');
+  const file = { path: 'b.md', expectedHash: null, contentPath, expectedContentHash: await fingerprint(contentPath) };
+  const proposal = { mode: 'derived', expectedManifestHash: manifestHash, files: [file], mappings: [{ identity: f.identity, paths: ['b.md'] }] };
+  await assert.rejects(proposeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, proposal }), { code: 'NOTE_METADATA_ID_COLLISION' });
+  for (const name of [`proposals/${f.operationId}/record.json`, `proposals/${f.operationId}/0.md`, `transactions/${f.operationId}.json`, 'journal.json']) {
+    assert.equal(await fingerprint(path.join(stateDir, name)), null, name);
+  }
+  assert.equal(await fingerprint(path.join(stateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+  assert.equal(await fingerprint(path.join(stateDir, 'manifest.json')), manifestHash);
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'a.md'), 'utf8'), content);
+  assert.equal(await fingerprint(path.join(f.collection.notes.notesDir, 'b.md')), null);
+  // Replacing the tracked note retains its ID without colliding with itself.
+  file.path = 'a.md'; file.expectedHash = await fingerprint(path.join(f.collection.notes.notesDir, 'a.md'));
+  proposal.mappings[0].paths = ['a.md'];
+  const approved = await proposeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, proposal });
+  assert.equal((await save(f, approved)).status, 'saved');
+});

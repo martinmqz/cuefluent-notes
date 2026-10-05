@@ -1,17 +1,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isMain, readBoundedBytes } from './file-io.mjs';
-import MarkdownIt from 'markdown-it';
-import footnote from 'markdown-it-footnote';
+import { createNoteMarkdownParser, inspectNoteMetadata, registerNoteIdentity } from './note-metadata.mjs';
 
 export const GUIDE_VERSION = '2026-09-21.1';
 export const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 100;
 const MAX_CASES = 200;
 const MAX_DIAGNOSTICS = 100;
-const md = new MarkdownIt({ html: true }).use(footnote);
-// Parse destinations for inspection only. No rendering, execution or resource loading.
-md.validateLink = () => true;
+const md = createNoteMarkdownParser();
+const visibleHtml = content => content.replace(/<!--(?:-?>|[\s\S]*?(?:--!?>|$))/g, '');
 const words = value => value.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 const normalize = value => words(value).join(' ');
 const inlineText = tokens => (tokens ?? []).map(t => {
@@ -23,9 +21,10 @@ const allTokens = tokens => tokens.flatMap(t => [t, ...allTokens(t.children ?? [
 
 /** Advisory subset check, not the Cuefluent parser/sanitizer or ranking engine. */
 export function inspectMarkdown(source, file = '<input>') {
-  const tokens = md.parse(source, {});
+  const tokens = md.parse(source.replace(/^\uFEFF/, ''), {});
+  const metadata = inspectNoteMetadata(source, file, tokens);
   const sections = [];
-  const diagnostics = [];
+  const diagnostics = [...metadata.diagnostics];
   const add = (severity, code, line, message) => diagnostics.push({ severity, code, file, line, message });
   let h1 = '';
   let current;
@@ -33,7 +32,7 @@ export function inspectMarkdown(source, file = '<input>') {
     if (!current) return;
     const visible = allTokens(current.body).some(t =>
       (['text', 'code_inline', 'code_block', 'fence'].includes(t.type) && t.content.trim()) || t.type === 'image');
-    const html = allTokens(current.body).some(t => ['html_inline', 'html_block'].includes(t.type) && /<(?![!\s])/.test(t.content));
+    const html = allTokens(current.body).some(t => ['html_inline', 'html_block'].includes(t.type) && /<(?![!\s])/.test(visibleHtml(t.content)));
     if (!visible && !html) add('error', 'empty-body', current.line, 'Section has no visible Markdown body.');
     if (!visible && html) add('warning', 'html-only-body', current.line, 'HTML-only visibility requires a separate sanitization review.');
     delete current.body;
@@ -75,7 +74,7 @@ export function inspectMarkdown(source, file = '<input>') {
       if (child.type === 'html_inline' && /<!--\s*aliases\s*:/i.test(child.content)) {
         add('error', 'alias-placement', line, 'Alias directives must precede the section body.');
       }
-      if (['html_inline', 'html_block'].includes(child.type) && /<(?![!\s])/.test(child.content)) {
+      if (['html_inline', 'html_block'].includes(child.type) && /<(?![!\s])/.test(visibleHtml(child.content))) {
         add('warning', 'html-unchecked', line, 'Raw HTML sanitization and resulting content are not checked.');
       }
       if (child.type === 'image') {
@@ -105,7 +104,7 @@ export function inspectMarkdown(source, file = '<input>') {
     const aliases = section.aliases.map(normalize);
     if (new Set(aliases).size < aliases.length) add('warning', 'alias-duplicate', section.line, 'Normalized alias repeats within this section.');
   }
-  return { sections, diagnostics };
+  return { sections, diagnostics, metadata };
 }
 
 export function reviewVocabulary(sections, cases = []) {
@@ -158,6 +157,18 @@ export async function checkFiles(files, casePath) {
   }
   const sections = results.flatMap(r => r.sections);
   const diagnostics = [...results.flatMap(r => r.diagnostics), ...reviewVocabulary(sections, cases)];
+  const noteIds = new Set(), identityFiles = new Map();
+  for (const [index, result] of results.entries()) {
+    try {
+      const id = registerNoteIdentity(result.metadata, noteIds);
+      if (id !== undefined) identityFiles.set(id, canonical[index]);
+    } catch (error) {
+      if (error.code !== 'NOTE_METADATA_ID_COLLISION') throw error;
+      diagnostics.push({ severity: 'error', code: 'metadata-id-collision', file: canonical[index],
+        line: result.metadata.block.line, relatedFile: identityFiles.get(result.metadata.value.id),
+        message: 'This note shares its ID with the related selected file; resolve identity without merging their content.' });
+    }
+  }
   const errors = diagnostics.filter(d => d.severity === 'error').length;
   const warnings = diagnostics.length - errors;
   return {

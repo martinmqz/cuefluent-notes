@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { saveProcessing } from './processing.mjs';
 import { storageFixture } from './test-support/storage-fixture.mjs';
-import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
+import { processingFixture, inspectedClaim, proposedClaim } from './test-support/processing-fixture.mjs';
 import { executeWorkflow } from './workflow.mjs';
 import { fingerprint, inspectDirectories } from './safe-update.mjs';
 import { digest, canonicalJSON } from './workflow-values.mjs';
@@ -47,6 +47,27 @@ test('CLI processing supports exact paged inspection, Skip and durable status wi
   const done = await call('processing-complete', { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'skipped' });
   assert.equal(done.status, 'skipped');
   assert.equal((await call('processing-pending', { selection: f.selection })).pending.length, 0);
+});
+
+test('CLI exposes the collision code without disclosing note identity or content', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f), files = [];
+  const content = '<!-- cuefluent\nschema_version: 1\nid: note_PRIVATE_ID\n-->\n\n# Meeting\n\n## Decision\n\nPRIVATE_BODY\n';
+  for (const name of ['first.md', 'second.md']) {
+    const contentPath = path.join(f.root, 'proposal-' + name); await fs.writeFile(contentPath, content);
+    files.push({ path: name, expectedHash: null, contentPath, expectedContentHash: await fingerprint(contentPath) });
+  }
+  const proposal = { files, mappings: [{ identity: f.identity, paths: files.map(file => file.path) }] };
+  const plan = { version: 1, mode: 'authored', root: f.collection.notes.notesDir, stateDir: f.collection.notes.writerStateDir, files };
+  for (const [command, value] of [
+    ['processing-propose', envelope(f, { ...f.args, expectedClaimHash: claim.claimHash, proposal })],
+    ['direct-save', { plan, approvedPlanHash: digest(canonicalJSON(plan)) }],
+  ]) {
+    const request = path.join(f.root, 'request.json'); await fs.writeFile(request, JSON.stringify(value));
+    const result = await invoke([command, '--config', f.options.configPath, '--request', request]);
+    assert.equal(result.code, 1); assert.equal(result.stdout, '');
+    assert.deepEqual(JSON.parse(result.stderr), { error: 'NOTE_METADATA_ID_COLLISION' });
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }
 });
 test('CLI reports retained metadata cleanup without exposing the underlying exception text', async t => {
   const f = await storageFixture(t); await fs.mkdir(f.collection.notes.notesDir);

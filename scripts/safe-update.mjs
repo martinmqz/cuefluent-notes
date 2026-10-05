@@ -1,3 +1,4 @@
+import { inspectNoteMetadata, registerNoteIdentity } from './note-metadata.mjs';
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -510,6 +511,22 @@ async function retirementChecks(files, root, stateDir) {
     if (await fingerprint(target) !== file.expectedHash) fail('A retired output changed since inspection; review its current state.');
   }
 }
+
+/** Read only retained manifest outputs, with the same bounded path checks for
+ * proposal inspection and writing. Replaced outputs are checked by the caller. */
+export async function* readRetainedOutputs(plan, manifest) {
+  manifestSchema(manifest, plan.root);
+  const replaced = new Set(plan.files.map(file => path.join(plan.root, file.path)));
+  const retiring = new Set(retireSchema(plan.retire).map(file => file.path));
+  for (const tracked of manifest?.files ?? []) {
+    if (replaced.has(path.join(plan.root, tracked.path))) continue;
+    const target = await targetPath(plan.root, tracked.path, plan.stateDir, { allowMissingParents: retiring.has(tracked.path) });
+    if (retiring.has(tracked.path)) { yield { target, bytes: null }; continue; }
+    const bytes = await readBytes(target);
+    if (!bytes) fail('A tracked collection output is missing; review the collection before refreshing.');
+    yield { target, bytes };
+  }
+}
 const sourceStamp = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
 async function sourceChecks(files, outputPaths, proposalPaths = new Set(), { cache = new Map(), forceHash = true } = {}) {
   const checked = new Map();
@@ -594,7 +611,6 @@ export async function applyPlan(plan, options = {}) {
     const manifest = manifestSchema(old.value, root);
     if (plan.mode === 'authored' && manifest) fail('This state directory owns derived outputs; use the derived workflow or a separate authored notes collection with its own state.');
     if (plan.mode === 'derived' && old.hash !== plan.expectedManifestHash) fail('Derived manifest changed since inspection; prepare a current plan.');
-    const retiring = new Set(retire.map(file => file.path));
     for (const file of retire) {
       const tracked = manifest?.files.find(entry => entry.path === file.path);
       if (!tracked || (file.expectedHash !== null && file.expectedHash !== tracked.hash)) fail('Retirement requires a tracked output at its last generated hash or confirmed absence.');
@@ -606,6 +622,7 @@ export async function applyPlan(plan, options = {}) {
     const proposalPaths = new Set();
     const diagnostics = [];
     const allSections = [];
+    const noteIdentities = new Set();
     for (const file of plan.files) {
       if (!file || !validHash(file.expectedHash, true) || !absolute(file.contentPath)) fail('Each file needs path, expectedHash (null for new), and an absolute contentPath.');
       const target = await targetPath(root, file.path, stateDir, { allowMissingParents: Boolean(directories) });
@@ -622,13 +639,22 @@ export async function applyPlan(plan, options = {}) {
           (!validHash(file.expectedContentHash) || sha256(bytes) !== file.expectedContentHash)) fail('Approved proposal content changed.');
       const checked = inspectMarkdown(new TextDecoder('utf-8', { fatal: true }).decode(bytes), target);
       if (checked.diagnostics.some(item => item.severity === 'error')) fail('A proposed document fails the bundled Markdown check; run check-notes for bounded diagnostics.');
+      registerNoteIdentity(checked.metadata, noteIdentities);
       diagnostics.push(...checked.diagnostics);
       allSections.push(...checked.sections);
-      const currentHash = await fingerprint(target);
+      const currentBytes = await readBytes(target);
+      const currentHash = currentBytes === null ? null : sha256(currentBytes);
       if (currentHash !== file.expectedHash) fail('An output changed since inspection; preserve current edits and prepare a new plan.');
       if (plan.mode === 'derived') {
         const tracked = manifest?.files.find(entry => entry.path === file.path);
         if (tracked ? currentHash !== tracked.hash : currentHash !== null) fail('Derived output has manual changes or is an existing untracked file; do not overwrite it.');
+      }
+      const currentMetadata = currentBytes === null ? null : inspectNoteMetadata(new TextDecoder('utf-8', { fatal: true }).decode(currentBytes), target);
+      if (currentMetadata?.status === 'invalid') {
+        fail('An existing document has invalid Cuefluent metadata; preserve its bytes and resolve the conflict before applying a replacement.');
+      }
+      if (currentMetadata?.status === 'unsupported' && currentMetadata.block.raw !== checked.metadata.block?.raw) {
+        fail('Preserve the existing opaque Cuefluent metadata block byte-for-byte when replacing a note.');
       }
       const sources = sourcesSchema(file.sources, { required: plan.mode === 'derived' });
       const entries = entriesSchema(file.entries, sources, checked.sections.map(section => section.heading));
@@ -636,14 +662,12 @@ export async function applyPlan(plan, options = {}) {
       const metadata = currentHash !== newHash ? await replacementMetadata(target) : null;
       prepared.push({ path: file.path, target, oldHash: currentHash, newHash, metadata, bytes, sources, entries, stagePath: null });
     }
-    for (const tracked of manifest?.files ?? []) if (!outputPaths.has(path.join(root, tracked.path))) {
-      const target = await targetPath(root, tracked.path, stateDir, { allowMissingParents: retiring.has(tracked.path) });
+    for await (const { target, bytes } of readRetainedOutputs({ ...plan, root, stateDir }, manifest)) {
       outputPaths.add(target);
-      if (retiring.has(tracked.path)) continue;
-      const bytes = await readBytes(target);
-      if (!bytes) fail('A tracked collection output is missing; review the collection before refreshing.');
+      if (bytes === null) continue;
       const checked = inspectMarkdown(new TextDecoder('utf-8', { fatal: true }).decode(bytes), target);
       if (checked.diagnostics.some(item => item.severity === 'error')) fail('A tracked collection document fails the bundled Markdown check.');
+      registerNoteIdentity(checked.metadata, noteIdentities);
       diagnostics.push(...checked.diagnostics);
       allSections.push(...checked.sections);
     }
