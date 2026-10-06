@@ -10,6 +10,7 @@ import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { canonicalJSON } from './workflow-values.mjs';
 import { assertWriterAccess, validateWriterCoordination, publishWriterReceipt, readWriterReceipt } from './writer-protocol.mjs';
 import { NOTE_CATEGORIES, isNoteCategory } from './note-organization.mjs';
+import { assertInspectedNoteTransition } from './note-generation.mjs';
 
 const heldWriterGuards = new WeakMap();
 const MAX_FILES = 100;
@@ -637,7 +638,8 @@ export async function applyPlan(plan, options = {}) {
       if (!bytes) fail('A selected proposal is missing.');
       if ((options.coordination || file.expectedContentHash !== undefined) &&
           (!validHash(file.expectedContentHash) || sha256(bytes) !== file.expectedContentHash)) fail('Approved proposal content changed.');
-      const checked = inspectMarkdown(new TextDecoder('utf-8', { fatal: true }).decode(bytes), target);
+      const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      const checked = inspectMarkdown(content, target);
       if (checked.diagnostics.some(item => item.severity === 'error')) fail('A proposed document fails the bundled Markdown check; run check-notes for bounded diagnostics.');
       registerNoteIdentity(checked.metadata, noteIdentities);
       diagnostics.push(...checked.diagnostics);
@@ -649,13 +651,12 @@ export async function applyPlan(plan, options = {}) {
         const tracked = manifest?.files.find(entry => entry.path === file.path);
         if (tracked ? currentHash !== tracked.hash : currentHash !== null) fail('Derived output has manual changes or is an existing untracked file; do not overwrite it.');
       }
-      const currentMetadata = currentBytes === null ? null : inspectNoteMetadata(new TextDecoder('utf-8', { fatal: true }).decode(currentBytes), target);
+      const current = currentBytes === null ? null : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(currentBytes);
+      const currentMetadata = current === null ? null : inspectNoteMetadata(current, target);
       if (currentMetadata?.status === 'invalid') {
         fail('An existing document has invalid Cuefluent metadata; preserve its bytes and resolve the conflict before applying a replacement.');
       }
-      if (currentMetadata?.status === 'unsupported' && currentMetadata.block.raw !== checked.metadata.block?.raw) {
-        fail('Preserve the existing opaque Cuefluent metadata block byte-for-byte when replacing a note.');
-      }
+      assertInspectedNoteTransition(currentMetadata, checked.metadata);
       const sources = sourcesSchema(file.sources, { required: plan.mode === 'derived' });
       const entries = entriesSchema(file.entries, sources, checked.sections.map(section => section.heading));
       const newHash = sha256(bytes);

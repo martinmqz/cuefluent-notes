@@ -13,10 +13,13 @@ import { previewCapturePrune, applyCapturePrune } from './capture-maintenance.mj
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { assertWorkflowAuthorizations, workflowProcessingBinding, verifyWorkflowStorage } from './workflow-storage.mjs';
 import { saveDirectNote } from './direct-save.mjs';
+import { prepareNote } from './note-generation.mjs';
+import MarkdownIt from 'markdown-it';
 
 const rawFile = f => path.join(f.collection.rawDir, captureRelativePath(f.identity, f.capture.evidenceHash));
 const page = (f, claim, index = 0) => readProcessingPage(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, page: index });
 const save = (f, p, options) => saveProcessing(f.capability, { ...f.args, expectedClaimHash: p.claimHash, approvedProposalHash: p.proposalHash }, options);
+const metadataSource = f => `sources:\n  - type: session\n    client: ${f.identity.client}\n    session_id: ${f.identity.sessionId}\n    unit_id: ${f.identity.unitId}\n    revision: "${f.capture.evidenceHash}"\n`;
 
 // Instrument actual file-handle bytes, not the implementation's observation hook.
 function rawReadCounter(files) {
@@ -293,7 +296,8 @@ for (const kind of ['foreign-coordination', 'incomplete-directory']) {
 test('processing proposal metadata rejection preserves existing authored bytes and accepts opaque schemas', async t => {
   for (const schema of [1, 2]) {
     const f = await processingFixture(t);
-    const content = `<!-- cuefluent\nschema_version: ${schema}\nid: note_processing\n-->\n\n# Meeting\n\n## Decision\n\nKeep rollout paused.\n`;
+    const sources = schema === 1 ? metadataSource(f) : '';
+    const content = `<!-- cuefluent\nschema_version: ${schema}\nid: note_processing\n${sources}-->\n\n# Meeting\n\n## Decision\n\nKeep rollout paused.\n`;
     const proposed = await proposedClaim(f, { name: 'meeting.md', content });
     assert.equal(await fs.readFile(proposed.plan.files[0].contentPath, 'utf8'), content);
   }
@@ -302,6 +306,29 @@ test('processing proposal metadata rejection preserves existing authored bytes a
   await fs.writeFile(target, malformed);
   await assert.rejects(proposedClaim(f, { name: 'meeting.md', content: malformed + '\nProposed addition.\n' }), /INVALID_PROCESSING_MARKDOWN/);
   assert.equal(await fs.readFile(target, 'utf8'), malformed);
+});
+
+test('processing proposal binds every metadata capture source to its mapped immutable input', async t => {
+  const f = await processingFixture(t), second = await processingFixture(t, { base: f });
+  f.inputs.push(...second.inputs);
+  const claim = await inspectedClaim(f), contentPath = path.join(f.root, 'metadata-proposal.md');
+  const source = input => ({ type: 'session', client: input.identity.client, session_id: input.identity.sessionId,
+    unit_id: input.identity.unitId, revision: input.evidenceHash, source_hash: `sha256:${input.fileHash}` });
+  const sources = claim.inputs.map(source), body = '# Meeting\n\n## Decision\n\nKeep rollout paused.\n';
+  const propose = async selected => {
+    const content = prepareNote({ original: null, content: body, now: '2026-10-01T12:00:00Z', skillVersion: '0.9.0', metadata: { sources: selected } }).content;
+    await fs.writeFile(contentPath, content);
+    const proposal = { files: [{ path: 'meeting.md', expectedHash: null, contentPath, expectedContentHash: await fingerprint(contentPath) }],
+      mappings: claim.inputs.map(input => ({ identity: input.identity, paths: ['meeting.md'] })) };
+    return proposeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, proposal });
+  };
+  await assert.rejects(propose(sources.slice(0, 1)), /NOTE_METADATA_INPUT_MISSING/);
+  await assert.rejects(propose([...sources, { ...sources[0], revision: 'f'.repeat(64) }]), /NOTE_METADATA_INPUT_MISMATCH/);
+  await assert.rejects(propose([{ ...sources[0], source_hash: 'sha256:' + 'f'.repeat(64) }, sources[1]]), /NOTE_METADATA_INPUT_MISMATCH/);
+  assert.equal(await fingerprint(path.join(f.collection.notes.notesDir, 'meeting.md')), null);
+  const proposed = await propose(sources), approved = await fs.readFile(contentPath, 'utf8');
+  assert.equal((await save(f, proposed)).status, 'saved');
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meeting.md'), 'utf8'), approved);
 });
 
 test('processing cannot propose removal or repair of malformed existing metadata', async t => {
@@ -344,6 +371,31 @@ test('processing preserves opaque metadata before recording a replacement propos
   assert.equal(await fs.readFile(target, 'utf8'), original);
 });
 
+test('processing reuses inspections and rejects creation backfills before proposal intent', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f);
+  const target = path.join(f.collection.notes.notesDir, 'meeting.md');
+  const body = '# Meeting\n\n## Decision\n\nEvidence.\n';
+  const original = `<!-- cuefluent\nschema_version: 1\nid: no_creation\n${metadataSource(f)}-->\n` + body;
+  await fs.writeFile(target, original);
+  const changed = original.replace('schema_version: 1', 'schema_version: 1\ncreated: "2001-01-01T00:00:00Z"');
+  await assert.rejects(proposedClaim(f, { name: 'meeting.md', content: changed, claim }), { code: 'NOTE_METADATA_IDENTITY_CHANGED' });
+  assert.equal(await fs.readFile(target, 'utf8'), original);
+  assert.equal(await fingerprint(path.join(f.collection.notes.writerStateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+  assert.equal(await fingerprint(path.join(f.collection.notes.writerStateDir, 'proposals', f.operationId, 'record.json')), null);
+
+  const plain = body + '\n```markdown\n<!-- cuefluent PARSE_SENTINEL -->\n```\n';
+  await fs.writeFile(target, plain);
+  const parse = MarkdownIt.prototype.parse; let count = 0;
+  const mocked = t.mock.method(MarkdownIt.prototype, 'parse', function (source, ...args) {
+    if (source.includes('PARSE_SENTINEL')) count++;
+    return parse.call(this, source, ...args);
+  });
+  const proposed = await proposedClaim(f, { name: 'meeting.md', content: plain + '\nAddition.\n', claim });
+  mocked.mock.restore();
+  assert.equal(count, 2, 'one proposed and one current inspection, without transition reparsing');
+  assert.equal(await fs.readFile(proposed.plan.files[0].contentPath, 'utf8'), plain + '\nAddition.\n');
+});
+
 test('processing rejects unused footnote body markers before recording a proposal', async t => {
   const f = await processingFixture(t), claim = await inspectedClaim(f);
   const body = '# Meeting\n\n## Decision\n\nVisible evidence.\n';
@@ -383,7 +435,7 @@ test('processing rejects unquoted timestamps before recording intent and preserv
     }
     assert.equal(await fingerprint(path.join(stateDir, 'claims', f.operationId + '.json')), claim.claimHash);
   }
-  const quoted = `<!-- cuefluent\nschema_version: 1\nid: note_timestamp\ncreated: "${stamp}"\nupdated: '${stamp}'\n-->\n\n` + body;
+  const quoted = `<!-- cuefluent\nschema_version: 1\nid: note_timestamp\ncreated: "${stamp}"\nupdated: '${stamp}'\n${metadataSource(f)}-->\n\n` + body;
   const approved = await proposedClaim(f, { name: 'meeting.md', content: quoted, claim });
   assert.equal((await save(f, approved)).status, 'saved');
   assert.equal(await fs.readFile(target, 'utf8'), quoted);
@@ -410,7 +462,7 @@ test('processing rejects duplicate proposed identities and deeply hidden markers
 
 test('derived processing rejects retained identity collisions before recording proposal intent', async t => {
   const f = await processingFixture(t), stateDir = f.collection.notes.writerStateDir;
-  const content = '<!-- cuefluent\nschema_version: 1\nid: note_retained\n-->\n\n# Meeting\n\n## Decision\n\nVisible evidence.\n';
+  const content = `<!-- cuefluent\nschema_version: 1\nid: note_retained\n${metadataSource(f)}-->\n\n# Meeting\n\n## Decision\n\nVisible evidence.\n`;
   const seed = path.join(f.root, 'seed.md'); await fs.writeFile(seed, content);
   await applyPlan({ version: 1, mode: 'derived', root: f.collection.notes.notesDir, stateDir, expectedManifestHash: null,
     files: [{ path: 'a.md', expectedHash: null, contentPath: seed, sources: [{ path: f.source.path, expectedHash: await fingerprint(f.source.path) }] }] });

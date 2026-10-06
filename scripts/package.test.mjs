@@ -100,7 +100,12 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     const notes = path.join(work, 'notes');
     await fs.mkdir(notes, { recursive: true });
     const proposal = path.join(work, 'proposal.md');
-    await fs.writeFile(proposal, '# Synthetic\n\n## Portable write\n\nVerified from an isolated package.\n');
+    const preparation = path.join(work, 'preparation.json');
+    await fs.writeFile(preparation, JSON.stringify({ original: null, content: '# Synthetic\n\n## Portable write\n\nVerified from an isolated package.\n',
+      now: '2026-10-01T12:00:00Z', skillVersion: sourceVersion }));
+    const prepared = run(workflow, ['prepare-note', '--request', preparation], directory);
+    assert.equal(prepared.metadataStatus, 'valid');
+    await fs.writeFile(proposal, prepared.content);
     const planFile = path.join(work, 'plan.json');
     const plan = { version: 1, mode: 'authored', root: notes, stateDir: path.join(work, 'state'), files: [{ path: 'note.md', expectedHash: null, contentPath: proposal }] };
     await fs.writeFile(planFile, JSON.stringify(plan));

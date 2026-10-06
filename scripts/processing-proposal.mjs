@@ -7,6 +7,7 @@ import { inspectDirectories, inspectExistingDirectories, readRetainedOutputs } f
 import { isNoteCategory } from './note-organization.mjs';
 import { readBoundedBytes, windowsComponent } from './file-io.mjs';
 import { inspectMarkdown } from './check-notes.mjs';
+import { assertInspectedNoteTransition, assertProcessingNoteSources } from './note-generation.mjs';
 import { processingSnapshot, writeProcessingBytes } from './processing-state.mjs';
 import { intakeJSON } from './intake-io.mjs';
 import { canonicalJSON, digest, fail, keys, list, hash, choice, unique } from './workflow-values.mjs';
@@ -55,22 +56,23 @@ export async function buildProcessingProposal(ctx, claim, request) {
     const bytes = await readBoundedBytes(file.contentPath, { maxBytes: LIMIT, noFollow: true });
     if (digest(bytes) !== file.expectedContentHash) fail('PROCESSING_PROPOSAL_CHANGED');
     total += bytes.length; if (total > LIMIT) fail('PROCESSING_PROPOSAL_CAPACITY');
-    const checked = inspectMarkdown(new TextDecoder('utf-8', { fatal: true }).decode(bytes), file.path);
+    const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const checked = inspectMarkdown(content, file.path);
     if (checked.diagnostics.some(item => item.severity === 'error')) fail('INVALID_PROCESSING_MARKDOWN');
     registerNoteIdentity(checked.metadata, noteIdentities);
-    const currentBytes = await readBoundedBytes(path.join(root, file.path), { missing: true });
+    const currentBytes = await readBoundedBytes(path.join(root, file.path), { maxBytes: 2 * 1024 * 1024, missing: true, noFollow: true });
     if ((currentBytes === null ? null : digest(currentBytes)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');
-    const currentMetadata = currentBytes === null ? null : inspectNoteMetadata(new TextDecoder('utf-8', { fatal: true }).decode(currentBytes), file.path);
+    const current = currentBytes === null ? null : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(currentBytes);
+    const currentMetadata = current === null ? null : inspectNoteMetadata(current, file.path);
     if (currentMetadata?.status === 'invalid') {
       fail('INVALID_EXISTING_NOTE_METADATA');
     }
-    if (currentMetadata?.status === 'unsupported' && currentMetadata.block.raw !== checked.metadata.block?.raw) {
-      fail('NOTE_METADATA_OPAQUE_CHANGED');
-    }
+    assertInspectedNoteTransition(currentMetadata, checked.metadata);
+    const mapped = claim.inputs.filter(input => request.mappings.some(item => unitKey(item.identity) === unitKey(input.identity) && item.paths.includes(file.path)));
+    assertProcessingNoteSources(currentMetadata, checked.metadata, mapped);
     const ownedPath = `proposals/${claim.operationId}/${index}.md`;
     copies.push({ path: ownedPath, source: file.contentPath, hash: file.expectedContentHash });
-    const sources = claim.inputs.filter(input => request.mappings.some(item => unitKey(item.identity) === unitKey(input.identity) && item.paths.includes(file.path)))
-      .map(input => ({ path: path.join(ctx.collection.rawDir, captureRelativePath(input.identity, input.evidenceHash)), expectedHash: input.fileHash }));
+    const sources = mapped.map(input => ({ path: path.join(ctx.collection.rawDir, captureRelativePath(input.identity, input.evidenceHash)), expectedHash: input.fileHash }));
     files.push({ path: file.path, expectedHash: file.expectedHash, contentPath: path.join(ctx.collection.notes.writerStateDir, ownedPath), expectedContentHash: file.expectedContentHash, sources });
   }
   const categoryPaths = files.every(file => { const parts = file.path.split('/'); return parts.length === 1 || (parts.length === 2 && isNoteCategory(parts[0])); });

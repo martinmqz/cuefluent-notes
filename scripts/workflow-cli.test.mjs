@@ -35,6 +35,48 @@ test('CLI unconfigured status writes nothing and rejects malformed, oversized, u
   }
   assert.equal((await invoke(['status', '--config', config, '--config', config])).code, 1);
 });
+test('CLI note preparation requires no configuration and writes neither notes nor workflow state', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-prepare-'))); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const request = path.join(root, 'request.json'), config = path.join(root, 'missing', 'workflow.json');
+  const content = '# Synthetic\n\n## Decision\n\nRetain the supplied prose.\n';
+  await fs.writeFile(request, JSON.stringify({ original: null, content, now: '2026-10-01T12:00:00Z', skillVersion: '0.9.0' }));
+  const before = await fs.readdir(root), result = await invoke(['prepare-note', '--config', config, '--request', request]);
+  assert.equal(result.code, 0, result.stderr); const prepared = JSON.parse(result.stdout);
+  assert.equal(prepared.metadataStatus, 'valid'); assert(prepared.content.endsWith(content));
+  assert.deepEqual(await fs.readdir(root), before);
+});
+test('CLI preparation accommodates two large Markdown fields including JSON escaping', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-large-prepare-'))); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const request = path.join(root, 'request.json'), content = '# Synthetic\n\n## Decision\n\n' + '\u0000'.repeat(1100 * 1024);
+  await fs.writeFile(request, JSON.stringify({ original: content, content, now: '2026-10-01T12:00:00Z', skillVersion: '0.9.0' }));
+  assert((await fs.stat(request)).size > 12 * 1024 * 1024);
+  const result = await invoke(['prepare-note', '--request', request]);
+  assert.equal(result.code, 0, result.stderr); assert.equal(JSON.parse(result.stdout).content, content);
+});
+test('pure preparation bypasses configuration and native storage probes', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-pure-prepare-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const request = path.join(root, 'request.json'), preload = path.join(root, 'probe-guard.mjs');
+  const value = { original: null, content: '# Note\n\n## Work\n\nEvidence.\n', now: '2026-10-05T12:00:00Z', skillVersion: '0.9.0' };
+  await fs.writeFile(request, JSON.stringify(value));
+  await fs.writeFile(preload, `import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+process.env.CUEFLUENT_WORKFLOW_CONFIG = 'relative-invalid-config';
+childProcess.spawn = () => { throw new Error('Unexpected storage subprocess'); };
+syncBuiltinESMExports();
+`);
+  const result = await invoke(['prepare-note', '--request', request], ['--import', pathToFileURL(preload).href]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).metadataStatus, 'valid');
+  const before = process.env.CUEFLUENT_WORKFLOW_CONFIG;
+  try {
+    process.env.CUEFLUENT_WORKFLOW_CONFIG = 'relative-invalid-config';
+    assert.equal((await executeWorkflow('prepare-note', value)).metadataStatus, 'valid');
+  } finally {
+    if (before === undefined) delete process.env.CUEFLUENT_WORKFLOW_CONFIG;
+    else process.env.CUEFLUENT_WORKFLOW_CONFIG = before;
+  }
+});
 test('CLI processing supports exact paged inspection, Skip and durable status without new capture setup', async t => {
   const f = await processingFixture(t);
   const call = (command, args) => executeWorkflow(command, envelope(f, args), { configPath: f.options.configPath });
@@ -51,7 +93,7 @@ test('CLI processing supports exact paged inspection, Skip and durable status wi
 
 test('CLI exposes the collision code without disclosing note identity or content', async t => {
   const f = await processingFixture(t), claim = await inspectedClaim(f), files = [];
-  const content = '<!-- cuefluent\nschema_version: 1\nid: note_PRIVATE_ID\n-->\n\n# Meeting\n\n## Decision\n\nPRIVATE_BODY\n';
+  const content = `<!-- cuefluent\nschema_version: 1\nid: note_PRIVATE_ID\nsources:\n  - type: session\n    client: ${f.identity.client}\n    session_id: ${f.identity.sessionId}\n    unit_id: ${f.identity.unitId}\n    revision: "${f.capture.evidenceHash}"\n-->\n\n# Meeting\n\n## Decision\n\nPRIVATE_BODY\n`;
   for (const name of ['first.md', 'second.md']) {
     const contentPath = path.join(f.root, 'proposal-' + name); await fs.writeFile(contentPath, content);
     files.push({ path: name, expectedHash: null, contentPath, expectedContentHash: await fingerprint(contentPath) });

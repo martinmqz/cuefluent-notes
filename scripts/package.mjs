@@ -22,6 +22,7 @@ const SOURCE_FILES = [
   'scripts/plugin-manifest.mjs',
   'scripts/note-organization.mjs',
   'scripts/note-metadata.mjs',
+  'scripts/note-generation.mjs',
   'scripts/capture-contract.mjs',
   'scripts/capture-controls.mjs',
   'scripts/capture-evidence.mjs',

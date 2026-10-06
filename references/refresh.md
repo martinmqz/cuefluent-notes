@@ -70,6 +70,14 @@ an unchanged derived manifest is retained without rewriting it.
 Unchanged source hashes do not prove current behavior, and changed source hashes
 do not prove that every derived entry needs an edit.
 
+Prepare [portable note metadata](note-metadata.md#generation-and-safe-updates)
+before approval. The writer checks identity, creation time, unknown values and
+prior source preservation against the inspected note; it never inserts metadata
+or changes approved bytes. Malformed existing blocks require resolution, while
+future-schema blocks can be retained byte-for-byte in an authored body update.
+Selected resulting outputs cannot share a supported note ID. Metadata-free notes
+remain valid, and metadata hashes do not replace any filesystem guard below.
+
 ## Commands and plan
 
 Run from the skill directory with the supported Node runtime and dependencies

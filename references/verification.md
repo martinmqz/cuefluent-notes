@@ -13,6 +13,7 @@ in the source repository for the current jobs.
 | Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots and explicit maintenance |
 | Processing and writes | Exact input claims, acknowledged evidence pages, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
 | Portable note metadata | Bounded YAML structure, comment placement, safe unknown fields, unsupported schemas, selected-file ID collisions, descriptive dates/source references and unchanged heading/alias vocabulary; no app indexing or hash-freshness claim |
+| Metadata generation and updates | Pure proposal preparation, stable identity/creation/source/unknown-field preservation, byte-identical no-ops, selected capture mappings, stale-write refusals, interrupted-write recovery and both detached client packages; no prose reconciliation or consent inference |
 | Distribution | Dependency and documentation closure, detached manual/hook packages, installers, shell launchers, reproducible archives, published-package digests and source-preserving package-update branches, pre-commit digest validation and legacy migration notices |
 
 Windows CI includes Windows PowerShell, PowerShell 7, Git Bash, and a separate

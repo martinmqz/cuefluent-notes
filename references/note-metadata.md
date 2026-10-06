@@ -169,3 +169,56 @@ references over private machine paths. Missing sources remain explicit gaps;
 metadata never expands collection consent or authorizes automatic discovery.
 Future app retrieval may use periods and series relationships, but current
 headings and aliases remain necessary for supported search behavior.
+
+## Generation and safe updates
+
+Use [`prepare-note`](workflow-cli.md#prepare-note-metadata) to prepare complete
+proposal bytes before approval. The pure helper accepts supplied original/proposed
+Markdown and metadata; it never reads sources, edits prose, selects a destination
+or writes a note. A new generated note receives a UUID-based ID, current note
+creation/update times and the supplied skill version. Existing plain notes remain
+plain unless explicitly enriched. Enrichment adds identity and an update time but
+does not invent a historical creation date; later guarded updates preserve that
+absence. A leading YAML (`---`) or TOML (`+++`) frontmatter document
+cannot be enriched by this helper because prepending a comment would change that
+format; preserve it and report the conflict.
+
+Prepare the visible prose against the current inspected note, retaining human
+corrections. The helper preserves the proposed visible bytes, including a BOM,
+line endings and blank lines. Regeneration keeps the existing block position when
+its prefix is retained, including blank lines after the closing comment. Generated
+metadata uses the existing block's first newline, or the body's first newline for
+a new block, defaulting to LF when neither has one. It cannot decide whether those bytes faithfully
+retain earlier prose. Supported metadata can be reserialized on a meaningful
+change, retaining unknown values but not necessarily YAML comments/formatting.
+The shared metadata validator rejects numeric scalars that cannot retain their
+exact value as JavaScript numbers. Generation reports `NOTE_METADATA_INVALID`
+even for a no-op or body-only request against such a block; preserve the original
+bytes and resolve the malformed metadata explicitly. Do not silently round the
+value or recast an unfamiliar field to bypass the conflict. Generated creation
+and update timestamps use quoted YAML strings as required by the schema.
+A no-op returns the exact original bytes without changing timestamps or the
+generator version. The optional content hash is calculated without the metadata
+block; an existing hash is refreshed on a meaningful generation update. A stale
+embedded hash does not authorize replacing a human edit.
+
+Metadata additions can change known descriptive fields but cannot replace the
+note ID, the presence or value of a creation time, or established series ID. Source descriptors
+are additive: retain prior descriptors exactly; never silently truncate provenance
+to fit the 128-source bound. Report capacity or conflicting descriptions for
+review. Unknown values, including nested extensions, must survive updates.
+Unsupported schemas require retaining the exact opaque block. Malformed blocks
+remain conflicts, even when the proposed replacement would remove the error.
+The plain-Markdown option applies to new notes and existing plain notes. Guarded
+updates do not provide a metadata removal or provenance-correction override;
+report the preservation conflict instead of silently discarding metadata.
+
+The shared writer validates these transitions against the exact inspected
+existing bytes without modifying the approved proposal. It checks ID collisions
+among proposed outputs and retained tracked derived members, not unrelated files.
+Processing additionally requires every mapped selected capture in a supported
+metadata block and validates each newly added session identity/revision against
+those mapped inputs. An optional new session `source_hash` must match that
+capture's exact stored bytes. Earlier descriptors can remain without reopening
+their sources. Plain and opaque-schema notes retain their compatibility.
+These checks validate descriptions, never factual claims or consent.

@@ -13,6 +13,7 @@ import { captureStorageStatus, previewCapturePrune, applyCapturePrune, recoverCa
 import { inspectIntakeRecovery, applyIntakeRecovery } from './intake-recovery.mjs';
 import { fingerprint, inspectDirectories, inspectExistingDirectories, inspectState, recover } from './safe-update.mjs';
 import { saveDirectNote } from './direct-save.mjs';
+import { prepareNote } from './note-generation.mjs';
 import { keys, id, hash, list, fail, canonicalJSON } from './workflow-values.mjs';
 
 // Public request schemas expose selections and inspected hashes, never native
@@ -40,7 +41,7 @@ const commands = {
   'intake-recovery-status': { required: [], run: cap => inspectIntakeRecovery(cap) },
   'intake-recover': { required: ['reviewed', 'offline'], run: (cap, args) => applyIntakeRecovery(cap, args.reviewed, { offline: args.offline }) },
 };
-const extra = ['status', 'defaults', 'configure', 'storage-prepare', 'fingerprint', 'inspect-notes', 'direct-save', 'writer-status', 'writer-recover'];
+const extra = ['status', 'defaults', 'configure', 'storage-prepare', 'fingerprint', 'inspect-notes', 'prepare-note', 'direct-save', 'writer-status', 'writer-recover'];
 export function workflowHelp() {
   return { usage: 'node scripts/workflow.mjs <command> [--config <absolute-path>] --request <absolute-json-file>',
     commands: [...extra, ...Object.keys(commands)], request: 'Collection operations use {collectionId, expectedConfigHash, args}. See references/workflow-cli.md.',
@@ -50,7 +51,9 @@ async function capability(configPath, request) {
   id(request.collectionId); hash(request.expectedConfigHash);
   return verifyWorkflowStorage({ configPath, collectionId: request.collectionId, expectedConfigHash: request.expectedConfigHash });
 }
-export async function executeWorkflow(command, request, { configPath = workflowConfigPath() } = {}) {
+export async function executeWorkflow(command, request, { configPath } = {}) {
+  if (command === 'prepare-note') return prepareNote(request);
+  if (configPath === undefined) configPath = workflowConfigPath();
   if (command === 'status') { keys(request, [], ['selection']); return workflowStatus({ configPath, ...request }); }
   if (command === 'defaults') {
     keys(request, [], ['collectionId']);
@@ -102,9 +105,12 @@ export async function main(args) {
   if (!options['--request'] && !['status', 'defaults'].includes(command)) fail('WORKFLOW_REQUEST_REQUIRED');
   let request = {};
   if (options['--request']) {
-    const bytes = await readBoundedBytes(options['--request'], { maxBytes: 2 * 1024 * 1024, noFollow: true });
+    // Two bounded Markdown strings can require six JSON bytes per character.
+    const maxBytes = (command === 'prepare-note' ? 25 : 2) * 1024 * 1024;
+    const bytes = await readBoundedBytes(options['--request'], { maxBytes, noFollow: true });
     try { request = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { fail('INVALID_WORKFLOW_REQUEST_JSON'); }
   }
+  if (command === 'prepare-note') return prepareNote(request);
   return withStorageProbes(() => executeWorkflow(command, request, { configPath: workflowConfigPath({ explicit: options['--config'] }) }));
 }
 if (await isMain(import.meta.url)) main(process.argv.slice(2)).then(result => process.stdout.write(canonicalJSON(result) + '\n')).catch(error => {

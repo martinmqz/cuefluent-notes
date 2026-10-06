@@ -169,6 +169,16 @@ need deliberate ownership, guarded source mappings, and existing parents. Preser
 manual edits and recovery evidence. See [safe updates](references/refresh.md) for
 existing custom paths and derived refresh.
 
+For new generated notes, prepare the lean hidden [note metadata](references/note-metadata.md)
+before preview/approval, unless the user requests plain Markdown. Use
+[`prepare-note`](references/workflow-cli.md#prepare-note-metadata) with the inspected
+original and reconciled proposal. Preserve note identity, creation time, prior sources,
+unknown fields and human corrections. Existing plain notes stay plain unless explicitly
+enriched. Use actual selected capture identities/revisions or supplied document references;
+never invent source references or enable collection to populate metadata. Keep knowledge,
+attribution, uncertainty and occurrence dates visible. Metadata preparation enables neither
+collection nor processing and does not authorize saving.
+
 Use descriptive H2 sections with visible content and useful H1 context. Infer
 faithful lookup terms from subjects, symptoms, actions, identifiers, and alternate
 names; put them in H1/H2 headings or aliases. Body text and H3–H6 do not supply

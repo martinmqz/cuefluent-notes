@@ -9,7 +9,8 @@ node scripts/workflow.mjs <command> --config /absolute/workflow.json --request /
 ```
 
 On Windows use fully qualified native paths; invoke Node directly with separate
-arguments. Requests are ordinary UTF-8 JSON files, at most 2 MiB. Put private request
+arguments. Requests are ordinary UTF-8 JSON files, at most 2 MiB, except
+`prepare-note` allows 25 MiB for two Markdown fields and JSON escaping. Put private request
 files outside the repository/plugin. Helpers never evaluate text or accept serialized
 reader proofs, lock capabilities or callbacks. Errors return bounded codes without
 echoing source text. Hook launchers separately normalize plugin errors to exit zero.
@@ -133,8 +134,9 @@ Use a collection envelope and the same operation ID throughout a batch:
    pages are the issued `{index, hash}` pairs. Use the latest claim hash returned
    by each call. Delivery is not acknowledgment; unread pages must not be acked.
 5. Synthesize useful notes using the [skill](../SKILL.md), selected source facts,
-   relevant existing notes and prior associations. Stage complete Markdown in a
-   private proposal file, fingerprint it and the inspected target.
+   relevant existing notes and prior associations. Prepare any
+   [note metadata](#prepare-note-metadata) before staging complete Markdown in a
+   private proposal file; fingerprint it and the inspected target.
 6. `processing-propose`: `{selection, operationId, expectedClaimHash, proposal}`.
    Proposal is `{files, mappings, mode?, expectedManifestHash?}`. Each file has
    `{path, expectedHash, contentPath, expectedContentHash}`. Each input mapping has
@@ -190,6 +192,63 @@ Custom/deeper existing paths and derived ownership follow [safe updates](refresh
 The writer rechecks actual proposal bytes and inspected note/parent state, preserves
 user edits and pending transactions, and verifies its output. A direct save creates
 no fake capture, processing claim or capture disposition.
+
+## Prepare note metadata
+
+`prepare-note` uses its own request, with no collection envelope or configured
+workflow requirement:
+
+```json
+{
+  "original": null,
+  "content": "# Synthetic planning\n\n## Decision\n\nReview the prototype first.\n",
+  "now": "2026-10-01T07:42:00-07:00",
+  "skillVersion": "0.9.0",
+  "metadata": {
+    "type": "meeting",
+    "sources": [{"type": "document", "ref": "selected/planning.md"}],
+    "context": {"project": "synthetic-project", "topics": ["prototype"]}
+  },
+  "contentHash": true
+}
+```
+
+These dates, version and sources are illustrative. Use the actual note-update
+time, generating skill version and selected source descriptors. `original` is
+null only for a new note; otherwise supply its complete inspected Markdown.
+`content` is the complete reconciled proposal, either with no metadata block or
+with the original block unchanged. Supply supported metadata changes separately
+in `metadata`: optional `type`, `sources`, `context`, `series`, `sprint`, `period`.
+Nested context/series/period additions use their defined keys. Identity and
+generation fields are managed by the helper. Unknown existing fields are retained.
+
+`enrich: true` explicitly permits adding metadata to an existing plain note;
+the default preserves its plain format. `contentHash: true` requests the optional
+body hash; a pre-existing hash is maintained regardless of this flag. Source
+additions keep earlier descriptors. See the [metadata contract](note-metadata.md)
+for bounds, conflicts and opaque future schemas.
+
+The result is `{content, changed, metadataStatus}`. It writes nothing, reads no
+note/source/configuration paths, resolves no workflow defaults, starts no storage
+permission probes and grants no save authority. Invalid metadata inputs return a
+bounded `NOTE_METADATA_INVALID` error. Save returned content
+to a private proposal file, inspect the diff and fingerprint those exact bytes
+before approval. Reuse a prepared new-note proposal rather than generating another
+ID on retry. A no-op keeps original bytes. It does not verify the factual quality
+or preservation of proposed prose; the agent must reconcile that against the
+inspected original. The existing save checks still reject stale whole-file hashes.
+Each original/proposed Markdown string remains limited to 2 MiB UTF-8, and the
+metadata block remains limited to 64 KiB; the larger request envelope does not
+expand note or metadata limits.
+
+For capture processing, translate each mapped claim input into a session descriptor:
+`identity.client` → `client`, `identity.sessionId` → `session_id`,
+`identity.unitId` → `unit_id`, and full `evidenceHash` → `revision`.
+Optional `source_hash` is `sha256:` plus `fileHash`. Include every input mapped
+to this note and retain older descriptors. Do not use shortened filenames or the
+growing native transcript hash. Supported metadata with missing or unrelated new
+session sources is rejected by `processing-propose`; plain/future-schema notes
+remain supported. Metadata does not replace the private proposal mappings.
 
 ## Explicit maintenance
 

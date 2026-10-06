@@ -61,6 +61,15 @@ Changing the intent requires cancelling the unapplied operation and preparing a
 new one. `proposeProcessing` returns the complete plan and proposal hash for
 review. The proposal byte total is limited to 900 KiB.
 
+Prepare [note metadata](workflow-cli.md#prepare-note-metadata) before this boundary.
+For a supported metadata block, every mapped input must have its exact session
+identity and full evidence revision in `sources`; newly added session descriptors
+must match these inputs, including any supplied capture-byte hash. Preserve prior
+descriptors, unknown fields, identity and creation time. Existing plain notes and
+unchanged opaque future blocks remain supported. These descriptions neither replace
+private mappings nor authorize source reads. The helper validates them without
+rewriting proposal bytes; the shared writer repeats transition checks at save.
+
 Authored ownership is the default. An explicitly selected derived plan retains
 the shared writer's manifest rules and requires an exact manifest hash and existing
 parents. No automatic ownership conversion occurs. A single-file destination

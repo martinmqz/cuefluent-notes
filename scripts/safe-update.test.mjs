@@ -6,6 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { abortUpdate, fingerprint, applyPlan, recover, inspectState } from './safe-update.mjs';
+import { prepareNote } from './note-generation.mjs';
+import MarkdownIt from 'markdown-it';
 
 async function fixture(t, mode = 'authored') {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-update-'));
@@ -675,6 +677,80 @@ test('metadata validation accepts valid and opaque blocks but preserves malforme
   }
 });
 
+test('shared writer preserves generated identities and unknown metadata, rejects stale edits and leaves no-op bytes alone', async t => {
+  const f = await fixture(t), body = await fs.readFile(f.proposal, 'utf8');
+  const original = prepareNote({ original: null, content: body, now: '2026-10-01T12:00:00Z', skillVersion: '0.9.0' }).content
+    .replace('schema_version: 1', 'custom: {retain: true}\nschema_version: 1');
+  await fs.writeFile(f.proposal, original); await applyPlan(f.plan); await reinspect(f.plan);
+  const before = await fs.stat(f.target, { bigint: true });
+  assert.equal((await applyPlan(f.plan)).status, 'unchanged');
+  assert.equal((await fs.stat(f.target, { bigint: true })).mtimeNs, before.mtimeNs);
+  for (const invalid of [original.replace(/id: note_[^\n]+/, 'id: replacement'), original.replace('custom: {retain: true}\n', ''), body]) {
+    await fs.writeFile(f.proposal, invalid);
+    await assert.rejects(applyPlan(f.plan), /NOTE_METADATA_/);
+    assert.equal(await fs.readFile(f.target, 'utf8'), original);
+    assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+  }
+  const update = prepareNote({ original, content: original + '\nReviewed addition.\n', now: '2026-10-02T12:00:00Z', skillVersion: '0.9.0' }).content;
+  await fs.writeFile(f.proposal, update); await fs.appendFile(f.target, '\nConcurrent human correction.\n');
+  await assert.rejects(applyPlan(f.plan), /changed since inspection/);
+  assert.match(await fs.readFile(f.target, 'utf8'), /Concurrent human correction/);
+});
+
+test('metadata survives interrupted writes and duplicate IDs fail before note staging', async t => {
+  const f = await fixture(t), body = await fs.readFile(f.proposal, 'utf8');
+  const content = prepareNote({ original: null, content: body, now: '2026-10-01T12:00:00Z', skillVersion: '0.9.0', contentHash: true }).content;
+  await fs.writeFile(f.proposal, content);
+  const second = path.join(f.directory, 'second.md'); await fs.writeFile(second, content);
+  const duplicate = { ...f.plan, files: [...f.plan.files, { ...f.plan.files[0], path: 'second.md', contentPath: second }] };
+  await assert.rejects(applyPlan(duplicate), /NOTE_METADATA_ID_COLLISION/);
+  assert.equal(await fingerprint(f.target), null);
+  assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+  await assert.rejects(applyPlan(f.plan, { afterStage() { throw new Error('synthetic interruption'); } }), /synthetic interruption/);
+  await recover(f.stateDir);
+  assert.equal(await fs.readFile(f.target, 'utf8'), content);
+});
+
+test('writer reuses metadata inspections and refuses creation-date backfills before staging', async t => {
+  const f = await fixture(t), body = await fs.readFile(f.proposal, 'utf8');
+  const original = prepareNote({ original: body, content: body, enrich: true, now: '2026-10-05T12:00:00Z', skillVersion: '0.9.0' }).content;
+  await fs.writeFile(f.target, original); await reinspect(f.plan);
+  await fs.writeFile(f.proposal, original.replace('schema_version: 1', 'schema_version: 1\ncreated: "2001-01-01T00:00:00Z"'));
+  await assert.rejects(applyPlan(f.plan), { code: 'NOTE_METADATA_IDENTITY_CHANGED' });
+  assert.equal(await fs.readFile(f.target, 'utf8'), original);
+  assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+
+  const plain = body + '\n```markdown\n<!-- cuefluent PARSE_SENTINEL -->\n```\n';
+  await fs.writeFile(f.target, plain); await reinspect(f.plan);
+  await fs.writeFile(f.proposal, plain + '\nAddition.\n');
+  const parse = MarkdownIt.prototype.parse; let count = 0;
+  const mocked = t.mock.method(MarkdownIt.prototype, 'parse', function (source, ...args) {
+    if (source.includes('PARSE_SENTINEL')) count++;
+    return parse.call(this, source, ...args);
+  });
+  await applyPlan(f.plan); mocked.mock.restore();
+  assert.equal(count, 2, 'inspect each proposed/current note once, without transition reparsing');
+  assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+});
+
+test('metadata transition checks do not reject a plain UTF-8 note containing NUL', async t => {
+  const f = await fixture(t);
+  await fs.appendFile(f.proposal, '\nLiteral NUL: \u0000\n');
+  await applyPlan(f.plan); await reinspect(f.plan);
+  await fs.appendFile(f.proposal, '\nReviewed addition.\n'); await applyPlan(f.plan);
+  assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+});
+
+test('shared writer preserves exact unknown numbers when a rounded replacement disguises a change', async t => {
+  const f = await fixture(t), body = await fs.readFile(f.proposal, 'utf8');
+  const original = '<!-- cuefluent\nschema_version: 1\nid: note_numeric\nunknown: 9007199254740992\n-->\n' + body;
+  await fs.writeFile(f.target, original); await reinspect(f.plan);
+  await fs.writeFile(f.proposal, original.replace('9007199254740992', '9007199254740993'));
+  await assert.rejects(applyPlan(f.plan), /Markdown check/);
+  assert.equal(await fs.readFile(f.target, 'utf8'), original);
+  assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);
+});
+
 test('replacement proposals cannot remove or repair malformed existing metadata', async t => {
   for (const mode of ['authored', 'derived']) for (const replacement of ['remove', 'repair']) {
     const f = await fixture(t, mode);
@@ -756,7 +832,7 @@ test('writers preserve opaque metadata bytes while allowing body-only updates', 
     for (const next of ['', block.replace('2', '1'), block.replace('keep me', 'changed'),
       block.replace('"keep me"', "'keep me'"), block.replaceAll('\r\n', '\n')]) {
       await fs.writeFile(f.proposal, '\uFEFF' + next + '\n' + body + '\nUpdated body.\n');
-      await assert.rejects(applyPlan(f.plan), /opaque.*metadata/i);
+      await assert.rejects(applyPlan(f.plan), { code: 'NOTE_METADATA_OPAQUE_CHANGED' });
       assert.equal(await fs.readFile(f.target, 'utf8'), original);
       assert.equal(await fingerprint(path.join(f.stateDir, 'manifest.json')), manifestHash);
       assert.equal(await fingerprint(path.join(f.stateDir, 'journal.json')), null);

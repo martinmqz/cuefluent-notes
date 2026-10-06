@@ -211,7 +211,8 @@ export function createNoteMarkdownParser() {
 let parser;
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const sha256 = /^sha256:[a-f0-9]{64}$/;
-const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
+  [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const own = (value, key) => Object.hasOwn(value, key);
 const reject = () => { throw new Error('Invalid note metadata.'); };
 const requireValue = condition => { if (!condition) reject(); };
@@ -220,6 +221,57 @@ const text = (value, limit = 256) => typeof value === 'string' && value.length >
 const id = value => typeof value === 'string' && identifier.test(value);
 const optional = (value, key, predicate) => { if (own(value, key)) requireValue(predicate(value[key])); };
 const stringList = value => Array.isArray(value) && value.length <= 128 && value.every(item => text(item)) && new Set(value).size === value.length;
+const bounds = { nodes: 4096, depth: 8, items: 128, string: 2048 };
+const metadataKey = value => typeof value === 'string' && /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(value) &&
+  !['__proto__', 'constructor', 'prototype'].includes(value);
+const metadataScalar = value => value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) ||
+  (typeof value === 'string' && value.length <= bounds.string &&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value) && !/<!--|-->|--!>/.test(value));
+export const isNoteSkillVersion = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value);
+
+/** Bound supplied JSON-compatible metadata before cloning or YAML serialization.
+ * Count mapping keys as nodes, matching the YAML AST inspection budget. */
+export function validateNoteMetadataValue(value) {
+  requireValue(object(value));
+  const queue = [[value, 0]]; let count = 0;
+  while (queue.length) {
+    const [item, depth] = queue.pop();
+    requireValue(++count <= bounds.nodes && depth <= bounds.depth);
+    if (item === null || typeof item !== 'object') { requireValue(metadataScalar(item)); continue; }
+    const names = Reflect.ownKeys(item);
+    if (Array.isArray(item)) {
+      requireValue(item.length <= bounds.items && names.length === item.length + 1 &&
+        Array.from({ length: item.length }, (_, index) => index).every(index => own(item, index)));
+    } else requireValue(object(item) && names.length <= bounds.items && names.every(metadataKey));
+    for (const name of names) {
+      if (Array.isArray(item) && name === 'length') continue;
+      const descriptor = Object.getOwnPropertyDescriptor(item, name);
+      requireValue(own(descriptor, 'value') && descriptor.enumerable);
+      if (!Array.isArray(item)) queue.push([name, depth + 1]);
+      queue.push([descriptor.value, depth + 1]);
+    }
+  }
+  return value;
+}
+
+/** Validate a source descriptor before deriving its canonical deduplication key. */
+export function noteSourceIdentity(source) {
+  requireValue(object(source));
+  let identity;
+  if (source.type === 'session') {
+    requireValue(['codex', 'claude'].includes(source.client) && id(source.session_id) && id(source.unit_id) &&
+      typeof source.revision === 'string' && /^[a-f0-9]{64}$/.test(source.revision));
+    identity = [source.type, source.client, source.session_id, source.unit_id, source.revision];
+    optional(source, 'raw_ref', item => text(item, 2048));
+  } else {
+    requireValue(source.type === 'document' && text(source.ref, 2048));
+    optional(source, 'locator', item => text(item, 2048));
+    optional(source, 'version', item => text(item));
+    identity = [source.type, source.ref, source.locator ?? null, source.version ?? null, source.source_hash ?? null];
+  }
+  optional(source, 'source_hash', item => typeof item === 'string' && sha256.test(item));
+  return JSON.stringify(identity);
+}
 
 export function isCalendarDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -253,20 +305,7 @@ export function validateNoteMetadata(value) {
     requireValue(Array.isArray(value.sources) && value.sources.length <= 128);
     const identities = new Set();
     for (const source of value.sources) {
-      requireValue(object(source));
-      let identity;
-      if (source.type === 'session') {
-        requireValue(['codex', 'claude'].includes(source.client) && id(source.session_id) && id(source.unit_id) &&
-          typeof source.revision === 'string' && /^[a-f0-9]{64}$/.test(source.revision));
-        identity = JSON.stringify([source.type, source.client, source.session_id, source.unit_id, source.revision]);
-        optional(source, 'raw_ref', item => text(item, 2048));
-      } else {
-        requireValue(source.type === 'document' && text(source.ref, 2048));
-        optional(source, 'locator', item => text(item, 2048));
-        optional(source, 'version', item => text(item));
-        identity = JSON.stringify([source.type, source.ref, source.locator ?? null, source.version ?? null, source.source_hash ?? null]);
-      }
-      optional(source, 'source_hash', item => typeof item === 'string' && sha256.test(item));
+      const identity = noteSourceIdentity(source);
       requireValue(!identities.has(identity)); identities.add(identity);
     }
   }
@@ -281,7 +320,7 @@ export function validateNoteMetadata(value) {
   }
   if (own(value, 'generation')) {
     requireValue(object(value.generation));
-    optional(value.generation, 'skill_version', item => typeof item === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(item));
+    optional(value.generation, 'skill_version', isNoteSkillVersion);
     optional(value.generation, 'content_hash', item => typeof item === 'string' && sha256.test(item));
   }
   return value;
@@ -307,19 +346,17 @@ function plainDocument(payload) {
   const queue = [[doc.contents, 0]]; let count = 0;
   while (queue.length) {
     const [node, depth] = queue.pop();
-    requireValue(++count <= 4096 && depth <= 8);
+    requireValue(++count <= bounds.nodes && depth <= bounds.depth);
     if (node === null) continue;
     requireValue(!isAlias(node) && !node.anchor && !node.tag);
     if (isMap(node)) {
-      requireValue(node.items.length <= 128);
+      requireValue(node.items.length <= bounds.items);
       for (const pair of node.items) {
-        requireValue(isScalar(pair.key) && typeof pair.key.value === 'string' &&
-          /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(pair.key.value) &&
-          !['__proto__', 'constructor', 'prototype'].includes(pair.key.value));
+        requireValue(isScalar(pair.key) && metadataKey(pair.key.value));
         queue.push([pair.key, depth + 1], [pair.value, depth + 1]);
       }
     } else if (isSeq(node)) {
-      requireValue(node.items.length <= 128);
+      requireValue(node.items.length <= bounds.items);
       queue.push(...node.items.map(item => [item, depth + 1]));
     } else {
       requireValue(isScalar(node));
@@ -328,8 +365,7 @@ function plainDocument(payload) {
         const printed = Object.is(value, -0) ? '-0' : String(value);
         requireValue(numericKey(node.source) === numericKey(printed));
       }
-      requireValue(value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) ||
-        (typeof value === 'string' && value.length <= 2048 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value) && !/<!--|-->|--!>/.test(value)));
+      requireValue(metadataScalar(value));
     }
   }
   // Core YAML resolves plain timestamps to strings, but other YAML consumers
