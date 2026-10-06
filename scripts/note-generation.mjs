@@ -87,23 +87,23 @@ function insertBlock(body, block, position) {
 /** Pure preparation of a complete proposal. No reads, writes, source discovery,
  * authorization or prose reconciliation happen here. Save these exact bytes. */
 export function prepareNote(request) {
-  keys(request, ['original', 'content', 'now', 'skillVersion'], ['metadata', 'enrich', 'contentHash']);
+  keys(request, ['original', 'content', 'now', 'skillVersion'], ['metadata', 'enrich', 'contentHash', 'createSeries']);
   if (!isNoteTimestamp(request.now)) fail('NOTE_METADATA_INVALID');
   if (!isNoteSkillVersion(request.skillVersion)) fail('NOTE_METADATA_INVALID');
-  for (const key of ['enrich', 'contentHash']) if (request[key] !== undefined && typeof request[key] !== 'boolean') fail('NOTE_METADATA_INVALID');
+  for (const key of ['enrich', 'contentHash', 'createSeries']) if (request[key] !== undefined && typeof request[key] !== 'boolean') fail('NOTE_METADATA_INVALID');
   const original = request.original, proposed = inspect(request.content);
   const previous = original === null ? null : inspect(original);
   const patch = Object.hasOwn(request, 'metadata') ? request.metadata : {};
   metadataCheck(() => validateNoteMetadataValue(patch));
   const result = (content, inspected) => ({ content, changed: content !== original, metadataStatus: inspected.status });
   if (previous?.status === 'unsupported') {
-    if (Object.keys(patch).length || request.enrich || request.contentHash) fail('NOTE_METADATA_OPAQUE_CHANGED');
+    if (Object.keys(patch).length || request.enrich || request.contentHash || request.createSeries) fail('NOTE_METADATA_OPAQUE_CHANGED');
     assertInspectedNoteTransition(previous, proposed);
     return result(request.content, proposed);
   }
   if (proposed.status !== 'absent' && (!previous?.block || proposed.block.raw !== previous.block.raw)) fail('NOTE_METADATA_PROPOSAL_CHANGED');
   if (previous?.status === 'absent' && !request.enrich) {
-    if (Object.keys(patch).length || request.contentHash || proposed.status !== 'absent') fail('NOTE_METADATA_ENRICHMENT_REQUIRED');
+    if (Object.keys(patch).length || request.contentHash || request.createSeries || proposed.status !== 'absent') fail('NOTE_METADATA_ENRICHMENT_REQUIRED');
     return result(request.content, proposed);
   }
   const body = bodyOf(request.content, proposed);
@@ -111,6 +111,12 @@ export function prepareNote(request) {
   if (!previous?.block && /^(?:\uFEFF)?[ \t\r\n]*(?:---|\+\+\+)[ \t]*(?:\r\n|\r|\n|$)/.test(body)) fail('NOTE_FRONTMATTER_CONFLICT');
   const value = patchMetadata(previous?.value ?? { schema_version: 1, id: `note_${randomUUID()}`,
     ...(original === null ? { created: request.now } : {}) }, patch);
+  if (request.createSeries) {
+    // Creation is explicit: a missing ID must never silently split an existing
+    // series, and a supplied ID must never be replaced by a generated one.
+    if (previous?.value?.series || Object.hasOwn(value.series ?? {}, 'id')) fail('NOTE_METADATA_SERIES_CONFLICT');
+    value.series = { ...value.series, id: `series_${randomUUID()}` };
+  }
   const hashed = request.contentHash || Boolean(previous?.value?.generation?.content_hash);
   const unchanged = previous?.status === 'valid' && body === bodyOf(original, previous) && same(value, previous.value) &&
     (!request.contentHash || previous.value.generation?.content_hash !== undefined);
@@ -121,6 +127,7 @@ export function prepareNote(request) {
   metadataCheck(() => { validateNoteMetadataValue(value); validateNoteMetadata(value); });
   const document = new Document(value);
   for (const key of ['created', 'updated']) if (document.has(key)) document.get(key, true).type = Scalar.QUOTE_DOUBLE;
+  if (value.period) for (const key of ['start', 'end']) document.getIn(['period', key], true).type = Scalar.QUOTE_DOUBLE;
   const newline = /\r\n|\r|\n/.exec(previous?.block?.raw ?? body)?.[0] ?? '\n';
   const block = ('<!-- cuefluent\n' + document.toString({ lineWidth: 0 }) + '-->\n').replace(/\n/g, newline);
   // Retain the supplied block's location. For a metadata-free proposal, reuse

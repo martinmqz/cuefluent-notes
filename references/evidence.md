@@ -163,6 +163,27 @@ observed mapping for one fake-transport invocation. It retained the unknown
 charge outcome and the pending live integration check. It did not certify the
 current deployed client or resolve the undated help-text discrepancy.
 
+### STANDUP-20.26 — first sprint record
+
+This fictional Atlas client sprint runs September 21–October 2, 2026, in
+America/Los_Angeles. At the September 22 standup, Rina reported that sandbox
+access was still pending and the live integration check had not run. On October 1,
+Omar proposed running it after access became available. No owner, due date,
+completed check or rollout approval was recorded. The example note was created
+September 22 at 09:15 and updated October 1 at 09:15 in the stated timezone.
+
+### STANDUP-20.27 — following sprint record
+
+This fictional Atlas client sprint runs October 5–16, 2026, in
+America/Los_Angeles. On October 5, Rina reported sandbox access was available.
+On October 6, Omar reported one live sandbox request for fixture `intent_demo_17`:
+it returned `409`, the client reported `AuthorizationConflict`, and its trace
+showed no automatic retry for that invocation. This reported result does not
+establish repeated-call behavior, a charge outcome, production deployment or
+rollout approval. The example note was created October 5 at 09:15 and updated
+October 6 at 09:15 in the stated timezone. This is the next member of the same
+fictional standup series; earlier statements retain their original dates.
+
 The purpose examples below are alternatives for different requests. They are
 not a required output bundle, a raw activity log, or a chain of converted copies:
 
@@ -174,3 +195,5 @@ not a required output bundle, a raw activity log, or a chain of converted copies
 | [Meeting summary](../examples/meeting-summary.md) | MEET-3 | Reports, agreement, and open action |
 | [Task summary](../examples/task-summary.md) | TASK-12 | Findings, progress, and remaining work |
 | [Knowledge base](../examples/knowledge-base.md) | PAY-101, TASK-12, DOC-5 | Explain contract and verification boundaries |
+| [Sprint 20.26 standups](../examples/standups-sprint-20-26.md) | STANDUP-20.26 | First member of a related-note series, with dated reports and a pending action |
+| [Sprint 20.27 standups](../examples/standups-sprint-20-27.md) | STANDUP-20.26, STANDUP-20.27 | Next member, distinguishing earlier context from new reported evidence |

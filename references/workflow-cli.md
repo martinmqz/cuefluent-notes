@@ -222,6 +222,15 @@ in `metadata`: optional `type`, `sources`, `context`, `series`, `sprint`, `perio
 Nested context/series/period additions use their defined keys. Identity and
 generation fields are managed by the helper. Unknown existing fields are retained.
 
+`createSeries: true` explicitly creates a new `series_` UUID when the note has no
+established series. Optionally supply `metadata.series.label`, but omit its `id`.
+The default does not generate a series ID: to join an existing series, supply its
+inspected `metadata.series.id`. Creation with an existing series or a supplied ID
+fails with `NOTE_METADATA_SERIES_CONFLICT`; the helper never replaces either ID.
+This flag also works for an existing supported note without a series, or for a
+plain note with explicit enrichment. It cannot modify opaque future metadata.
+Reuse the returned ID for later members and the prepared bytes for save retries.
+
 `enrich: true` explicitly permits adding metadata to an existing plain note;
 the default preserves its plain format. `contentHash: true` requests the optional
 body hash; a pre-existing hash is maintained regardless of this flag. Source

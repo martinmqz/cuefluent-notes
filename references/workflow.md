@@ -76,6 +76,14 @@ Include project context only when needed to distinguish the subject. An individu
 meeting may use its actual occurrence date to distinguish it; a continuing note
 uses a stable name and dated sections. Do not invent dates or make a file per turn.
 
+Recurring material can use [related-note series](note-series.md) with natural
+boundaries, such as a separate standup log for each sprint. When the user or an
+established series already uses per-period files, reuse the matching period's
+member; otherwise a suitable existing continuing note remains the target. Each
+series member has its own identity and shares the established series ID. Explicit
+single-file destinations still take precedence. Follow that guide for missing metadata,
+ambiguous periods, historical corrections and preservation of earlier members.
+
 Keep decisions within their meeting or task unless a separate reusable record
 serves an explicitly selected purpose. A task note does not add a TODO queue,
 activity feed, worklog, or Start/Close lifecycle. Preserve reported-versus-verified

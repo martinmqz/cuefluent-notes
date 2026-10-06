@@ -11,7 +11,7 @@
     "install:codex": "node scripts/install.mjs --client codex",
     "install:claude": "node scripts/install.mjs --client claude",
     "test": "node scripts/test.mjs",
-    "check:examples": "node scripts/check-notes.mjs --cases examples/check-cases.json examples/feature-behavior.md examples/decision.md examples/standup.md examples/meeting-summary.md examples/task-summary.md examples/knowledge-base.md",
+    "check:examples": "node scripts/check-examples.mjs",
     "package": "node scripts/package.mjs",
     "package:hooks": "node scripts/package.mjs --hooks",
     "release:build": "node scripts/release.mjs"

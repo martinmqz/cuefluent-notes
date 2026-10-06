@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { parse } from 'yaml';
 import { prepareNote, assertNoteTransition, assertProcessingNoteSources } from './note-generation.mjs';
 import { inspectNoteMetadata } from './note-metadata.mjs';
 import { digest } from './workflow-values.mjs';
@@ -30,6 +31,46 @@ test('leading content indentation cannot make generated metadata render as code'
     assert.equal(prepared.metadataStatus, 'valid');
     assert.equal(without(prepared.content), content);
   }
+});
+
+test('series creation generates an independent ID only on explicit request and preserves it on reuse', () => {
+  const first = prepare({ createSeries: true, metadata: { series: { label: 'Synthetic standups' } } });
+  const series = parsed(first.content).value.series;
+  assert.match(series.id, /^series_[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  assert.equal(series.label, 'Synthetic standups');
+  assert.notEqual(parsed(prepare({ createSeries: true }).content).value.series.id, series.id);
+  assert.deepEqual(parsed(prepare({ metadata: { series } }).content).value.series, series);
+  assert.equal(prepare({ original: first.content, content: first.content, createSeries: false }).content, first.content);
+  assert.throws(() => prepare({ metadata: { series: { label: series.label } } }), { code: 'NOTE_METADATA_INVALID' });
+  for (const original of [null, first.content]) assert.throws(() => prepare({ original, content: original ?? body,
+    createSeries: true, metadata: { series } }), { code: 'NOTE_METADATA_SERIES_CONFLICT' });
+  assert.throws(() => prepare({ original: first.content, content: first.content, createSeries: true }), { code: 'NOTE_METADATA_SERIES_CONFLICT' });
+  assert.throws(() => prepare({ createSeries: 'true' }), { code: 'NOTE_METADATA_INVALID' });
+});
+
+test('creating a series respects plain-note enrichment and opaque metadata boundaries', () => {
+  assert.throws(() => prepare({ original: body, createSeries: true }), { code: 'NOTE_METADATA_ENRICHMENT_REQUIRED' });
+  const enriched = parsed(prepare({ original: body, enrich: true, createSeries: true }).content).value;
+  assert(enriched.series.id); assert.equal(enriched.created, undefined);
+  const original = prepare({}).content;
+  const joined = parsed(prepare({ original, content: original, createSeries: true }).content).value;
+  assert(joined.series.id); assert.equal(joined.id, parsed(original).value.id);
+  const future = '<!-- cuefluent\nschema_version: 2\n-->\n# Note\n';
+  assert.throws(() => prepare({ original: future, content: future, createSeries: true }), { code: 'NOTE_METADATA_OPAQUE_CHANGED' });
+  assert.equal(prepare({ original: future, content: future, createSeries: false }).content, future);
+});
+
+test('generated period dates stay strings in both YAML versions while existing unquoted dates remain supported', () => {
+  const period = { start: '2026-10-05', end: '2026-10-16', timezone: 'America/Los_Angeles' };
+  const generated = prepare({ metadata: { period } }).content;
+  for (const version of ['1.1', '1.2']) {
+    const raw = parsed(generated).block.raw;
+    const value = parse(raw.slice(raw.indexOf('\n') + 1, raw.lastIndexOf('-->')), { version });
+    assert.deepEqual(value.period, period);
+  }
+  const original = generated.replace('start: "2026-10-05"', 'start: 2026-10-05').replace('end: "2026-10-16"', 'end: 2026-10-16');
+  assert.equal(prepare({ original, content: original }).content, original);
+  assert.deepEqual(parsed(prepare({ original, content: original + '\r\nCorrection.' }).content).value.period, period);
 });
 
 test('generation preserves CR, LF and CRLF bodies and refuses frontmatter before enrichment', () => {

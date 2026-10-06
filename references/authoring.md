@@ -25,6 +25,9 @@ see the [metadata contract](note-metadata.md). The standalone checker validates
 its structure and detects duplicate note IDs among selected files. These fields
 do not supply app search terms or establish series-aware retrieval. Ordinary
 notes need no metadata. Keep summaries, decisions and event dates visible.
+For recurring notes, [series authoring](note-series.md) explains how to retain
+separate human-sized files with shared identity metadata and visible period
+vocabulary, while honoring explicit destinations and existing plain notes.
 
 ```markdown
 # Topic context

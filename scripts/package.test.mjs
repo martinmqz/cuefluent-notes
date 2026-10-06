@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { buildPackages } from './package.mjs';
+import { exampleChecks } from './check-examples.mjs';
+import { inspectNoteMetadata } from './note-metadata.mjs';
 import MarkdownIt from 'markdown-it';
 
 const sourceVersion = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -91,20 +93,23 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     const metadataExample = path.join(directory, `${pkg.client}-metadata.md`);
     await fs.writeFile(metadataExample, '<!-- cuefluent\nschema_version: 1\nid: note_detached\n-->\n\n# Synthetic\n\n## Metadata\n\nPortable evidence.\n');
     assert.equal(run(checker, [metadataExample], directory).errors, 0);
-    const examples = path.join(pkg.skillRoot, 'examples');
-    const report = run(checker, ['--cases', path.join(examples, 'check-cases.json'),
-      ...['feature-behavior', 'decision', 'standup', 'meeting-summary', 'task-summary', 'knowledge-base'].map(name => path.join(examples, `${name}.md`))], directory);
+    const examples = await exampleChecks(path.join(pkg.skillRoot, 'examples'));
+    const report = run(checker, ['--cases', examples.casePath, ...examples.files], directory);
     assert.equal(report.errors, 0);
-    assert.equal(report.cases, 14);
+    assert.equal(report.cases, examples.caseCount);
+    assert(!files.some(file => file.endsWith('/check-examples.mjs')));
     const work = path.join(directory, `private-${pkg.client}`);
     const notes = path.join(work, 'notes');
     await fs.mkdir(notes, { recursive: true });
     const proposal = path.join(work, 'proposal.md');
     const preparation = path.join(work, 'preparation.json');
     await fs.writeFile(preparation, JSON.stringify({ original: null, content: '# Synthetic\n\n## Portable write\n\nVerified from an isolated package.\n',
-      now: '2026-10-01T12:00:00Z', skillVersion: sourceVersion }));
+      now: '2026-10-01T12:00:00Z', skillVersion: sourceVersion, createSeries: true,
+      metadata: { series: { label: 'Synthetic standups' }, period: { start: '2026-09-21', end: '2026-10-02', timezone: 'America/Los_Angeles' } } }));
     const prepared = run(workflow, ['prepare-note', '--request', preparation], directory);
     assert.equal(prepared.metadataStatus, 'valid');
+    assert.match(inspectNoteMetadata(prepared.content).value.series.id, /^series_[a-f0-9-]{36}$/);
+    assert.match(prepared.content, /start: "2026-09-21"/);
     await fs.writeFile(proposal, prepared.content);
     const planFile = path.join(work, 'plan.json');
     const plan = { version: 1, mode: 'authored', root: notes, stateDir: path.join(work, 'state'), files: [{ path: 'note.md', expectedHash: null, contentPath: proposal }] };

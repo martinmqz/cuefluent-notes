@@ -179,6 +179,15 @@ never invent source references or enable collection to populate metadata. Keep k
 attribution, uncertainty and occurrence dates visible. Metadata preparation enables neither
 collection nor processing and does not authorize saving.
 
+For recurring material, use [related-note series](references/note-series.md). A suitable
+existing continuing note stays the target unless the user chooses per-period files
+or an established series already uses that boundary. For separate members, keep
+natural boundaries such as one standup log per agreed sprint, reuse the stable series
+ID, and give each new member its own note ID. Reuse the correct existing member for
+updates, including historical corrections. Honor explicit file destinations and
+existing routes; series metadata does not authorize splitting, moving or discovering
+other files. Resolve uncertain membership or period matches before saving.
+
 Use descriptive H2 sections with visible content and useful H1 context. Infer
 faithful lookup terms from subjects, symptoms, actions, identifiers, and alternate
 names; put them in H1/H2 headings or aliases. Body text and H3–H6 do not supply

@@ -100,7 +100,7 @@ extension keys, including keys containing dots, have no defined field behavior.
 | `context.topics`, `context.entities` | Up to 128 distinct supported strings each, at most 256 characters each. Entity names may include people when useful and evidenced; these are descriptive retrieval hints. |
 | `series.id`, `series.label` | Stable series identity, plus an optional human-readable label of at most 256 characters. Each member retains its own note ID. |
 | `sprint` | String label of at most 128 characters; quote numeric-looking values such as `"20.26"`. |
-| `period.start`, `period.end`, `period.timezone` | Inclusive calendar dates `YYYY-MM-DD`, ordered start through end, and a named timezone recognized by the runtime’s `Intl.DateTimeFormat`. These describe the note's subject period, independently of note timestamps. All three are required when period is present. |
+| `period.start`, `period.end`, `period.timezone` | Inclusive calendar dates `YYYY-MM-DD`, ordered start through end, and a named timezone recognized by the runtime’s `Intl.DateTimeFormat`. These describe the note's subject period, independently of note timestamps. All three are required when period is present. The helper quotes date strings for YAML portability; existing plain date scalars remain supported. |
 | `generation.skill_version` | Version string of the skill that generated the current material; independent of schema version. |
 | `generation.content_hash` | Optional `sha256:` plus the full lowercase 64-hex digest of UTF-8 note bytes after removing precisely the metadata block, including its closing-line newline. All other bytes, including surrounding blank lines and BOM, remain in the hashed content. |
 
@@ -159,7 +159,8 @@ ownership and all [safe-update protections](refresh.md).
 ## Series and portability
 
 A series connects natural human-sized documents, such as one standup log per
-sprint. Share the stable series ID; preserve distinct note IDs, visible dates,
+sprint. Follow [series authoring](note-series.md) for member selection, boundaries
+and conflicts. Share the stable series ID; preserve distinct note IDs, visible dates,
 individual source references and period boundaries. A label alone, such as
 `standups`, does not identify a series across projects. Unknown membership must
 not be guessed from a filename or title.
@@ -176,7 +177,9 @@ Use [`prepare-note`](workflow-cli.md#prepare-note-metadata) to prepare complete
 proposal bytes before approval. The pure helper accepts supplied original/proposed
 Markdown and metadata; it never reads sources, edits prose, selects a destination
 or writes a note. A new generated note receives a UUID-based ID, current note
-creation/update times and the supplied skill version. Existing plain notes remain
+creation/update times and the supplied skill version. Explicit `createSeries: true`
+generates a UUID-based series ID only when no existing or supplied series ID is
+present; reuse that ID for subsequent members. Existing plain notes remain
 plain unless explicitly enriched. Enrichment adds identity and an update time but
 does not invent a historical creation date; later guarded updates preserve that
 absence. A leading YAML (`---`) or TOML (`+++`) frontmatter document
@@ -196,7 +199,8 @@ exact value as JavaScript numbers. Generation reports `NOTE_METADATA_INVALID`
 even for a no-op or body-only request against such a block; preserve the original
 bytes and resolve the malformed metadata explicitly. Do not silently round the
 value or recast an unfamiliar field to bypass the conflict. Generated creation
-and update timestamps use quoted YAML strings as required by the schema.
+and update timestamps use quoted YAML strings as required by the schema. Generated
+period dates are also quoted to remain strings in YAML 1.1 consumers.
 A no-op returns the exact original bytes without changing timestamps or the
 generator version. The optional content hash is calculated without the metadata
 block; an existing hash is refreshed on a meaningful generation update. A stale
