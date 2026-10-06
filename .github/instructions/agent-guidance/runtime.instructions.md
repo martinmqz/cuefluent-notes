@@ -1,0 +1,62 @@
+---
+applyTo: "scripts/**,SKILL.md,references/session-workflow.md,references/processing.md,references/workflow-cli.md,references/refresh.md,references/hooks.md,references/setup.md"
+---
+
+<!-- agent-guidance-sync:generated:v1 source=".agents/rules/runtime.md" target=".github/instructions/agent-guidance/runtime.instructions.md" -->
+
+# Runtime and storage
+
+Apply the shared consent, privacy, writer, and review boundaries in the root
+[repository guidance](/AGENTS.md). Use the module map below to load the relevant
+implementation and canonical product reference before changing behavior.
+
+## Module map and invariants
+
+- `scripts/safe-update.mjs`, `scripts/file-io.mjs`, and
+  `scripts/runtime-paths.mjs`: inspected hashes, filesystem boundaries, writer
+  locks, journals, and recovery. See [safe updates](/references/refresh.md).
+- `scripts/workflow-*.mjs` and `scripts/capture-contract.mjs`: session-workflow
+  contracts and guarded private settings. See
+  [session workflow](/references/session-workflow.md) for the current implementation
+  boundary and independent collection/processing consent.
+- `scripts/capture-selection.mjs` and `scripts/intake-*.mjs`: selection intervals,
+  guarded intake state, immutable publication, and recovery. Native-order proofs
+  come from trusted readers; they are not user JSON commands.
+- `scripts/session-jsonl.mjs`, `scripts/capture-evidence.mjs`,
+  `scripts/codex-reader.mjs`, and `scripts/claude-reader.mjs`: bounded native
+  session reads and selected capture extraction. Keep the verified client-format
+  matrix in the session reference. `scripts/reader-checkpoint.mjs` bounds
+  metadata-only incremental carry; `scripts/reader-pages.mjs` persists authenticated
+  pages with finite cumulative allocation. Preserve full hashes and native
+  identity metadata, fresh permission checks around cached bytes, and exact
+  cursor/root publication. Claude pause freezes automatic inspection at its saved
+  EOF; suspension is not finality. Schema-2 captures are immutable revisions;
+  activate heads only with fresh selection and expected hashes. Claude ordinary
+  assistant parentage does not prove prompt ownership.
+- `scripts/workflow-storage.mjs`, `scripts/storage-platform.mjs`, and
+  `scripts/capture-maintenance.mjs`: current private-storage capabilities and
+  explicit whole-unit pruning. Preserve exact tombstones and processing evidence;
+  use intake-then-sorted-writer lock order for maintenance and processing.
+- `scripts/collection-*.mjs`, `scripts/workflow-budget.mjs`, and
+  `scripts/process-identity.mjs`: metadata-only hook ingress, bounded detached
+  collection, and native owner probes. `scripts/intake-recovery.mjs` requires an
+  externally established offline window; never infer it from a dead PID alone.
+- `scripts/processing*.mjs` and `scripts/writer-protocol.mjs`: exact input claims,
+  bounded evidence pages, immutable proposals, dispositions, and coordinated
+  Markdown receipts. See [processing](/references/processing.md). Hold intake then
+  writer locks only during helper calls. Never bypass pending transactions through
+  the public writer, infer page acknowledgment from delivery, or rewrite notes in
+  recovery after a durable save receipt exists.
+- `scripts/workflow.mjs`, `scripts/workflow-settings.mjs`, and
+  `scripts/capture-controls.mjs`: explicit CLI operations, settings CAS, and native
+  selection controls. Never accept serialized reader proofs or infer current
+  identity from cwd. Pending discovery reads metadata only; full preparation is
+  the evidence integrity gate. See [workflow CLI](/references/workflow-cli.md).
+
+## Runtime review and verification
+
+Tests live in `scripts/*.test.mjs` and use Node's built-in test runner, detached
+packages, and disposable filesystem fixtures. Use meaningful failure reproductions
+and observable invariants rather than assertions that duplicate implementation.
+Follow the root [development and verification rules](/AGENTS.md#development-and-verification)
+for test selection, portability, and fixture isolation.

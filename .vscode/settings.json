@@ -1,0 +1,5 @@
+{
+  "github.copilot.chat.codeGeneration.useInstructionFiles": true,
+  "chat.useAgentsMdFile": false,
+  "chat.includeReferencedInstructions": false
+}

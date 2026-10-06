@@ -8,6 +8,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "guidance:sync": "agent-guidance sync",
+    "check:guidance": "agent-guidance check",
     "install:codex": "node scripts/install.mjs --client codex",
     "install:claude": "node scripts/install.mjs --client claude",
     "test": "node scripts/test.mjs",
@@ -22,6 +24,7 @@
     "yaml": "2.9.1"
   },
   "devDependencies": {
+    "@martinmqz/agent-guidance-sync": "0.1.2",
     "fflate": "0.8.3",
     "tar-stream": "3.2.1"
   }

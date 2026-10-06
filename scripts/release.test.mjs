@@ -25,6 +25,7 @@ const readJSON = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 
 test('release catalogs resolve complete client packages and all four archives work after extraction', async t => {
   const root = await fixture(t);
+  const devDependencies = Object.keys((await readJSON(path.join(sourceRoot, 'package.json'))).devDependencies ?? {});
   const built = await buildRelease({ outDir: path.join(root, 'release with spaces $value') });
   assert.equal(built.archives.length, 4);
   assert.deepEqual(await readJSON(path.join(built.outDir, 'release.json')), { version: built.version, archives: built.archives });
@@ -68,7 +69,7 @@ test('release catalogs resolve complete client packages and all four archives wo
     assert.equal(integrity.trustedReleaseVerified, true);
     assert.equal(integrity.variant, archive.variant);
     await fs.stat(path.join(skill, 'node_modules/markdown-it/LICENSE'));
-    for (const dependency of ['fflate', 'tar-stream']) {
+    for (const dependency of devDependencies) {
       await assert.rejects(fs.stat(path.join(skill, 'node_modules', dependency)), { code: 'ENOENT' });
     }
     assert.equal((await readJSON(path.join(skill, 'package.json'))).devDependencies, undefined);

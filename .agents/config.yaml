@@ -1,0 +1,7 @@
+version: 1
+adapters:
+  agents: true
+  claude: false
+  cursor: rules-only
+  copilot: true
+nested: false
