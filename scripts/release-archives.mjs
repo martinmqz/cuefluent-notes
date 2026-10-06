@@ -6,6 +6,8 @@ import { compare } from './file-io.mjs';
 
 /** Read a built tree once, retaining only portable paths and file bytes. */
 export async function archiveFiles(root, { exclude = [] } = {}) {
+  root = path.resolve(root);
+  if (!(await fs.lstat(root)).isDirectory()) throw new Error('Nonportable archive root.');
   const files = [];
   async function visit(relative) {
     for (const entry of await fs.readdir(path.join(root, relative), { withFileTypes: true })) {

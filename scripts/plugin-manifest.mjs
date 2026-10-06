@@ -23,3 +23,12 @@ export function validatePluginManifest(manifest, client) {
   }
   if (!validCommon || !validInterface) throw new Error('Invalid Cuefluent Notes plugin manifest metadata.');
 }
+
+/** Fields deliberately shared by the two source templates, not every interface label. */
+export function validateManifestPair(codex, claude) {
+  validatePluginManifest(codex, 'codex');
+  validatePluginManifest(claude, 'claude');
+  if (['name', 'version', 'description'].some(key => codex[key] !== claude[key]) ||
+      codex.author.name !== claude.author.name || codex.interface.shortDescription !== codex.description ||
+      codex.interface.developerName !== codex.author.name) throw new Error('Shared plugin manifest metadata differs.');
+}

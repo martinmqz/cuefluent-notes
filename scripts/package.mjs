@@ -1,10 +1,10 @@
 import fs from 'node:fs/promises';
-import { constants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { within, lstatOrNull as statOrNull, isMain, compare, CONTROLS } from './file-io.mjs';
+import { within, lstatOrNull as statOrNull, isMain, compare, CONTROLS, readBoundedBytes, sameFileIdentity } from './file-io.mjs';
 import { collectionHookConfiguration } from './collection-hook-definition.mjs';
-import { validatePluginManifest } from './plugin-manifest.mjs';
+import { validatePluginManifest, validateManifestPair } from './plugin-manifest.mjs';
+import { withPackageInventory, packagePath } from './package-integrity.mjs';
 
 const SOURCE_ROOT = await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const SOURCE_FILES = [
@@ -20,7 +20,7 @@ const SOURCE_FILES = [
   'examples/knowledge-base.md', 'examples/check-cases.json',
   'examples/standups-sprint-20-26.md', 'examples/standups-sprint-20-27.md',
   'scripts/check-notes.mjs', 'scripts/safe-update.mjs', 'scripts/writer-protocol.mjs', 'scripts/workflow-values.mjs', 'scripts/runtime-paths.mjs', 'scripts/file-io.mjs',
-  'scripts/plugin-manifest.mjs',
+  'scripts/plugin-manifest.mjs', 'scripts/package-integrity.mjs',
   'scripts/note-organization.mjs',
   'scripts/note-metadata.mjs',
   'scripts/note-generation.mjs',
@@ -75,6 +75,7 @@ const equalMap = (left, right) => JSON.stringify(sortedEntries(left)) === JSON.s
 const asJSON = value => `${JSON.stringify(value, null, 2)}\n`;
 
 async function regularSource(relative) {
+  packagePath(relative);
   const parts = relative.split('/');
   if (parts.some(part => !part || part === '.' || part === '..') || path.isAbsolute(relative)) fail('Invalid package source path.');
   let current = SOURCE_ROOT;
@@ -85,17 +86,22 @@ async function regularSource(relative) {
   }
   return current;
 }
-/** Read a distributable source input without following links or leaking checkout paths. */
+/** Read bounded package inputs without links; check first-party files for checkout leaks. */
 export async function readPortableSource(relative) {
   const file = await regularSource(relative);
-  const bytes = await fs.readFile(file);
-  if (bytes.toString('utf8').includes(SOURCE_ROOT)) fail(`Portable source input contains an absolute checkout path: ${relative}`);
+  const before = await fs.lstat(file, { bigint: true });
+  const bytes = await readBoundedBytes(file, { noFollow: true, utf8: false, maxBytes: 16 * 1024 * 1024 });
+  await regularSource(relative);
+  const after = await fs.lstat(file, { bigint: true });
+  if (!sameFileIdentity(before, after) || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) fail('Package input changed during read.');
+  // Dependencies may legitimately contain strings such as /src or /app that
+  // coincide with a short checkout path. The leak scan is first-party only.
+  if (!relative.startsWith('node_modules/') && bytes.toString('utf8').includes(SOURCE_ROOT)) fail(`Portable source input contains an absolute checkout path: ${relative}`);
   return bytes;
 }
-async function readJSON(relative) {
-  const source = await regularSource(relative);
+async function readJSON(relative, read = readPortableSource) {
   let value;
-  try { value = JSON.parse(await fs.readFile(source, 'utf8')); }
+  try { value = JSON.parse(await read(relative)); }
   catch { fail(`Invalid package JSON: ${relative}`); }
   if (!object(value)) fail(`Package JSON must contain an object: ${relative}`);
   return value;
@@ -117,7 +123,7 @@ function resolveDependency(packages, parent, name) {
   }
   fail('The lockfile does not contain the complete runtime dependency closure.');
 }
-async function runtimeDependencies(pkg, lock) {
+async function runtimeDependencies(pkg, lock, read) {
   if (lock.lockfileVersion !== 3 || !object(lock.packages) || !object(lock.packages['']) ||
     lock.name !== pkg.name || lock.version !== pkg.version || lock.packages[''].version !== pkg.version ||
     !equalMap(pkg.dependencies, lock.packages[''].dependencies)) fail('Package metadata and lockfile disagree; refresh the source dependencies before building.');
@@ -132,7 +138,7 @@ async function runtimeDependencies(pkg, lock) {
     if (!modulePath(key) || !object(record) || record.link || record.dev || record.optional ||
       typeof record.version !== 'string' || typeof record.integrity !== 'string' ||
       !record.resolved?.startsWith('https://') || (directVersion && directVersion !== record.version)) fail('The runtime lock contains an unsupported, unpinned or linked dependency.');
-    const installed = await readJSON(`${key}/package.json`);
+    const installed = await readJSON(`${key}/package.json`, read);
     if (installed.name !== name || installed.version !== record.version || !equalMap(installed.dependencies, record.dependencies) ||
       Object.keys(installed.optionalDependencies ?? {}).length || Object.keys(installed.peerDependencies ?? {}).length) fail(`Installed dependency does not match the supported locked runtime: ${name}`);
     selected.set(key, record);
@@ -164,12 +170,7 @@ async function dependencyFiles(relativeRoot) {
 async function writeNew(file, bytes) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, bytes, { flag: 'wx', mode: 0o644 });
-}
-async function copyNew(relative, destination) {
-  const source = await regularSource(relative);
-  await fs.mkdir(path.dirname(destination), { recursive: true });
-  await fs.copyFile(source, destination, constants.COPYFILE_EXCL);
-  await fs.chmod(destination, 0o644);
+  await fs.chmod(file, 0o644);
 }
 function outputPlacement(output) {
   if (within(output, SOURCE_ROOT) || ['node_modules', 'scripts', 'references', 'examples', 'packaging', '.git'].some(part => within(path.join(SOURCE_ROOT, part), output))) fail('Choose a fresh output directory outside package source inputs.');
@@ -202,20 +203,33 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
   const output = await canonicalOutput(requested);
   outputPlacement(output);
   if (await statOrNull(output)) fail('Output directory already exists; choose a fresh --out directory.');
-  const pkg = await readJSON('package.json');
-  const lock = await readJSON('package-lock.json');
+  // Capture each input once: validation and both clients consume the same bytes.
+  const inputs = new Map();
+  let inputBytes = 0;
+  const read = async relative => {
+    if (!inputs.has(relative)) {
+      const bytes = await readPortableSource(relative);
+      inputBytes += bytes.length;
+      if (inputBytes > 128 * 1024 * 1024 || inputs.size >= 4096) fail('Package inputs exceed the build size limit.');
+      inputs.set(relative, bytes);
+    }
+    return inputs.get(relative);
+  };
+  const pkg = await readJSON('package.json', read);
+  const lock = await readJSON('package-lock.json', read);
   if (pkg.name !== 'cuefluent-notes' || pkg.private !== true || pkg.type !== 'module' || pkg.engines?.node !== '>=22') fail('Unexpected package identity or runtime requirements.');
-  const dependencies = await runtimeDependencies(pkg, lock);
+  const dependencies = await runtimeDependencies(pkg, lock, read);
   const dependencyInputs = [];
   for (const [key] of dependencies) dependencyInputs.push(...await dependencyFiles(key));
-  for (const source of SOURCE_FILES) await readPortableSource(source);
+  for (const source of [...SOURCE_FILES, ...dependencyInputs]) await read(source);
   const manifests = new Map();
-  for (const client of clients) {
-    const manifest = await readJSON(`packaging/${client}/plugin.json`);
+  for (const client of ['codex', 'claude']) {
+    const manifest = await readJSON(`packaging/${client}/plugin.json`, read);
     validatePluginManifest(manifest, client);
     if (manifest.version !== pkg.version) fail('Plugin templates must match the package version.');
     manifests.set(client, manifest);
   }
+  validateManifestPair(manifests.get('codex'), manifests.get('claude'));
   const runtimePackage = { name: pkg.name, version: pkg.version, private: true, type: 'module', description: pkg.description, engines: pkg.engines, dependencies: pkg.dependencies };
   const runtimeLock = { name: pkg.name, version: pkg.version, lockfileVersion: 3, requires: true,
     packages: { '': { name: pkg.name, version: pkg.version, dependencies: pkg.dependencies, engines: pkg.engines }, ...Object.fromEntries(dependencies) } };
@@ -228,14 +242,15 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
   try {
     for (const client of clients) {
       const root = path.join(staging, client, pkg.name);
-      const skillRoot = path.join(root, 'skills', pkg.name);
-      for (const source of SOURCE_FILES) await copyNew(source, path.join(skillRoot, source));
-      for (const source of dependencyInputs) await copyNew(source, path.join(skillRoot, source));
-      await writeNew(path.join(skillRoot, 'package.json'), asJSON(runtimePackage));
-      await writeNew(path.join(skillRoot, 'package-lock.json'), asJSON(runtimeLock));
-      await writeNew(path.join(root, client === 'codex' ? '.codex-plugin' : '.claude-plugin', 'plugin.json'), asJSON(manifests.get(client)));
-      if (withHooks) await writeNew(path.join(root, 'hooks', 'hooks.json'), asJSON(collectionHookConfiguration(client)));
-      await writeNew(path.join(root, 'README.md'), packageReadme(client, pkg.version, withHooks));
+      const skillRoot = `skills/${pkg.name}`;
+      const files = [...SOURCE_FILES, ...dependencyInputs].map(source => ({ name: `${skillRoot}/${source}`, bytes: inputs.get(source) }));
+      const add = (name, bytes) => files.push({ name, bytes: Buffer.from(bytes) });
+      add(`${skillRoot}/package.json`, asJSON(runtimePackage));
+      add(`${skillRoot}/package-lock.json`, asJSON(runtimeLock));
+      add(`.${client}-plugin/plugin.json`, asJSON(manifests.get(client)));
+      if (withHooks) add('hooks/hooks.json', asJSON(collectionHookConfiguration(client)));
+      add('README.md', packageReadme(client, pkg.version, withHooks));
+      for (const file of withPackageInventory(files, { client, version: pkg.version, withHooks })) await writeNew(path.join(root, file.name), file.bytes);
     }
     // Exclusive reservation prevents two builders from publishing over an existing result.
     try { await fs.mkdir(output); claimedOutput = true; }

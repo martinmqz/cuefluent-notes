@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { buildRelease } from './release.mjs';
 import { archiveFiles, pluginZip, marketplaceTar } from './release-archives.mjs';
+import { INVENTORY_FILE } from './package-integrity.mjs';
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 async function fixture(t) {
@@ -62,6 +63,10 @@ test('release catalogs resolve complete client packages and all four archives wo
     const plugin = path.join(extracted, 'cuefluent-notes');
     await fs.stat(path.join(plugin, `.${archive.client}-plugin/plugin.json`));
     const skill = path.join(plugin, 'skills/cuefluent-notes');
+    const integrity = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/package-integrity.mjs'), plugin,
+      '--expected-inventory-sha256', archive.inventorySha256], { cwd: root, env: { ...process.env, NODE_PATH: '' } }));
+    assert.equal(integrity.trustedReleaseVerified, true);
+    assert.equal(integrity.variant, archive.variant);
     await fs.stat(path.join(skill, 'node_modules/markdown-it/LICENSE'));
     for (const dependency of ['fflate', 'tar-stream']) {
       await assert.rejects(fs.stat(path.join(skill, 'node_modules', dependency)), { code: 'ENOENT' });
@@ -78,8 +83,8 @@ test('release catalogs resolve complete client packages and all four archives wo
     if (archive.variant === 'manual') {
       const hooks = await archiveFiles(path.join(root, `${archive.client}-hooks/cuefluent-notes`));
       const manual = await archiveFiles(plugin);
-      assert.deepEqual(manual.filter(file => file.name !== 'README.md'),
-        hooks.filter(file => file.name !== 'README.md' && !file.name.startsWith('hooks/')));
+      assert.deepEqual(manual.filter(file => !['README.md', INVENTORY_FILE].includes(file.name)),
+        hooks.filter(file => !['README.md', INVENTORY_FILE].includes(file.name) && !file.name.startsWith('hooks/')));
       assert.match(await fs.readFile(path.join(plugin, 'README.md'), 'utf8'), /manual package[\s\S]*no hook registration/);
     }
   }
@@ -138,7 +143,8 @@ test('archives normalize input order, file timestamps and permissions', async t 
   await fs.writeFile(snapshot, archives[0][1]);
   run('tar', ['-xzf', snapshot, '-C', restored]);
   for (const name of names) assert.equal(await fs.readFile(path.join(restored, name), 'utf8'), `Synthetic content: ${name}\n`);
-  await fs.symlink(path.join(root, '0/z.md'), path.join(restored, 'linked.md'));
+  await fs.symlink(path.join(root, process.platform === 'win32' ? '0' : '0/z.md'),
+    path.join(restored, 'linked.md'), process.platform === 'win32' ? 'junction' : 'file');
   await assert.rejects(archiveFiles(restored), /Nonportable archive input/);
 });
 
@@ -160,7 +166,8 @@ test('release templates reject outside symlinks and checkout paths before produc
     const file = path.join(checkout, relative);
     const original = await fs.readFile(file);
     await fs.rm(file);
-    await fs.symlink(privateFile, file);
+    await fs.symlink(process.platform === 'win32' ? root : privateFile, file,
+      process.platform === 'win32' ? 'junction' : 'file');
     const linked = attempt();
     assert.equal(linked.status, 2, `Linked ${relative} must be refused before publication.`);
     assert.match(linked.stderr, /nonportable package input/);

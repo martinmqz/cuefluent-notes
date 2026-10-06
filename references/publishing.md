@@ -42,7 +42,7 @@ dist/release/
   plugins/cuefluent-notes/               # Codex hook-enabled plugin
   claude/cuefluent-notes/                # Claude hook-enabled plugin
   README.md
-  release.json                          # version and plugin ZIP digests
+  release.json                          # version, ZIP and inventory digests
   artifacts/
     cuefluent-notes-VERSION-codex-hooks.zip
     cuefluent-notes-VERSION-codex-manual.zip
@@ -60,6 +60,18 @@ and a timestamp-free gzip header. The same source and locked dependencies produc
 identical archive bytes across supported hosts. Manual packages use the already-built
 hook packages, removing hook registration and updating their generated README.
 Build-only dependencies are excluded from every plugin runtime.
+
+Builds capture validated source and dependency inputs once for both clients.
+Shared manifest descriptions/authors and their corresponding Codex labels must
+agree, as must the Claude catalog description. Client-specific interface details
+remain separate. Release verification compares the complete shared skill trees,
+both inventories and their recorded digests before producing the marketplace
+archive. Manual archives receive a new inventory for their own README and file set.
+Marketplace verification requires inventories for 0.11.0 and later, with identities
+matching the enclosing client, release version and hooks variant. Older published
+packages retain their original ZIP digests, without reconstructing them using
+today's shipping list. See [package verification](distribution.md#verify-a-selected-package)
+for an explicit read-only check of a built or installed package.
 
 Keep the reviewed artifacts and `SHA256SUMS` together. If an asset is lost, a rebuild
 from the unchanged tag can recover it only when its checksum matches the original;

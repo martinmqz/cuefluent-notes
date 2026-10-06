@@ -11,6 +11,7 @@ import { archiveFiles, pluginZip } from './release-archives.mjs';
 import { MARKETPLACE_PLUGINS } from './marketplace-layout.mjs';
 import { marketplaceTreeFiles, verifyMarketplaceFiles } from './marketplace-content.mjs';
 import { smokeEnvironment } from './smoke-environment.mjs';
+import { INVENTORY_FILE, withPackageInventory } from './package-integrity.mjs';
 
 const source = path.dirname(fileURLToPath(import.meta.url));
 test('publication branches preserve new main source, reject unexpected or transformed bytes, and never force concurrent changes', async t => {
@@ -43,7 +44,7 @@ test('publication branches preserve new main source, reject unexpected or transf
   }
   await fs.mkdir(path.join(checkout, 'scripts'));
   for (const file of ['release-policy.mjs', 'marketplace-layout.mjs', 'marketplace-content.mjs',
-    'release-archives.mjs', 'file-io.mjs', 'publish-marketplace.sh']) {
+    'release-archives.mjs', 'file-io.mjs', 'publish-marketplace.sh', 'package-integrity.mjs', 'plugin-manifest.mjs', 'workflow-values.mjs']) {
     await fs.copyFile(path.join(source, file), path.join(checkout, 'scripts', file));
   }
   await fs.writeFile(path.join(checkout, '.gitignore'), 'node_modules/\ndist/\n');
@@ -128,13 +129,22 @@ test('publication branches preserve new main source, reject unexpected or transf
       const file = path.join(snapshot, plugin, `.${client}-plugin/plugin.json`);
       const manifest = JSON.parse(await fs.readFile(file, 'utf8'));
       manifest.version = version; await fs.writeFile(file, JSON.stringify(manifest));
-      release.archives.find(a => a.client === client && a.variant === 'hooks').sha256 =
-        createHash('sha256').update(pluginZip(await archiveFiles(path.join(snapshot, plugin)))).digest('hex');
+      const runtimePath = path.join(snapshot, plugin, 'skills/cuefluent-notes/package.json');
+      const runtime = JSON.parse(await fs.readFile(runtimePath)); runtime.version = version;
+      await fs.writeFile(runtimePath, JSON.stringify(runtime));
+      const files = withPackageInventory(await archiveFiles(path.join(snapshot, plugin)), { client, version, withHooks: true });
+      const inventory = files.find(f => f.name === INVENTORY_FILE).bytes;
+      await fs.writeFile(path.join(snapshot, plugin, INVENTORY_FILE), inventory);
+      const record = release.archives.find(a => a.client === client && a.variant === 'hooks');
+      record.sha256 = createHash('sha256').update(pluginZip(files)).digest('hex');
+      record.inventorySha256 = createHash('sha256').update(inventory).digest('hex');
     }
     await fs.writeFile(path.join(snapshot, 'release.json'), JSON.stringify(release));
   };
   const stale = 'plugins/cuefluent-notes/skills/cuefluent-notes/examples/decision.md';
-  await fs.rm(path.join(snapshot, stale)); await setVersion('999.0.0');
+  await fs.rm(path.join(snapshot, stale));
+  await fs.rm(path.join(snapshot, stale.replace('plugins/', 'claude/')));
+  await setVersion('999.0.0');
   const concurrent = changeSource(intervening, 'later-source.txt', 'A second real source change.');
   // A different push endpoint advertises a conflicting branch BEFORE push.
   // --force would overwrite it and make this test fail; no hooks or chmod needed.

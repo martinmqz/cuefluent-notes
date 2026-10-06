@@ -5,15 +5,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { smokeEnvironment } from './smoke-environment.mjs';
 
 const source = path.dirname(fileURLToPath(import.meta.url));
 test('shallow release checks fetch main ancestry only and reject tags outside main', async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-ancestry-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const remote = path.join(root, 'remote');
+  const env = { ...smokeEnvironment(root), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(root, 'empty.gitconfig') };
+  await fs.writeFile(env.GIT_CONFIG_GLOBAL, '');
   await fs.mkdir(remote);
   const git = (cwd, ...args) => {
-    const result = spawnSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
+    const result = spawnSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd, env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     return result.stdout.trim();
   };
@@ -56,13 +59,13 @@ test('shallow release checks fetch main ancestry only and reject tags outside ma
     assert.equal(git(checkout, 'rev-list', '--count', 'HEAD'), '1');
     const head = git(checkout, 'rev-parse', 'HEAD');
     const checked = spawnSync('bash', ['scripts/check-release-source.sh'], {
-      cwd: checkout, encoding: 'utf8', env: { ...process.env, RELEASE_TAG: tag },
+      cwd: checkout, encoding: 'utf8', env: { ...env, RELEASE_TAG: tag },
     });
     assert.equal(checked.status, accepted ? 0 : 1, checked.stderr || checked.stdout);
     assert.equal(git(checkout, 'rev-parse', 'HEAD'), head);
     assert.equal(git(checkout, 'rev-parse', 'origin/main'), git(remote, 'rev-parse', 'main'));
     for (const absent of accepted ? [marketplace, unmerged, laterBlob] : [marketplace, laterBlob]) {
-      assert.notEqual(spawnSync('git', ['-c', 'remote.origin.promisor=false', 'cat-file', '-e', absent], { cwd: checkout, env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } }).status, 0);
+      assert.notEqual(spawnSync('git', ['-c', 'remote.origin.promisor=false', 'cat-file', '-e', absent], { cwd: checkout, env: { ...env, GIT_NO_LAZY_FETCH: '1' } }).status, 0);
     }
     assert.equal(git(checkout, 'for-each-ref', '--format=%(refname)', 'refs/remotes'), 'refs/remotes/origin/main');
   }

@@ -177,6 +177,7 @@ Each output contains:
 ```text
 codex/cuefluent-notes/
   .codex-plugin/plugin.json
+  package-inventory.json       # exact files, sizes and SHA-256 digests
   skills/cuefluent-notes/
     SKILL.md
     README.md
@@ -189,6 +190,7 @@ codex/cuefluent-notes/
   hooks/hooks.json             # hook variant only
 claude/cuefluent-notes/
   .claude-plugin/plugin.json
+  package-inventory.json
   skills/cuefluent-notes/       # same complete skill and runtime
   hooks/hooks.json             # hook variant only
 ```
@@ -197,6 +199,55 @@ The package includes the runtime dependency closure and its license notices.
 Tests and the package builder are source-development tools; use the source
 checkout to change or test the implementation. The source README lives inside
 the packaged skill so its relative reference links remain usable.
+
+## Verify a selected package
+
+Packages built with version 0.11.0 or later include an inventory of their exact
+files. From the source checkout or the packaged skill directory, explicitly select
+the whole plugin root (the directory containing its client manifest):
+
+```sh
+node scripts/package-integrity.mjs /absolute/path/to/cuefluent-notes
+```
+
+The check is read-only. It reports missing, changed and unexpected files, checks
+the client/version/variant identity, and reads only the selected package. It does
+not read notes, capture settings, session evidence or client credentials, fetch
+anything, repair files, install a plugin or change hook trust. Use a known-good
+copy of the checker when investigating a potentially modified installation.
+
+`integrityVerified: true` means the files match their included inventory; it does
+not prove where that inventory came from. For release verification, obtain the
+matching archive entry's `inventorySha256` from a **separately trusted**
+`release.json` in the reviewed marketplace snapshot or published package commit:
+
+```sh
+node scripts/package-integrity.mjs /absolute/path/to/cuefluent-notes \
+  --expected-inventory-sha256 TRUSTED_64_CHARACTER_SHA256
+```
+
+Select the entry matching the version, client and `hooks`/`manual` variant.
+`trustedReleaseVerified` is true only when the files pass integrity checks and
+the inventory matches that supplied digest. Copying a digest from the same
+untrusted installation does not establish release identity. Exit codes are 0
+for successful requested verification, 1 for mismatches, and 2 for unsupported
+or unsafe inputs. Existing packages without inventories remain verifiable through
+their original release ZIP digests; do not add a new inventory to a published version.
+
+Verification rejects symlinks (including the selected root), special files,
+unsafe paths and detected changes during inspection. Bounds are 4,096 packaged
+files, 8,192 total entries, 20 path components, 16 MiB per file, 128 MiB total and
+2 MiB for the inventory. Each mismatch list displays at most 100 paths; counts
+include all mismatches. Ordinary `.DS_Store`, `Thumbs.db`, `desktop.ini` files up
+to 16 MiB and root `.in_use/<positive-decimal-PID>` markers up to 4 KiB are reported
+as ignored host files. `ignoredCount` includes all ignored files and `ignored`
+lists at most 100 paths. Links and special files under those names still
+fail verification. Other files remain unexpected. An actively changing package
+can fail inspection; retry after the client finishes its update.
+
+Package verification does not prove client loading, hook trust, current-turn
+transport or note retrieval behavior. The lightweight `workflow.mjs status`
+diagnostics retain their existing scope; full verification runs only when requested.
 
 Choose one variant for each client. Both variants have the identity
 `cuefluent-notes`; do not install both or register the same adapter manually as
