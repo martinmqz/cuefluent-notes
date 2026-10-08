@@ -51,8 +51,10 @@ scripts also work. WSL, administrator access, and developer-mode symlink
 privileges are not prerequisites for ordinary installation or capture.
 
 `~` in this guide means the current user's home (`%USERPROFILE%` on Windows).
-Workflow settings default to `%LOCALAPPDATA%\CuefluentNotes\workflow.json` on
-Windows and `~/.config/cuefluent-notes/workflow.json` on macOS/Linux. Raw evidence
+Fresh Windows setups use `<local user profile>\.cuefluent-notes\workflow.json`;
+see [Windows storage selection](setup.md#windows-storage-selection) for existing
+stores and explicit overrides. macOS/Linux settings default to
+`~/.config/cuefluent-notes/workflow.json`. Raw evidence
 and managed state must be private and machine-local. Setup verifies ownership and
 permissions and only applies private permissions to newly created managed roots;
 it never repairs an existing directory's ACL. Node chmod alone is insufficient

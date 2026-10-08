@@ -41,7 +41,7 @@ These commands use their own request shape, without the collection envelope:
 
 | Command | Request |
 | --- | --- |
-| `status` | `{selection?}`; reads settings and bounded package diagnostics, optionally resolves a route; no writes |
+| `status` | `{selection?, diagnostics?}`; reads settings and bounded package diagnostics, optionally resolves a route; no writes |
 | `defaults` | `{collectionId?}`; returns platform paths; no creation or activation |
 | `configure` | `{expectedHash, proposal}`; exact old hash or null plus the complete new configuration |
 | `storage-prepare` | `{collectionId, expectedConfigHash}`; explicitly prepares/validates private storage without enabling either process |
@@ -274,3 +274,65 @@ using the returned plan and the explicit offline conditions in
 Neither user confirmation nor a PID check creates OS exclusivity. Live or uncertain
 owners, changed locks and pending conflicts are retained. Never delete or steal a
 writer lock. Maintenance is an explicit operation, not a remedy to run silently.
+
+## Windows settings discovery
+
+See [Windows storage selection](setup.md#windows-storage-selection) for defaults,
+override precedence, existing-store preservation and the environment used by hooks.
+
+`status` and `configure` add `requestedConfigPath` and `resolvedConfigPath`.
+`status` keeps the normalized requested `configPath`; `configure` keeps the resolved
+`configPath`. Ordinary Windows `status` inspects only the
+selected settings path and its package origin. `{ "diagnostics": true }` also
+inventories the known default/package-cache settings locations and inspects the
+configured collections' root paths and physical identities. It does not read other
+settings bodies, captures, or notes, and an incomplete inventory is reported as incomplete.
+
+Fresh setup and changes to projects, collections or storage destinations compare
+bounded, validated settings from those locations before writing. Overlapping
+project, note or private-storage bindings are refused. An explicit disjoint
+configuration is permitted; explicit selection cannot bypass a conflicting store.
+Storage already identified by the selected settings remains usable: a bounded
+metadata walk distinguishes its ancestors and private roots from unexplained
+siblings, without reading private-root contents or adopting unknown state.
+Ordinary policy changes and removals keep working without that inventory.
+
+`WINDOWS_PACKAGE_STORE_FROZEN` means a package-backed settings file or private
+root needs a missing store created. Existing prepared collections can continue,
+but additions requiring missing roots await separate migration support.
+`WINDOWS_STORAGE_SHADOW_CONFLICT` means an AppData path has a package-cache
+counterpart that could hide another store. Keep the existing files; do not delete
+state, change permissions, or choose fresh paths to bypass these errors.
+Incomplete discovery or changed candidate settings also stops setup. Inspect the
+reported paths and resolve access or concurrent changes before reviewing a new
+request. Discovery does not lock every configuration across clients, so it cannot
+make independent cross-config setup operations atomic. Each discovery pass retains
+finite entry/byte bounds and a 30-second deadline checked between filesystem
+operations; an outer worker deadline, if present, still takes precedence.
+
+Setup pins resolved paths for the operation. `PRIVATE_STORAGE_REDIRECTED` means
+creation or staging changed a path mapping; activation is refused. A failed setup
+can leave newly created empty directories. Preserve those objects for inspection
+instead of retrying automatically or selecting their redirected paths. A changed
+mapping is not authorization to adopt a different store.
+
+New Windows private directories require a parent whose write permissions are
+limited to the current user, SYSTEM and Administrators. `PRIVATE_PARENT_UNSAFE`
+refuses creation beneath a shared writable parent; do not loosen its permissions
+or select another store to bypass a conflict. Existing folders receive no
+permission edits. A separate mechanism for secure creation under shared parents
+is not included.
+
+| Setup error | Meaning and next step |
+| --- | --- |
+| `WORKFLOW_CONFIG_SELECTION_REQUIRED` | Both implicit defaults name different settings files. Inspect and select the intended settings for the command; hooks also need the client environment override described in [setup](setup.md#windows-storage-selection). Never merge or delete stores automatically. |
+| `WORKFLOW_CONFIG_UNAVAILABLE` | A selected/default path is unsafe, unreadable or changed during inspection. Do not treat it as absent and create another configuration. |
+| `LOCAL_STATE_LOCATION_REQUIRED` | Required local path facts are missing or the only fresh candidate is a network profile. No fallback store is selected. |
+| `PRIVATE_PROFILE_UNVERIFIED` / `PRIVATE_PROFILE_UNSAFE` | Native profile policy cannot be established or is unsupported for the private location. Preserve settings and data; inspect profile policy rather than enabling capture or relaxing checks. |
+| `PRIVATE_CONTENT_INDEXING_REQUIRED` | A private profile path lacks NotContentIndexed. Verification does not repair existing files; review storage before continuing. This is separate from an optional raw-folder visibility warning. |
+| `WINDOWS_EXISTING_SETTINGS` | Implicit fresh setup found other settings. Inspect their paths before explicitly selecting an existing setup or a disjoint new one. |
+| `WINDOWS_SETTINGS_OVERLAP` | Another configuration owns overlapping project, notes or private-storage paths. Preserve it; do not create a second writer or move paths to bypass ownership. |
+| `WINDOWS_SETTINGS_UNRESOLVED` | Discovered state or another settings file could not be explained or validated. Inspect the reported location; a newer schema may require a plugin update. |
+| `WINDOWS_SETTINGS_INSPECTION_LIMIT` | Bounded settings or metadata inspection exceeded its limit. Setup did not complete; preserve the existing stores. |
+| `WINDOWS_SETTINGS_DISCOVERY_INCOMPLETE` / `WINDOWS_DISCOVERY_TIMEOUT` | The package inventory or inspection could not finish. Diagnose access or host load before trying a newly reviewed request. |
+| `WINDOWS_SETTINGS_CHANGED` | Candidate identity, contents or bindings changed during setup. Inspect the current state before reviewing another request. |

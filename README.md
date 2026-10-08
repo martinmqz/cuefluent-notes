@@ -294,7 +294,10 @@ Collection and processing can be paused independently; user opt-outs override
 saved permission. Raw evidence is private and may contain sensitive information;
 collection does not automatically redact it. Pruning and abandoned-lock recovery
 require explicit, reviewed commands. Intake and writer state must stay on local
-storage, outside projects, notes and the plugin.
+storage, outside projects, notes and the plugin. Fresh Windows setups use a
+shared local profile directory; existing settings are preserved. See
+[Windows storage selection](references/setup.md#windows-storage-selection) for
+Desktop/CLI selection, package-store limits and profile checks.
 
 ## Verification and licensing
 

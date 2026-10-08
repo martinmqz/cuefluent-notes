@@ -9,8 +9,8 @@ can proceed without setup. Installation or trusting hooks supplies no capture co
 
 Run `node scripts/workflow.mjs status` from the installed package. Use an explicit
 `--config` when one was selected; otherwise the helper respects
-`CUEFLUENT_WORKFLOW_CONFIG` and its platform default. Status reads settings and bounded package diagnostics and
-creates nothing. Report existing collections, routes, collection selection, processing
+`CUEFLUENT_WORKFLOW_CONFIG` and its platform default. Status reads settings and
+creates nothing; request `diagnostics: true` for bounded Windows package inventory. Report existing collections, routes, collection selection, processing
 mode, destinations and transport limits; preserve settings unrelated to the request.
 Use [workflow-cli](workflow-cli.md) for JSON request formats and inspected hashes.
 
@@ -38,11 +38,68 @@ Explain the choices in ordinary terms:
   processing run automatically. Do not promise native prompt rendering without
   verifying it in the actual client.
 
+## Windows storage selection
+
+Fresh Windows setups use `<local user profile>\.cuefluent-notes\workflow.json`.
+The raw, intake and writer suggestions share the selected settings file's
+`collections\<collectionId>` folder. Explicit custom settings and aliases retain
+that same base instead of creating storage at an unrelated implicit default.
+The Markdown destination remains a separate user choice. The same resolver is used
+by setup, the CLI and hooks; installation does not create this storage.
+
+An explicit `--config` takes precedence over `CUEFLUENT_WORKFLOW_CONFIG`.
+Without either override, an existing old
+`%LOCALAPPDATA%\CuefluentNotes\workflow.json` stays selected when the new default
+is absent. If both default files exist as distinct objects, the helper reports
+`WORKFLOW_CONFIG_SELECTION_REQUIRED`; inspect them and explicitly select the
+intended settings. `--config` selects only that command, not future hooks.
+While both defaults exist, commands that need workflow settings and hook collection
+require an explicit selection. For hooks, `CUEFLUENT_WORKFLOW_CONFIG` must be present
+in the launching client's environment.
+Verify the value in that client context; setting it in a separate terminal does
+not establish what Desktop hooks inherit. Creating an explicit disjoint setup at
+the other default location introduces this ambiguity for existing hooks too.
+Equal contents do not make two stores interchangeable. Errors
+or unreadable paths are not treated as missing settings. A network profile cannot
+become the new default; an existing local setup remains selectable.
+
+Before a fresh setup or ownership change, the helper checks known old/new defaults
+and package-cache locations for conflicting settings. Incomplete discovery blocks
+setup. It reads bounded settings for this comparison, never captures or notes.
+Implicit fresh setup stops whenever other settings exist, even without overlap.
+An explicit new path does not bypass an overlapping project, note destination or
+private store. An explicitly selected, provably disjoint setup is permitted; empty package shadows alone
+do not block the new profile default. See [Windows diagnostics](workflow-cli.md#windows-settings-discovery).
+
+Windows package-backed stores are preserved. Existing prepared collections can
+continue while their storage verifies, but missing roots cannot be created for
+those stores. Additions that need new roots and replacement of the same collection
+require separate migration work; this release has no migration or retirement
+command. Do not copy settings to another host view, create another writer for the
+same notes, or rerun fresh setup to work around that freeze.
+
+Private settings and storage under the native profile, outside verified
+non-roaming LocalAppData, require a local, loaded, non-roaming profile and content
+indexing protection. This applies to custom private profile paths too. New empty
+private directories get the NotContentIndexed attribute before private writes;
+children must retain it. Existing unmarked data fail with
+`PRIVATE_CONTENT_INDEXING_REQUIRED` and are not modified. Preserve the files and
+review the storage configuration rather than moving them or recursively changing
+attributes as an automatic repair. The native profile location is checked from
+registry metadata. The WMI profile policy query runs only for private paths inside
+that profile outside verified LocalAppData; failures block those paths, without
+gating unrelated local stores. Read-only status does not grant that verification. These rules do not restrict finished notes in Documents, OneDrive or
+other user-selected document locations. The indexing attribute is separate from
+the raw folder's optional Hidden attribute and does not control every third-party
+indexer or synchronization tool.
+
 ## Save the chosen settings
 
 Use the complete configuration described by [session-workflow](session-workflow.md)
 and the synthetic [example](../examples/workflow.json). `defaults` with a collection
-ID suggests platform-specific private paths. The user selects the Markdown location;
+ID suggests platform-specific private paths for a fresh collection. Never use
+those defaults to replace existing bindings during an upgrade.
+The user selects the Markdown location;
 private raw/intake/writer storage uses machine-local paths outside projects, notes,
 and the plugin. Do not place private state in a sync folder or the repository.
 
@@ -71,7 +128,8 @@ For a fresh collection:
    decision. Never create category folders during setup.
 4. If the user authorized activation, use a second guarded `configure` to apply
    the chosen collection and processing settings after privacy verification. Read
-   status back and report the actual state and transport limit.
+   status back and report saved preferences, verified storage, observed hook
+   execution and completed capture as separate outcomes, including the transport limit.
 
 The selected notes root must exist before proposal inspection; create a missing
 root only within an explicit setup/destination authorization. Existing notes and
@@ -80,6 +138,10 @@ All overlapping note routes must share one writer state; do not create per-categ
 or per-session writers. A custom raw directory does not relocate intake state.
 
 ## Existing settings
+
+Keep all client plugins/helpers sharing a store on the same version. For Windows
+storage changes, follow [Windows storage selection](#windows-storage-selection)
+and preserve existing paths and consent; the new default is not a migration.
 
 For the v0.8.0-to-v0.9.0 upgrade, preserve the existing workflow settings and
 storage paths; fresh setup is not required. Before updating, stop collection

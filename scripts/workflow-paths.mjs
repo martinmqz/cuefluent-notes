@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { windowsAbsolute, CONTROLS, lstatOrNull } from './file-io.mjs';
+import { windowsAbsolute, CONTROLS, lstatOrNull, sameFileIdentity } from './file-io.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { fail, id, string } from './workflow-values.mjs';
 
@@ -12,36 +12,81 @@ export function absolutePath(value, platform = process.platform) {
       !(platform === 'win32' ? windowsAbsolute(value) : api.isAbsolute(value))) fail('INVALID_WORKFLOW_PATH');
   return api.resolve(value);
 }
-export function inside(parent, child, platform = process.platform) {
+export function inside(parent, child, platform = process.platform, { caseInsensitive = false } = {}) {
   const api = platform === 'win32' ? path.win32 : path.posix;
-  const relative = api.relative(parent, child);
+  const relative = api.relative(caseInsensitive ? parent.toLowerCase() : parent, caseInsensitive ? child.toLowerCase() : child);
   return relative === '' || (!relative.startsWith(`..${api.sep}`) && relative !== '..' && !api.isAbsolute(relative));
 }
-export const overlaps = (a, b, platform) => inside(a, b, platform) || inside(b, a, platform);
+export const overlaps = (a, b, platform, options) => inside(a, b, platform, options) || inside(b, a, platform, options);
 
 // Missing suffix spelling is not canonical on the default case-insensitive APFS.
 // Conservatively reject case-only overlaps even on a case-sensitive macOS volume.
 const placementOverlap = (a, b) => overlaps(process.platform === 'darwin' ? a.toLowerCase() : a,
   process.platform === 'darwin' ? b.toLowerCase() : b);
 
-export function workflowDefaults({ platform = process.platform, home = os.homedir(), env = process.env, collectionId } = {}) {
+/** Shared path facts, without inventory, native subprocesses or writes. */
+export function windowsDefaultLocations({ platform = process.platform, home = os.homedir(), env = process.env } = {}) {
   const api = platform === 'win32' ? path.win32 : path.posix;
-  let base, configPath;
+  if (!env.LOCALAPPDATA) fail('LOCAL_STATE_LOCATION_REQUIRED');
+  const local = absolutePath(env.LOCALAPPDATA, platform), user = absolutePath(home, platform);
+  if (platform === 'win32' && !/^[a-z]:\\/i.test(local)) fail('LOCAL_STATE_LOCATION_REQUIRED');
+  return { local, home: user, oldConfig: api.join(local, 'CuefluentNotes', 'workflow.json'),
+    newConfig: api.join(user, '.cuefluent-notes', 'workflow.json') };
+}
+
+async function defaultCandidate(file) {
+  // Canonicalization also checks missing suffixes: broken aliases and access
+  // errors cannot masquerade as the confirmed absence needed for fresh setup.
+  try {
+    await canonicalWorkflowPath(file, { directory: false });
+    const stat = await lstatOrNull(file, { bigint: true });
+    if (!stat) return null;
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) fail('UNSAFE_WORKFLOW_PATH');
+    const resolved = await fs.realpath(file), after = await fs.lstat(file, { bigint: true });
+    if (!sameFileIdentity(stat, after)) fail('PRIVATE_STORAGE_CHANGED');
+    return { resolved, stat: after };
+  } catch (error) { throw Object.assign(new Error('Workflow default selection is unavailable.', { cause: error }), { code: 'WORKFLOW_CONFIG_UNAVAILABLE' }); }
+}
+
+/** Native metadata only. Separate path facts keep this shared by hooks and CLI. */
+export async function resolveWindowsConfig({ oldConfig, newConfig }) {
+  const old = await defaultCandidate(oldConfig);
+  // A network profile is not a fresh storage candidate. Keep a healthy old
+  // LocalAppData selection available without inspecting the network profile.
+  if (newConfig.startsWith('\\\\')) {
+    if (old) return oldConfig;
+    fail('LOCAL_STATE_LOCATION_REQUIRED');
+  }
+  const current = await defaultCandidate(newConfig);
+  if (old && current && !sameFileIdentity(old.stat, current.stat)) fail('WORKFLOW_CONFIG_SELECTION_REQUIRED');
+  return current || !old ? newConfig : oldConfig;
+}
+
+export async function resolveWorkflowConfig({ platform = process.platform, home = os.homedir(), env = process.env, explicit } = {}) {
+  const override = explicit ?? env.CUEFLUENT_WORKFLOW_CONFIG;
+  const requestedConfigPath = override ?? (platform === 'win32'
+    ? await resolveWindowsConfig(windowsDefaultLocations({ platform, home, env }))
+    : path.posix.join(absolutePath(home, platform), '.config', 'cuefluent-notes', 'workflow.json'));
+  return { configPath: absolutePath(requestedConfigPath, platform), requestedConfigPath, explicit: override !== undefined };
+}
+
+export async function workflowDefaults({ platform = process.platform, home = os.homedir(), env = process.env, collectionId, explicit } = {}) {
+  const api = platform === 'win32' ? path.win32 : path.posix;
+  const { configPath } = await resolveWorkflowConfig({ platform, home, env, explicit });
+  if (collectionId === undefined) return { configPath };
+  let base;
   if (platform === 'win32') {
-    if (!env.LOCALAPPDATA) fail('LOCAL_STATE_LOCATION_REQUIRED');
-    const local = absolutePath(env.LOCALAPPDATA, platform);
-    if (!/^[a-z]:\\/i.test(local)) fail('LOCAL_STATE_LOCATION_REQUIRED');
-    base = api.join(local, 'CuefluentNotes');
-    configPath = api.join(base, 'workflow.json');
+    // Keep new suggestions with the selected settings, including aliases of an
+    // old store and explicit custom configs. Never create orphan default state
+    // elsewhere merely because the caller selected a different settings path.
+    base = api.dirname(configPath);
   } else {
     const user = absolutePath(home, platform);
-    configPath = api.join(user, '.config', 'cuefluent-notes', 'workflow.json');
     base = platform === 'darwin' ? api.join(user, 'Library', 'Application Support', 'Cuefluent Notes')
       : api.join(env.XDG_STATE_HOME ? absolutePath(env.XDG_STATE_HOME, platform) : api.join(user, '.local', 'state'), 'cuefluent-notes');
   }
-  if (collectionId === undefined) return { configPath };
   const root = api.join(base, 'collections', id(collectionId));
-  return { configPath, rawDir: api.join(root, '.cuefluent-raw'), intakeStateDir: api.join(root, 'state') };
+  return { configPath, rawDir: api.join(root, '.cuefluent-raw'), intakeStateDir: api.join(root, 'state'), writerStateDir: api.join(root, 'writer') };
 }
 
 /** Resolve existing aliases, but never create a missing suffix. Leaf links are refused. */
@@ -85,7 +130,8 @@ export async function canonicalWorkflowProject(input, { allowMissing = true } = 
 
 /** Input must already pass validateWorkflowConfig. This is not an ACL/locality grant. */
 export async function validateWorkflowPlacement(config, { packageRoot = PACKAGE_ROOT,
-  configPath = workflowDefaults().configPath, canonicalize = canonicalWorkflowPath } = {}) {
+  configPath, canonicalize = canonicalWorkflowPath } = {}) {
+  configPath ??= (await workflowDefaults()).configPath;
   const projects = await Promise.all(config.routes.map(route => canonicalize(route.projectRoot)));
   const installedRoot = await canonicalize(packageRoot);
   const protectedRoots = [installedRoot, ...projects];

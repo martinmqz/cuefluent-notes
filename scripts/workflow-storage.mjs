@@ -8,8 +8,9 @@ import { lstatOrNull, sameFileIdentity, syncDirectory } from './file-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { validateWorkflowPlacement, canonicalWorkflowPath, inside } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
-import { privacyIdentity, verifyPrivateEntries, protectNewDirectory, hidePrivateDirectory, rejectKnownSync } from './storage-platform.mjs';
+import { privacyIdentity, verifyPrivateEntries, createPrivateDirectory, hidePrivateDirectory, rejectKnownSync, withStorageProbes } from './storage-platform.mjs';
 import { fail, canonicalJSON, hash, digest, list, keys } from './workflow-values.mjs';
+import { preflightWindowsStorage } from './windows-setup-guards.mjs';
 
 const capabilities = new WeakMap();
 const rootsOf = collection => [collection.rawDir, collection.intakeStateDir, collection.notes.writerStateDir];
@@ -129,14 +130,24 @@ export async function verifyPrivateDirectories(roots, options = { paths: [] }) {
 }
 
 /** Explicit setup only; never called by a hook. Existing permissions are not repaired. */
-export async function prepareWorkflowStorage({ configPath, expectedConfigHash, collectionId }, {
+export function prepareWorkflowStorage(request, options = {}) {
+  return withStorageProbes(() => prepareStorage(request, options));
+}
+async function prepareStorage({ configPath, expectedConfigHash, collectionId }, {
   visibility = hidePrivateDirectory,
   onWarning = code => console.error(`Cuefluent Notes: raw folder remains visible (${code}).`),
+  platformFacts,
 } = {}) {
   const selected = await checkedSelection(configPath, expectedConfigHash, collectionId);
+  const pinnedSelection = async () => {
+    const current = await checkedSelection(configPath, expectedConfigHash, collectionId);
+    if (canonicalJSON(current.placement) !== canonicalJSON(selected.placement)) fail('PRIVATE_STORAGE_REDIRECTED');
+    return current;
+  };
+  const recheck = await preflightWindowsStorage({ configPath, roots: rootsOf(selected.collection) }, platformFacts);
   const identity = await privacyIdentity();
   const initialRaw = await lstatOrNull(selected.collection.rawDir, { bigint: true });
-  let createdRaw;
+  let createdRaw, uncertainRaw = false;
   async function create(file, expected, beforeCreate) {
     rejectKnownSync(file);
     const old = await lstatOrNull(file, { bigint: true });
@@ -148,12 +159,17 @@ export async function prepareWorkflowStorage({ configPath, expectedConfigHash, c
       return old;
     }
     await create(path.dirname(file));
-    await checkedSelection(configPath, expectedConfigHash, collectionId);
+    await pinnedSelection();
     await beforeCreate?.();
-    await fs.mkdir(file, { mode: 0o700 }); // EEXIST is a conflict, never adopt.
-    const original = await fs.lstat(file, { bigint: true });
-    if (file === selected.collection.rawDir && !initialRaw) createdRaw = original;
-    await protectNewDirectory(file, identity);
+    let original;
+    try {
+      original = await createPrivateDirectory(file, identity, stat => {
+        if (file === selected.collection.rawDir && !initialRaw) createdRaw = stat;
+      });
+    } catch (error) {
+      if (file === selected.collection.rawDir && !initialRaw && error.privateDirectoryMayExist) uncertainRaw = true;
+      throw error;
+    }
     const current = await fs.lstat(file, { bigint: true });
     if (!sameFileIdentity(original, current)) fail('PRIVATE_STORAGE_CHANGED');
     await verifyPrivateEntries([{ path: file, stat: current, root: true }], identity);
@@ -169,28 +185,45 @@ export async function prepareWorkflowStorage({ configPath, expectedConfigHash, c
       'wake/codex', 'wake/claude', 'wake-acks/codex', 'wake-acks/claude', 'drained/codex', 'drained/claude', 'suspended/codex', 'suspended/claude']) {
       await create(path.join(selected.collection.intakeStateDir, 'ingress', ...name.split('/')));
     }
-    // Verify inheritance without source text, and remove only the exact empty
-    // probe owned by this setup. Existing roots receive no permission mutation.
+    // Verify inheritance and file-level resolution without source text. Desktop
+    // can retain a directory alias while exposing relocation only on a child file.
+    // Remove only exact owned probes; existing roots receive no permission edits.
     for (const root of rootsOf(selected.collection)) {
       await verifyRoots([root], identity, { paths: null });
       const probe = path.join(root, `.privacy-probe-${randomUUID()}`);
       await fs.mkdir(probe, { mode: 0o700 });
       const stat = await fs.lstat(probe, { bigint: true });
-      try { await verifyPrivateEntries([{ path: probe, stat, root: false }], identity); }
+      const probeFile = path.join(probe, 'entry'); let fileStat;
+      try {
+        await verifyPrivateEntries([{ path: probe, stat, root: false }], identity);
+        const handle = await fs.open(probeFile, 'wx', 0o600);
+        try { fileStat = await handle.stat({ bigint: true }); } finally { await handle.close(); }
+        if (await fs.realpath(probeFile) !== probeFile) fail('PRIVATE_STORAGE_REDIRECTED');
+        await verifyPrivateEntries([{ path: probeFile, stat: fileStat, root: false }], identity);
+      }
       finally {
         const now = await fs.lstat(probe, { bigint: true });
         if (!sameFileIdentity(stat, now) || now.isSymbolicLink()) fail('PRIVATE_STORAGE_CHANGED');
+        if (fileStat) {
+          const current = await fs.lstat(probeFile, { bigint: true });
+          if (!sameFileIdentity(fileStat, current) || !current.isFile() || current.isSymbolicLink() ||
+              current.nlink !== 1n || current.size !== 0n || current.ctimeNs !== fileStat.ctimeNs ||
+              current.mtimeNs !== fileStat.mtimeNs) fail('PRIVATE_STORAGE_CHANGED');
+          await fs.unlink(probeFile);
+        }
         await fs.rmdir(probe); await syncDirectory(root);
       }
     }
+    await pinnedSelection();
     let capability = await verifyWorkflowStorage({ configPath, expectedConfigHash, collectionId });
     if (!sameFileIdentity(preparedRaw, capabilities.get(capability).roots[0].stat)) fail('PRIVATE_STORAGE_CHANGED');
     if (process.platform === 'win32') {
       const original = capabilities.get(capability);
       await visibility(original.roots[0], identity,
-        () => checkedSelection(configPath, expectedConfigHash, collectionId));
+        pinnedSelection);
       // Visibility commands can outlive changes to any root. Recheck privacy and
       // preserve the original identities before returning a fresh capability.
+      await pinnedSelection();
       capability = await verifyWorkflowStorage({ configPath, expectedConfigHash, collectionId });
       const current = capabilities.get(capability);
       if (current.identity !== original.identity) fail('PRIVATE_STORAGE_CHANGED');
@@ -202,6 +235,7 @@ export async function prepareWorkflowStorage({ configPath, expectedConfigHash, c
   }
 
   const intake = selected.collection.intakeStateDir;
+  await recheck?.();
   const preparedIntake = await create(intake, await lstatOrNull(intake, { bigint: true }));
   const guardIntake = async () => {
     const [current] = await verifyRoots([intake], identity);
@@ -233,6 +267,15 @@ export async function prepareWorkflowStorage({ configPath, expectedConfigHash, c
       preparedRaw = await create(selected.collection.rawDir, initialRaw, emptyVersion ? unchangedIntake : undefined);
       if (emptyVersion) await unchangedIntake();
     } catch (error) {
+      if (!initialRaw && !createdRaw) {
+        // Creation may have completed without returning an identity, or another
+        // object may have raced our exclusive create. Neither permits pairing an
+        // unexplained raw root with this intake on the next attempt.
+        try { preserveLock = uncertainRaw || !!await lstatOrNull(selected.collection.rawDir); }
+        catch { preserveLock = true; }
+        if (preserveLock && !error.cleanupWarnings?.length)
+          error.cleanupWarnings = ['Raw-root creation could not be verified; preserve it for inspection.'];
+      }
       if (createdRaw) {
         // Roll back only our still-private, unchanged, empty new root. Never
         // remove content or a replacement while rejecting a changed intake.
@@ -255,11 +298,17 @@ export async function prepareWorkflowStorage({ configPath, expectedConfigHash, c
 }
 
 /** Opaque, process-local capability; serialization cannot turn it into authority. */
-export async function verifyWorkflowStorage({ configPath, expectedConfigHash, collectionId }) {
+export function verifyWorkflowStorage(request) {
+  return withStorageProbes(() => verifyStorage(request));
+}
+async function verifyStorage({ configPath, expectedConfigHash, collectionId }) {
   checkWorkflowBudget();
   configPath = await canonicalWorkflowPath(configPath, { directory: false, allowMissing: false });
   const selected = await checkedSelection(configPath, expectedConfigHash, collectionId);
   const identity = await privacyIdentity();
+  if (process.platform === 'win32') await verifyPrivateEntries([
+    { path: configPath, stat: await fs.lstat(configPath, { bigint: true }), root: false },
+  ], identity);
   const roots = await verifyRoots(rootsOf(selected.collection), identity);
   await checkedSelection(configPath, expectedConfigHash, collectionId);
   const capability = Object.freeze({ toJSON() { fail('STORAGE_CAPABILITY_NOT_SERIALIZABLE'); } });

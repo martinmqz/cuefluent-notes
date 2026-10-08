@@ -146,7 +146,8 @@ export function launchCollectionWorker({ configPath, collectionId, trigger = nul
 }
 
 /** Returns metadata only. A hook envelope is not a current-turn control token. */
-export async function collectionIngress(client, payload, { configPath = workflowConfigPath(), launch = launchCollectionWorker } = {}) {
+export async function collectionIngress(client, payload, { configPath, launch = launchCollectionWorker } = {}) {
+  configPath ??= await workflowConfigPath();
   const envelope = nativeContextEnvelope(client, payload), snapshot = await readWorkflowSnapshot(configPath);
   const route = await resolveWorkflowRoute(snapshot.config, envelope);
   if (!route.intended?.collect && !route.intended?.process) return { status: route.status === 'selected' ? 'disabled' : route.status, context: null };

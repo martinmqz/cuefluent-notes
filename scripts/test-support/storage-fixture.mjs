@@ -12,6 +12,8 @@ export async function storageFixture(t, { privateConfig = false, fullSetup = tru
   // Detached native children can briefly retain their cwd after publication.
   // Retry only owned-fixture teardown; assertion failures still propagate.
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  // Match POSIX mkdtemp privacy before writing synthetic config or child paths.
+  if (process.platform === 'win32') await protectNewDirectory(root, await privacyIdentity());
   const project = path.join(root, 'project'); await fs.mkdir(project);
   const collection = { id: 'fixture', rawDir: path.join(root, rawName), intakeStateDir: path.join(root, 'state'),
     notes: { notesDir: path.join(root, 'notes'), writerStateDir: path.join(root, 'writer') } };

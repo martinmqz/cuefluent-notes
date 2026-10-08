@@ -1,3 +1,4 @@
+import './test-support/isolated-settings.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -142,4 +143,51 @@ test('a Windows worker probe rereads changed ACLs within the same process', { sk
     await systemCommand(windowsTools().icacls, [file, '/grant', '*S-1-1-0:R']);
     await assert.rejects(withStorageProbes(() => assertPrivatePaths(f.capability, [file])), { code: 'STORAGE_NOT_PRIVATE' });
   });
+});
+
+test('exclusive private creation refuses existing objects without changing their contents or permissions', async t => {
+  const { createPrivateDirectory } = await import('./storage-platform.mjs');
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-exclusive-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  if (process.platform === 'win32') await systemCommand(windowsTools().icacls, [root, '/grant', '*S-1-5-32-545:(OI)(CI)RX']);
+  await withStorageProbes(async () => {
+    const identity = await privacyIdentity(), directory = path.join(root, '会議 & $(literal)');
+    const first = await createPrivateDirectory(directory, identity);
+    await verifyPrivateEntries([{ path: directory, stat: first, root: true }], identity);
+    const file = path.join(directory, 'keep.json'); await fs.writeFile(file, '{"keep":true}', { mode: 0o600 });
+    const before = await fs.lstat(directory, { bigint: true });
+    await assert.rejects(createPrivateDirectory(directory, identity), { code: 'EEXIST' });
+    const after = await fs.lstat(directory, { bigint: true });
+    assert.equal(after.ino, before.ino); assert.equal(after.mode, before.mode); assert.equal(after.ctimeNs, before.ctimeNs);
+    assert.equal(await fs.readFile(file, 'utf8'), '{"keep":true}');
+  });
+});
+
+test('native Windows refuses a shared writable creation parent without changing it', { skip: process.platform !== 'win32' }, async t => {
+  const { createPrivateDirectory } = await import('./storage-platform.mjs');
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-parent-acl-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await systemCommand(windowsTools().icacls, [root, '/grant', '*S-1-1-0:(OI)(CI)M']);
+  const before = await systemCommand(windowsTools().icacls, [root]);
+  await withStorageProbes(async () => {
+    await assert.rejects(createPrivateDirectory(path.join(root, 'private'), await privacyIdentity()), { code: 'PRIVATE_PARENT_UNSAFE' });
+  });
+  assert.deepEqual(await fs.readdir(root), []);
+  assert.equal(await systemCommand(windowsTools().icacls, [root]), before);
+});
+
+test('creation parent validation rejects untrusted write grants, ownership and unsupported ACL forms', async () => {
+  const { validateWindowsCreationParent } = await import('./storage-platform.mjs');
+  const sid = 'S-1-5-21-1-2-3-1000';
+  const valid = { owner: sid, protected: false, daclPresent: true, attributes: 16, driveType: 3, driveFormat: 'NTFS',
+    aces: [sid, 'S-1-5-18', 'S-1-5-32-544'].map(sid => ({ sid, type: 0, flags: 3, mask: 2032127 })) };
+  valid.aces.push({ sid: 'S-1-5-32-545', type: 0, flags: 3, mask: 1179817 });
+  valid.aces.push({ sid: 'S-1-3-0', type: 0, flags: 11, mask: 2032127 });
+  validateWindowsCreationParent(valid, sid);
+  for (const mutate of [v => v.aces[3].mask |= 2, v => v.aces[3].mask |= 64,
+    v => v.aces[4].flags = 3, v => v.aces[0].type = 5, v => v.owner = 'S-1-1-0',
+    v => v.attributes |= 1024, v => v.daclPresent = false, v => v.driveType = 4]) {
+    const changed = structuredClone(valid); mutate(changed);
+    assert.throws(() => validateWindowsCreationParent(changed, sid), { code: 'PRIVATE_PARENT_UNSAFE' });
+  }
 });

@@ -11,7 +11,11 @@ for (const statuses of [[1, 0], [0, 7], [2, 7], [null, 0], ['spawn-error', 0], [
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-test-runner-# '));
     t.after(() => fs.rm(root, { recursive: true, force: true }));
     await fs.copyFile(new URL('./test.mjs', import.meta.url), path.join(root, 'test.mjs'));
-    const names = ['collection-hooks.test.mjs', 'collection-package.test.mjs', 'ordinary.test.mjs'];
+    await fs.mkdir(path.join(root, 'test-support'));
+    // This process only simulates phase dispatch. Its spoofed platform must not
+    // invoke Windows ACL tools or create settings as if it were a native host.
+    await fs.writeFile(path.join(root, 'test-support', 'isolated-settings.mjs'), '// No settings or native storage in this orchestration-only fixture.\n');
+    const names = ['collection-hooks.test.mjs', 'collection-package.test.mjs', 'windows-discovery.test.mjs', 'ordinary.test.mjs'];
     await Promise.all(names.map(name => fs.writeFile(path.join(root, name), '')));
     // Only orchestration is simulated: no filesystem or client behavior is
     // claimed as native Windows coverage by this isolated child process.

@@ -4,9 +4,10 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fail } from './workflow-values.mjs';
-import { inside } from './workflow-paths.mjs';
+import { inside, canonicalWorkflowPath } from './workflow-paths.mjs';
 import { workflowTimeout } from './workflow-budget.mjs';
 import { sameFileIdentity } from './file-io.mjs';
+import { PROFILE_PROBE, PROFILE_FOLDERS_PROBE, windowsProfilePolicy, profileIndexPaths, resolveNativeProfileFolders, resolveProfileFolders } from './windows-profile.mjs';
 
 const SID = /^S-1-(?:\d+-){1,14}\d+$/;
 const SYSTEM = 'S-1-5-18', ADMIN = 'S-1-5-32-544', FULL = 2032127;
@@ -91,7 +92,7 @@ export async function withStorageProbes(operation) {
   // Reuse that live query transport; every query still checks current ACLs and
   // the innermost budget, and only its original owner closes the child.
   if (probeSessions.getStore()) return operation();
-  const script = `[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); function Read-CuefluentAcl($pathData) {${ACL_PROBE.replace('$env:CUEFLUENT_PRIVACY_PATHS', '$pathData')}}; while(($line=[Console]::In.ReadLine()) -ne $null) { Read-CuefluentAcl $line }`;
+  const script = `[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); function Read-CuefluentAcl($pathData) {${ACL_PROBE.replace('$env:CUEFLUENT_PRIVACY_PATHS', '$pathData')}}; function Read-CuefluentProfile {${PROFILE_PROBE}}; function Read-CuefluentFolders {${PROFILE_FOLDERS_PROBE}}; while(($line=[Console]::In.ReadLine()) -ne $null) { if($line -eq 'profile' -or $line -eq 'folders') {try {if($line -eq 'profile'){Read-CuefluentProfile}else{Read-CuefluentFolders}} catch {[Console]::WriteLine('{"error":"PRIVATE_PROFILE_UNVERIFIED"}')}} else {Read-CuefluentAcl $line} }`;
   const child = spawn(windowsTools().powershell, ['-NoProfile', '-NonInteractive', '-Command', script],
     { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: probeEnvironment('') });
   let pending = null, buffer = '', received = 0, dead = false, queue = Promise.resolve();
@@ -112,7 +113,7 @@ export async function withStorageProbes(operation) {
     request.resolve(line);
   });
   child.stderr.on('data', chunk => { received += chunk.length; if (received > 1024 * 1024) failed(); });
-  const session = { sid: null, acl(paths) {
+  const session = { sid: null, folders: null, profile: null, acl(paths) {
     const next = queue.then(() => new Promise((resolve, reject) => {
       if (dead) { reject(Object.assign(new Error('PRIVACY_PROBE_FAILED'), { code: 'PRIVACY_PROBE_FAILED' })); return; }
       const timeout = workflowTimeout(); received = 0; buffer = '';
@@ -123,6 +124,105 @@ export async function withStorageProbes(operation) {
   } };
   try { return await probeSessions.run(session, operation); }
   finally { child.stdin.end(); failed(); }
+}
+
+/** Cache policy only for the live top-level operation, never across commands or
+ * in a serialized capability. ACL queries remain fresh on every boundary. */
+export async function privateProfilePaths(files, identity) {
+  if (process.platform !== 'win32') return new Set();
+  if (!files.length) return new Set();
+  const session = probeSessions.getStore();
+  const query = async (command, script, resolve) => {
+    try {
+      const value = JSON.parse(session ? await session.acl(command) : await systemCommand(windowsTools().powershell,
+        ['-NoProfile', '-NonInteractive', '-Command', script], { env: probeEnvironment('') }));
+      return await resolve(value);
+    } catch { fail('PRIVATE_PROFILE_UNVERIFIED'); }
+  };
+  const foldersQuery = () => query('folders', PROFILE_FOLDERS_PROBE, resolveNativeProfileFolders);
+  const folders = await (session ? (session.folders ??= foldersQuery()) : foldersQuery());
+  const indexed = profileIndexPaths(folders, identity, files);
+  if (!indexed.size) return indexed;
+  const profileQuery = () => query('profile', PROFILE_PROBE, value => resolveProfileFolders({ ...folders, ...value }));
+  const value = await (session ? (session.profile ??= profileQuery()) : profileQuery());
+  return windowsProfilePolicy(value, identity, files);
+}
+
+// Shared writable parents need a separately verified atomic-creation mechanism.
+// Setup currently supports parents whose owner and effective/inheritable write
+// grants are confined to the current user, SYSTEM and Administrators.
+export function validateWindowsCreationParent(value, sid) {
+  const trusted = new Set([sid, SYSTEM, ADMIN]);
+  if (!SID.test(sid) || !value || !trusted.has(value.owner) || value.daclPresent !== true ||
+      !Number.isInteger(value.attributes) || !(value.attributes & 16) || (value.attributes & 1024) ||
+      ![2, 3].includes(value.driveType) || !['NTFS', 'ReFS'].includes(value.driveFormat) ||
+      !Array.isArray(value.aces) || !value.aces.length || value.aces.length > 128) fail('PRIVATE_PARENT_UNSAFE');
+  const readAndExecute = 0x1200a9; // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+  for (const ace of value.aces) {
+    if (ace.type !== 0 || !Number.isInteger(ace.flags) || (ace.flags & ~31) ||
+        !Number.isInteger(ace.mask) || ace.mask < 0) fail('PRIVATE_PARENT_UNSAFE');
+    // Inherit-only CREATOR OWNER becomes the creator's SID, not another user.
+    const creator = ace.sid === 'S-1-3-0' && (ace.flags & 8);
+    if (!trusted.has(ace.sid) && !creator && (ace.mask & ~readAndExecute)) fail('PRIVATE_PARENT_UNSAFE');
+  }
+}
+
+async function windowsACL(paths) {
+  const data = JSON.stringify(paths);
+  if (data.length > 24000) fail('PRIVACY_PROBE_CAPACITY');
+  let values;
+  try {
+    const session = probeSessions.getStore();
+    values = JSON.parse(session ? await session.acl(data) : await systemCommand(windowsTools().powershell,
+      ['-NoProfile', '-NonInteractive', '-Command', ACL_PROBE], { env: probeEnvironment(data) }));
+  } catch { fail('PRIVACY_PROBE_FAILED'); }
+  if (!Array.isArray(values) || values.length !== paths.length || values.some((value, i) => value.path !== paths[i])) fail('PRIVACY_PROBE_FAILED');
+  return values;
+}
+
+/** Explicit setup only. Refuse unsafe parents before exclusive creation; never
+ * adopt an existing object or change its ACL. Pin the new object before any
+ * protection failure so the caller can preserve an uncertain raw/intake pair.
+ */
+export function createPrivateDirectory(file, identity, onCreated) {
+  return withStorageProbes(() => createDirectory(file, identity, onCreated));
+}
+async function createDirectory(file, identity, onCreated) {
+  const parent = path.dirname(file), before = await fs.lstat(parent, { bigint: true });
+  const indexed = (await privateProfilePaths([file], identity)).has(file);
+  if (!before.isDirectory() || before.isSymbolicLink() ||
+      await canonicalWorkflowPath(file) !== file) fail('PRIVATE_STORAGE_REDIRECTED');
+  if (process.platform === 'win32') validateWindowsCreationParent((await windowsACL([parent]))[0], identity);
+  if (!sameFileIdentity(before, await fs.lstat(parent, { bigint: true })) ||
+      await canonicalWorkflowPath(file) !== file) fail('PRIVATE_STORAGE_CHANGED');
+  await fs.mkdir(file, { mode: 0o700 }); // EEXIST is a conflict, never adopt.
+  try {
+    const stat = await fs.lstat(file, { bigint: true });
+    onCreated?.(stat);
+    const guard = async () => {
+      if (await canonicalWorkflowPath(file) !== file || await fs.realpath(file) !== file) fail('PRIVATE_STORAGE_REDIRECTED');
+      if (!sameFileIdentity(before, await fs.lstat(parent, { bigint: true })) ||
+          !sameFileIdentity(stat, await fs.lstat(file, { bigint: true })) ||
+          !stat.isDirectory() || stat.isSymbolicLink()) fail('PRIVATE_STORAGE_CHANGED');
+    };
+    await guard();
+    if (process.platform === 'win32') validateWindowsCreationParent((await windowsACL([parent]))[0], identity);
+    await protectNewDirectory(file, identity);
+    if (indexed) {
+      await guard();
+      // Only this newly owned, empty directory. Descendants inherit the bit;
+      // publication checks verify it, rather than recursively changing old data.
+      if ((await fs.readdir(file)).length) fail('PRIVATE_SETUP_CONFLICT');
+      await systemCommand(windowsTools().attrib, ['+I', file, '/L']);
+      if (!((await windowsACL([file]))[0].attributes & 8192)) fail('PRIVATE_CONTENT_INDEXING_REQUIRED');
+    }
+    await guard();
+    return await fs.lstat(file, { bigint: true });
+  } catch (error) {
+    error.privateDirectoryMayExist = true;
+    error.cleanupWarnings = [...(error.cleanupWarnings ?? []), 'A newly created directory may remain; inspect it before retrying setup.'];
+    throw error;
+  }
 }
 
 export function validateWindowsACL(value, sid, { directory, root }) {
@@ -200,20 +300,13 @@ export async function privacyIdentity() {
 export async function verifyPrivateEntries(entries, identity, { fresh = false } = {}) {
   const attributes = new Map();
   if (process.platform === 'win32') {
+    const indexed = await privateProfilePaths(entries.map(item => item.path), identity);
     for (let offset = 0; offset < entries.length; offset += 32) {
       const batch = entries.slice(offset, offset + 32);
-      const paths = JSON.stringify(batch.map(item => item.path));
-      if (paths.length > 24000) fail('PRIVACY_PROBE_CAPACITY');
-      let values;
-      try {
-        const session = probeSessions.getStore();
-        values = JSON.parse(session ? await session.acl(paths) : await systemCommand(windowsTools().powershell, ['-NoProfile', '-NonInteractive', '-Command', ACL_PROBE],
-          { env: probeEnvironment(paths) }));
-      } catch { fail('PRIVACY_PROBE_FAILED'); }
-      if (!Array.isArray(values) || values.length !== batch.length) fail('PRIVACY_PROBE_FAILED');
+      const values = await windowsACL(batch.map(item => item.path));
       for (let i = 0; i < batch.length; i++) {
-        if (values[i].path !== batch[i].path) fail('PRIVACY_PROBE_FAILED');
         validateWindowsACL(values[i], identity, { directory: batch[i].stat.isDirectory(), root: batch[i].root });
+        if (indexed.has(batch[i].path) && !(values[i].attributes & 8192)) fail('PRIVATE_CONTENT_INDEXING_REQUIRED');
         attributes.set(batch[i].path, values[i].attributes);
       }
     }

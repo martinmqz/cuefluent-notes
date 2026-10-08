@@ -1,5 +1,5 @@
 import { readBoundedBytes } from './file-io.mjs';
-import { absolutePath, workflowDefaults, canonicalWorkflowPath, overlaps } from './workflow-paths.mjs';
+import { absolutePath, resolveWorkflowConfig, canonicalWorkflowPath, overlaps } from './workflow-paths.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { keys, choice, list, id, nativeId, unique, fail, digest, string } from './workflow-values.mjs';
 
@@ -57,18 +57,18 @@ export function validateWorkflowConfig(value, { platform = process.platform } = 
   return { format: value.format, schemaVersion: 1, collections, routes };
 }
 
-export function workflowConfigPath({ explicit, env = process.env, ...options } = {}) {
-  return absolutePath(explicit ?? env.CUEFLUENT_WORKFLOW_CONFIG ?? workflowDefaults({ ...options, env }).configPath, options.platform);
+export async function workflowConfigPath(options = {}) {
+  return (await resolveWorkflowConfig(options)).configPath;
 }
 
 /** No legacy lookup, directory creation, or state/source reads. Hash exact inspected bytes. */
-export async function readWorkflowSnapshot(file, { packageRoot = PACKAGE_ROOT } = {}) {
+export async function readWorkflowSnapshot(file, { packageRoot = PACKAGE_ROOT, maxBytes = MAX_WORKFLOW_CONFIG_BYTES } = {}) {
   const selected = absolutePath(file);
   let bytes;
   try {
     const canonical = await canonicalWorkflowPath(selected, { directory: false });
     if (overlaps(await canonicalWorkflowPath(packageRoot), canonical)) fail('WORKFLOW_STORAGE_OVERLAP');
-    bytes = await readBoundedBytes(selected, { maxBytes: MAX_WORKFLOW_CONFIG_BYTES, missing: true, noFollow: true, utf8: false });
+    bytes = await readBoundedBytes(selected, { maxBytes: Math.min(maxBytes, MAX_WORKFLOW_CONFIG_BYTES), missing: true, noFollow: true, utf8: false });
   } catch (error) {
     if (error.code === 'WORKFLOW_STORAGE_OVERLAP') throw error;
     throw Object.assign(new Error('Workflow configuration is unavailable or unsafe.', { cause: error }), { code: 'WORKFLOW_CONFIG_UNAVAILABLE' });

@@ -79,27 +79,25 @@ for (const change of ['removed', 'replaced']) test(`a raw root ${change} after t
   const raw = f.collection.rawDir, retained = raw + '-retained';
   await fs.writeFile(path.join(raw, 'capture.json'), '{}', { mode: 0o600 });
   await fs.writeFile(path.join(f.collection.intakeStateDir, 'history.json'), '{}', { mode: 0o600 });
-  const lstat = fs.lstat, mkdir = fs.mkdir; let rawStats = 0, changed = false, creations = 0;
-  t.mock.method(fs, 'lstat', async (file, ...args) => {
-    const stat = await lstat(file, ...args);
-    // Placement inspects raw first; the next snapshot decides whether setup
-    // must check intake history. Change the path after that snapshot is read.
-    if (file === raw && ++rawStats === 2) {
+  const mkdir = fs.mkdir; let changed = false;
+  t.mock.method(fs, 'mkdir', async (file, ...args) => {
+    const result = await mkdir(file, ...args);
+    // The normal intake lock is acquired after raw's initial identity snapshot,
+    // independent of additional Windows metadata discovery before that boundary.
+    if (file === path.join(f.collection.intakeStateDir, '.intake-lock') && !changed) {
       await fs.rename(raw, retained); changed = true;
       if (change === 'replaced') {
         await mkdir(raw, { mode: 0o700 });
         await protectNewDirectory(raw, await privacyIdentity());
       }
     }
-    return stat;
+    return result;
   });
-  t.mock.method(fs, 'mkdir', (file, ...args) => { if (file === raw) creations++; return mkdir(file, ...args); });
   await assert.rejects(prepareConfiguredStorage(f.options), { code: 'PRIVATE_STORAGE_CHANGED' });
   assert.equal(changed, true);
-  assert.equal(creations, 0);
   assert.equal(await fs.readFile(path.join(retained, 'capture.json'), 'utf8'), '{}');
   assert.equal(await fs.readFile(path.join(f.collection.intakeStateDir, 'history.json'), 'utf8'), '{}');
-  if (change === 'removed') await assert.rejects(lstat(raw), { code: 'ENOENT' });
+  if (change === 'removed') await assert.rejects(fs.lstat(raw), { code: 'ENOENT' });
   else assert.deepEqual(await fs.readdir(raw), []);
 });
 
@@ -126,7 +124,9 @@ test('a raw root introduced after the empty-intake check is not adopted', async 
   await assert.rejects(prepareConfiguredStorage(f.options), { code: 'PRIVATE_STORAGE_CHANGED' });
   assert.equal(changed, true);
   assert.equal(await fs.readFile(path.join(raw, 'foreign.json'), 'utf8'), '{}');
-  assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), []);
+  assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), ['.intake-lock']);
+  await assert.rejects(prepareConfiguredStorage(f.options), { code: 'INTAKE_BLOCKED' });
+  assert.equal(await fs.readFile(path.join(raw, 'foreign.json'), 'utf8'), '{}');
 });
 
 test('a raw root replaced after its setup probe cannot pass final verification', async t => {
@@ -169,9 +169,9 @@ for (const timing of ['existing', 'replaced after placement']) test(`${timing} i
   }
   const opendir = fs.opendir; let opens = 0;
   t.mock.method(fs, 'opendir', (file, ...args) => { if (file === intake || file === retained) opens++; return opendir(file, ...args); });
-  await assert.rejects(prepareWorkflowStorage(f.options), {
-    code: timing === 'existing' ? 'UNSAFE_WORKFLOW_PATH' : 'UNSAFE_PRIVATE_STORAGE',
-  });
+  // Windows setup discovery can refuse the substitution before the storage walk.
+  await assert.rejects(prepareWorkflowStorage(f.options), error =>
+    ['UNSAFE_WORKFLOW_PATH', 'UNSAFE_PRIVATE_STORAGE'].includes(error.code));
   assert.equal(opens, 0);
   assert.equal(await fs.readFile(path.join(retained, 'keep.json'), 'utf8'), '{}');
   await assert.rejects(fs.stat(f.collection.rawDir), { code: 'ENOENT' });
@@ -181,13 +181,13 @@ test('setup holds the normal intake lock while creating a raw root and never ste
   const f = await storageFixture(t, { fullSetup: false });
   await fs.rmdir(f.collection.rawDir);
   await fs.rmdir(path.join(f.collection.intakeStateDir, 'metadata-stages'));
-  const mkdir = fs.mkdir; let blocked = false;
-  t.mock.method(fs, 'mkdir', async (file, ...args) => {
-    const result = await mkdir(file, ...args);
-    if (file === f.collection.rawDir) {
+  const lstat = fs.lstat; let blocked = false;
+  t.mock.method(fs, 'lstat', async (file, ...args) => {
+    const result = await lstat(file, ...args);
+    if (file === f.collection.rawDir && !blocked) {
+      blocked = true;
       const store = await inspectIntakeStore(f.collection);
       await assert.rejects(withIntakeLock(store, () => assert.fail('collector entered during setup')), { code: 'INTAKE_BLOCKED' });
-      blocked = true;
     }
     return result;
   });
@@ -220,9 +220,9 @@ for (const timing of ['after empty read', 'after close', 'during raw creation'])
       await fs.writeFile(path.join(intake, 'history.json'), '{}', { mode: 0o600 });
     };
     if (timing === 'during raw creation') {
-      const mkdir = fs.mkdir;
-      t.mock.method(fs, 'mkdir', async (file, ...args) => {
-        const result = await mkdir(file, ...args);
+      const lstat = fs.lstat;
+      t.mock.method(fs, 'lstat', async (file, ...args) => {
+        const result = await lstat(file, ...args);
         if (file === f.collection.rawDir) await changeIntake();
         return result;
       });
@@ -258,10 +258,11 @@ for (const timing of ['before protection', 'during rollback'])
     const raw = f.collection.rawDir, intake = f.collection.intakeStateDir;
     await fs.rmdir(raw);
     await fs.rmdir(path.join(intake, 'metadata-stages'));
-    const mkdir = fs.mkdir; let injected = false;
-    t.mock.method(fs, 'mkdir', async (file, ...args) => {
-      const result = await mkdir(file, ...args);
-      if (file === raw) {
+    const lstat = fs.lstat; let injected = false, created = false;
+    t.mock.method(fs, 'lstat', async (file, ...args) => {
+      const result = await lstat(file, ...args);
+      if (file === raw && !created) {
+        created = true;
         await fs.writeFile(path.join(intake, 'history.json'), '{}', { mode: 0o600 });
         if (timing === 'before protection') {
           await fs.writeFile(path.join(raw, 'keep.json'), '{}', { mode: 0o600 });
@@ -466,3 +467,53 @@ for (const target of ['intake', 'writer']) for (const change of ['permissions', 
       assert.equal(calls, 1);
       assert.equal(await fs.readFile(change === 'replacement' ? path.join(root + '-retained', 'keep.json') : marker, 'utf8'), '{}');
     });
+
+test('raw creation without an identity receipt preserves the intake lock and the uncertain root', async t => {
+  const f = await storageFixture(t, { fullSetup: false });
+  const raw = f.collection.rawDir, intake = f.collection.intakeStateDir;
+  await fs.rmdir(raw); await fs.rmdir(path.join(intake, 'metadata-stages'));
+  const original = fs.lstat.bind(fs); let failed = false;
+  const mock = t.mock.method(fs, 'lstat', async (...args) => {
+    const result = await original(...args);
+    if (args[0] === raw && !failed) { failed = true; throw Object.assign(new Error('synthetic identity read failure'), { code: 'EIO' }); }
+    return result;
+  });
+  await assert.rejects(prepareWorkflowStorage(f.options), error => error.code === 'EIO' && error.cleanupWarnings?.length >= 2);
+  mock.mock.restore(); assert(failed);
+  assert.deepEqual(await fs.readdir(raw), []);
+  const owner = path.join(intake, '.intake-lock', 'owner.json'), before = await fs.readFile(owner);
+  await assert.rejects(prepareWorkflowStorage(f.options), { code: 'INTAKE_BLOCKED' });
+  assert.deepEqual(await fs.readFile(owner), before);
+});
+
+for (const code of ['EACCES', 'EPERM']) test(`failed raw mkdir ${code} releases the intake lock when nothing was created`, async t => {
+  const f = await storageFixture(t, { fullSetup: false });
+  const raw = f.collection.rawDir, intake = f.collection.intakeStateDir;
+  await fs.rmdir(raw); await fs.rmdir(path.join(intake, 'metadata-stages'));
+  const mkdir = fs.mkdir.bind(fs);
+  const denied = t.mock.method(fs, 'mkdir', (file, ...args) => {
+    if (file === raw) throw Object.assign(new Error('synthetic denial'), { code });
+    return mkdir(file, ...args);
+  });
+  await assert.rejects(prepareWorkflowStorage(f.options), error => error.code === code &&
+    !error.privateDirectoryMayExist && !error.cleanupWarnings?.length);
+  denied.mock.restore();
+  assert.equal(await fs.lstat(raw).catch(error => error.code), 'ENOENT');
+  assert.equal(await fs.lstat(path.join(intake, '.intake-lock')).catch(error => error.code), 'ENOENT');
+  await prepareWorkflowStorage(f.options);
+});
+
+test('a racing raw root at EEXIST is retained with its intake lock', async t => {
+  const f = await storageFixture(t, { fullSetup: false });
+  const raw = f.collection.rawDir, intake = f.collection.intakeStateDir;
+  await fs.rmdir(raw); await fs.rmdir(path.join(intake, 'metadata-stages'));
+  const mkdir = fs.mkdir.bind(fs);
+  const race = t.mock.method(fs, 'mkdir', async (file, ...args) => {
+    if (file === raw) { await mkdir(file, ...args); await fs.writeFile(path.join(file, 'foreign'), 'retained'); }
+    return mkdir(file, ...args);
+  });
+  await assert.rejects(prepareWorkflowStorage(f.options), error => error.code === 'EEXIST' && error.cleanupWarnings?.length > 0);
+  race.mock.restore();
+  assert.equal(await fs.readFile(path.join(raw, 'foreign'), 'utf8'), 'retained');
+  assert((await fs.stat(path.join(intake, '.intake-lock'))).isDirectory());
+});

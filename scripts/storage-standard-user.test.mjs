@@ -31,6 +31,11 @@ test('the isolated standard-user fixture includes its complete module dependenci
     assert.match(complete.stderr, /Error: Windows CI fixture only\./);
     assert.doesNotMatch(complete.stderr, /ERR_MODULE_NOT_FOUND/);
   }
+  const second = spawnSync(process.execPath, [path.join(root, 'scripts', 'storage-standard-user-access.mjs')],
+    { env: { ...process.env, GITHUB_ACTIONS: 'false' }, encoding: 'utf8', timeout: 10000 });
+  assert.equal(second.status, 1); assert.equal(second.signal, null);
+  assert.match(second.stderr, /Error: Windows CI second-user fixture only\./);
+  assert.doesNotMatch(second.stderr, /ERR_MODULE_NOT_FOUND/);
   // Reproduce the native CI failure as a negative control for the detached copy.
   await fs.unlink(path.join(root, 'scripts', 'collection-grant.mjs'));
   const incomplete = launch();

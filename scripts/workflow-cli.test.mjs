@@ -9,6 +9,7 @@ import { saveProcessing } from './processing.mjs';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { processingFixture, inspectedClaim, proposedClaim } from './test-support/processing-fixture.mjs';
 import { executeWorkflow } from './workflow.mjs';
+import { windowsDefaultLocations } from './workflow-paths.mjs';
 import { fingerprint, inspectDirectories } from './safe-update.mjs';
 import { digest, canonicalJSON } from './workflow-values.mjs';
 const cli = fileURLToPath(new URL('./workflow.mjs', import.meta.url));
@@ -26,6 +27,11 @@ test('CLI unconfigured status writes nothing and rejects malformed, oversized, u
   const config = path.join(root, 'missing', 'workflow.json'), request = path.join(root, 'request.json');
   const before = await fs.readdir(root), status = await invoke(['status', '--config', config]);
   assert.equal(status.code, 0, status.stderr); assert.equal(JSON.parse(status.stdout).configHash, null); assert.deepEqual(await fs.readdir(root), before);
+  const spelled = `${root}${path.sep}.${path.sep}missing${path.sep}workflow.json`;
+  const aliasStatus = await invoke(['status', '--config', spelled]);
+  assert.equal(aliasStatus.code, 0, aliasStatus.stderr);
+  const paths = JSON.parse(aliasStatus.stdout);
+  assert.equal(paths.configPath, config); assert.equal(paths.requestedConfigPath, spelled); assert.equal(paths.resolvedConfigPath, config);
   for (const [body, args] of [['{ PRIVATE_SYNTAX', ['configure']], ['x'.repeat(2 * 1024 * 1024 + 1), ['configure']], ['{}', ['unknown']],
     [JSON.stringify({ collectionId: 'x', expectedConfigHash: '0'.repeat(64), args: { selection: {}, proof: {} } }), ['capture-run']]]) {
     await fs.writeFile(request, body);
@@ -155,6 +161,48 @@ test('direct save uses inspected note/content/parent hashes without native ident
   await executeWorkflow('direct-save', request);
   assert.equal(await fingerprint(path.join(plan.root, plan.files[0].path)), plan.files[0].expectedContentHash);
   assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), intakeBefore);
+});
+async function manualCommandsWithUnavailableConfig(f, code) {
+  const root = f.collection.notes.notesDir, stateDir = f.collection.notes.writerStateDir;
+  await fs.mkdir(root);
+  const contentPath = path.join(f.root, 'manual.md'), content = '# Manual note\n\n## Decision\n\nKeep the selected scope.\n';
+  await fs.writeFile(contentPath, content);
+  const before = await fs.readdir(f.collection.intakeStateDir);
+  const files = (await executeWorkflow('fingerprint', { paths: [contentPath] })).files;
+  assert.deepEqual(files, [{ path: contentPath, hash: digest(content) }]);
+  const inspected = await executeWorkflow('inspect-notes', { root, paths: ['manual.md'] });
+  assert.equal((await executeWorkflow('writer-status', { stateDir })).recoveryPending, false);
+  // Recovery still enforces its own inspected journal hash, even with unusable settings.
+  await assert.rejects(executeWorkflow('writer-recover', { stateDir, expectedJournalHash: '0'.repeat(64) }), /Inspected recovery journal changed/);
+  const plan = { version: 2, mode: 'authored', root: inspected.root, stateDir,
+    directories: inspected.directories, createDirectories: inspected.createDirectories,
+    files: [{ path: 'manual.md', expectedHash: null, contentPath, expectedContentHash: files[0].hash }] };
+  const request = { plan, approvedPlanHash: digest(canonicalJSON(plan)) };
+  await assert.rejects(executeWorkflow('status', {}), { code });
+  await assert.rejects(executeWorkflow('direct-save', { ...request, collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash }), { code });
+  assert.deepEqual(await fs.readdir(root), []);
+  await executeWorkflow('direct-save', request);
+  assert.equal(await fs.readFile(path.join(root, 'manual.md'), 'utf8'), content);
+  assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
+}
+test('manual commands remain available when the configured settings path is invalid', async t => {
+  const f = await storageFixture(t), previous = process.env.CUEFLUENT_WORKFLOW_CONFIG;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CUEFLUENT_WORKFLOW_CONFIG;
+    else process.env.CUEFLUENT_WORKFLOW_CONFIG = previous;
+  });
+  process.env.CUEFLUENT_WORKFLOW_CONFIG = 'relative-invalid-config';
+  await manualCommandsWithUnavailableConfig(f, 'INVALID_WORKFLOW_PATH');
+});
+test('manual commands remain available when Windows default settings are ambiguous', { skip: process.platform !== 'win32' }, async t => {
+  const f = await storageFixture(t), { oldConfig, newConfig } = windowsDefaultLocations();
+  for (const file of [oldConfig, newConfig]) {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, '{}', { flag: 'wx' });
+    t.after(() => fs.unlink(file));
+  }
+  await manualCommandsWithUnavailableConfig(f, 'WORKFLOW_CONFIG_SELECTION_REQUIRED');
 });
 test('direct saves cannot change configured destinations or bypass pending processing transactions', async t => {
   const f = await processingFixture(t), proposed = await proposedClaim(f);

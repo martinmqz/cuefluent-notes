@@ -17,11 +17,15 @@ The new configuration has `format: "cuefluent-workflow"`, `schemaVersion: 1`,
 `collections`, and `routes`. Legacy migration and mixed-version operation are
 outside this replacement's scope; obsolete runtime code has been removed. The override is
 `CUEFLUENT_WORKFLOW_CONFIG`; otherwise settings use
-`%LOCALAPPDATA%\CuefluentNotes\workflow.json` on Windows and
+`<local user profile>\.cuefluent-notes\workflow.json` for fresh Windows setups and
 `~/.config/cuefluent-notes/workflow.json` on macOS/Linux.
 The [synthetic example](../examples/workflow.json) illustrates the shape with
 placeholder POSIX paths and both processes inactive; it is not a setup command.
-Windows settings use fully qualified Windows paths instead.
+Windows settings use fully qualified Windows paths instead. `--config` overrides
+the environment setting. Windows preserves a sole existing old LocalAppData
+default; distinct old and new defaults require explicit selection. See
+[Windows storage selection](setup.md#windows-storage-selection) for discovery,
+existing package stores and custom profile-path compatibility.
 
 A collection has an `id`, `rawDir`, `intakeStateDir`, and `notes`. Notes specify
 either `notesDir` with `organization: "by-type" | "flat"`, or a single Markdown
@@ -53,9 +57,12 @@ bounded to 1 MiB; unsafe/unreadable files report `WORKFLOW_CONFIG_UNAVAILABLE`
 and invalid JSON/schema reports `INVALID_WORKFLOW`. macOS placement conservatively
 rejects case-only overlapping suffixes even before directories exist.
 
-Default intake storage uses LocalAppData on Windows, Application Support on
-macOS, and XDG state storage on Linux. No Windows fallback to redirected homes
-is provided. Raw and intake storage must stay outside finished notes, configured
+Fresh Windows raw, intake and writer defaults share
+`<local user profile>\.cuefluent-notes\collections\<id>`. An existing selected old
+LocalAppData default retains its old private-path suggestions. macOS uses
+Application Support; Linux uses XDG state storage. Existing collection paths are
+never changed by default resolution, and no fallback store bypasses failed checks.
+Raw and intake storage must stay outside finished notes, configured
 projects, and the plugin. User source material can contain secrets or private
 third-party remarks; the workflow does not promise automatic redaction.
 
@@ -467,6 +474,26 @@ and the selected path payload are overridden after removing inherited aliases
 case-insensitively.
 Constrained Language restrictions or paths unsupported by Windows PowerShell
 5.1 fail closed. These helpers never change finished-note permissions.
+
+Within one Windows operation, the existing native probe transport samples the
+current token's `Win32_UserProfile` policy and registered Local AppData location
+once. Later operations take a new sample; ACLs and identities remain freshly
+checked. Directory aliases for native profile facts resolve to their directory
+targets; actual private roots still reject leaf links. The policy covers private
+settings, raw, intake and writer paths, not Markdown destinations. Private profile
+paths outside native LocalAppData reject roaming, temporary, mandatory, corrupt or
+unverifiable profile policy. Native LocalAppData is treated as non-roaming, while
+temporary, mandatory and corrupt profile states remain unsupported there.
+
+Outside native LocalAppData, only newly created empty private profile directories
+receive NotContentIndexed
+(`attrib +I`, no recursive changes), before settings/evidence bytes are written.
+Fresh native checks require the bit on those private directories and files,
+including stages and published children. Missing protection on existing data is a
+fatal diagnostic, not a repair request. This protection is independent of Hidden
+and does not certify third-party indexer or synchronization behavior. The helper
+refuses creation below shared writable parents; it does not introduce a ProgramData
+fallback, automatic ACL repair or package-store migration.
 
 Known cloud-sync and network locations, including canonical aliases, are refused.
 macOS Desktop and Documents are conservatively refused because iCloud can sync

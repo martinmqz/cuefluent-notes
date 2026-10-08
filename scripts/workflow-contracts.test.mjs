@@ -1,3 +1,4 @@
+import './test-support/isolated-settings.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -73,19 +74,27 @@ test('configuration validates every route and collection, including disabled one
   assert.deepEqual(validateWorkflowConfig(input).collections[0].notes, input.collections[0].notes);
 });
 
-test('platform defaults keep worker state machine-local and separate from raw overrides', () => {
-  const windows = workflowDefaults({ platform: 'win32', home: '\\\\server\\roaming', env: { LOCALAPPDATA: 'C:\\Users\\Example\\AppData\\Local' }, collectionId: 'example' });
-  assert.equal(windows.intakeStateDir, 'C:\\Users\\Example\\AppData\\Local\\CuefluentNotes\\collections\\example\\state');
-  assert.equal(windows.rawDir, 'C:\\Users\\Example\\AppData\\Local\\CuefluentNotes\\collections\\example\\.cuefluent-raw');
-  assert.throws(() => workflowDefaults({ platform: 'win32', env: {} }), { code: 'LOCAL_STATE_LOCATION_REQUIRED' });
-  assert.throws(() => workflowDefaults({ platform: 'win32', env: { LOCALAPPDATA: '\\\\server\\share' } }), { code: 'LOCAL_STATE_LOCATION_REQUIRED' });
-  const mac = workflowDefaults({ platform: 'darwin', home: '/Users/example', env: {}, collectionId: 'example' });
+test('platform defaults keep all private roots together and preserve override precedence', async () => {
+  const options = { platform: 'win32', home: 'C:\\Users\\Example',
+    env: { LOCALAPPDATA: 'C:\\Users\\Example\\AppData\\Local' }, collectionId: 'example',
+    explicit: 'C:\\Users\\Example\\.cuefluent-notes\\workflow.json' };
+  const windows = await workflowDefaults(options);
+  const root = 'C:\\Users\\Example\\.cuefluent-notes\\collections\\example';
+  assert.equal(windows.intakeStateDir, root + '\\state');
+  assert.equal(windows.rawDir, root + '\\.cuefluent-raw');
+  assert.equal(windows.writerStateDir, root + '\\writer');
+  const old = await workflowDefaults({ ...options, explicit: options.env.LOCALAPPDATA + '\\CuefluentNotes\\workflow.json' });
+  assert.equal(old.intakeStateDir, options.env.LOCALAPPDATA + '\\CuefluentNotes\\collections\\example\\state');
+  await assert.rejects(workflowDefaults({ platform: 'win32', env: {} }), { code: 'LOCAL_STATE_LOCATION_REQUIRED' });
+  await assert.rejects(workflowDefaults({ platform: 'win32', home: options.home, env: { LOCALAPPDATA: '\\\\server\\share' } }), { code: 'LOCAL_STATE_LOCATION_REQUIRED' });
+  const mac = await workflowDefaults({ platform: 'darwin', home: '/Users/example', env: {}, collectionId: 'example' });
   assert.equal(mac.intakeStateDir, '/Users/example/Library/Application Support/Cuefluent Notes/collections/example/state');
   assert.equal(mac.rawDir, '/Users/example/Library/Application Support/Cuefluent Notes/collections/example/.cuefluent-raw');
-  const linux = workflowDefaults({ platform: 'linux', home: '/home/example', env: { XDG_STATE_HOME: '/local/state' }, collectionId: 'example' });
+  assert.equal(mac.writerStateDir, '/Users/example/Library/Application Support/Cuefluent Notes/collections/example/writer');
+  const linux = await workflowDefaults({ platform: 'linux', home: '/home/example', env: { XDG_STATE_HOME: '/local/state' }, collectionId: 'example' });
   assert.equal(linux.rawDir, '/local/state/cuefluent-notes/collections/example/.cuefluent-raw');
-  assert.equal(workflowConfigPath({ platform: 'linux', home: '/home/example', env: { CUEFLUENT_NOTES_CONFIG: '/legacy.json' } }), '/home/example/.config/cuefluent-notes/workflow.json');
-  assert.equal(workflowConfigPath({ platform: 'linux', env: { CUEFLUENT_WORKFLOW_CONFIG: '/new.json' } }), '/new.json');
+  assert.equal(await workflowConfigPath({ platform: 'linux', home: '/home/example', env: { CUEFLUENT_NOTES_CONFIG: '/legacy.json' } }), '/home/example/.config/cuefluent-notes/workflow.json');
+  assert.equal(await workflowConfigPath({ platform: 'linux', env: { CUEFLUENT_WORKFLOW_CONFIG: '/new.json' } }), '/new.json');
   assert.equal(absolutePath('C:\\資料\\notes', 'win32'), 'C:\\資料\\notes');
   assert.throws(() => absolutePath('C:\\notes\\file:stream', 'win32'));
 });

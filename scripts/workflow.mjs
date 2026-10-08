@@ -1,7 +1,6 @@
 import path from 'node:path';
 import { isMain, readBoundedBytes } from './file-io.mjs';
-import { workflowConfigPath } from './workflow-config.mjs';
-import { workflowDefaults } from './workflow-paths.mjs';
+import { workflowDefaults, resolveWorkflowConfig } from './workflow-paths.mjs';
 import { workflowStatus, configureWorkflow, prepareConfiguredStorage } from './workflow-settings.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
@@ -53,15 +52,10 @@ async function capability(configPath, request) {
 }
 export async function executeWorkflow(command, request, { configPath } = {}) {
   if (command === 'prepare-note') return prepareNote(request);
-  if (configPath === undefined) configPath = workflowConfigPath();
-  if (command === 'status') { keys(request, [], ['selection']); return workflowStatus({ configPath, ...request }); }
   if (command === 'defaults') {
     keys(request, [], ['collectionId']);
-    const value = workflowDefaults(request);
-    return value.rawDir ? { ...value, writerStateDir: path.join(path.dirname(value.rawDir), 'writer') } : value;
+    return workflowDefaults({ ...request, explicit: configPath });
   }
-  if (command === 'configure') { keys(request, ['expectedHash', 'proposal']); return configureWorkflow({ configPath, ...request }); }
-  if (command === 'storage-prepare') { keys(request, ['collectionId', 'expectedConfigHash']); return prepareConfiguredStorage({ configPath, ...request }); }
   if (command === 'fingerprint') {
     keys(request, ['paths']); list(request.paths, 100, { empty: false });
     if (request.paths.some(file => typeof file !== 'string' || !path.isAbsolute(file))) fail('ABSOLUTE_PATH_REQUIRED');
@@ -80,8 +74,17 @@ export async function executeWorkflow(command, request, { configPath } = {}) {
   if (command === 'direct-save') {
     keys(request, ['plan', 'approvedPlanHash'], ['collectionId', 'expectedConfigHash']);
     if (Object.hasOwn(request, 'collectionId') !== Object.hasOwn(request, 'expectedConfigHash')) fail('INVALID_WORKFLOW');
-    return saveDirectNote(request, Object.hasOwn(request, 'collectionId') ? await capability(configPath, request) : null);
+    if (!Object.hasOwn(request, 'collectionId')) return saveDirectNote(request, null);
   }
+  // Manual operations above use only their inspected paths and plans. Resolve
+  // settings only for work that actually depends on a selected configuration.
+  const selection = await resolveWorkflowConfig({ explicit: configPath });
+  const { requestedConfigPath, explicit: explicitConfig } = selection;
+  configPath = selection.configPath;
+  if (command === 'status') { keys(request, [], ['selection', 'diagnostics']); return workflowStatus({ configPath, requestedConfigPath, ...request }); }
+  if (command === 'configure') { keys(request, ['expectedHash', 'proposal']); return configureWorkflow({ configPath, ...request }, { explicitConfig, requestedConfigPath }); }
+  if (command === 'storage-prepare') { keys(request, ['collectionId', 'expectedConfigHash']); return prepareConfiguredStorage({ configPath, ...request }); }
+  if (command === 'direct-save') return saveDirectNote(request, await capability(configPath, request));
   const definition = commands[command];
   if (!definition || !Object.hasOwn(commands, command)) fail('UNKNOWN_WORKFLOW_COMMAND');
   keys(request, ['collectionId', 'expectedConfigHash', 'args']);
@@ -111,7 +114,7 @@ export async function main(args) {
     try { request = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { fail('INVALID_WORKFLOW_REQUEST_JSON'); }
   }
   if (command === 'prepare-note') return prepareNote(request);
-  return withStorageProbes(() => executeWorkflow(command, request, { configPath: workflowConfigPath({ explicit: options['--config'] }) }));
+  return withStorageProbes(() => executeWorkflow(command, request, { configPath: options['--config'] }));
 }
 if (await isMain(import.meta.url)) main(process.argv.slice(2)).then(result => process.stdout.write(canonicalJSON(result) + '\n')).catch(error => {
   // Parser/OS exceptions never echo source bodies. Writer-authored diagnostics

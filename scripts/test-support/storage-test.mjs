@@ -1,3 +1,4 @@
+import './isolated-settings.mjs';
 import test from 'node:test';
 import { withStorageProbes } from '../storage-platform.mjs';
 

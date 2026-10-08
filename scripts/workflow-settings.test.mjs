@@ -129,3 +129,111 @@ test('pure membership widening and broader parents preserve existing native gran
   await update(c => { c.routes[0].collection.selection.sessionIds.push(sessionId); c.routes[0].collection.generation = originalGeneration; });
   assert.notEqual(await collectionGrantHash(current.config, 'fixture', selection), first);
 });
+
+test('settings reject post-creation directory relocation without publishing or retrying', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-relocation-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const parent = path.join(root, 'settings'), file = path.join(parent, 'workflow.json');
+  const original = fs.realpath.bind(fs);
+  const mock = t.mock.method(fs, 'realpath', async (...args) => {
+    const resolved = await original(...args);
+    return args[0] === parent ? path.join(root, 'redirected') : resolved;
+  });
+  await assert.rejects(configureWorkflow({ configPath: file, expectedHash: null,
+    proposal: { format: 'cuefluent-workflow', schemaVersion: 1, collections: [], routes: [] } }), error => {
+    assert.equal(error.code, 'PRIVATE_STORAGE_REDIRECTED'); assert.equal(error.cleanupWarnings.length, 1); return true;
+  });
+  mock.mock.restore();
+  assert.deepEqual(await fs.readdir(parent), []); // creation is a real side effect
+  await assert.rejects(fs.stat(file), { code: 'ENOENT' });
+});
+
+test('a relocated settings stage receives no config bytes and preserves the old config', async t => {
+  const f = await settingsFixture(t), before = await fs.readFile(f.options.configPath);
+  const proposal = structuredClone(f.config); proposal.routes[0].processing.mode = 'prompted';
+  const original = fs.realpath.bind(fs); let stageSeen = false;
+  const mock = t.mock.method(fs, 'realpath', async (...args) => {
+    const resolved = await original(...args);
+    if (path.basename(args[0]).startsWith('.workflow-')) {
+      stageSeen = true; assert.equal((await fs.stat(args[0])).size, 0);
+      return path.join(f.root, 'redirected-stage');
+    }
+    return resolved;
+  });
+  await assert.rejects(configureWorkflow({ configPath: f.options.configPath, expectedHash: f.options.expectedConfigHash, proposal }), { code: 'PRIVATE_STORAGE_REDIRECTED' });
+  mock.mock.restore();
+  assert(stageSeen); assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  assert.deepEqual(await fs.readdir(path.dirname(f.options.configPath)), ['workflow.json']);
+});
+
+test('guarded activation rejects a note destination mapping change after staging', async t => {
+  const f = await settingsFixture(t), before = await fs.readFile(f.options.configPath);
+  const proposal = structuredClone(f.config); proposal.routes[0].processing.mode = 'automatic';
+  await fs.mkdir(f.collection.notes.notesDir);
+  const alternate = path.join(f.root, 'alternate-notes'); await fs.mkdir(alternate);
+  const original = fs.realpath.bind(fs); let moved = false;
+  const mock = t.mock.method(fs, 'realpath', async (...args) => {
+    const resolved = await original(...args);
+    return moved && args[0] === f.collection.notes.notesDir ? alternate : resolved;
+  });
+  await assert.rejects(configureWorkflow({ configPath: f.options.configPath, expectedHash: f.options.expectedConfigHash, proposal },
+    { beforeCommit: () => { moved = true; } }), { code: 'PRIVATE_STORAGE_REDIRECTED' });
+  mock.mock.restore();
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  assert.deepEqual(await fs.readdir(alternate), []);
+});
+
+test('storage preparation stops at a newly redirected intake and leaves consent disabled', async t => {
+  const f = await settingsFixture(t);
+  const proposal = structuredClone(f.config); proposal.routes[0].collection.enabled = false;
+  for (const key of ['rawDir', 'intakeStateDir']) proposal.collections[0][key] = path.join(f.root, 'new-' + key);
+  proposal.collections[0].notes.writerStateDir = path.join(f.root, 'new-writer');
+  const configured = await configureWorkflow({ configPath: f.options.configPath, expectedHash: f.options.expectedConfigHash, proposal });
+  const before = await fs.readFile(f.options.configPath), intake = proposal.collections[0].intakeStateDir;
+  const original = fs.realpath.bind(fs);
+  const mock = t.mock.method(fs, 'realpath', async (...args) => {
+    const resolved = await original(...args);
+    return args[0] === intake ? path.join(f.root, 'redirected-intake') : resolved;
+  });
+  await assert.rejects(prepareConfiguredStorage({ configPath: f.options.configPath, expectedConfigHash: configured.configHash, collectionId: 'fixture' }), { code: 'PRIVATE_STORAGE_REDIRECTED' });
+  mock.mock.restore();
+  assert.deepEqual(await fs.readdir(intake), []);
+  await assert.rejects(fs.stat(proposal.collections[0].rawDir), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(proposal.collections[0].notes.writerStateDir), { code: 'ENOENT' });
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  assert.equal((await readWorkflowSnapshot(f.options.configPath)).config.routes[0].collection.enabled, false);
+});
+
+test('storage preparation checks child-file resolution when directory paths hide relocation', async t => {
+  const f = await settingsFixture(t), proposal = structuredClone(f.config);
+  proposal.routes[0].collection.enabled = false;
+  const saved = await configureWorkflow({ configPath: f.options.configPath, expectedHash: f.options.expectedConfigHash, proposal });
+  const before = await fs.readFile(f.options.configPath), original = fs.realpath.bind(fs); let observed = false;
+  const mock = t.mock.method(fs, 'realpath', async (...args) => {
+    const resolved = await original(...args);
+    if (path.basename(args[0]) === 'entry' && path.basename(path.dirname(args[0])).startsWith('.privacy-probe-')) {
+      observed = true; assert.equal((await fs.stat(args[0])).size, 0);
+      return path.join(f.root, 'redirected-entry');
+    }
+    return resolved;
+  });
+  await assert.rejects(prepareConfiguredStorage({ ...f.options, expectedConfigHash: saved.configHash }), { code: 'PRIVATE_STORAGE_REDIRECTED' });
+  mock.mock.restore(); assert(observed);
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  for (const root of [f.collection.rawDir, f.collection.intakeStateDir, f.collection.notes.writerStateDir])
+    assert(!(await fs.readdir(root)).some(name => name.startsWith('.privacy-probe-')));
+});
+
+test('activation refuses a replacement private root even when its new ACL is valid', async t => {
+  const { createPrivateDirectory, privacyIdentity } = await import('./storage-platform.mjs');
+  const f = await settingsFixture(t), before = await fs.readFile(f.options.configPath);
+  const proposal = structuredClone(f.config); proposal.routes[0].processing.mode = 'automatic';
+  await assert.rejects(configureWorkflow({ configPath: f.options.configPath, expectedHash: f.options.expectedConfigHash, proposal }, {
+    beforeCommit: async () => {
+      await fs.rename(f.collection.notes.writerStateDir, f.collection.notes.writerStateDir + '-original');
+      await createPrivateDirectory(f.collection.notes.writerStateDir, await privacyIdentity());
+    },
+  }), { code: 'PRIVATE_STORAGE_CHANGED' });
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  assert.deepEqual(await fs.readdir(f.collection.notes.writerStateDir), []);
+});

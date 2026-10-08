@@ -10,7 +10,7 @@ in the source repository for the current jobs.
 | --- | --- |
 | Session readers | Supported Codex and Claude record shapes across varying version metadata, selected boundaries, native identity/order, bounded reads, exclusions, partial records and immutable revisions |
 | Consent and controls | Independent collection/processing settings, opt-outs, stale settings, explicit selection and zero-write ingress for disabled or unconfigured projects |
-| Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots and explicit maintenance |
+| Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots, profile/indexing policy, aliased native folder facts and explicit maintenance |
 | Processing and writes | Exact input claims, acknowledged evidence pages, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
 | Portable note metadata | Bounded YAML structure, comment placement, safe unknown fields, unsupported schemas, selected-file ID collisions, descriptive dates/source references and unchanged heading/alias vocabulary; no app indexing or hash-freshness claim |
 | Metadata generation and updates | Pure proposal preparation, stable identity/creation/source/unknown-field preservation, byte-identical no-ops, selected capture mappings, stale-write refusals, interrupted-write recovery and both detached client packages; no prose reconciliation or consent inference |
@@ -18,7 +18,11 @@ in the source repository for the current jobs.
 | Distribution | Dependency and documentation closure, detached manual/hook packages, installers, shell launchers, reproducible archives, captured shared inputs and client parity, metadata consistency, bounded read-only inventory verification and trusted inventory digests, published-package digests and source-preserving package-update branches, pre-commit digest validation and legacy migration notices |
 
 Windows CI includes Windows PowerShell, PowerShell 7, Git Bash, and a separate
-private-storage check under a real standard-user token. Tests for unavailable
+private-storage check under real standard-user tokens. It exercises local profile
+creation and inherited indexing attributes, missing-attribute refusal, non-admin
+profile policy queries and isolation from a second standard user with a positive
+parent-access control. Synthetic settings tests isolate default/AppData discovery
+from the developer's installed stores. Tests for unavailable
 local shells or another operating system skip explicitly; such skips are not
 verification of that platform.
 
@@ -66,6 +70,12 @@ integration works.
 - Claude extraction preserves proven human input with unconfirmed coverage;
   it does not infer assistant ownership or completed turns from ordinary
   transcript parentage.
+- A fresh default setup from Windows Desktop and CLI in a clean account,
+  followed by live collection, processing and a duplicate-safe retry, remains
+  unverified. Synthetic redirection tests and native permission fixtures do not
+  establish that complete client workflow. Existing package stores are preserved;
+  automatic migration is unsupported. Host profile, package visibility and indexing
+  policies can differ; no universal third-party indexing/sync protection is claimed.
 - Desktop Node PATH, already-open session reload and changed hook trust require
   verification in the user's client. Installation alone enables neither
   collection nor processing consent.
