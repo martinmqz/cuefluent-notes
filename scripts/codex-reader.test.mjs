@@ -5,13 +5,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readCodexSelection, codexPublicationPlan, codexRegistrationHeader } from './codex-reader.mjs';
+import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader } from './codex-reader.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { newSelectionState, applySelectionControl, stableSourceIdentity, inspectSourceBoundary } from './capture-selection.mjs';
 import { digest } from './workflow-values.mjs';
-import { inspectIntakeStore, withIntakeLock } from './intake-io.mjs';
-import { controlSelection, publishCapture } from './intake-store.mjs';
-import { serializeCapture } from './capture-contract.mjs';
+import { inspectIntakeStore, withIntakeLock, intakeSnapshot } from './intake-io.mjs';
+import { controlSelection, publishCapture, readCaptureHead } from './intake-store.mjs';
+import { serializeCapture, createCapture, captureRelativePath } from './capture-contract.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -428,11 +428,55 @@ test('malformed JSON/UTF-8, changed sources, and bounded line/byte budgets fail 
   assert.equal((await readSessionRange({ source: limit.source, from: limit.bytes.length, verifyHeader: async () => ({}) })).blocked.code, 'SESSION_RECORD_LIMIT');
 });
 
+test('fair tool budgets retain later native failures identically after a bounded retry', async t => {
+  const calls = Array.from({ length: 8 }, (_, i) => response(A, 'function_call', {
+    name: 'exec_command', call_id: `call-${i}`, arguments: 'arguments '.repeat(5000) }));
+  const docs = Array.from({ length: 8 }, (_, i) => response(A, 'function_call_output', {
+    call_id: `call-${i}`, output: 'Relevant API documentation '.repeat(2000) }));
+  const f = await fixture(t, [start(A), user(A), ...calls, ...docs,
+    response(A, 'function_call', { name: 'exec_command', call_id: 'late', arguments: '{"cmd":"test unchanged caller"}' }),
+    response(A, 'function_call_output', { call_id: 'late', output: 'Failure: unchanged caller crashes.' }),
+    evt('item_completed', { thread_id: S, turn_id: A, item: { id: 'late', type: 'CommandExecution', status: 'failed', exit_code: 1 } }),
+    user(A, 'Correction: passing rebuilt callers did not prove binary compatibility.'), end(A)]);
+  const limited = await readCodexSelection({ ...f.args, maxBytes: 100000 });
+  assert.equal(limited.candidates.length, 0);
+  const cursor = codexProgressPlan(limited).scan.to;
+  assert.equal(cursor.offset, limited.from.offset);
+  const resumed = await readCodexSelection({ ...f.args, cursor });
+  const full = await readCodexSelection(f.args), capture = resumed.candidates[0].capture;
+  assert.deepEqual(serializeCapture(capture), serializeCapture(full.candidates[0].capture));
+  assert.equal(capture.reader.version, '2');
+  const result = capture.evidence.find(item => item.kind === 'tool-result' && item.callId === 'late');
+  assert.equal(result.text, 'Failure: unchanged caller crashes.'); assert.equal(result.outcome, 'failed');
+  assert(capture.evidence.some(item => item.kind === 'user' && item.text.startsWith('Correction:')));
+  assert(capture.coverage.partial);
+  assert(capture.coverage.omissions.some(item => item.reason === 'tool-call-call-limit'));
+  assert(capture.coverage.omissions.some(item => item.reason === 'tool-result-call-limit'));
+});
+
+test('changed reader allocation cannot replace a finalized v1 capture', async t => {
+  const output = 'x'.repeat(32768);
+  const f = await fixture(t, [start(A), user(A),
+    response(A, 'function_call', { name: 'exec_command', call_id: 'call', arguments: '{}' }),
+    response(A, 'function_call_output', { call_id: 'call', output }), end(A)]);
+  const result = await readCodexSelection(f.args), candidate = result.candidates[0];
+  const old = createCapture({ ...candidate.capture, reader: { ...candidate.capture.reader, version: '1' },
+    coverage: { partial: false, omissions: [] }, evidence: candidate.capture.evidence.map(item => item.kind === 'tool-result' ? { ...item, text: output } : item) });
+  const store = await privateIntakeFixture(t, f.source);
+  const selected = await withIntakeLock(store, tx => controlSelection(tx, { source: f.source, request: f.request, expectedHash: null, authorize: async () => true }));
+  const args = { ...candidate, selectionHash: selected.hash, cursorHash: null,
+    scan: codexPublicationPlan(result, A).scan, authorize: async () => true };
+  const published = await withIntakeLock(store, tx => publishCapture(tx, { ...args, capture: old }));
+  await assert.rejects(withIntakeLock(store, tx => publishCapture(tx, { ...args, expectedHeadHash: published.headHash })), { code: 'FINAL_CAPTURE_CONFLICT' });
+  assert.equal((await readCaptureHead(store, old.identity)).hash, published.headHash);
+  assert.deepEqual((await intakeSnapshot(store, 'raw', captureRelativePath(old.identity, old.evidenceHash))).bytes, serializeCapture(old));
+});
+
 test('tool truncation is UTF-8-safe, disclosed, and keeps the entire envelope bounded', async t => {
   const f = await fixture(t, [start(A), user(A), response(A, 'function_call', { name: 'tool', call_id: 'c', arguments: '{}' }),
     response(A, 'function_call_output', { call_id: 'c', output: '🦉'.repeat(16000) }), end(A)]);
   const capture = (await readCodexSelection(f.args)).candidates[0].capture;
-  assert.ok(capture.coverage.omissions.some(item => item.reason === 'tool-excerpt-truncated'));
+  assert.ok(capture.coverage.omissions.some(item => item.reason === 'tool-result-call-limit'));
   assert.ok(Buffer.byteLength(capture.evidence.at(-1).text) <= 32768);
   assert.ok(!capture.evidence.at(-1).text.includes('\ufffd')); assert.ok(serializeCapture(capture).length <= 2 * 1024 * 1024);
 });

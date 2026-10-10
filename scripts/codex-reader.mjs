@@ -2,14 +2,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readSessionRange, readSessionHeader } from './session-jsonl.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
-import { createCapture, clientVersion } from './capture-contract.mjs';
+import { createCapture, validateCapture, clientVersion } from './capture-contract.mjs';
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
 import { absolutePath } from './workflow-paths.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { nativeId, integer, timestamp, string, choice, canonicalJSON, fail } from './workflow-values.mjs';
 
-export const CODEX_READER_VERSION = '1';
+// v2 allocates separate bounded call/result text pools and preserves native
+// descriptors after text exhaustion. Published v1 captures remain immutable.
+export const CODEX_READER_VERSION = '2';
 const structural = new Set(['compacted', 'token_usage_record', 'world_state', 'retained_context', 'security_risk_score',
   'inter_agent_communication', 'inter_agent_communication_metadata', 'realtime_item']);
 const ignoredEvents = new Set(['token_count', 'thread_goal_updated', 'thread_settings_applied', 'agent_reasoning',
@@ -92,8 +94,8 @@ function toolText(collector, record, output) {
   return texts.join('\n');
 }
 
-function normalizeUnit(unit, historyMode, checkBudget) {
-  const collector = evidenceCollector(), calls = new Map(), seen = new Map(), outcomes = new Map(), collabIds = new Set(unit.collaborationIds);
+function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion) {
+  const collector = evidenceCollector(undefined, { toolRulesVersion }), calls = new Map(), seen = new Map(), outcomes = new Map(), collabIds = new Set(unit.collaborationIds);
   // Only structured native completion status can refine an observed tool outcome.
   for (const record of unit.records) {
     checkBudget();
@@ -178,7 +180,7 @@ function normalizeUnit(unit, historyMode, checkBudget) {
 }
 
 /** Library-only preview/extraction. Selection and source are helper-owned, never transcript controls. */
-export async function readCodexSelection({ state, scopeId, cursor = null, capturedAt = new Date().toISOString(), deadline = Infinity, now = Date.now, ...limits }) {
+export async function readCodexSelection({ state, scopeId, cursor = null, loadHead = null, capturedAt = new Date().toISOString(), deadline = Infinity, now = Date.now, ...limits }) {
   validateSelectionState(state); nativeId(scopeId); timestamp(capturedAt);
   const scope = currentIntervals(state).find(item => item.id === scopeId) ?? state.explicitScopes.find(item => item.id === scopeId);
   if (!scope) fail('CAPTURE_NOT_SELECTED');
@@ -321,14 +323,25 @@ export async function readCodexSelection({ state, scopeId, cursor = null, captur
     }
     if (!permitted) { if (selected.pendingScopes?.includes(scopeId)) pending.push({ unitId: unit.id, reason: 'anchor-unresolved' }); continue; }
     if (unit.end.endByte - unit.end.startByte > 64 * 1024) { pending.push({ unitId: unit.id, reason: 'SOURCE_ANCHOR_LIMIT' }); continue; }
-    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget);
+    // An already-published unit may be reread while an earlier unit holds the
+    // cursor. Reproduce its original rules rather than replacing finalized data.
+    const prior = (await loadHead?.(unit.id))?.capture;
+    let readerVersion = CODEX_READER_VERSION;
+    if (prior) {
+      validateCapture(prior);
+      if (prior.identity.client !== 'codex' || prior.identity.sessionId !== source.sessionId || prior.identity.unitId !== unit.id ||
+          prior.source.fileIdentity !== source.fileIdentity || prior.source.path !== source.path || prior.projectRoot !== source.projectRoot) fail('SOURCE_IDENTITY_MISMATCH');
+      if (prior.reader.name !== 'codex-rollout') fail('UNSUPPORTED_CODEX_READER');
+      readerVersion = choice(prior.reader.version, ['1', CODEX_READER_VERSION]);
+    }
+    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget, readerVersion);
     if (!collected.evidence.length && !collected.omissions.length) { noEvidence.push(unit.id); eligibility.set(unit.id, 'excluded'); continue; }
     const occurredAt = Number.isSafeInteger(unit.start.value.payload.started_at)
       ? new Date(unit.start.value.payload.started_at * 1000).toISOString() : unit.start.value.timestamp;
     const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2,
       identity: { client: 'codex', sessionId: source.sessionId, unitId: unit.id }, projectRoot: source.projectRoot,
       source: { path: source.path, fileIdentity: source.fileIdentity, ranges: compactRanges(unit.records) },
-      reader: { name: 'codex-rollout', version: CODEX_READER_VERSION, headerClientVersion: scan.metadata.version },
+      reader: { name: 'codex-rollout', version: readerVersion, headerClientVersion: scan.metadata.version },
       occurredAt, capturedAt, terminal: unit.terminal,
       coverage: { partial: unit.terminal !== 'completed' || collected.omissions.length > 0, omissions: collected.omissions }, evidence: collected.evidence });
     candidates.push({ capture, proof, scopeId });
@@ -399,7 +412,8 @@ export function codexProgressPlan(result, published = new Map()) {
 }
 
 export function codexCheckpoint(result, offset) {
-  return { format: 'cuefluent-reader-checkpoint', version: 1, reader: `codex-rollout/${CODEX_READER_VERSION}`,
+  // Cursor-only checkpoint representation is unchanged by capture text rules.
+  return { format: 'cuefluent-reader-checkpoint', version: 1, reader: 'codex-rollout/1',
     client: 'codex', sessionId: result.selection.source.sessionId, scopeId: result.scopeId,
     sourceIdentity: result.from.sourceIdentity, offset, records: [], units: [] };
 }

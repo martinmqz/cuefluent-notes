@@ -156,6 +156,47 @@ An omission-only capture is permitted when selected input contains no reusable
 evidence, for example inline images. It retains native identity, byte provenance,
 terminal status, and explicit omissions instead of inventing empty user text.
 
+The Codex reader `codex-rollout/2` applies tighter text allocations within those
+unchanged format limits: 64 KiB for call arguments and 192 KiB for results, with
+8 KiB of arguments and 16 KiB of result text per native call across its records.
+Unused allowance is not loaned between kinds. Source order and distinct record
+identities survive; identical text, API documentation and large objects are not
+excluded by keywords or presumed usefulness. Only already-supported native
+structural records are ignored. The worker cannot identify an important sentence
+inside an arbitrary truncated result.
+
+After text allowance runs out, a tool record may retain its native tool/call ID
+and outcome with an empty excerpt and a separate `tool-text-omitted` marker for
+that exact record ID. These markers are not aggregated, so genuinely empty output
+remains distinguishable. At most 32 such descriptors are retained, and only below
+2,016 evidence records and while omission capacity remains; otherwise
+`tool-descriptor-budget-exhausted` reports their loss. A native failed
+outcome is not proof of the underlying task's full result. Descriptors still share
+the 2,048-record and 1 MiB serialized evidence limits (with 2 KiB headroom); later
+descriptors can also be omitted when that envelope fills. User text uses that
+same envelope, independently of the tool-text pools. Neither original transcript
+bytes nor omitted content are available through an invented artifact reference.
+
+Omissions distinguish `tool-call-call-limit` / `tool-result-call-limit` (per-call
+text), `tool-call-budget-exhausted` / `tool-result-budget-exhausted` (per-kind
+text), `tool-budget-exhausted` (shared hard text ceiling), and
+`tool-evidence-record-limit` / `tool-evidence-serialized-limit` (overall envelope).
+Successive bounds account for disjoint omitted byte ranges; aggregated omission
+counts are affected records/ranges, not missing notes. Native read limits and
+unsupported structures remain separately reported by the readers.
+
+This allocation applies to new Codex units; it cannot recover previously
+omitted bytes. Existing captures, processing packets and acknowledgements are
+not rewritten. During collection, an already-published unit is normalized with its
+recorded reader rules, including version 1, so a held cursor can pass its unchanged
+evidence again without replacing it. Changed native evidence still conflicts.
+The Codex cursor-only checkpoint keeps its independent `codex-rollout/1` label;
+its representation has not changed with the text allocation. Reader rebuild
+remains deferred. Claude's
+human-only reader remains at version 1 because its supported evidence has no
+tool text. Budget changes do not move selection boundaries or rewind an advanced
+cursor to rebalance allocations.
+
 ## Selection and intake primitives
 
 Selection and intake provide explicit source registration, structured controls,

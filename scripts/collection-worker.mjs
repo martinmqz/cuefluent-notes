@@ -137,7 +137,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
     }
     const result = await (identity.client === 'codex' ? readCodexSelection : readClaudeSelection)({ state: selection.state, scopeId,
       cursor, checkpoint, observeRead,
-      ...(identity.client === 'claude' ? { loadHead: unitId => readCaptureHead(store, { ...identity, unitId }) } : {}) });
+      loadHead: unitId => readCaptureHead(store, { ...identity, unitId }) });
     // A later event for an already published/pruned Codex unit is not harmless
     // structural content. Do not advance through it as an excluded prefix.
     for (const unitId of result.unanchoredUnits) {

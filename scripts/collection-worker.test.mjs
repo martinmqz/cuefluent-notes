@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { withWorkflowBudget, consumeWorkflowBytes, workflowTimeout } from './workflow-budget.mjs';
 import { collectionHookOutput } from './collection-hooks.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
+import { createCapture, serializeCapture } from './capture-contract.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -82,6 +83,42 @@ test('frozen ingress EOF excludes its boundary turn and collects the next comple
   const head = await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B });
   assert.equal(head.capture.reader.headerClientVersion, '0.155.0-alpha.16.4');
   assert.match(head.capture.evidence[0].text, /Decision/);
+  assert.equal((await f.run()).saved, 0);
+});
+
+for (const held of [false, true]) test(`v1 Codex progress and published units continue under v2 with held cursor=${held}`, async t => {
+  const f = await fixture(t); await collectionIngress('codex', f.payload, f.options);
+  await fs.appendFile(f.source, turn(A, 'Boundary')); await f.run();
+  const selection = await readSelection(f.store, { client: 'codex', sessionId: S }), scopeId = selection.state.intervals[0].id;
+  const progress = await intakeSnapshot(f.store, 'state', `progress/codex/${S}/${scopeId}.json`);
+  const { checkpoint, ...cursor } = intakeJSON(progress);
+  assert.equal(checkpoint.reader, 'codex-rollout/1');
+  const C = randomUUID(), D = randomUUID(), output = 'x'.repeat(32768);
+  const failingEarlier = row('event_msg', { type: 'task_started', turn_id: B }) +
+    row('event_msg', { type: 'user_message', message: 'Earlier unit.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: B, last_agent_message: 'x'.repeat(70000) });
+  await fs.appendFile(f.source, (held ? failingEarlier : '') + row('event_msg', { type: 'task_started', turn_id: C }) +
+    row('event_msg', { type: 'user_message', message: 'Saved old source.' }) +
+    row('response_item', { type: 'function_call', id: randomUUID(), name: 'exec_command', call_id: 'old', arguments: '{}' }) +
+    row('response_item', { type: 'function_call_output', id: randomUUID(), call_id: 'old', output }) +
+    row('event_msg', { type: 'task_complete', turn_id: C }));
+  const extracted = await readCodexSelection({ state: selection.state, scopeId, cursor, checkpoint });
+  const candidate = extracted.candidates.find(item => item.capture.identity.unitId === C);
+  const old = createCapture({ ...candidate.capture, reader: { ...candidate.capture.reader, version: '1' },
+    coverage: { partial: false, omissions: [] }, evidence: candidate.capture.evidence.map(item => item.kind === 'tool-result' ? { ...item, text: output } : item) });
+  const plan = codexPublicationPlan(extracted, C);
+  const store = await openWorkflowIntake(f.capability, { client: 'codex', sessionId: S, cwd: f.project }, 'collect');
+  const saved = await withIntakeLock(store, tx => publishCapture(tx, { ...candidate, capture: old,
+    selectionHash: selection.hash, cursorHash: progress.hash, scan: plan.scan,
+    checkpoint: codexCheckpoint(extracted, plan.scan.to.offset), authorize: async () => true }));
+  await fs.appendFile(f.source, turn(D, 'New future evidence.'));
+  const run = await f.run();
+  assert.equal(run.saved, 1);
+  assert(!run.pending.includes('READER_CHECKPOINT_CONFLICT')); assert(!run.pending.includes('FINAL_CAPTURE_CONFLICT'));
+  if (held) assert(run.pending.includes('SOURCE_ANCHOR_LIMIT'));
+  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: D })).capture.reader.version, '2');
+  const retained = await readCaptureHead(f.store, old.identity);
+  assert.equal(retained.hash, saved.headHash); assert.deepEqual(serializeCapture(retained.capture), serializeCapture(old));
   assert.equal((await f.run()).saved, 0);
 });
 
