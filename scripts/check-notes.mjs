@@ -23,6 +23,13 @@ const inlineText = tokens => (tokens ?? []).map(t => {
 }).join('');
 const allTokens = tokens => tokens.flatMap(t => [t, ...allTokens(t.children ?? [])]);
 
+/** Fixed guidance only: never forward a proposed document's text or path. */
+export function markdownFailureReason(checked) {
+  return checked.metadata?.status === 'invalid'
+    ? 'Markdown check: reserved <!-- cuefluent ... --> metadata is invalid. Use check-notes for bounded diagnostics. Existing malformed metadata blocks automatic updates: preserve it and report the block to the user. New metadata belongs before all other content; use prepare-note. Put ordinary <!-- source-review: ... --> comments after valid leading metadata, keeping material facts and limitations visible.'
+    : 'A proposed document fails the bundled Markdown check; run check-notes for bounded diagnostics.';
+}
+
 /** Advisory subset check, not the Cuefluent parser/sanitizer or ranking engine. */
 export function inspectMarkdown(source, file = '<input>') {
   const tokens = md.parse(source.replace(/^\uFEFF/, ''), {});

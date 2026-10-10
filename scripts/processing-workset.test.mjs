@@ -88,7 +88,7 @@ test('workset survives admission interruption, freezes arrivals and charges the 
   await completeProcessing(f.capability, { selection: f.selection, operationId, expectedClaimHash: batch.claimHash, outcome: 'cancelled' });
   await processingFixture(t, { base: f }); // Incoming capture never joins the frozen list.
   workset = await inspectProcessingWorkset(f.capability, { worksetId });
-  assert.equal(workset.inputs.length, 2); assert.equal(workset.remainingSelected, 1); assert.equal(workset.budgetExhausted, true);
+  assert.equal(workset.inputs.length, 2); assert.equal(workset.remainingSelected, 2); assert.equal(workset.budgetExhausted, true);
   assert.equal(workset.items[0].state, 'cancelled'); assert.equal(workset.items[1].state, 'unattempted');
   await assert.rejects(prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: workset.worksetHash, indexes: [1] }), /PROCESSING_WORKSET_BUDGET/);
   const retry = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: [...f.inputs, ...b.inputs],

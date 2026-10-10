@@ -154,7 +154,7 @@ export function workflowErrorReport(error) {
     ...(typeof worksetId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(worksetId) ? { worksetId } : {}),
     ...(typeof operationId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(operationId) ? { operationId } : {}),
     ...(Object.keys(details).length ? { details } : {}),
-    ...(code === 'SAFE_UPDATE_REJECTED' && typeof error.safeMessage === 'string'
+    ...(['SAFE_UPDATE_REJECTED', 'INVALID_PROCESSING_MARKDOWN'].includes(code) && typeof error.safeMessage === 'string'
       ? { reason: error.safeMessage.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 500) } : {}),
     ...(Array.isArray(error?.cleanupWarnings) && error.cleanupWarnings.length
       ? { cleanupWarnings: ['Cleanup could not be verified; retained state requires inspection.'] } : {}) };

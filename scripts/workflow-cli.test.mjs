@@ -300,3 +300,21 @@ test('direct saves cannot change configured destinations or bypass pending proce
     { fault: at => { if (at === 'write-intent') throw new Error('crash'); } }), /crash/);
   await assert.rejects(executeWorkflow('direct-save', request, { configPath: f.options.configPath }), /pending|transaction|processing/i);
 });
+
+test('CLI reserved-metadata errors give fixed correction guidance without draft text', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f), contentPath = path.join(f.root, 'reserved.md');
+  await fs.writeFile(contentPath, '# Subject\n\n## Fact\n\nVisible fact.\n\n<!-- cuefluent review PRIVATE_SENTINEL -->\n');
+  const request = path.join(f.root, 'request.json');
+  await fs.writeFile(request, JSON.stringify(envelope(f, { ...f.args, expectedClaimHash: claim.claimHash, proposal: {
+    files: [{ path: 'subject.md', expectedHash: null, contentPath, expectedContentHash: await fingerprint(contentPath) }],
+    mappings: [{ identity: f.identity, paths: ['subject.md'] }],
+  } })));
+  const result = await invoke(['processing-propose', '--config', f.options.configPath, '--request', request]);
+  assert.equal(result.code, 1);
+  const error = JSON.parse(result.stderr);
+  assert.equal(error.error, 'INVALID_PROCESSING_MARKDOWN');
+  assert.match(error.reason, /reserved <!-- cuefluent/); assert.match(error.reason, /source-review/);
+  assert(!result.stderr.includes('PRIVATE_SENTINEL'));
+  assert.equal(await fingerprint(path.join(f.collection.notes.writerStateDir, 'claims', f.operationId + '.json')), claim.claimHash);
+  assert.equal(await fingerprint(path.join(f.collection.notes.notesDir, 'subject.md')), null);
+});

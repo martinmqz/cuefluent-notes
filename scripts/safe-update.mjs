@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, CONTROLS, compare, syncDirectory, sameFileIdentity, openGuarded, windowsComponent, isOwnedStage, removeOwnedStage } from './file-io.mjs';
-import { GUIDE_VERSION, MAX_BYTES, inspectMarkdown, reviewVocabulary } from './check-notes.mjs';
+import { GUIDE_VERSION, MAX_BYTES, inspectMarkdown, reviewVocabulary, markdownFailureReason } from './check-notes.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { canonicalJSON } from './workflow-values.mjs';
 import { assertWriterAccess, validateWriterCoordination, publishWriterReceipt, readWriterReceipt } from './writer-protocol.mjs';
@@ -640,7 +640,7 @@ export async function applyPlan(plan, options = {}) {
           (!validHash(file.expectedContentHash) || sha256(bytes) !== file.expectedContentHash)) fail('Approved proposal content changed.');
       const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
       const checked = inspectMarkdown(content, target);
-      if (checked.diagnostics.some(item => item.severity === 'error')) fail('A proposed document fails the bundled Markdown check; run check-notes for bounded diagnostics.');
+      if (checked.diagnostics.some(item => item.severity === 'error')) fail(markdownFailureReason(checked));
       registerNoteIdentity(checked.metadata, noteIdentities);
       diagnostics.push(...checked.diagnostics);
       allSections.push(...checked.sections);

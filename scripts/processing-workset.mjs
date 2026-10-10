@@ -133,11 +133,14 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
     const blocked = value.policyHash !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
       : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
     const elsewhere = done && done.operationId !== operation?.operationId;
-    const state = operation?.outcome ?? (elsewhere ? 'handled-elsewhere' : blocked ? 'blocked' : operation ? operation.admissionPending ? 'admission-pending' : operation.state : 'unattempted');
+    // Input disposition is current; operation outcomes remain historical. A
+    // cancelled attempt must not hide a later exact save or a new claim owner.
+    const state = elsewhere ? 'handled-elsewhere' : operation?.outcome === 'cancelled' ? blocked ? 'blocked' : 'cancelled'
+      : operation?.outcome ?? (blocked ? 'blocked' : operation ? operation.admissionPending ? 'admission-pending' : operation.state : 'unattempted');
     items.push({ index, state, operationId: operation?.operationId ?? null,
       externalOperationId: elsewhere ? done.operationId : owner && owner.operationId !== operation?.operationId ? owner.operationId : null,
       externalOutcome: elsewhere ? done.outcome : null,
-      conflict: operation?.outcome || elsewhere ? null : blocked ?? operation?.conflict ?? null });
+      conflict: elsewhere || (operation?.outcome && operation.outcome !== 'cancelled') ? null : blocked ?? operation?.conflict ?? null });
   }
   for (const operation of operations.filter(item => item.admissionPending)) {
     const members = items.filter(item => operation.indexes.includes(item.index));
@@ -164,7 +167,7 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
     inputCounts[bucket]++;
   }
   return { ...summary, items, operations, operationCounts, outcomeCounts, inputCounts,
-    remainingSelected: inputCounts.unattempted + inputCounts.blocked,
+    remainingSelected: inputCounts.unattempted + inputCounts.blocked + inputCounts.cancelled,
     remainingPacketBytes: value.budget.maxPacketBytes - summary.chargedPacketBytes,
     budgetExhausted: summary.chargedBatches >= value.budget.maxBatches || summary.chargedPacketBytes >= value.budget.maxPacketBytes,
     sourceCompleteness: 'unknown', scope: 'frozen-selection-only' };

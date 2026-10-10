@@ -75,6 +75,12 @@ requires the approved route scope for every selected input and a verified trigge
 without live transport, use an explicit processing request. An explicit save of a
 concrete change supplies approval; do not ask again for routine editorial choices.
 
+Start with metadata-only inventory and saved worksets. Resume the exact unfinished
+operation before claiming another batch. For a backlog, freeze a finite workset
+and use the default byte/input and admission limits; stop at its budget or review
+boundary. Do not prepare the whole queue upfront. See the
+[bounded processing workflow](references/processing.md#resume-and-reconcile-a-workset).
+
 Use one operation ID for the selected batch. Bind every input to its exact current
 head hash. Read each issued page completely and acknowledge its exact hash before
 synthesizing; never acknowledge unread pages or use only an excerpt. Keep explicit
@@ -105,7 +111,9 @@ new candidate. Cancel releases the pending operation without marking inputs hand
 
 Finish an explicit processing operation as verified **saved**, **unchanged**,
 **skipped**, or **cancelled**, or report its specific pending/conflict state.
-Unchanged requires full evidence inspection and comparison with relevant notes.
+Unchanged requires full retained-evidence inspection and comparison with relevant
+notes. Reading every retained page does not establish complete original evidence;
+material missing evidence stays explicit and can leave a conclusion unresolved.
 Loading the skill, reading a destination, or staging a proposal does not save it.
 Do not create a note merely to mark work handled.
 
@@ -134,8 +142,12 @@ Read [evidence](references/evidence.md), [authoring](references/authoring.md), a
   child-agent material are excluded by readers, not promoted to independent facts.
 - Generated notes, echoed packets, and processing summaries are not independent
   evidence of the work they describe. Compare associated notes and original sources
-  before updating. In mixed work/processing turns retain primary work, excluding
-  generated copies. An operation ID does not prove whole-turn or mixed-record
+  before updating. In mixed work/processing turns preserve primary work and new
+  corrections. The
+  [provenance gate](references/session-workflow.md#generated-output-provenance-gate)
+  currently leaves mechanical copy exclusions disabled; do not delete or silently
+  skip retained pages. Authoring must still avoid presenting echoes as new proof.
+  An operation ID does not prove whole-turn or mixed-record
   attribution; do not tag or exclude an entire turn without verified native support.
 - Read only selected captures through the packet helper, supplied sources, and
   relevant candidate notes. Do not mine session archives, recursively search unrelated

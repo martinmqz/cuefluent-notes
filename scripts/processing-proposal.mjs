@@ -6,7 +6,7 @@ import { unitKey } from './capture-retention.mjs';
 import { inspectDirectories, inspectExistingDirectories, readRetainedOutputs } from './safe-update.mjs';
 import { isNoteCategory } from './note-organization.mjs';
 import { readBoundedBytes, windowsComponent } from './file-io.mjs';
-import { inspectMarkdown } from './check-notes.mjs';
+import { inspectMarkdown, markdownFailureReason } from './check-notes.mjs';
 import { assertInspectedNoteTransition, assertProcessingNoteSources } from './note-generation.mjs';
 import { processingSnapshot, writeProcessingBytes } from './processing-state.mjs';
 import { intakeJSON } from './intake-io.mjs';
@@ -58,7 +58,9 @@ export async function buildProcessingProposal(ctx, claim, request) {
     total += bytes.length; if (total > LIMIT) fail('PROCESSING_PROPOSAL_CAPACITY');
     const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
     const checked = inspectMarkdown(content, file.path);
-    if (checked.diagnostics.some(item => item.severity === 'error')) fail('INVALID_PROCESSING_MARKDOWN');
+    if (checked.diagnostics.some(item => item.severity === 'error')) throw Object.assign(new Error('INVALID_PROCESSING_MARKDOWN'), {
+      code: 'INVALID_PROCESSING_MARKDOWN', safeMessage: markdownFailureReason(checked),
+    });
     registerNoteIdentity(checked.metadata, noteIdentities);
     const currentBytes = await readBoundedBytes(path.join(root, file.path), { maxBytes: 2 * 1024 * 1024, missing: true, noFollow: true });
     if ((currentBytes === null ? null : digest(currentBytes)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');

@@ -11,7 +11,9 @@ in the source repository for the current jobs.
 | Session readers | Supported Codex and Claude record shapes across varying version metadata, selected boundaries, native identity/order, bounded reads, exclusions, partial records and immutable revisions |
 | Consent and controls | Independent collection/processing settings, opt-outs, stale settings, explicit selection and zero-write ingress for disabled or unconfigured projects |
 | Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots, profile/indexing policy, aliased native folder facts and explicit maintenance |
-| Processing and writes | Exact input claims, acknowledged evidence pages, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
+| Processing and writes | Exact input claims, acknowledged evidence pages, metadata-only operation states, bounded packet admission, frozen worksets, cross-client admission, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
+| Backlog acceptance | Synthetic repeated facts completed unchanged, multiple revisions mapped to one existing subject note, resumed/reversed-order correction review with rejection of prior proposal authority, unavailable-image and output-gap retention; authored fixture text tests engine preservation, not model synthesis |
+| Capture fairness and echoes | Bounded per-call/kind tool text, explicit clipping descriptors, Unicode accounting, later failure/correction retention, old-reader replay and checkpoint continuity; forged markers and new identities retain unproven echoes |
 | Portable note metadata | Bounded YAML structure, comment placement, safe unknown fields, unsupported schemas, selected-file ID collisions, descriptive dates/source references and unchanged heading/alias vocabulary; no app indexing or hash-freshness claim |
 | Metadata generation and updates | Pure proposal preparation, stable identity/creation/source/unknown-field preservation, byte-identical no-ops, selected capture mappings, stale-write refusals, interrupted-write recovery and both detached client packages; no prose reconciliation or consent inference |
 | Related-note authoring | Shipped synthetic examples and newly prepared members share a series while retaining distinct note IDs; explicit series-ID generation and portable quoted dates; guarded later-member updates and earlier-sprint corrections preserve the other member, prior sources and the selected period; this does not automate destination choice, infer membership or execute app series retrieval |
@@ -67,6 +69,10 @@ integration works.
   current-turn identity transport or context delivery. Native Save / Skip
   rendering, conversational current-turn controls and automatic Markdown
   processing are not verified; use the supported explicit CLI operations.
+- Generated-output attribution remains unverified. Collection and processing copy
+  exclusions are disabled; processing output can still enter later captures.
+  Budget fairness improves future retention but cannot restore previously omitted
+  text. Complete page inspection does not establish complete original sources.
 - Claude extraction preserves proven human input with unconfirmed coverage;
   it does not infer assistant ownership or completed turns from ordinary
   transcript parentage.

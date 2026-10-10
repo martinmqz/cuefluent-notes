@@ -10,13 +10,13 @@ import { digest } from '../workflow-values.mjs';
 import { fingerprint } from '../safe-update.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing } from '../processing.mjs';
 
-export async function processingFixture(t, { base, terminal = 'completed', text = 'Synthetic meeting: keep the rollout paused.', evidence, nativeIdentity } = {}) {
+export async function processingFixture(t, { base, client = 'codex', terminal = client === 'claude' ? 'unconfirmed' : 'completed', omissions = [], text = 'Synthetic meeting: keep the rollout paused.', evidence, nativeIdentity } = {}) {
   const f = base ?? await storageFixture(t, { fullSetup: false });
   await fs.mkdir(f.collection.notes.notesDir, { recursive: true });
-  const sessionId = nativeIdentity?.sessionId ?? randomUUID(), unitId = nativeIdentity?.unitId ?? randomUUID(), identity = { client: 'codex', sessionId, unitId };
-  const selection = { client: 'codex', sessionId, cwd: f.project, unitId: null };
+  const sessionId = nativeIdentity?.sessionId ?? randomUUID(), unitId = nativeIdentity?.unitId ?? randomUUID(), identity = { client, sessionId, unitId };
+  const selection = { client, sessionId, cwd: f.project, unitId: null };
   const store = await openWorkflowIntake(f.capability, selection, 'collect');
-  const source = { client: 'codex', sessionId, projectRoot: f.project, path: path.join(f.project, `${sessionId}.jsonl`) };
+  const source = { client, sessionId, projectRoot: f.project, path: path.join(f.project, `${sessionId}.jsonl`) };
   await fs.writeFile(source.path, 'x'.repeat(300)); source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
   const proof = { ...identity, sourceIdentity: source.fileIdentity,
     start: { id: 'start', startByte: 200, endByte: 220, hash: digest('x'.repeat(20)) },
@@ -29,11 +29,15 @@ export async function processingFixture(t, { base, terminal = 'completed', text 
   const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity, projectRoot: f.project,
     source: { path: source.path, fileIdentity: source.fileIdentity, ranges: [range] }, reader: { name: 'fixture', version: '1', clientVersion: 'fixture' },
     occurredAt: '2026-01-01T00:00:00.000Z', capturedAt: '2026-01-01T00:00:00.000Z', terminal,
-    coverage: { partial: terminal !== 'completed', omissions: [] }, evidence: evidence ?? [{ kind: 'user', recordId: 'message', range, text }] });
+    coverage: { partial: terminal !== 'completed' || omissions.length > 0, omissions }, evidence: evidence ?? [{ kind: 'user', recordId: 'message', range, text }] });
   const scan = { from: { sourceIdentity: source.fileIdentity, offset: 200, anchor: null },
     to: { sourceIdentity: source.fileIdentity, offset: 300, anchor: { startByte: 280, endByte: 300, hash: proof.end.hash } },
     accounted: [{ kind: 'captured', unitId, startByte: 200, endByte: 300 }] };
-  const publishArgs = { capture, proof, scopeId: request.id, selectionHash: state.hash, cursorHash: null, scan, authorize };
+  // Processing fixtures use synthetic native bytes; real-reader coverage lives
+  // in the reader suites. Claude publication still requires its cursor contract.
+  const checkpoint = client === 'claude' ? { format: 'cuefluent-reader-checkpoint', version: 1, reader: 'fixture', client, sessionId,
+    scopeId: request.id, sourceIdentity: source.fileIdentity, offset: 300, records: [], units: [] } : null;
+  const publishArgs = { capture, proof, scopeId: request.id, selectionHash: state.hash, cursorHash: null, scan, checkpoint, authorize };
   const published = await withIntakeLock(store, tx => publishCapture(tx, publishArgs));
   const operationId = randomUUID(), inputs = [{ identity, headHash: published.headHash }];
   const args = { selection, operationId };

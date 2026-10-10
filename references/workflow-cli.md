@@ -151,11 +151,13 @@ Claude publishes proven human-input snapshots with unconfirmed finality.
 
 ### Supported read interface
 
-`--help`, `processing-capabilities`, `processing-pending`, and `processing-status` advertise
-`interfaceVersion: 1`. This is the public command/read-model contract, independent
+`--help`, `processing-capabilities`, `processing-pending`, `processing-status`,
+`processing-worksets`, and `processing-workset-status` advertise `interfaceVersion: 1`.
+Workset creation and preparation also return a versioned workset view; ordinary
+page, ack and proposal responses do not advertise a separate version. This is the public command/read-model contract, independent
 of capture and private-state schema versions. Consumers must use these commands,
-not parse private claims, journals, or receipts. Unknown interface versions require
-an explicit compatibility check. Additive fields may appear; request keys remain
+not parse private claims, journals, or receipts. Stop on an unsupported interface version until compatibility is explicitly
+established. Additive fields may appear; request keys remain
 strict. This interface works without Cuefluent being installed or running.
 
 `processing-capabilities` accepts an empty request `{}` (or no `--request`), without
@@ -323,7 +325,7 @@ atomic snapshot. Workset IDs are UUIDs. Nothing automatically extends a workset.
   saved, unchanged, skipped and cancelled; cancelled is terminal but **unhandled**.
   Exact dispositions from other operations appear as `handled-elsewhere`, with
   their operation IDs/outcomes. Foreign claims block admission rather than appearing
-  as available work. `remainingSelected` counts unattempted and blocked revisions,
+  as available work. `remainingSelected` counts unattempted, blocked and cancelled-but-unhandled revisions,
   excluding exact revisions already handled elsewhere. `remainingPacketBytes` does not prove another revision
   fits; actual packet measurement remains mandatory. `sourceCompleteness` is
   unknown in this metadata view. An interrupted pre-claim admission is exposed
@@ -335,7 +337,8 @@ conflict. Finish each batch before claiming another. All retained pages still ne
 explicit acknowledgement, even for apparently identical text. `unchanged` is a
 successful knowledge outcome; `cancelled` leaves evidence unhandled. Neither
 outcome causes the engine to chase newly arriving captures. Stop when the run
-budget stops new admission or review is needed, and report unattempted/blocked inputs.
+budget stops new admission or review is needed, and report unattempted, blocked
+and cancelled-but-unhandled inputs.
 Existing operations and already charged admissions remain resumable at an exhausted
 budget; finish/recover them rather than creating a replacement run.
 Workset files are helper-managed plans and do not prevent authorized pruning.
@@ -517,3 +520,28 @@ is not included.
 | `WINDOWS_SETTINGS_INSPECTION_LIMIT` | Bounded settings or metadata inspection exceeded its limit. Setup did not complete; preserve the existing stores. |
 | `WINDOWS_SETTINGS_DISCOVERY_INCOMPLETE` / `WINDOWS_DISCOVERY_TIMEOUT` | The package inventory or inspection could not finish. Diagnose access or host load before trying a newly reviewed request. |
 | `WINDOWS_SETTINGS_CHANGED` | Candidate identity, contents or bindings changed during setup. Inspect the current state before reviewing another request. |
+
+## Supported consumer boundary
+
+Use the [supported read interface](#supported-read-interface) and explicit command
+schemas above. Do not parse private files to infer state or maintain another claims,
+receipts, approval or writer database. The plugin remains usable without an app.
+
+Read-only processing commands are `processing-capabilities`, `processing-pending`,
+`processing-status`, `processing-worksets`, and `processing-workset-status`.
+They describe capabilities or metadata progress. `processing-page` is mutating:
+it records issued pages and can change the claim hash, even without acknowledgment.
+Page/ack requires explicit processing authority and coordination with the owning
+operation. A read-only consumer must not call page/ack, claim inputs, stage drafts,
+write notes or mutate settings. Delivery is not inspection. The CLI cannot attest that a person or model read a page.
+All mutation commands retain current consent, exact hashes and conflict/recovery
+checks. Proposal hashes are identifiers, never consent. Selection and source
+locators do not grant access to unrelated evidence.
+
+`INVALID_PROCESSING_MARKDOWN` retains its code and may include a bounded fixed
+`reason`, including correction guidance for the reserved Cuefluent metadata marker.
+It never returns proposal text. Writer rejections retain `SAFE_UPDATE_REJECTED`.
+Use current operation status after a failed mutation; do not infer that an error
+means no durable commit occurred. See [processing](processing.md) for resume,
+source-completeness and outcome semantics. Live automatic processing, model
+selection, app controls and scheduling are not supplied by this interface.
