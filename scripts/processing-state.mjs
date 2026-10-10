@@ -6,6 +6,7 @@ import { openProcessingIntake, inspectIntakeStore, withIntakeLock, guardStore, i
 import { withWorkflowWriterLocks } from './capture-maintenance.mjs';
 import { lstatOrNull, removeOwnedStage, syncDirectory, isOwnedStage } from './file-io.mjs';
 import { canonicalJSON, fail } from './workflow-values.mjs';
+import { checkWorkflowBudget } from './workflow-budget.mjs';
 
 export async function readProcessingState(capability, selection, operation) {
   const { collection, store, configHash, binding, hash } = await openProcessingIntake(capability, selection, operation);
@@ -80,4 +81,23 @@ export async function processingNames(ctx, directory, limit = 100) {
     if (names.length > limit) fail('PROCESSING_CAPACITY');
   }
   return names.sort();
+}
+
+/** Lexical metadata pagination. The bounded scan fails rather than pretending
+ * an unvisited directory suffix is a complete page. */
+export async function processingNamePage(ctx, directory, { limit, afterId }) {
+  const target = await intakePath(ctx.writer, 'state', `${directory}/.list`), parent = path.dirname(target);
+  await assertPrivatePaths(ctx.capability, [parent]);
+  if (!await lstatOrNull(parent)) return { ids: [], incomplete: false, nextCursor: null };
+  const ids = []; let scanned = 0;
+  for await (const entry of await fs.opendir(parent)) {
+    checkWorkflowBudget();
+    if (++scanned > 65536) fail('PROCESSING_INVENTORY_CAPACITY');
+    if (!entry.isFile() || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.json$/.test(entry.name)) fail('UNKNOWN_PROCESSING_STATE');
+    const id = entry.name.slice(0, -5);
+    if (afterId !== null && id <= afterId) continue;
+    ids.push(id); ids.sort(); if (ids.length > limit + 1) ids.pop();
+  }
+  const incomplete = ids.length > limit; if (incomplete) ids.pop();
+  return { ids, incomplete, nextCursor: incomplete ? ids.at(-1) : null };
 }

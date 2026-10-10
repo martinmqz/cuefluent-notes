@@ -21,6 +21,31 @@ in one claim. Claims cover logical units, so a newer revision cannot bypass an
 older claim. They never expire or get stolen. Locks are held only during helper
 calls; no lock spans agent synthesis or a user approval wait.
 
+New batches default to **five revisions and 64 KiB** of serialized packet content.
+An explicit `budget` can raise these limits up to 20 revisions and 4 MiB. The
+helper measures actual UTF-8 packet bytes before creating a claim, with rendered
+page overhead reported separately. Oversized evidence stays pending; nothing is
+silently truncated or split. Token estimates are approximate, not a model budget.
+Inspect reported required bytes before explicitly selecting a larger singleton.
+
+Admission defaults to one active inspection batch per collection, shared by both
+clients. Resume the existing operation first. An explicit `parallelism` of 1–5
+changes only that admission check; logical-unit reservations still apply. Fully
+inspected published proposals release the inspection slot but reserve their inputs.
+At most five proposals may await disposition; proposing also rechecks this bound.
+Existing excess claims remain resumable, and identical preparation retries do not
+reapply smaller defaults to an already reserved packet. No claim expires or is
+cancelled to make room. Admission errors identify blocking operation IDs when known.
+
+For a backlog, freeze a finite [workset](workflow-cli.md#finite-processing-worksets)
+before preparing batches. Its exact selection, admission budget and operation IDs
+survive compaction/restart. New captures stay outside it. Complete or publish one
+batch before starting the next; stop at the selected budget or review boundary.
+Worksets are plans, not additional claims, receipts, or writer state. They grant
+no permission and do not pin evidence against authorized pruning. Changed/pruned
+revisions become blocked and never get silently replaced. Cancellation releases
+the claim without refunding the run's charged work or marking its inputs handled.
+
 The returned packet description contains exact page hashes, byte count and
 input descriptors. Call `readProcessingPage` for each page, then explicitly
 `acknowledgeProcessingPages` using the issued index/hash pairs and latest claim

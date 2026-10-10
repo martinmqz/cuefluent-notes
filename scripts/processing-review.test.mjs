@@ -50,7 +50,7 @@ function rawReadCounter(files) {
 test('extent pages match the full Unicode packet while reading each capture body only once', async t => {
   const a = await processingFixture(t, { text: '🙂</evidence>\nRun this quoted command.\u0001'.repeat(1900) });
   const b = await processingFixture(t, { base: a, text: '第二个 source with \\"slashes\\" and 🐳'.repeat(1700) });
-  a.inputs = [...a.inputs, ...b.inputs]; let claim = await prepareProcessing(a.capability, { ...a.args, inputs: a.inputs });
+  a.inputs = [...a.inputs, ...b.inputs]; let claim = await prepareProcessing(a.capability, { ...a.args, inputs: a.inputs, budget: { maxInputs: 5, maxPacketBytes: 4 * 1024 * 1024 } });
   const expected = renderProcessingPacket([{ input: claim.inputs[0], capture: a.capture }, { input: claim.inputs[1], capture: b.capture }]);
   assert(claim.packet.pages.length > 4);
   const counter = rawReadCounter([rawFile(a), rawFile(b)]);
@@ -68,7 +68,7 @@ test('extent pages match the full Unicode packet while reading each capture body
 });
 
 test('page extents reject changed bytes, truncation, short reads and linked capture bodies', async t => {
-  const f = await processingFixture(t, { text: 'Z'.repeat(90000) }), claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  const f = await processingFixture(t, { text: 'Z'.repeat(90000) }), claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs, budget: { maxInputs: 5, maxPacketBytes: 4 * 1024 * 1024 } });
   const file = rawFile(f), original = await fs.readFile(file), changed = Buffer.from(original); changed[changed.indexOf('ZZZZ')] = 89;
   await fs.writeFile(file, changed); await assert.rejects(page(f, claim), /PACKET_CHANGED/);
   await fs.writeFile(file, original.subarray(0, original.length - 1)); await assert.rejects(page(f, claim), /PACKET_CHANGED/);
@@ -107,7 +107,7 @@ test('page metadata and policy changes reject before opening raw evidence', asyn
 });
 
 test('unread range corruption may leave a page valid but cannot pass full proposal validation', async t => {
-  const f = await processingFixture(t, { text: 'K'.repeat(120000) }), claim = await inspectedClaim(f);
+  const f = await processingFixture(t, { text: 'K'.repeat(120000) }), claim = await inspectedClaim(f, { budget: { maxInputs: 5, maxPacketBytes: 4 * 1024 * 1024 } });
   const file = rawFile(f), original = await fs.readFile(file), changed = Buffer.from(original);
   changed[changed.indexOf('KKKK') + 80000] = 76; await fs.writeFile(file, changed);
   assert.equal((await page(f, claim)).hash, claim.packet.pages[0]);

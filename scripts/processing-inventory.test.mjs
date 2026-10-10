@@ -36,7 +36,7 @@ test('claims stay visible until cleanup and exact handled revisions leave pendin
 
 test('public operation view distinguishes delivery, inspection, review and completion without claiming source completeness', async t => {
   const f = await processingFixture(t, { text: 'Synthetic evidence. '.repeat(4000) });
-  let claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  let claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs, budget: { maxInputs: 5, maxPacketBytes: 4 * 1024 * 1024 } });
   let status = await inspectProcessing(f.capability, f.operationId);
   assert.equal(status.interfaceVersion, 1); assert.equal(status.state, 'unread');
   assert.equal(status.inspection.packetBytes, claim.packet.bytes);

@@ -51,6 +51,7 @@ const SOURCE_FILES = [
   'scripts/processing-proposal.mjs',
   'scripts/processing-state.mjs',
   'scripts/processing.mjs',
+  'scripts/processing-workset.mjs',
   'scripts/reader-checkpoint.mjs',
   'scripts/reader-pages.mjs',
   'scripts/session-jsonl.mjs',

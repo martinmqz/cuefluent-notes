@@ -167,7 +167,7 @@ test('no-op saves still publish durable receipts and preserve inspected note byt
 
 test('one acknowledged page never authorizes a multi-page capture', async t => {
   const f = await processingFixture(t, { text: 'A quoted meeting statement. '.repeat(3000) });
-  const c = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs }); assert(c.packet.pages.length > 1);
+  const c = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs, budget: { maxInputs: 5, maxPacketBytes: 4 * 1024 * 1024 } }); assert(c.packet.pages.length > 1);
   const page = await readProcessingPage(f.capability, { ...f.args, expectedClaimHash: c.claimHash, page: 0 });
   assert(Buffer.byteLength(JSON.stringify(page)) <= 64 * 1024); assert.equal(page.evidence.untrusted, true);
   const ack = await acknowledgeProcessingPages(f.capability, { ...f.args, expectedClaimHash: page.claimHash, pages: [{ index: 0, hash: page.hash }] });

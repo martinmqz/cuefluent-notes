@@ -8,13 +8,13 @@ import { logicalCaptureIdentity } from './capture-contract.mjs';
 import { withProcessingState, readProcessingState, processingSnapshot, processingJSON, writeProcessingJSON, removeProcessingJSON, processingNames } from './processing-state.mjs';
 import { claimPath, proposalPath, transactionPath, operationPath, associationPath, validateClaim, validateAssociation, operationContext, inspectionProgress, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
-import { renderProcessingPacket, packetManifest, validatePageIndex, PROCESSING_PAGE_BYTES } from './processing-packet.mjs';
+import { renderProcessingPacket, packetManifest, validatePageIndex, PROCESSING_PAGE_BYTES, PROCESSING_PACKET_BYTES } from './processing-packet.mjs';
 import { processingPageLayout, processingPagePaths, readProcessingExtent } from './processing-page.mjs';
 import { buildProcessingProposal, validateProcessingProposal, copyProcessingProposal, verifyProcessingProposal, verifyExistingProposalParents, proposalHash } from './processing-proposal.mjs';
 import { applyPlan, recover, finalizeRecordedWriter, verifyPlanTargets } from './safe-update.mjs';
 import { readWriterReceipt as writerReceipt } from './writer-protocol.mjs';
 import { syncDirectory } from './file-io.mjs';
-import { canonicalJSON, digest, fail, keys, list, hash, nativeId, unique, choice, timestamp } from './workflow-values.mjs';
+import { canonicalJSON, digest, fail, keys, list, hash, nativeId, unique, choice, timestamp, integer } from './workflow-values.mjs';
 
 const equal = (a, b) => canonicalJSON(a) === canonicalJSON(b);
 const explicit = 'explicitProcess';
@@ -92,38 +92,82 @@ async function requireIncomplete(ctx, operationId) {
   if ((await processingSnapshot(ctx, operationPath(operationId))).bytes) fail('PROCESSING_OPERATION_COMPLETE');
 }
 
-/** Explicit selection only while native current-turn delivery is unverified. */
-export async function prepareProcessing(capability, { selection, operationId, inputs, reconsider = false }) {
-  selection = await selected(selection); nativeId(operationId);
-  list(inputs, 20, { empty: false }); unique(inputs.map(input => unitKey(input.identity)));
+export const DEFAULT_PROCESSING_BUDGET = Object.freeze({ maxInputs: 5, maxPacketBytes: 64 * 1024 });
+export function processingBudget(value = DEFAULT_PROCESSING_BUDGET) {
+  keys(value, ['maxInputs', 'maxPacketBytes']); integer(value.maxInputs); integer(value.maxPacketBytes);
+  if (value.maxInputs < 1 || value.maxInputs > 20 || value.maxPacketBytes < 1 || value.maxPacketBytes > PROCESSING_PACKET_BYTES) fail('INVALID_PROCESSING_BUDGET');
+  return { ...value };
+}
+function budgetError(code, details) { throw Object.assign(new Error(code), { code, details }); }
+export async function activeProcessingClaims(ctx) {
+  const claims = [];
+  for (const name of await processingNames(ctx, 'claims')) {
+    const operationId = nativeId(name.slice('claims/'.length, -5));
+    try {
+      const claim = validateClaim(await processingJSON(ctx, name));
+      if (claim.bindingHash !== ctx.bindingHash) continue;
+      if (!equal(claim.binding, ctx.binding) || name !== claimPath(claim.operationId)) fail('PROCESSING_BINDING_CHANGED');
+      let published = false;
+      if (claim.proposalIntent) {
+        checkedInspection(claim);
+        const proposal = await processingJSON(ctx, proposalPath(claim.operationId));
+        if (proposal !== null) {
+          if (proposalHash(validateProcessingProposal(proposal, claim)) !== claim.proposalIntent.hash) fail('PROCESSING_PROPOSAL_CHANGED');
+          published = true;
+        }
+      }
+      claims.push({ claim, published });
+    } catch (error) { error.operationId = operationId; throw error; }
+  }
+  return claims;
+}
+
+/** Caller owns the existing intake/writer locks. Workset intent is published
+ * through beforePublish only after all ordinary admission and byte checks. */
+export async function prepareProcessingInState(ctx, { operationId, inputs, reconsider = false, budget, parallelism = 1 }, { beforePublish } = {}) {
+  nativeId(operationId); list(inputs, 20, { empty: false }); unique(inputs.map(input => unitKey(input.identity)));
   if (typeof reconsider !== 'boolean') fail('INVALID_PROCESSING_REQUEST');
-  return withProcessingState(capability, selection, explicit, async ctx => {
-    await noPendingIntake(ctx); await assertNoTransaction(ctx);
-    const complete = await processingJSON(ctx, operationPath(operationId));
-    if (complete !== null) fail('PROCESSING_OPERATION_COMPLETE');
-    const existing = await processingSnapshot(ctx, claimPath(operationId));
-    if (existing.bytes) {
-      const saved = await loadClaim(ctx, operationId);
-      if (!equal(saved.claim.inputs.map(inputReference), inputs)) fail('PROCESSING_OPERATION_CONFLICT');
-      return summary(saved.claim, saved.hash);
-    }
-    const sources = [], associations = [];
-    for (const reference of inputs) {
-      const current = await activatedInput(ctx, reference);
-      if (current.input.dispositionHash !== null && !reconsider) fail('PROCESSING_INPUT_ALREADY_HANDLED');
-      sources.push({ input: current.input, capture: current.capture }); associations.push(current.association);
-    }
-    for (const name of await processingNames(ctx, 'claims')) {
-      const other = validateClaim(await processingJSON(ctx, name));
-      if (other.bindingHash === ctx.bindingHash && other.inputs.some(input => sources.some(source => unitKey(source.input.identity) === unitKey(input.identity)))) fail('PROCESSING_INPUT_CLAIMED');
-    }
-    const packet = renderProcessingPacket(sources), descriptors = sources.map(source => source.input);
-    const claim = validateClaim({ format: 'cuefluent-processing-claim', version: 1, operationId, bindingHash: ctx.bindingHash, binding: ctx.binding,
-      selection, policyHash: ctx.policyHash, createdAt: new Date().toISOString(), inputs: descriptors, inputsHash: digest(canonicalJSON(descriptors)),
-      packet: packetManifest(sources, packet), issued: [], acknowledged: [], proposalIntent: null });
-    const saved = await writeProcessingJSON(ctx, claimPath(operationId), claim, null);
-    return { ...summary(claim, saved.hash), associations };
-  });
+  const limits = processingBudget(budget); integer(parallelism);
+  if (parallelism < 1 || parallelism > 5) fail('INVALID_PROCESSING_PARALLELISM');
+  await noPendingIntake(ctx); await assertNoTransaction(ctx);
+  if (await processingJSON(ctx, operationPath(operationId)) !== null) fail('PROCESSING_OPERATION_COMPLETE');
+  const existing = await processingSnapshot(ctx, claimPath(operationId));
+  if (existing.bytes) {
+    const saved = await loadClaim(ctx, operationId);
+    if (!equal(saved.claim.inputs.map(inputReference), inputs)) fail('PROCESSING_OPERATION_CONFLICT');
+    return summary(saved.claim, saved.hash);
+  }
+  if (inputs.length > limits.maxInputs) budgetError('PROCESSING_BATCH_BUDGET', { inputs: inputs.length, maxInputs: limits.maxInputs });
+  const claims = await activeProcessingClaims(ctx);
+  for (const { claim } of claims) {
+    if (claim.inputs.some(input => inputs.some(ref => unitKey(ref.identity) === unitKey(input.identity)))) fail('PROCESSING_INPUT_CLAIMED');
+  }
+  const queued = claims.filter(item => item.published).length, active = claims.length - queued;
+  if (queued >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued, limit: 5, operationIds: claims.filter(item => item.published).map(item => item.claim.operationId) });
+  if (active >= parallelism) budgetError('PROCESSING_RESUME_REQUIRED', { current: active, limit: parallelism, operationIds: claims.filter(item => !item.published).map(item => item.claim.operationId) });
+  const sources = [], associations = [];
+  for (const reference of inputs) {
+    const current = await activatedInput(ctx, reference);
+    if (current.input.dispositionHash !== null && !reconsider) fail('PROCESSING_INPUT_ALREADY_HANDLED');
+    sources.push({ input: current.input, capture: current.capture }); associations.push(current.association);
+  }
+  const packet = renderProcessingPacket(sources), descriptors = sources.map(source => source.input);
+  const workload = { packetBytes: packet.bytes, renderedPageBytes: packet.pages.reduce((total, page) => total + page.bytes, 0),
+    estimatedTokens: Math.ceil(packet.bytes / 4), estimator: 'UTF-8 bytes divided by four; not measured model tokens' };
+  if (packet.bytes > limits.maxPacketBytes) budgetError('PROCESSING_BATCH_BUDGET', { packetBytes: packet.bytes, maxPacketBytes: limits.maxPacketBytes,
+    inputSizes: sources.map((source, index) => ({ index, packetBytes: renderProcessingPacket([source]).bytes })) });
+  const claim = validateClaim({ format: 'cuefluent-processing-claim', version: 1, operationId, bindingHash: ctx.bindingHash, binding: ctx.binding,
+    selection: ctx.selection, policyHash: ctx.policyHash, createdAt: new Date().toISOString(), inputs: descriptors, inputsHash: digest(canonicalJSON(descriptors)),
+    packet: packetManifest(sources, packet), issued: [], acknowledged: [], proposalIntent: null });
+  await beforePublish?.(claim);
+  const saved = await writeProcessingJSON(ctx, claimPath(operationId), claim, null);
+  return { ...summary(claim, saved.hash), associations, workload };
+}
+
+/** Explicit selection only while native current-turn delivery is unverified. */
+export async function prepareProcessing(capability, args) {
+  const selection = await selected(args.selection);
+  return withProcessingState(capability, selection, explicit, ctx => prepareProcessingInState(ctx, args));
 }
 
 export async function readProcessingPage(capability, { selection, operationId, expectedClaimHash, page }) {
@@ -163,6 +207,9 @@ export async function proposeProcessing(capability, { selection, operationId, ex
     await assertNoTransaction(ctx); await requireIncomplete(ctx, operationId);
     let saved = await loadClaim(ctx, operationId, expectedClaimHash); const { claim } = saved;
     checkedInspection(claim); await currentInputs(ctx, claim);
+    const active = await activeProcessingClaims(ctx), existing = active.find(item => item.claim.operationId === operationId);
+    const queued = active.filter(item => item.published && item.claim.operationId !== operationId);
+    if (!existing?.published && queued.length >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued.length, limit: 5, operationIds: queued.map(item => item.claim.operationId) });
     let value;
     if (claim.proposalIntent) {
       value = validateProcessingProposal(claim.proposalIntent.value, claim);

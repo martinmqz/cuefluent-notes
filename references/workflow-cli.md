@@ -199,10 +199,21 @@ Use a collection envelope and the same operation ID throughout a batch:
    `unitId` to inspect it without enumerating the directory. Incomplete
    results remain incomplete; narrow selection if capacity is reached. The output
    includes existing claims, pending proposals/transactions and blocked intake.
-2. `processing-prepare`: `{selection, operationId, inputs, reconsider?}`. Inputs
+2. `processing-prepare`: `{selection, operationId, inputs, reconsider?, budget?, parallelism?}`. Inputs
    are 1–20 exact `{identity: {client, sessionId, unitId}, headHash}` records.
    This verifies raw bytes and lineage, then reserves logical units. Explicit
    reconsideration can revisit handled heads; it is not an automatic retry flag.
+   New admissions default to 5 inputs and 64 KiB packet bytes. An explicit
+   `budget: {maxInputs, maxPacketBytes}` can select 1–20 inputs and 1–4194304 bytes.
+   Larger singletons require that explicit choice. `parallelism` defaults to 1
+   active inspection, with a maximum of 5; it applies across the collection, not
+   just this session or workset. Five published proposals is a separate fixed cap.
+   Budget rejection publishes no claim. Known capacity errors return numeric
+   details; admission blockers can include bounded `operationIds` for status.
+   A measured byte rejection also reports `inputSizes: [{index, packetBytes}]`:
+   each original request index's standalone packet cost, including framing. This
+   identifies oversized revisions without repeated singleton reads. Inventory
+   remains metadata-only and cannot estimate unmeasured raw bodies.
 3. `processing-page`: `{selection, operationId, expectedClaimHash, page}`.
    Page indexes start at zero. Read the complete returned evidence page.
 4. `processing-ack`: `{selection, operationId, expectedClaimHash, pages}` where
@@ -240,6 +251,64 @@ Do not prepare or synthesize another copy when a claim/proposal is already pendi
 hash. Completed save receipts can finish bookkeeping without modifying later user
 edits; incomplete writes require current input/policy/output checks. See
 [processing](processing.md) for durable protocol and coverage limits.
+
+## Finite processing worksets
+
+These version-1 commands use the same collection envelope, private processing
+state, claims, proposals and writer as ordinary processing. They invoke no model.
+Prepare a deliberately bounded list from inventory; pagination is not a globally
+atomic snapshot. Workset IDs are UUIDs. Nothing automatically extends a workset.
+
+- `processing-worksets`: `{selection?, limit?, afterWorksetId?}`. Rediscover saved
+  worksets after losing conversational context. Default page size 20, maximum 100;
+  scans at most 65536 filenames. Results include IDs, inspected hashes, selection,
+  creation time, input count and charged budgets, never raw bodies. The lexical
+  cursor covers examined workset files; selection/binding filtering can yield an
+  empty page with `incomplete: true`. Continue its cursor. Use a returned ID with
+  status rather than opening private files or creating a replacement run.
+- `processing-workset-create`: `{selection, worksetId, inputs, runBudget?,
+  unscannedRemainder?}`. Freeze 1–100 exact `{identity, headHash}` inputs.
+  `runBudget: {maxBatches, maxPacketBytes}` defaults to 5 batches and 327680 bytes;
+  maximums are 20 batches and 16777216 bytes. `unscannedRemainder` is a caller's
+  inventory limitation (boolean or null/unknown), not proof the whole queue was
+  enumerated. Exact creation retries return the existing workset without resetting
+  progress; changing a selection requires a new explicit workset.
+- `processing-workset-prepare`: `{worksetId, expectedWorksetHash, indexes,
+  batchBudget?, parallelism?}`. Select 1–20 unique zero-based indexes from the
+  frozen list. `batchBudget` has the same shape/limits as preparation's `budget`.
+  Workset and batch budgets both apply; a new workset cannot bypass collection
+  admission. The engine derives the same operation ID from the same index set.
+  Use the returned ordinary processing claim for page/ack/propose/save/complete.
+  Admission intent charges actual packet bytes before publishing the claim. An
+  interrupted admission resumes only its exact selection and packet, without a
+  second charge; inspect the workset for its current hash before retrying. A
+  completed operation is inspected/recovered, never prepared as a fresh save.
+- `processing-workset-status`: `{worksetId}`. Metadata-only progress over the
+  frozen selection. Reports per-input states, operation states, charged and
+  remaining budgets, `operationCounts`, `outcomeCounts`, `inputCounts`, `remainingSelected`, and
+  `budgetExhausted`. Operation counts are not note counts; input counts are not
+  global queue totals. Each count group is a separate dimension with disjoint
+  buckets; do not sum groups together. Operation progress distinguishes recovery,
+  terminal, review, blocked, admission-pending and inspection. Outcomes distinguish
+  saved, unchanged, skipped and cancelled; cancelled is terminal but **unhandled**.
+  Exact dispositions from other operations appear as `handled-elsewhere`, with
+  their operation IDs/outcomes. Foreign claims block admission rather than appearing
+  as available work. `remainingSelected` counts unattempted and blocked revisions,
+  excluding exact revisions already handled elsewhere. `remainingPacketBytes` does not prove another revision
+  fits; actual packet measurement remains mandatory. `sourceCompleteness` is
+  unknown in this metadata view. An interrupted pre-claim admission is exposed
+  as `admissionPending`; it is not a completed or reserved capture. If those inputs
+  were subsequently claimed/handled elsewhere, it reports the specific blocker.
+
+Follow status to resume the same operation, review a proposal, or inspect a
+conflict. Finish each batch before claiming another. All retained pages still need
+explicit acknowledgement, even for apparently identical text. `unchanged` is a
+successful knowledge outcome; `cancelled` leaves evidence unhandled. Neither
+outcome causes the engine to chase newly arriving captures. Stop when the run
+budget stops new admission or review is needed, and report unattempted/blocked inputs.
+Existing operations and already charged admissions remain resumable at an exhausted
+budget; finish/recover them rather than creating a replacement run.
+Workset files are helper-managed plans and do not prevent authorized pruning.
 
 ## Direct saves
 

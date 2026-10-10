@@ -6,6 +6,7 @@ import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { captureSelectionStatus, controlCapture, restrictCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './capture-controls.mjs';
 import { PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
+import { createProcessingWorkset, prepareWorksetBatch, inspectProcessingWorkset, listProcessingWorksets } from './processing-workset.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
   completeProcessing, inspectProcessing, recoverProcessing } from './processing.mjs';
@@ -25,7 +26,11 @@ const commands = {
   'capture-select': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], run: selectExplicitCapture },
   'capture-run': { required: ['selection', 'scopeId', 'expectedSelectionHash'], optional: ['unitIds'], run: runSelectedCapture },
   'processing-pending': { required: ['selection'], optional: ['limit', 'afterUnitId'], run: pendingProcessing },
-  'processing-prepare': { required: ['selection', 'operationId', 'inputs'], optional: ['reconsider'], run: prepareProcessing },
+  'processing-worksets': { required: [], optional: ['selection', 'limit', 'afterWorksetId'], run: listProcessingWorksets },
+  'processing-workset-create': { required: ['selection', 'worksetId', 'inputs'], optional: ['runBudget', 'unscannedRemainder'], run: createProcessingWorkset },
+  'processing-workset-status': { required: ['worksetId'], run: inspectProcessingWorkset },
+  'processing-workset-prepare': { required: ['worksetId', 'expectedWorksetHash', 'indexes'], optional: ['batchBudget', 'parallelism'], run: prepareWorksetBatch },
+  'processing-prepare': { required: ['selection', 'operationId', 'inputs'], optional: ['reconsider', 'budget', 'parallelism'], run: prepareProcessing },
   'processing-page': { required: ['selection', 'operationId', 'expectedClaimHash', 'page'], run: readProcessingPage },
   'processing-ack': { required: ['selection', 'operationId', 'expectedClaimHash', 'pages'], run: acknowledgeProcessingPages },
   'processing-propose': { required: ['selection', 'operationId', 'expectedClaimHash'], optional: ['proposal'], run: proposeProcessing },
@@ -120,16 +125,26 @@ export async function main(args) {
 /** Only known numeric capacity measurements may cross the CLI error boundary. */
 export function workflowErrorReport(error) {
   const details = {}, code = safeErrorCode(error, 'WORKFLOW_OPERATION_FAILED');
-  if (['NOTE_METADATA_SOURCE_CAPACITY', 'NOTE_METADATA_BYTE_CAPACITY'].includes(code)) {
-    for (const key of ['current', 'proposed', 'limit']) {
+  if (['NOTE_METADATA_SOURCE_CAPACITY', 'NOTE_METADATA_BYTE_CAPACITY', 'PROCESSING_BATCH_BUDGET', 'PROCESSING_PROPOSAL_QUEUE_FULL', 'PROCESSING_RESUME_REQUIRED'].includes(code)) {
+    for (const key of ['current', 'proposed', 'limit', 'inputs', 'maxInputs', 'packetBytes', 'maxPacketBytes']) {
       const value = Object.getOwnPropertyDescriptor(error.details ?? {}, key)?.value;
       if (Number.isSafeInteger(value) && value >= 0) details[key] = value;
     }
   }
+  if (['PROCESSING_RESUME_REQUIRED', 'PROCESSING_PROPOSAL_QUEUE_FULL'].includes(code)) {
+    const ids = Object.getOwnPropertyDescriptor(error.details ?? {}, 'operationIds')?.value;
+    if (Array.isArray(ids) && ids.length <= 100 && ids.every(value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value))) details.operationIds = [...ids];
+  }
+  if (code === 'PROCESSING_BATCH_BUDGET') {
+    const sizes = Object.getOwnPropertyDescriptor(error.details ?? {}, 'inputSizes')?.value;
+    if (Array.isArray(sizes) && sizes.length <= 20 && sizes.every(item => item && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < 20 && Number.isSafeInteger(item.packetBytes) && item.packetBytes > 0 && item.packetBytes <= 4194304)) details.inputSizes = sizes.map(({ index, packetBytes }) => ({ index, packetBytes }));
+  }
   // Parser/OS exceptions never echo source bodies. Writer-authored diagnostics
   // are fixed guidance (occasionally with a selected path), bounded separately.
   const operationId = Object.getOwnPropertyDescriptor(error ?? {}, 'operationId')?.value;
+  const worksetId = Object.getOwnPropertyDescriptor(error ?? {}, 'worksetId')?.value;
   return { error: code,
+    ...(typeof worksetId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(worksetId) ? { worksetId } : {}),
     ...(typeof operationId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(operationId) ? { operationId } : {}),
     ...(Object.keys(details).length ? { details } : {}),
     ...(code === 'SAFE_UPDATE_REJECTED' && typeof error.safeMessage === 'string'
