@@ -50,6 +50,10 @@ save questions through the unverified transport. An explicit processing request
 works now in every processing mode. Report this limitation when explaining whether
 processing runs automatically; saving an Automatic preference is not proof that
 live automatic processing is active.
+When setup or a mode change saves Automatic, give the
+[Automatic confirmation](references/setup.md#confirm-automatic): processing captured
+evidence still needs an explicit request, and each affected route's collection
+setting and session selection are reported separately.
 
 Future collection preserves the registered EOF and never imports earlier history.
 Without a proven boundary at that floor, the first later full native unit establishes

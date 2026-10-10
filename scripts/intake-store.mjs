@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { openGuarded, lstatOrNull, sameFileIdentity, syncDirectory, removeOwnedStage } from './file-io.mjs';
 import { validateCapture, serializeCapture, captureRelativePath, logicalCaptureIdentity, assertCaptureExtension, MAX_CAPTURE_BYTES } from './capture-contract.mjs';
-import { planReaderCheckpoint, validateStoredCheckpoint, hydrateReaderCheckpoint, publishReaderPages } from './reader-pages.mjs';
+import { planReaderCheckpoint, validateStoredCheckpoint, hydrateReaderCheckpoint, publishReaderPages, readReaderAllocation } from './reader-pages.mjs';
 import { validateReaderCheckpoint, assertCheckpointExtension } from './reader-checkpoint.mjs';
 import { assertCaptureRetained, assertNoPrune, readTombstone, lineagePath, readLineageRecord, captureLineage } from './capture-retention.mjs';
 import { newSelectionState, validateSelectionState, applySelectionControl, evaluateUnitSelection, resolveSelectionAnchor, stableSourceIdentity, currentIntervals } from './capture-selection.mjs';
@@ -50,14 +50,36 @@ const progressCursor = value => {
   cursor(current); return current;
 };
 const nextProgress = pending => ({ ...pending.transition.to, ...(pending.checkpoint !== null ? { checkpoint: pending.checkpoint } : {}) });
+function validateProgress(value, identity, scopeId, sourceIdentity) {
+  const current = progressCursor(value);
+  if (current && current.sourceIdentity !== sourceIdentity) fail('SOURCE_IDENTITY_MISMATCH');
+  if (value?.checkpoint != null) validateStoredCheckpoint(value.checkpoint, { identity, scopeId, sourceIdentity, offset: current.offset });
+  return current;
+}
 export async function readReaderProgress(store, identity, scopeId, sourceIdentity, { metadataOnly = false } = {}) {
   const snapshot = await intakeSnapshot(store, 'state', progressPath(identity, scopeId));
-  const value = intakeJSON(snapshot), current = progressCursor(value);
-  if (current && current.sourceIdentity !== sourceIdentity) fail('SOURCE_IDENTITY_MISMATCH');
-  if (value?.checkpoint) validateStoredCheckpoint(value.checkpoint, { identity, scopeId, sourceIdentity, offset: current.offset });
+  const value = intakeJSON(snapshot);
+  const current = validateProgress(value, identity, scopeId, sourceIdentity);
   const checkpoint = metadataOnly ? null : await hydrateReaderCheckpoint(store, value?.checkpoint ?? null);
   if (checkpoint !== null) validateReaderCheckpoint(checkpoint, { identity, scopeId, sourceIdentity, offset: current.offset });
   return { snapshot, cursor: current, checkpoint, checkpointRoot: value?.checkpoint ?? null };
+}
+export async function readReaderHeadroom(store, identity, scopeId, sourceIdentity) {
+  // Publication reserves counters before pages and progress. Read the checkpoint
+  // first: parallel/reversed reads can falsely pair a new root with an absent counter.
+  const snapshot = await intakeSnapshot(store, 'state', progressPath(identity, scopeId));
+  const value = intakeJSON(snapshot);
+  try {
+    validateProgress(value, identity, scopeId, sourceIdentity);
+  } catch (error) {
+    // Only headroom reporting remaps saved-data validation. Collection retains
+    // the original errors; guarded reads, privacy and budget failures stay outside.
+    if (['INVALID_WORKFLOW', 'INVALID_INTAKE_CURSOR', 'SOURCE_ANCHOR_LIMIT', 'UNSUPPORTED_NATIVE_IDENTITY',
+      'SOURCE_IDENTITY_MISMATCH', 'INVALID_READER_CHECKPOINT', 'READER_CHECKPOINT_CAPACITY',
+      'READER_CHECKPOINT_IDENTITY_MISMATCH'].includes(error.code)) fail('INVALID_READER_PROGRESS');
+    throw error;
+  }
+  return readReaderAllocation(store, { ...identity, scopeId, sourceIdentity }, value?.checkpoint ?? null);
 }
 const publicationIdentity = value => digest(canonicalJSON({ identity: value.identity, evidenceHash: value.evidenceHash,
   headHash: value.headHash, scopeId: value.scopeId, selectionHash: value.selectionHash, cursorHash: value.cursorHash,
@@ -260,7 +282,8 @@ function descriptor(value) {
 export async function verifySourceCursor(source, current) {
   try { return await sourceCursor(source, current); }
   catch (error) {
-    if (!error.code || ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EIO', 'EBADF'].includes(error.code)) {
+    if (!error.code || ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EIO', 'EBADF',
+      'FILE_NOT_REGULAR', 'FILE_LINK_COUNT_INVALID', 'FILE_IDENTITY_CHANGED'].includes(error.code)) {
       throw Object.assign(new Error('Source is unavailable or unsafe.', { cause: error }), { code: 'SOURCE_UNAVAILABLE' });
     }
     throw error;

@@ -5,7 +5,9 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { openWorkflowIntake, withIntakeLock, intakeSnapshot, intakeJSON, replaceIntakeJSON } from './intake-io.mjs';
-import { planReaderCheckpoint, publishReaderPages, hydrateReaderCheckpoint, validateStoredCheckpoint, READER_ALLOCATION_PAGES } from './reader-pages.mjs';
+import { planReaderCheckpoint, publishReaderPages, hydrateReaderCheckpoint, validateStoredCheckpoint, readReaderAllocation,
+  READER_ALLOCATION_PAGES, READER_ALLOCATION_BYTES } from './reader-pages.mjs';
+import { readReaderHeadroom } from './intake-store.mjs';
 import { checkpointPageBuilder } from './reader-checkpoint.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
@@ -20,6 +22,70 @@ async function fixture(t) {
 }
 const base = value => `reader-pages/claude/${S}/${value.scopeId}`;
 const name = (value, page) => `${base(value)}/${page.index.toString(16).padStart(2, '0')}-${page.hash.slice(0, 20)}/page.json`;
+
+test('allocation status distinguishes unused, charged, low, exhausted, and inconsistent metadata', async t => {
+  const f = await fixture(t), value = carry(), read = root => readReaderAllocation(f.store, value, root);
+  const empty = await read(null);
+  assert.equal(empty.bytes.reserved, 0); assert.equal(empty.pages.remaining, READER_ALLOCATION_PAGES);
+  const root = await f.publish(value), quotaName = `${base(value)}/allocation.json`;
+  const normal = await read(root); assert.equal(normal.status, 'ok');
+  assert.equal(normal.bytes.reserved, normal.checkpoint.referencedBytes);
+  assert.equal((await read(null)).bytes.reserved, normal.bytes.reserved, 'paid attempts survive absent progress');
+  const original = intakeJSON(await intakeSnapshot(f.store, 'state', quotaName));
+  const setQuota = async quota => withIntakeLock(f.store, async tx => {
+    const before = await intakeSnapshot(f.store, 'state', quotaName);
+    await replaceIntakeJSON(tx, quotaName, quota, before.hash);
+  });
+  for (const [field, limit] of [['bytes', READER_ALLOCATION_BYTES], ['pages', READER_ALLOCATION_PAGES]]) {
+    for (const [reserved, status] of [[Math.ceil(limit * 0.8) - 1, 'ok'], [Math.ceil(limit * 0.8), 'low-headroom'], [limit, 'exhausted']]) {
+      await setQuota({ ...original, [field]: reserved });
+      const result = await read(root); assert.equal(result.status, status); assert.equal(result[field].remaining, limit - reserved);
+    }
+    await setQuota({ ...original, [field]: limit + 1 }); await assert.rejects(read(root), /ALLOCATION_INCONSISTENT/);
+  }
+  for (const quota of [{ ...original, pages: 0 }, { ...original, bytes: -1 }, { ...original, pages: 'secret' },
+    { ...original, sessionId: randomUUID() }, { ...original, version: 2 }]) {
+    await setQuota(quota); await assert.rejects(read(root), /ALLOCATION_INCONSISTENT/);
+  }
+  await fs.unlink(path.join(f.collection.intakeStateDir, quotaName));
+  await assert.rejects(read(root), /ALLOCATION_INCONSISTENT/);
+  assert.equal((await read(null)).bytes.reserved, 0);
+  await setQuota(null);
+  await assert.rejects(read(null), /ALLOCATION_INCONSISTENT/, 'an existing JSON null counter is not an absent counter');
+});
+
+test('headroom reads checkpoint before counters and tolerates concurrent first and later publication', async t => {
+  const f = await fixture(t), value = carry(), identity = { client: 'claude', sessionId: S };
+  const progressName = `progress/claude/${S}/${value.scopeId}.json`;
+  const progressFile = path.join(f.collection.intakeStateDir, progressName);
+  const allocationFile = path.join(f.collection.intakeStateDir, `${base(value)}/allocation.json`);
+  const publish = async next => withIntakeLock(f.store, async tx => {
+    const root = await publishReaderPages(tx, next), before = await intakeSnapshot(f.store, 'state', progressName);
+    await replaceIntakeJSON(tx, progressName, { sourceIdentity: value.sourceIdentity, offset: next.offset, anchor: null, checkpoint: root }, before.hash);
+  });
+  const read = () => readReaderHeadroom(f.store, identity, value.scopeId, value.sourceIdentity);
+  const first = await read(); assert.equal(first.bytes.reserved, 0);
+  for (const next of [value, { ...value, offset: value.offset + 100,
+    records: [...value.records, { ...carry(1).records[0], startByte: value.offset, endByte: value.offset + 100 }] }]) {
+    const stat = fs.lstat, events = []; let injected = false, injecting = false;
+    fs.lstat = async (...args) => {
+      if (!injecting && [progressFile, allocationFile].includes(args[0])) events.push(args[0]);
+      if (!injecting && !injected && args[0] === allocationFile) {
+        injected = true; injecting = true;
+        try { await publish(next); } finally { injecting = false; }
+      }
+      return stat(...args);
+    };
+    let result;
+    try { result = await read(); } finally { fs.lstat = stat; }
+    assert(injected);
+    assert(events.lastIndexOf(progressFile) < events.indexOf(allocationFile), 'complete progress read precedes every counter read');
+    assert(result.bytes.reserved > 0); assert.equal(result.status, 'ok');
+    assert(result.bytes.reserved >= result.checkpoint.referencedBytes);
+  }
+  await fs.unlink(allocationFile);
+  await assert.rejects(read(), /ALLOCATION_INCONSISTENT/);
+});
 
 test('page hydration reuses unchanged bytes but never hides changed, missing or untrusted files', async t => {
   const f = await fixture(t), value = carry(), root = await f.publish(value);

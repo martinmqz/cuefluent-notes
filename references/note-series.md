@@ -101,6 +101,27 @@ does not authorize saving, switching ownership or enabling capture. No-op update
 leave timestamps and bytes unchanged. A historical correction does not rewrite
 other members merely to make their update times match.
 
+## Capacity continuation for logs
+
+When a log approaches the metadata source or byte bound, choose an explicit
+continuation boundary within the authorized destination scope. Preserve the old
+member, its human edits and every source descriptor. Prepare a new member for new
+material with a distinct note ID and the established series ID. If no series exists,
+explicitly create one on the existing supported note and reuse its returned ID;
+that metadata change must itself fit the normal bounds and guarded save rules.
+If it cannot fit, report the conflict instead of removing sources to make room.
+
+Show the selected destination and continuation boundary before the normal save
+step. A fixed file route still requires an explicitly authorized destination change;
+capacity does not permit automatic splitting, moving, a new route, or discovery.
+Keep period boundaries and pending work accurate. Series links do not prove old
+claims: preserve the supporting references for any carried-forward material.
+
+This is not a general overflow solution for a living knowledge-base note. Copying
+all old sources into a successor recreates the limit; copying its claims without
+their support loses provenance. Decide which note will hold the current answer
+and how each carried-forward fact remains supported before restructuring it.
+
 ## Retrieval boundary
 
 The two [fictional sprint examples](../examples/standups-sprint-20-26.md) and

@@ -1,13 +1,17 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isMain, readBoundedBytes } from './file-io.mjs';
+import { isMain, readBoundedBytes, sameFileIdentity, compare, within, CONTROLS } from './file-io.mjs';
 import { createNoteMarkdownParser, inspectNoteMetadata, registerNoteIdentity } from './note-metadata.mjs';
+import { safeErrorCode } from './workflow-values.mjs';
 
 export const GUIDE_VERSION = '2026-09-21.1';
 export const MAX_BYTES = 2 * 1024 * 1024;
-const MAX_FILES = 100;
+const MAX_FILES = 256;
+const MAX_ENTRIES = 4096;
+const MAX_DEPTH = 64;
 const MAX_CASES = 200;
 const MAX_DIAGNOSTICS = 100;
+const MAX_COMPETING_COMPARISONS = 1_000_000;
 const md = createNoteMarkdownParser();
 const visibleHtml = content => content.replace(/<!--(?:-?>|[\s\S]*?(?:--!?>|$))/g, '');
 const words = value => value.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -107,39 +111,166 @@ export function inspectMarkdown(source, file = '<input>') {
   return { sections, diagnostics, metadata };
 }
 
-export function reviewVocabulary(sections, cases = []) {
+export function reviewVocabulary(sections, cases = [], { onDiagnostic } = {}) {
   const diagnostics = [];
+  const add = onDiagnostic ?? (diagnostic => diagnostics.push(diagnostic));
   const aliases = new Map();
   for (const section of sections) {
     for (const alias of new Set(section.aliases.map(normalize))) {
-      if (aliases.has(alias)) diagnostics.push({ severity: 'warning', code: 'shared-alias', file: section.file, line: section.line, message: 'An alias is shared by multiple sections; review whether the overlap is useful.' });
+      if (aliases.has(alias)) add({ severity: 'warning', code: 'shared-alias', file: section.file, line: section.line, message: 'An alias is shared by multiple sections; review whether the overlap is useful.' });
       aliases.set(alias, section);
     }
   }
+  // Many sections share an H1; retain its word set once instead of once per H2.
+  const vocabularies = new WeakMap(), contexts = new Map();
+  const vocabularyFor = section => {
+    if (!contexts.has(section.h1)) contexts.set(section.h1, new Set(words(section.h1)));
+    if (!vocabularies.has(section)) vocabularies.set(section, new Set(words([section.heading, ...section.aliases].join(' '))));
+    return vocabularies.get(section);
+  };
+  const targetsByFile = new Map();
+  if (cases.length) for (const section of sections) {
+    let headings = targetsByFile.get(section.file);
+    if (!headings) targetsByFile.set(section.file, headings = new Map());
+    let match = headings.get(section.heading);
+    if (!match) headings.set(section.heading, match = { first: section, count: 0, contexts: new Map() });
+    match.count++;
+    const context = match.contexts.get(section.h1);
+    if (context) context.count++;
+    else match.contexts.set(section.h1, { first: section, count: 1 });
+  }
+  let comparisons = 0, limited = false;
   for (const [index, item] of cases.entries()) {
-    const targets = sections.filter(s => s.file === item.file && s.heading === item.heading && (item.h1 === undefined || s.h1 === item.h1));
-    const base = { severity: 'error', file: item.file, line: targets[0]?.line ?? 1 };
-    if (targets.length !== 1) {
-      diagnostics.push({ ...base, code: 'case-target', message: `Case ${index + 1}: expected exactly one matching file and H1/H2 heading path.` });
+    const heading = targetsByFile.get(item.file)?.get(item.heading);
+    const match = item.h1 === undefined ? heading : heading?.contexts.get(item.h1);
+    const base = { severity: 'error', file: item.file, line: match?.first.line ?? 1 };
+    if (match?.count !== 1) {
+      add({ ...base, code: 'case-target', message: `Case ${index + 1}: expected exactly one matching file and H1/H2 heading path.` });
       continue;
     }
-    const vocabulary = new Set(words([targets[0].h1, targets[0].heading, ...targets[0].aliases].join(' ')));
-    if (!words(item.query).every(word => vocabulary.has(word))) diagnostics.push({ ...base, code: 'vocabulary-gap', message: `Case ${index + 1}: query words missing from heading context or aliases.` });
+    const target = match.first, vocabulary = vocabularyFor(target);
+    const queryWords = [...new Set(words(item.query))];
+    if (!queryWords.every(word => contexts.get(target.h1).has(word) || vocabulary.has(word))) add({ ...base, code: 'vocabulary-gap', message: `Case ${index + 1}: query words missing from heading context or aliases.` });
+    if (limited || !queryWords.length) continue;
+    competitors: for (const section of sections) {
+      if (section === target) continue;
+      const other = vocabularyFor(section);
+      for (const word of queryWords) {
+        if (comparisons === MAX_COMPETING_COMPARISONS) {
+          limited = true;
+          add({ ...base, severity: 'warning', code: 'competing-query-limit', caseNumber: index + 1,
+            message: `Case ${index + 1}: competing-query review reached its word-comparison limit; further competition checks were omitted. Target and coverage checks continue.` });
+          break competitors;
+        }
+        comparisons++;
+        if (!contexts.get(section.h1).has(word) && !other.has(word)) continue competitors;
+      }
+      add({ ...base, severity: 'warning', code: 'competing-query', relatedFile: section.file, relatedLine: section.line,
+        message: `Case ${index + 1}: the related section also covers every query word in its H1/H2/aliases; review whether this overlap is useful.` });
+    }
   }
   return diagnostics;
 }
 
-export async function readBounded(file) {
-  return new TextDecoder('utf-8', { fatal: true }).decode(await readBoundedBytes(file, { maxBytes: MAX_BYTES }));
+export async function readBounded(file, { noFollow = false } = {}) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(await readBoundedBytes(file, { maxBytes: MAX_BYTES, noFollow }));
+  } catch (error) {
+    const reason = error.code === 'ERR_ENCODING_INVALID_ENCODED_DATA' ? 'Invalid UTF-8 encoded data.'
+      : error.code === 'FILE_IDENTITY_CHANGED' ? 'File identity changed during checking.'
+      : 'Cannot read a stable regular UTF-8 file within the 2 MiB limit.';
+    throw new Error(`Input ${displayPath(file)}: ${reason}${errorCode(error)}`);
+  }
 }
 
-export async function checkFiles(files, casePath) {
-  if (!files.length || files.length > MAX_FILES) throw new Error('Select 1–100 Markdown files explicitly.');
-  const canonical = await Promise.all(files.map(f => fs.realpath(f)));
-  if (new Set(canonical).size !== canonical.length) throw new Error('Select each file once, including symlink aliases.');
-  if (files.some(f => !/\.(md|markdown)$/i.test(f))) throw new Error('Inputs must use .md or .markdown extensions.');
+const displayPath = file => {
+  const value = String(file);
+  return JSON.stringify(value.length <= 180 ? value : `${value.slice(0, 80)}…${value.slice(-90)}`);
+};
+const markdownPath = file => /\.(md|markdown)$/i.test(file);
+const errorCode = error => { const code = safeErrorCode(error); return code ? ` (${code})` : ''; };
+const overlap = (left, right) => { throw new Error(`Select each input once; overlapping selections ${displayPath(left)} and ${displayPath(right)}.`); };
+async function selectedPath(file, operation) {
+  try { return await operation(); }
+  catch (error) {
+    if (error.code) throw new Error(`Cannot inspect selected input ${displayPath(file)}.${errorCode(error)}`);
+    throw error;
+  }
+}
+async function checkAncestry(ancestry) {
+  for (const entry of ancestry) {
+    const stat = await fs.lstat(entry.file, { bigint: true });
+    if (!stat.isDirectory() || !sameFileIdentity(stat, entry.stat) || await fs.realpath(entry.file) !== entry.file)
+      throw new Error(`Folder changed during checking: ${displayPath(entry.file)}.`);
+  }
+}
+
+async function selectFiles(files, folders) {
+  if (files.length > MAX_FILES || folders.length > MAX_ENTRIES) throw new Error('Selection exceeds 256 files or 4096 folder entries.');
+  if (files.some(f => !markdownPath(f))) throw new Error('Inputs must use .md or .markdown extensions.');
+  const selected = [], roots = [];
+  for (const file of files) {
+    const canonical = await selectedPath(file, () => fs.realpath(file));
+    if (selected.some(item => item.file === canonical)) overlap(file, canonical);
+    selected.push({ file: canonical, ancestry: [] });
+  }
+  for (const folder of folders) {
+    const requested = path.resolve(folder);
+    const stat = await selectedPath(folder, () => fs.lstat(requested, { bigint: true }));
+    // Only the final component must be a real directory; OS/selected parent aliases are allowed.
+    if (stat.isSymbolicLink()) throw new Error(`Selected folder must not be a link: ${displayPath(folder)}.`);
+    if (!stat.isDirectory()) throw new Error(`Selected folder must be a directory: ${displayPath(folder)}.`);
+    const file = await selectedPath(folder, () => fs.realpath(requested));
+    for (const root of roots) if (within(root.file, file) || within(file, root.file)) overlap(root.file, file);
+    for (const item of selected) if (within(file, item.file)) overlap(file, item.file);
+    roots.push({ file, stat });
+  }
+  let visitedEntries = roots.length, skippedLinks = 0;
+  const walk = async (entry, ancestry, depth) => selectedPath(entry.file, async () => {
+    if (depth > MAX_DEPTH) throw new Error(`Folder depth exceeds 64 levels: ${displayPath(entry.file)}.`);
+    // Retain root authority and this directory's identity. realpath on the latter
+    // also detects redirected intermediate parents without O(entries * depth) probes.
+    const parents = ancestry.length ? [ancestry[0], entry] : [entry];
+    await checkAncestry(parents);
+    const children = [];
+    for await (const child of await fs.opendir(entry.file)) {
+      if (++visitedEntries > MAX_ENTRIES) throw new Error(`Folder traversal exceeds 4096 visited entries at ${displayPath(entry.file)}; selection incomplete.`);
+      children.push(child.name);
+    }
+    await checkAncestry(parents);
+    for (const name of children.sort(compare)) {
+      const file = path.join(entry.file, name);
+      await checkAncestry(parents);
+      const stat = await selectedPath(file, () => fs.lstat(file, { bigint: true }));
+      if (stat.isSymbolicLink()) { skippedLinks++; continue; }
+      if (stat.isDirectory()) await walk({ file, stat }, parents, depth + 1);
+      else if (markdownPath(file)) {
+        if (!stat.isFile()) throw new Error(`Markdown input is not a regular file: ${displayPath(file)}.`);
+        if (selected.length === MAX_FILES) throw new Error('Select at most 256 Markdown files; selection incomplete.');
+        selected.push({ file, ancestry: parents });
+      }
+    }
+  });
+  for (const root of roots.sort((a, b) => compare(a.file, b.file))) await walk(root, [], 0);
+  if (!selected.length) throw new Error('Select 1–256 Markdown files explicitly or through --folder.');
+  return { selected: selected.sort((a, b) => compare(a.file, b.file)), visitedEntries, skippedLinks };
+}
+
+export async function checkFiles(files, casePath, { folders = [] } = {}) {
+  let selection;
+  try { selection = await selectFiles(files, folders); }
+  catch (error) { throw new Error(`selection incomplete: ${error.message}`); }
+  const { selected, visitedEntries, skippedLinks } = selection;
+  const canonical = selected.map(item => item.file);
   const results = [];
-  for (const file of canonical) results.push(inspectMarkdown(await readBounded(file), file));
+  for (const { file, ancestry } of selected) {
+    try {
+      await selectedPath(file, () => checkAncestry(ancestry));
+      const source = await readBounded(file, { noFollow: ancestry.length > 0 });
+      await selectedPath(file, () => checkAncestry(ancestry));
+      results.push(inspectMarkdown(source, file));
+    } catch (error) { throw new Error(`selection incomplete: ${error.message}`); }
+  }
   let cases = [];
   if (casePath) {
     const serialized = await readBounded(casePath);
@@ -156,7 +287,20 @@ export async function checkFiles(files, casePath) {
     }
   }
   const sections = results.flatMap(r => r.sections);
-  const diagnostics = [...results.flatMap(r => r.diagnostics), ...reviewVocabulary(sections, cases)];
+  const diagnostics = [];
+  let errors = 0, warnings = 0, firstIncompleteCase;
+  const add = diagnostic => {
+    if (diagnostic.severity === 'error') errors++; else warnings++;
+    if (diagnostic.code === 'competing-query-limit') firstIncompleteCase = diagnostic.caseNumber;
+    if (diagnostics.length < MAX_DIAGNOSTICS) diagnostics.push(diagnostic);
+    else if (diagnostic.severity === 'error') {
+      // Retain the earliest errors even when a broad query filled the report with warnings.
+      const lastWarning = diagnostics.findLastIndex(d => d.severity !== 'error');
+      if (lastWarning !== -1) { diagnostics.splice(lastWarning, 1); diagnostics.push(diagnostic); }
+    }
+  };
+  for (const result of results) for (const diagnostic of result.diagnostics) add(diagnostic);
+  reviewVocabulary(sections, cases, { onDiagnostic: add });
   const noteIds = new Set(), identityFiles = new Map();
   for (const [index, result] of results.entries()) {
     try {
@@ -164,37 +308,41 @@ export async function checkFiles(files, casePath) {
       if (id !== undefined) identityFiles.set(id, canonical[index]);
     } catch (error) {
       if (error.code !== 'NOTE_METADATA_ID_COLLISION') throw error;
-      diagnostics.push({ severity: 'error', code: 'metadata-id-collision', file: canonical[index],
+      add({ severity: 'error', code: 'metadata-id-collision', file: canonical[index],
         line: result.metadata.block.line, relatedFile: identityFiles.get(result.metadata.value.id),
         message: 'This note shares its ID with the related selected file; resolve identity without merging their content.' });
     }
   }
-  const errors = diagnostics.filter(d => d.severity === 'error').length;
-  const warnings = diagnostics.length - errors;
+  diagnostics.sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error'));
   return {
     guideVersion: GUIDE_VERSION, files: canonical.length, sections: sections.length, cases: cases.length,
-    errors, warnings, diagnostics: diagnostics.slice(0, MAX_DIAGNOSTICS), omittedDiagnostics: Math.max(0, diagnostics.length - MAX_DIAGNOSTICS),
+    ...(folders.length ? { scan: { roots: folders.length, visitedEntries, skippedLinks,
+      coverage: 'Only regular Markdown files beneath the selected folders; symlink and junction targets are excluded. This is not a whole-library inventory.' } } : {}),
+    ...(cases.length ? { competingQueries: { complete: firstIncompleteCase === undefined, comparisonLimit: MAX_COMPETING_COMPARISONS,
+      ...(firstIncompleteCase === undefined ? {} : { firstIncompleteCase }) } } : {}),
+    errors, warnings, diagnostics, omittedDiagnostics: errors + warnings - diagnostics.length,
     limits: 'Advisory Markdown subset and vocabulary coverage only. Expected information requires human/agent evidence review. No app rendering, admission, sanitization, image loading, ranking or factual verification.'
   };
 }
 
 export async function main(args) {
   if (args.length === 1 && args[0] === '--help') {
-    console.log('Usage: node scripts/check-notes.mjs [--cases cases.json] <note.md ...>\nRead-only JSON report; exit 0 no errors, 1 check errors, 2 input/usage failure.');
+    console.log('Usage: node scripts/check-notes.mjs [--cases cases.json] [--folder directory ...] [note.md ...]\nSelect 1–256 Markdown files. Repeat --folder for multiple roots. Read-only JSON report; exit 0 no errors, 1 check errors, 2 input/usage failure (selection incomplete).');
     return 0;
   }
   let casePath;
-  const files = [];
+  const files = [], folders = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--cases' && !casePath && args[i + 1] && !args[i + 1].startsWith('--')) casePath = args[++i];
+    else if (args[i] === '--folder' && args[i + 1] && !args[i + 1].startsWith('-')) folders.push(args[++i]);
     else if (args[i].startsWith('-')) throw new Error('Unknown or incomplete option; use --help.');
     else files.push(args[i]);
   }
-  const report = await checkFiles(files, casePath);
+  const report = await checkFiles(files, casePath, { folders });
   console.log(JSON.stringify(report, null, 2));
   return report.errors ? 1 : 0;
 }
 if (await isMain(import.meta.url)) {
   try { process.exitCode = await main(process.argv.slice(2)); }
-  catch (error) { console.error(`Check failed: ${String(error.message).slice(0, 500)}`); process.exitCode = 2; }
+  catch (error) { console.error(`Check failed: ${String(error.message).replace(new RegExp(CONTROLS.source, 'g'), ' ').slice(0, 500)}`); process.exitCode = 2; }
 }

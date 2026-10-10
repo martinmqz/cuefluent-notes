@@ -1,13 +1,14 @@
 import test from './test-support/storage-test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
-import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy } from './intake-io.mjs';
-import { readCaptureHead } from './intake-store.mjs';
+import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
+import { readCaptureHead, readReaderProgress } from './intake-store.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -26,6 +27,204 @@ async function fixture(t, { enabled = false, version = '0.156.1' } = {}) {
     operationId: randomUUID(), kind: 'current', unitIds: [A], readRange: { fromByte: Buffer.byteLength(header), endByte: status.source.eofByte } };
   return { ...f, capability, sourcePath, selection, request, store: await openWorkflowIntake(capability) };
 }
+
+async function claudeScopeFixture(t) {
+  const f = await fixture(t), stamp = '2026-09-24T00:00:00.000Z';
+  const human = (id, parentUuid) => ({ type: 'user', uuid: randomUUID(), timestamp: stamp, sessionId: S,
+    version: '2.1.282', isSidechain: false, parentUuid, cwd: f.project, promptId: id, message: { role: 'user', content: 'Synthetic evidence.' } });
+  const a = human(A, null), b = human(B, a.uuid), body = JSON.stringify(a) + '\n' + JSON.stringify(b) + '\n';
+  await fs.writeFile(f.sourcePath, body);
+  const selection = { ...f.selection, client: 'claude', unitId: null };
+  const initial = await captureSelectionStatus(f.capability, { selection, sourcePath: f.sourcePath, includeReaderAllocation: true });
+  assert.equal(initial.readerAllocation.status, 'unavailable'); assert.equal(initial.readerAllocation.reason, 'no-selection');
+  const request = { ...f.request, selection, kind: 'historical', expectedSourceIdentity: initial.source.fileIdentity,
+    readRange: { fromByte: 0, endByte: Buffer.byteLength(body) } };
+  const chosen = await selectExplicitCapture(f.capability, request);
+  return { ...f, selection, request, chosen };
+}
+
+test('capture status reports headroom without writes, transcript reads, page hydration or an intake lock', async t => {
+  const f = await claudeScopeFixture(t), args = { selection: f.selection, sourcePath: f.sourcePath, scopeId: f.request.operationId };
+  const unused = await captureSelectionStatus(f.capability, args);
+  assert.equal(unused.readerAllocation.scopes[0].bytes.reserved, 0);
+  await runSelectedCapture(f.capability, { selection: f.selection, scopeId: f.request.operationId, expectedSelectionHash: f.chosen.hash, unitIds: [A] });
+  let writes = 0;
+  for (const method of ['mkdir', 'mkdtemp', 'writeFile', 'appendFile', 'rename', 'unlink', 'rm', 'rmdir', 'chmod', 'chown', 'link', 'symlink']) {
+    t.mock.method(fs, method, async () => { writes++; throw new Error('Status attempted a filesystem write'); });
+  }
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (file, flags, ...rest) => {
+    assert.notEqual(file, f.sourcePath, 'status never opens a transcript');
+    assert.notEqual(path.basename(file), 'page.json', 'status never hydrates pages');
+    const writable = typeof flags === 'string' ? flags !== 'r' : flags & (constants.O_WRONLY | constants.O_RDWR | constants.O_CREAT | constants.O_TRUNC | constants.O_APPEND);
+    if (writable) { writes++; throw new Error('Status opened a file for writing'); }
+    return open(file, flags, ...rest);
+  });
+  let report;
+  try { report = await captureSelectionStatus(f.capability, args); }
+  finally { t.mock.restoreAll(); }
+  assert.equal(writes, 0); assert.equal(report.hash, f.chosen.hash);
+  assert.equal(report.readerAllocation.status, 'available');
+  const allocation = report.readerAllocation.scopes[0];
+  assert(allocation.bytes.reserved > 0); assert(allocation.pages.reserved > 0);
+  assert.equal(allocation.bytes.remaining + allocation.bytes.reserved, allocation.bytes.limit);
+  const counter = path.join(f.collection.intakeStateDir, 'reader-pages/claude', S, f.request.operationId, 'allocation.json');
+  await fs.unlink(counter);
+  const damaged = await captureSelectionStatus(f.capability, args);
+  assert.equal(damaged.hash, report.hash); assert.equal(damaged.readerAllocation.status, 'partial');
+  assert.equal(damaged.readerAllocation.scopes[0].status, 'inconsistent');
+  assert(!Object.hasOwn(damaged.readerAllocation.scopes[0], 'bytes'));
+  const progress = path.join(f.collection.intakeStateDir, 'progress/claude', S, `${f.request.operationId}.json`);
+  const saved = await fs.readFile(progress);
+  await fs.writeFile(progress, '{"PRIVATE-unfinished":');
+  const invalid = await captureSelectionStatus(f.capability, args);
+  assert.equal(invalid.hash, report.hash); assert.equal(invalid.readerAllocation.status, 'partial');
+  assert.deepEqual(invalid.readerAllocation.scopes[0], { scopeId: f.request.operationId,
+    status: 'unavailable', error: 'INVALID_INTAKE_METADATA' });
+  assert(!JSON.stringify(invalid).includes('PRIVATE-unfinished'));
+  await fs.writeFile(progress, saved); await fs.mkdir(counter, { mode: 0o700 });
+  const unreadable = await captureSelectionStatus(f.capability, args);
+  assert.equal(unreadable.hash, report.hash); assert.equal(unreadable.readerAllocation.status, 'partial');
+  assert.deepEqual(unreadable.readerAllocation.scopes[0], { scopeId: f.request.operationId,
+    status: 'unavailable', error: 'FILE_NOT_REGULAR' });
+});
+
+test('status bounds known scope reads, supports explicit scope selection and marks Codex not applicable', async t => {
+  const f = await claudeScopeFixture(t);
+  const state = structuredClone(f.chosen.state);
+  state.explicitScopes = Array.from({ length: 33 }, () => ({ ...state.explicitScopes[0], id: randomUUID() }));
+  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, `sessions/claude/${S}.json`, state, f.chosen.hash));
+  const lstat = fs.lstat; let progressReads = 0;
+  t.mock.method(fs, 'lstat', async (file, ...args) => {
+    if (file.includes(`${path.sep}progress${path.sep}`) || file.endsWith('allocation.json')) progressReads++;
+    return lstat(file, ...args);
+  });
+  const routine = await captureSelectionStatus(f.capability, { selection: f.selection });
+  assert(!Object.hasOwn(routine, 'readerAllocation'));
+  const needed = await captureSelectionStatus(f.capability, { selection: f.selection, includeReaderAllocation: true });
+  t.mock.restoreAll();
+  assert.equal(needed.readerAllocation.status, 'scope-selection-required'); assert.equal(needed.readerAllocation.scopeIds.length, 33);
+  assert.equal(progressReads, 0); assert.deepEqual(needed.readerAllocation.scopes, []);
+  const { executeWorkflow } = await import('./workflow.mjs');
+  const selected = await executeWorkflow('capture-status', { collectionId: f.collection.id, expectedConfigHash: digest(await fs.readFile(f.options.configPath)),
+    args: { selection: f.selection, scopeId: state.explicitScopes[0].id } }, { configPath: f.options.configPath });
+  assert.equal(selected.readerAllocation.scopes.length, 1); assert.equal(selected.readerAllocation.scopes[0].bytes.reserved, 0);
+  await assert.rejects(captureSelectionStatus(f.capability, { selection: f.selection, scopeId: randomUUID() }), /UNKNOWN_CAPTURE_SCOPE/);
+  const codex = await captureSelectionStatus(f.capability, { selection: { ...f.selection, client: 'codex' }, includeReaderAllocation: true });
+  assert.equal(codex.readerAllocation.status, 'not-applicable'); assert(!Object.hasOwn(codex.readerAllocation, 'scopes'));
+});
+
+test('headroom isolates malformed saved progress while retaining healthy scopes and request refusals', async t => {
+  const f = await claudeScopeFixture(t), state = structuredClone(f.chosen.state);
+  const badScope = f.request.operationId, goodScope = randomUUID();
+  state.explicitScopes.push({ ...state.explicitScopes[0], id: goodScope });
+  const selectionHash = await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, `sessions/claude/${S}.json`, state, f.chosen.hash));
+  const progress = path.join(f.collection.intakeStateDir, 'progress/claude', S, `${badScope}.json`);
+  await fs.mkdir(path.dirname(progress), { recursive: true, mode: 0o700 });
+  const valid = { sourceIdentity: state.source.fileIdentity, offset: 0, anchor: null };
+  const { executeWorkflow } = await import('./workflow.mjs');
+  const request = { collectionId: f.collection.id, expectedConfigHash: digest(await fs.readFile(f.options.configPath)),
+    args: { selection: f.selection, includeReaderAllocation: true } };
+  const invoke = args => executeWorkflow('capture-status', { ...request, args: { ...request.args, ...args } }, { configPath: f.options.configPath });
+  const checkpoint = { format: 'cuefluent-reader-checkpoint', version: 1, reader: 'claude-transcript/1',
+    client: 'claude', sessionId: S, scopeId: badScope, sourceIdentity: valid.sourceIdentity, offset: 0, records: [], units: [] };
+  const paged = { format: checkpoint.format, version: 2, reader: checkpoint.reader, client: checkpoint.client,
+    sessionId: S, scopeId: badScope, sourceIdentity: valid.sourceIdentity, offset: 0, pages: [], recordCount: 0, unitCount: 0 };
+  const inline = { ...checkpoint, offset: 1,
+    records: [{ id: 'record', parentId: null, unitId: A, kind: 'human', startByte: 0, endByte: 1, hash: digest('x') }],
+    units: [{ id: A, recordId: 'record', occurredAt: '2026-10-09T12:00:00.000Z' }] };
+  for (const value of [[], { ...valid, PRIVATE: true }, { ...valid, sourceIdentity: digest('other source') },
+    { ...valid, offset: -1 }, { ...valid, anchor: { startByte: 0, endByte: 1, hash: digest('anchor') } },
+    ...[false, 0, '', [], { ...checkpoint, offset: 1 }, { ...checkpoint, PRIVATE: true },
+      ...[checkpoint, paged].flatMap(root => ['sessionId', 'scopeId'].map(field => ({ ...root, [field]: 'invalid' })))
+    ].map(checkpoint => ({ ...valid, checkpoint })),
+    ...[{ ...inline, records: [{ ...inline.records[0], unitId: 'invalid' }] },
+      { ...inline, units: [{ ...inline.units[0], id: 'invalid' }] }
+    ].map(checkpoint => ({ ...valid, offset: 1, checkpoint }))]) {
+    const bytes = JSON.stringify(value);
+    await fs.writeFile(progress, bytes, { mode: 0o600 });
+    const report = await invoke();
+    assert.equal(report.hash, selectionHash); assert.equal(report.readerAllocation.status, 'partial');
+    assert.deepEqual(report.readerAllocation.scopes[0], { scopeId: badScope, status: 'unavailable', error: 'INVALID_READER_PROGRESS' });
+    assert.equal(report.readerAllocation.scopes[1].scopeId, goodScope);
+    assert.equal(report.readerAllocation.scopes[1].status, 'ok');
+    assert.equal(report.readerAllocation.scopes[1].bytes.reserved, 0);
+    assert(!JSON.stringify(report).includes('PRIVATE'));
+    assert.equal(await fs.readFile(progress, 'utf8'), bytes);
+  }
+  await assert.rejects(invoke({ includeReaderAllocation: 'yes' }), { code: 'INVALID_WORKFLOW' });
+  await assert.rejects(invoke({ scopeId: randomUUID() }), { code: 'UNKNOWN_CAPTURE_SCOPE' });
+  await assert.rejects(invoke({ scopeId: 'invalid' }), { code: 'UNSUPPORTED_NATIVE_IDENTITY' });
+  await assert.rejects(invoke({ selection: { ...f.selection, cwd: path.dirname(f.project) } }), { code: 'SOURCE_IDENTITY_MISMATCH' });
+});
+
+test('capture-run preserves progress validation errors while status reports scope-local failures', async t => {
+  const f = await claudeScopeFixture(t), scopeId = f.request.operationId;
+  const progress = path.join(f.collection.intakeStateDir, 'progress/claude', S, `${scopeId}.json`);
+  await fs.mkdir(path.dirname(progress), { recursive: true, mode: 0o700 });
+  const valid = { sourceIdentity: f.chosen.state.source.fileIdentity, offset: 0, anchor: null };
+  const { executeWorkflow } = await import('./workflow.mjs');
+  const request = { collectionId: f.collection.id, expectedConfigHash: digest(await fs.readFile(f.options.configPath)) };
+  const invoke = (command, args) => executeWorkflow(command, { ...request, args }, { configPath: f.options.configPath });
+  for (const [name, value, code] of [
+    ['array', [], 'INVALID_WORKFLOW'],
+    ['extra key', { ...valid, PRIVATE: true }, 'INVALID_WORKFLOW'],
+    ['source mismatch', { ...valid, sourceIdentity: digest('other source') }, 'SOURCE_IDENTITY_MISMATCH']
+  ]) await t.test(name, async () => {
+    const bytes = JSON.stringify(value);
+    await fs.writeFile(progress, bytes, { mode: 0o600 });
+    const status = await invoke('capture-status', { selection: f.selection, scopeId });
+    assert.equal(status.hash, f.chosen.hash);
+    assert.deepEqual(status.readerAllocation.scopes[0], { scopeId, status: 'unavailable', error: 'INVALID_READER_PROGRESS' });
+    await assert.rejects(invoke('capture-run', { selection: f.selection, scopeId, expectedSelectionHash: f.chosen.hash, unitIds: [A] }), { code });
+    for (const metadataOnly of [false, true]) {
+      await assert.rejects(readReaderProgress(f.store, { client: 'claude', sessionId: S }, scopeId, valid.sourceIdentity, { metadataOnly }), { code });
+    }
+    assert.equal(await fs.readFile(progress, 'utf8'), bytes);
+    assert.equal((await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: A })).head, null);
+  });
+});
+
+test('routine status skips headroom reads and requested headroom propagates privacy, budget and unexpected failures', async t => {
+  const f = await claudeScopeFixture(t);
+  const progress = path.join(f.collection.intakeStateDir, 'progress/claude', S, `${f.request.operationId}.json`);
+  await fs.mkdir(path.dirname(progress), { recursive: true, mode: 0o700 });
+  await fs.writeFile(progress, JSON.stringify({ sourceIdentity: f.chosen.state.source.fileIdentity, offset: 0, anchor: null }), { mode: 0o600 });
+  const counter = path.join(f.collection.intakeStateDir, 'reader-pages/claude', S, f.request.operationId, 'allocation.json');
+  await fs.mkdir(path.dirname(counter), { recursive: true, mode: 0o700 });
+  await fs.writeFile(counter, '{}', { mode: 0o600 });
+  const lstat = fs.lstat; let headroomReads = 0;
+  t.mock.method(fs, 'lstat', async (file, ...args) => {
+    if (file.includes(`${path.sep}progress${path.sep}`) || file.endsWith('allocation.json')) headroomReads++;
+    return lstat(file, ...args);
+  });
+  const { executeWorkflow } = await import('./workflow.mjs');
+  const request = { collectionId: f.collection.id, expectedConfigHash: digest(await fs.readFile(f.options.configPath)), args: { selection: f.selection } };
+  const routine = await executeWorkflow('capture-status', request, { configPath: f.options.configPath });
+  assert.equal(routine.hash, f.chosen.hash); assert.equal(headroomReads, 0);
+  assert(!Object.hasOwn(routine, 'readerAllocation'));
+  t.mock.restoreAll();
+  await assert.rejects(executeWorkflow('capture-status', { ...request, args: { ...request.args, includeReaderAllocation: 'yes' } },
+    { configPath: f.options.configPath }), { code: 'INVALID_WORKFLOW' });
+  const open = fs.open;
+  for (const target of [progress, counter]) for (const failure of [
+    ...['STORAGE_NOT_PRIVATE', 'PRIVATE_STORAGE_CHANGED', 'FILE_LINK_COUNT_INVALID', 'WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'INVALID_WORKFLOW', 'SOURCE_IDENTITY_MISMATCH', 'UNSUPPORTED_NATIVE_IDENTITY', 'UNEXPECTED_FAILURE'].map(code => Object.assign(new Error('Synthetic failure'), { code })),
+    new TypeError('Synthetic programming error')
+  ]) {
+    t.mock.method(fs, 'open', async (file, ...args) => { if (file === target) throw failure; return open(file, ...args); });
+    await assert.rejects(executeWorkflow('capture-status', { ...request, args: { ...request.args, includeReaderAllocation: true } },
+      { configPath: f.options.configPath }), error => error === failure);
+    t.mock.restoreAll();
+  }
+  t.mock.method(fs, 'open', async (file, ...args) => {
+    if (file === counter) throw Object.assign(new Error('PRIVATE OS details'), { code: 'EIO' });
+    return open(file, ...args);
+  });
+  const partial = await captureSelectionStatus(f.capability, { selection: f.selection, includeReaderAllocation: true });
+  assert.equal(partial.readerAllocation.status, 'partial');
+  assert.equal(partial.readerAllocation.scopes[0].error, 'EIO');
+  assert(!JSON.stringify(partial).includes('PRIVATE OS details'));
+});
 
 test('one-time capture with collection disabled reads the selected window and publishes only named native units', async t => {
   const f = await fixture(t, { version: '0.146.0' }), before = await fs.readdir(f.collection.intakeStateDir), reads = [];

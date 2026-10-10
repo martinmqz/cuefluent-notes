@@ -60,7 +60,7 @@ request UUID; it does not substitute for native source identity.
 
 | Command | `args` |
 | --- | --- |
-| `capture-status` | `{selection, sourcePath?}`; returns selection/hash and optional source metadata/EOF without reading transcript bodies |
+| `capture-status` | `{selection, sourcePath?, scopeId?, includeReaderAllocation?}`; returns selection/hash, optional source metadata/EOF, and requested reader allocation headroom without reading transcript bodies |
 | `capture-control` | `{selection, sourcePath, expectedSourceIdentity, expectedSelectionHash, operationId, operation}` with start/resume/pause/exclude |
 | `capture-preview` | `{selection, sourcePath, expectedSourceIdentity, expectedSelectionHash, operationId, kind, unitIds, readRange}` |
 | `capture-select` | Same as preview; durably selects one bounded scope without enabling collection |
@@ -72,6 +72,40 @@ consent and records the current EOF. Its first later proven native unit is exclu
 as the boundary. Pause/exclude requires the explicitly selected current native unit;
 it never infers identity from the latest source row. Pauses do not enable collection.
 A source change or stale state leaves the control unresolved.
+
+Reader headroom is opt-in: pass `includeReaderAllocation: true` or a `scopeId`.
+Routine status calls omit `readerAllocation` and do not read checkpoints or counters.
+When requested, `capture-status.readerAllocation` reports Claude counters for
+scopes already listed in that selection's intervals or explicit scopes; it does
+not discover other sessions.
+It reads at most 32 scopes per call. If more are known, `status` is
+`scope-selection-required`, `scopeIds` lists the choices, and no counters are read;
+repeat with one listed `scopeId`. An unknown scope is refused. Codex returns
+`not-applicable`. Missing selection or no known scopes returns `unavailable`, not
+zero usage. Valid reports have `status: available` and `scopes` entries with:
+
+- `bytes` and `pages`: `reserved`, `limit`, and `remaining`. These are cumulative
+  allocation and page attempts, including obsolete pages and interrupted attempts.
+- `status`: `ok`, `low-headroom` at 80% of either limit, or `exhausted` at a limit.
+- `checkpoint`: the saved root's referenced page count and byte total. This is
+  metadata only; status does not hydrate or verify those pages or measure disk usage.
+
+An unused scope with no page-bearing checkpoint or counter reports zero allocation.
+A missing counter for a page-bearing checkpoint, an invalid counter, or one below
+its checkpoint's referenced allocation,
+produces an `inconsistent` scope entry with no usage numbers; expected metadata
+read failures produce `unavailable`. Malformed saved progress or a checkpoint/source
+binding mismatch reports `INVALID_READER_PROGRESS` for that scope; healthy scopes
+remain available. Overall `partial` reports retain the
+selection/hash for controls. Privacy, private storage identity, workflow budget and
+unexpected failures reject the command instead of becoming partial reports.
+For each scope, status reads the checkpoint **before** the counter, without a lock
+or filesystem writes. Newer counters than the saved checkpoint are valid, including
+charged attempts with no committed checkpoint. The reads are not an atomic snapshot:
+usage can lag active collection and reported headroom can be higher than what
+remains when used. See [reader storage](session-workflow.md#claude-reader-contract)
+for the storage contract; status does not reserve capacity or reclaim pages.
+
 Selection inputs normalize project directory aliases and trailing separators to the
 stored project identity. Existing captures remain inspectable and processable
 after a worktree is deleted, provided the configured storage and source identities
@@ -240,7 +274,11 @@ for bounds, conflicts and opaque future schemas.
 The result is `{content, changed, metadataStatus}`. It writes nothing, reads no
 note/source/configuration paths, resolves no workflow defaults, starts no storage
 permission probes and grants no save authority. Invalid metadata inputs return a
-bounded `NOTE_METADATA_INVALID` error. Save returned content
+bounded `NOTE_METADATA_INVALID` error. Source-list or serialized-byte exhaustion
+instead returns `NOTE_METADATA_SOURCE_CAPACITY` or `NOTE_METADATA_BYTE_CAPACITY`
+with an allow-listed numeric `details` object containing `current`, `proposed`,
+and `limit`. See [capacity meanings and warnings](note-metadata.md#generation-and-safe-updates).
+No source values or arbitrary exception details are included. Save returned content
 to a private proposal file, inspect the diff and fingerprint those exact bytes
 before approval. Reuse a prepared new-note proposal rather than generating another
 ID on retry. A no-op keeps original bytes. It does not verify the factual quality

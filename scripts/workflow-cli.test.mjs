@@ -8,7 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { saveProcessing } from './processing.mjs';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { processingFixture, inspectedClaim, proposedClaim } from './test-support/processing-fixture.mjs';
-import { executeWorkflow } from './workflow.mjs';
+import { executeWorkflow, workflowErrorReport } from './workflow.mjs';
+import { prepareNote } from './note-generation.mjs';
 import { windowsDefaultLocations } from './workflow-paths.mjs';
 import { fingerprint, inspectDirectories } from './safe-update.mjs';
 import { digest, canonicalJSON } from './workflow-values.mjs';
@@ -22,6 +23,46 @@ async function invoke(args, nodeArgs = []) {
   });
 }
 const envelope = (f, args) => ({ collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash, args });
+test('CLI capacity errors expose only approved numeric measurements', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-capacity-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const request = path.join(root, 'request.json');
+  for (const kind of ['sources', 'bytes']) {
+    const sources = Array.from({ length: kind === 'sources' ? 129 : 40 }, (_, i) =>
+      ({ type: 'document', ref: `PRIVATE-${i}-` + (kind === 'bytes' ? '界'.repeat(700) : '') }));
+    await fs.writeFile(request, JSON.stringify({ original: null, content: '# Note\n\n## Work\nEvidence.\n',
+      now: '2026-10-09T12:00:00Z', skillVersion: '0.12.0', metadata: { sources } }));
+    const result = await invoke(['prepare-note', '--request', request]);
+    assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert(!result.stderr.includes('PRIVATE'));
+    const report = JSON.parse(result.stderr);
+    assert.equal(report.error, kind === 'sources' ? 'NOTE_METADATA_SOURCE_CAPACITY' : 'NOTE_METADATA_BYTE_CAPACITY');
+    assert.equal(report.details.current, 0); assert(report.details.proposed > report.details.limit);
+  }
+  const details = { current: 1, proposed: 'PRIVATE', limit: Infinity, extra: 'PRIVATE' };
+  Object.defineProperty(details, 'hidden', { get() { throw new Error('must not invoke'); } });
+  assert.deepEqual(workflowErrorReport({ code: 'NOTE_METADATA_SOURCE_CAPACITY', details }),
+    { error: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 1 } });
+  assert.deepEqual(workflowErrorReport({ code: 'NOTE_METADATA_INVALID', details: { current: 1 } }), { error: 'NOTE_METADATA_INVALID' });
+  for (const code of ['private-value', 'A'.repeat(82), 'PRIVATE\nCONTENT', { toString() { throw new Error('must not coerce'); } }]) {
+    assert.deepEqual(workflowErrorReport({ code }), { error: 'WORKFLOW_OPERATION_FAILED' });
+  }
+  assert.deepEqual(workflowErrorReport(Object.defineProperty({}, 'code', { get() { throw new Error('must not read'); } })),
+    { error: 'WORKFLOW_OPERATION_FAILED' });
+});
+test('CLI reports source capacity when the merged session sources exceed the structural budget', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-capacity-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const session = i => ({ type: 'session', client: 'claude', session_id: 'synthetic', unit_id: `unit_${i}`, revision: 'a'.repeat(64) });
+  const base = { original: null, content: '# Topic\n## Decision\nEvidence.\n', now: '2026-10-09T12:00:00Z', skillVersion: '0.12.0' };
+  const original = prepareNote({ ...base, metadata: { sources: Array.from({ length: 128 }, (_, i) => session(i)) } }).content;
+  const request = path.join(root, 'request.json');
+  await fs.writeFile(request, JSON.stringify({ ...base, original, content: original,
+    metadata: { sources: Array.from({ length: 250 }, (_, i) => session(i + 128)) } }));
+  const result = await invoke(['prepare-note', '--request', request]);
+  assert.equal(result.code, 1); assert.equal(result.stdout, '');
+  assert.deepEqual(JSON.parse(result.stderr), { error: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 128, proposed: 250, limit: 128 } });
+});
+
 test('CLI unconfigured status writes nothing and rejects malformed, oversized, unknown or proof-bearing requests', async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-cli-'))); t.after(() => fs.rm(root, { recursive: true, force: true }));
   const config = path.join(root, 'missing', 'workflow.json'), request = path.join(root, 'request.json');

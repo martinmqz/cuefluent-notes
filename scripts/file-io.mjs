@@ -70,7 +70,8 @@ export async function isMain(url) {
 export async function openGuarded(file, { flags = constants.O_RDONLY, missing = false, singleLink = false, maxBytes = Infinity } = {}) {
   const check = stat => {
     if (!stat.isFile() || (singleLink && stat.nlink !== 1n)) {
-      throw new Error('Expected a regular file within the size limit' + (singleLink ? ' with a single hard link.' : '.'));
+      throw Object.assign(new Error('Expected a regular file within the size limit' + (singleLink ? ' with a single hard link.' : '.')),
+        { code: stat.isFile() ? 'FILE_LINK_COUNT_INVALID' : 'FILE_NOT_REGULAR' });
     }
     if (stat.size > maxBytes) throw Object.assign(new Error('Expected a regular file within the size limit.'), { code: 'FILE_SIZE_LIMIT_EXCEEDED' });
   };
@@ -82,7 +83,8 @@ export async function openGuarded(file, { flags = constants.O_RDONLY, missing = 
     const stat = await handle.stat({ bigint: true });
     const current = await fs.lstat(file, { bigint: true });
     check(stat); check(current);
-    if (!sameFileIdentity(before, stat) || !sameFileIdentity(stat, current)) throw new Error('File identity changed during guarded open.');
+    if (!sameFileIdentity(before, stat) || !sameFileIdentity(stat, current))
+      throw Object.assign(new Error('File identity changed during guarded open.'), { code: 'FILE_IDENTITY_CHANGED' });
     return { handle, stat };
   } catch (error) {
     if (handle) await handle.close();

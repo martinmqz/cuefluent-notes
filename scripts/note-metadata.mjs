@@ -4,6 +4,7 @@ import { Scalar, isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml';
 
 export const NOTE_METADATA_SCHEMA = 1;
 export const MAX_METADATA_BYTES = 64 * 1024;
+export const MAX_NOTE_SOURCES = 128;
 export const MAX_NOTE_BYTES = 2 * 1024 * 1024;
 const marker = /<!--[ \t\r\n]*cuefluent(?![\p{L}\p{N}\p{M}_])/iu;
 const containerMarker = /<!--[ \t]*(?:[\r\n][ \t>]*)*cuefluent(?![\p{L}\p{N}\p{M}_])/iu;
@@ -233,14 +234,14 @@ export const isNoteSkillVersion = value => typeof value === 'string' && /^\d+\.\
  * Count mapping keys as nodes, matching the YAML AST inspection budget. */
 export function validateNoteMetadataValue(value) {
   requireValue(object(value));
-  const queue = [[value, 0]]; let count = 0;
+  const queue = [[value, 0, false]]; let count = 0;
   while (queue.length) {
-    const [item, depth] = queue.pop();
+    const [item, depth, sources] = queue.pop();
     requireValue(++count <= bounds.nodes && depth <= bounds.depth);
     if (item === null || typeof item !== 'object') { requireValue(metadataScalar(item)); continue; }
     const names = Reflect.ownKeys(item);
     if (Array.isArray(item)) {
-      requireValue(item.length <= bounds.items && names.length === item.length + 1 &&
+      requireValue(item.length <= (sources ? bounds.nodes : bounds.items) && names.length === item.length + 1 &&
         Array.from({ length: item.length }, (_, index) => index).every(index => own(item, index)));
     } else requireValue(object(item) && names.length <= bounds.items && names.every(metadataKey));
     for (const name of names) {
@@ -248,7 +249,7 @@ export function validateNoteMetadataValue(value) {
       const descriptor = Object.getOwnPropertyDescriptor(item, name);
       requireValue(own(descriptor, 'value') && descriptor.enumerable);
       if (!Array.isArray(item)) queue.push([name, depth + 1]);
-      queue.push([descriptor.value, depth + 1]);
+      queue.push([descriptor.value, depth + 1, depth === 0 && name === 'sources']);
     }
   }
   return value;
@@ -302,7 +303,7 @@ export function validateNoteMetadata(value) {
     optional(value.context, 'topics', stringList); optional(value.context, 'entities', stringList);
   }
   if (own(value, 'sources')) {
-    requireValue(Array.isArray(value.sources) && value.sources.length <= 128);
+    requireValue(Array.isArray(value.sources) && value.sources.length <= MAX_NOTE_SOURCES);
     const identities = new Set();
     for (const source of value.sources) {
       const identity = noteSourceIdentity(source);
@@ -423,6 +424,11 @@ export function inspectNoteMetadata(source, file = '<input>', tokens) {
       return { status: 'unsupported', value: null, block, diagnostics };
     }
     validateNoteMetadata(value);
+    const sourceCount = value.sources?.length ?? 0, metadataBytes = Buffer.byteLength(block.raw, 'utf8');
+    if (sourceCount >= Math.ceil(MAX_NOTE_SOURCES * 0.8)) issue('metadata-source-headroom', candidate.line,
+      `Note uses ${sourceCount} of ${MAX_NOTE_SOURCES} source descriptors; review capacity before adding more. Logs can use an explicit continuation; other notes need a restructuring decision.`, 'warning');
+    if (metadataBytes >= Math.ceil(MAX_METADATA_BYTES * 0.8)) issue('metadata-byte-headroom', candidate.line,
+      `Note metadata uses ${metadataBytes} of ${MAX_METADATA_BYTES} bytes; source count alone does not predict remaining capacity.`, 'warning');
     return { status: 'valid', value, block, diagnostics };
   } catch {
     issue('metadata-invalid', candidate.line, 'Invalid or unsupported metadata structure or field value.');

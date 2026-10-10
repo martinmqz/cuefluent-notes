@@ -411,7 +411,13 @@ counter reserves each random staging attempt before writing; a crash leaves paid
 inert stages and the next attempt can use fresh stages. Existing exact final pages
 are reused. Per scope, cumulative allocations stop at 256 MiB or 4,096 page attempts,
 including interrupted stages and obsolete versions. No page garbage collection is
-implemented. Content-addressed filenames use a 20-hex hash prefix and verify the full
+implemented. Selection-scoped [`capture-status`](workflow-cli.md#collection-controls)
+reports reserved bytes/page attempts, limits, and headroom on request
+(`includeReaderAllocation: true` or a selected `scopeId`) from guarded metadata
+reads. Routine status omits these reads. It does not take a lock or write files.
+The checkpoint is read before its counter; results may lag collection and do not
+reserve space or measure disk usage.
+Content-addressed filenames use a 20-hex hash prefix and verify the full
 hash and binding. Observed conflicting destinations are refused. Directory rename
 cannot replace a nonempty destination; as with metadata CAS, POSIX can replace a
 race-created empty directory, so this is not a universal no-replace primitive.

@@ -13,12 +13,12 @@ import { inspectIntakeRecovery, applyIntakeRecovery } from './intake-recovery.mj
 import { fingerprint, inspectDirectories, inspectExistingDirectories, inspectState, recover } from './safe-update.mjs';
 import { saveDirectNote } from './direct-save.mjs';
 import { prepareNote } from './note-generation.mjs';
-import { keys, id, hash, list, fail, canonicalJSON } from './workflow-values.mjs';
+import { keys, id, hash, list, fail, canonicalJSON, safeErrorCode } from './workflow-values.mjs';
 
 // Public request schemas expose selections and inspected hashes, never native
 // reader proofs, lock capabilities, callback code or hook-context authority.
 const commands = {
-  'capture-status': { required: ['selection'], optional: ['sourcePath'], run: captureSelectionStatus },
+  'capture-status': { required: ['selection'], optional: ['sourcePath', 'scopeId', 'includeReaderAllocation'], run: captureSelectionStatus },
   'capture-control': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation'], run: controlCapture },
   'capture-preview': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], run: previewExplicitCapture },
   'capture-select': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], run: selectExplicitCapture },
@@ -116,13 +116,25 @@ export async function main(args) {
   if (command === 'prepare-note') return prepareNote(request);
   return withStorageProbes(() => executeWorkflow(command, request, { configPath: options['--config'] }));
 }
-if (await isMain(import.meta.url)) main(process.argv.slice(2)).then(result => process.stdout.write(canonicalJSON(result) + '\n')).catch(error => {
+/** Only known numeric capacity measurements may cross the CLI error boundary. */
+export function workflowErrorReport(error) {
+  const details = {}, code = safeErrorCode(error, 'WORKFLOW_OPERATION_FAILED');
+  if (['NOTE_METADATA_SOURCE_CAPACITY', 'NOTE_METADATA_BYTE_CAPACITY'].includes(code)) {
+    for (const key of ['current', 'proposed', 'limit']) {
+      const value = Object.getOwnPropertyDescriptor(error.details ?? {}, key)?.value;
+      if (Number.isSafeInteger(value) && value >= 0) details[key] = value;
+    }
+  }
   // Parser/OS exceptions never echo source bodies. Writer-authored diagnostics
   // are fixed guidance (occasionally with a selected path), bounded separately.
-  process.stderr.write(JSON.stringify({ error: /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code ?? '') ? error.code : 'WORKFLOW_OPERATION_FAILED',
-    ...(error.code === 'SAFE_UPDATE_REJECTED' && typeof error.safeMessage === 'string'
+  return { error: code,
+    ...(Object.keys(details).length ? { details } : {}),
+    ...(code === 'SAFE_UPDATE_REJECTED' && typeof error.safeMessage === 'string'
       ? { reason: error.safeMessage.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 500) } : {}),
-    ...(Array.isArray(error.cleanupWarnings) && error.cleanupWarnings.length
-      ? { cleanupWarnings: ['Cleanup could not be verified; retained state requires inspection.'] } : {}) }) + '\n');
+    ...(Array.isArray(error?.cleanupWarnings) && error.cleanupWarnings.length
+      ? { cleanupWarnings: ['Cleanup could not be verified; retained state requires inspection.'] } : {}) };
+}
+if (await isMain(import.meta.url)) main(process.argv.slice(2)).then(result => process.stdout.write(canonicalJSON(result) + '\n')).catch(error => {
+  process.stderr.write(JSON.stringify(workflowErrorReport(error)) + '\n');
   process.exitCode = 1;
 });

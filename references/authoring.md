@@ -144,13 +144,18 @@ install the pinned dependencies once; distributed bundles already include them:
 npm ci --ignore-scripts
 # Both source checkouts and distributed bundles:
 node scripts/check-notes.mjs /absolute/path/to/selected-note.md
+# Explicit recursive folder selection; repeat --folder for separate roots:
+node scripts/check-notes.mjs --folder /absolute/path/to/selected-collection
 ```
 
-The checker reads only explicitly supplied Markdown and optional query cases;
-it does not write notes, load image/link targets, scan folders, run the app, or
+The checker reads explicitly supplied Markdown, Markdown beneath explicitly
+selected folders, and optional query cases. It does not write notes, load
+image/link targets, discover unselected folders, run the app, or
 send telemetry. Its standard Markdown parser recognizes root ATX/Setext H1/H2,
 nested constructs, tables, code and footnotes. It checks missing/empty sections,
 heading-path collisions, alias placement, duplicate aliases and shared aliases.
+Optional cases also flag [competing query vocabulary](retrieval.md#optional-reproducible-cases)
+across the selected sections, without predicting search ranking.
 HTML and images receive review warnings. Warnings require judgment, not automatic
 rewriting. A reference-only or comment-only body is not visible content.
 
@@ -160,11 +165,37 @@ visibility, unsupported-content loss, image resolution and factual completeness
 remain review work. Keep these limitations with the result; a clean report is
 not proof that every construct is admitted or displayed by the app.
 
-Tool bounds (not Cuefluent limits): 100 explicit files, 2 MiB UTF-8 per file,
+Tool bounds (not Cuefluent limits): 1–256 selected files, 2 MiB UTF-8 per file,
 200 optional vocabulary cases and 100 displayed diagnostics. Severity totals
-include omitted diagnostics. JSON reports include guide version and limitations.
+include omitted diagnostics; displayed diagnostics prioritize errors. JSON reports
+include guide version and limitations.
+The optional competition check has a separate budget of 1,000,000 query-word/section comparisons;
+if exhausted, it reports incomplete competition coverage while other checks continue.
 Exit codes: 0 means no checker errors (warnings may remain), 1 means checker
-errors, and 2 means an input/usage failure. The command never repairs files.
+errors, and 2 means an input/usage failure. One unreadable, oversized or invalid
+UTF-8 input aborts the run without a partial report; the selection was not completely
+checked, and the error says `selection incomplete`. Usage and cases-file errors
+report their own cause without that label. The command never repairs files.
+
+Folder selection recurses through regular directories, including hidden directories,
+and selects regular `.md`/`.markdown` files (case insensitive) in deterministic
+path order across the whole selection, including explicit file arguments. It
+counts all visited entries, including selected roots, ignored file
+types and links, with one 4,096-entry budget across all roots. Roots have depth zero;
+directory depth is limited to 64. Exceeding any bound fails the complete run.
+Discovered symlinks and Windows junctions are not followed; `scan.skippedLinks`
+reports their count and the report explains that their targets were excluded.
+A selected folder's final component must not be a link, but linked parents
+(including macOS `/tmp` and `/var`) resolve normally. Explicit file arguments
+continue to resolve links to their real paths.
+
+Repeated/nested folder roots, folder-plus-member-file selections, and duplicate
+canonical file paths fail as overlaps. Select disjoint inputs; duplicates are not
+silently merged. Checks for note IDs, aliases and cases cover the entire selected
+set. A selected folder is not necessarily the app's whole library. The app's
+10 MiB per-file allowance does not enlarge this checker's 2 MiB bound or prove app
+admission. The writer retains its separate 100-operation and 100-file derived
+manifest limits; checker coverage does not enlarge either.
 
 Developer verification from the source checkout: `npm test` exercises observable helper behavior;
 `npm run check:examples` checks the selected synthetic documents and vocabulary.

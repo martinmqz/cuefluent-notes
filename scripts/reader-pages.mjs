@@ -5,7 +5,7 @@ import { validateReaderCheckpoint, MAX_READER_CHECKPOINT_BYTES, checkpointPageBu
 import { intakePath, intakeSnapshot, intakeSnapshotBatch, intakeJSON, assertIntakeTransaction, guardStore, replaceIntakeJSON, writeIntakePageBatch } from './intake-io.mjs';
 import { lstatOrNull, sameFileIdentity, syncDirectory } from './file-io.mjs';
 import { checkWorkflowBudget, workflowTimeout } from './workflow-budget.mjs';
-import { keys, integer, hash, canonicalJSON, digest, fail } from './workflow-values.mjs';
+import { keys, integer, hash, nativeId, string, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
 export { READER_PAGE_BYTES };
 export const READER_ALLOCATION_BYTES = 256 * 1024 * 1024;
@@ -17,6 +17,37 @@ const basePath = root => `reader-pages/${root.client}/${root.sessionId}/${root.s
 const pagePath = (root, page) => `${basePath(root)}/${page.index.toString(16).padStart(2, '0')}-${page.hash.slice(0, 20)}/page.json`;
 const inline = (root, records, units) => ({ format: 'cuefluent-reader-checkpoint', version: 1,
   ...binding(root), offset: root.offset, records, units });
+function validateAllocation(quota, expected) {
+  keys(quota, ['version', 'reader', 'client', 'sessionId', 'scopeId', 'sourceIdentity', 'bytes', 'pages']);
+  string(quota.reader, 128); integer(quota.bytes); integer(quota.pages);
+  if (quota.version !== 1 || canonicalJSON(binding(quota)) !== canonicalJSON(binding(expected))) fail('READER_PAGE_CONFLICT');
+}
+
+/** Read counters after the caller's checkpoint read, without hydrating pages or taking a lock. */
+export async function readReaderAllocation(store, { client, sessionId, scopeId, sourceIdentity }, checkpointRoot = null) {
+  choice(client, ['claude']); nativeId(sessionId); nativeId(scopeId); hash(sourceIdentity);
+  if (checkpointRoot !== null) validateStoredCheckpoint(checkpointRoot, { identity: { client, sessionId }, scopeId, sourceIdentity });
+  const referencedPages = checkpointRoot?.version === 2 ? checkpointRoot.pages : [];
+  const checkpoint = { referencedPages: referencedPages.length, referencedBytes: referencedPages.reduce((sum, page) => sum + page.bytes, 0) };
+  const expected = { client, sessionId, scopeId, sourceIdentity };
+  const snapshot = await intakeSnapshot(store, 'state', `${basePath(expected)}/allocation.json`);
+  let quota;
+  try {
+    quota = intakeJSON(snapshot);
+    if (quota === null) {
+      if (snapshot.bytes !== null || checkpoint.referencedPages) fail('READER_ALLOCATION_INCONSISTENT');
+      quota = { bytes: 0, pages: 0 };
+    } else {
+      validateAllocation(quota, { reader: checkpointRoot?.reader ?? quota.reader, ...expected });
+      if (quota.bytes > READER_ALLOCATION_BYTES || quota.pages > READER_ALLOCATION_PAGES ||
+          quota.bytes < checkpoint.referencedBytes || quota.pages < checkpoint.referencedPages) fail('READER_ALLOCATION_INCONSISTENT');
+    }
+  } catch { fail('READER_ALLOCATION_INCONSISTENT'); }
+  const measurement = (reserved, limit) => ({ reserved, limit, remaining: limit - reserved });
+  const bytes = measurement(quota.bytes, READER_ALLOCATION_BYTES), pages = measurement(quota.pages, READER_ALLOCATION_PAGES);
+  return { scopeId, status: [bytes, pages].some(item => item.remaining === 0) ? 'exhausted'
+    : [bytes, pages].some(item => item.reserved >= Math.ceil(item.limit * 0.8)) ? 'low-headroom' : 'ok', bytes, pages, checkpoint };
+}
 
 export function validateStoredCheckpoint(value, expected) {
   if (value?.version !== 2) return validateReaderCheckpoint(value, expected);
@@ -105,9 +136,7 @@ export async function publishReaderPages(transaction, value) {
   if (!missing.length) return root;
   const quotaName = `${basePath(root)}/allocation.json`, snapshot = await intakeSnapshot(store, 'state', quotaName);
   const quota = intakeJSON(snapshot) ?? { version: 1, ...binding(root), bytes: 0, pages: 0 };
-  keys(quota, ['version', 'reader', 'client', 'sessionId', 'scopeId', 'sourceIdentity', 'bytes', 'pages']);
-  if (quota.version !== 1 || canonicalJSON(binding(quota)) !== canonicalJSON(binding(root))) fail('READER_PAGE_CONFLICT');
-  integer(quota.bytes); integer(quota.pages);
+  validateAllocation(quota, root);
   quota.bytes += missing.reduce((sum, page) => sum + page.bytes.length, 0); quota.pages += missing.length;
   if (quota.bytes > READER_ALLOCATION_BYTES || quota.pages > READER_ALLOCATION_PAGES) fail('READER_CHECKPOINT_ALLOCATION_CAPACITY');
   checkWorkflowBudget();

@@ -33,6 +33,24 @@ async function reinspect(plan) {
   for (const file of plan.files) file.expectedHash = await fingerprint(path.join(plan.root, file.path));
   if (plan.mode === 'derived') plan.expectedManifestHash = await fingerprint(path.join(plan.stateDir, 'manifest.json'));
 }
+test('capacity warnings permit authored saves and updates retaining derived notes', async t => {
+  for (const mode of ['authored', 'derived']) {
+    const f = await fixture(t, mode);
+    const content = prepareNote({ original: null, content: await fs.readFile(f.proposal, 'utf8'),
+      now: '2026-10-09T12:00:00Z', skillVersion: '0.12.0',
+      metadata: { sources: Array.from({ length: 128 }, (_, i) => ({ type: 'document', ref: `synthetic/${i}` })) } }).content;
+    await fs.writeFile(f.proposal, content);
+    const first = await applyPlan(f.plan);
+    assert(first.diagnostics.some(d => d.code === 'metadata-source-headroom' && d.severity === 'warning'));
+    await reinspect(f.plan);
+    assert.equal((await applyPlan(f.plan)).status, 'unchanged');
+    const second = path.join(f.directory, 'second.md'); await fs.writeFile(second, '# Other\n\n## Decision\nEvidence.\n');
+    const next = { ...f.plan, files: [{ ...f.plan.files[0], path: 'other.md', contentPath: second, expectedHash: null,
+      entries: [] }] };
+    assert.equal((await applyPlan(next)).status, 'updated');
+    assert.equal(await fs.readFile(f.target, 'utf8'), content);
+  }
+});
 test('nested portable note paths save successfully', async t => {
   const f = await fixture(t);
   await fs.mkdir(path.join(f.root, 'nested café'));

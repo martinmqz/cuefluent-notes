@@ -27,7 +27,7 @@ test('guarded reads refuse links and replacement between inspection and open', a
     if (args[0] === file) await fs.rename(other, file);
     return open(...args);
   });
-  await assert.rejects(readBoundedBytes(file, { noFollow: true }), /identity changed/);
+  await assert.rejects(readBoundedBytes(file, { noFollow: true }), { code: 'FILE_IDENTITY_CHANGED' });
 });
 test('directory sync accepts real directories and preserves missing-path errors', async t => {
   const root = await fixture(t);

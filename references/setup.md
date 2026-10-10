@@ -38,6 +38,28 @@ Explain the choices in ordinary terms:
   processing run automatically. Do not promise native prompt rendering without
   verifying it in the actual client.
 
+## Confirm Automatic
+
+When setup or a mode change saves Automatic, give a concise confirmation after the
+save succeeds, for each affected route/project. For example: “Automatic is saved
+for [project], limited to [approved processing subject scope]. Turning captured
+session evidence into notes still requires an explicit processing request.
+Collection is enabled for [N listed sessions].” Direct saves of supplied material
+retain their separate workflow.
+
+Ground the processing limitation in the existing
+`status.transport.automaticProcessing: false` result. Saving the preference does
+not change that capability. Take each route's collection setting and selection
+from the `config` returned by `configure`, or its post-save status read-back.
+Report off, enabled for project sessions, or enabled for N listed sessions;
+explicitly say “no sessions selected” for an empty list. Include any known pause
+or exclusion, and do not describe an excluded route as actively collecting.
+The processing subject scope limits note content; collection selection belongs
+to the route and may differ between projects.
+Keep the confirmation in ordinary language; this reports the result of the save
+and adds no approval question. Existing processing scope and save-consent rules
+remain in [processing](processing.md).
+
 ## Windows storage selection
 
 Fresh Windows setups use `<local user profile>\.cuefluent-notes\workflow.json`.

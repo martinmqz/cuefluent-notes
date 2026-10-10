@@ -4,7 +4,7 @@ import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, with
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { canonicalWorkflowProject, validateWorkflowPlacement } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
-import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning } from './intake-store.mjs';
+import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom } from './intake-store.mjs';
 import { inspectSourceBoundary, newSelectionState, currentIntervals } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.mjs';
@@ -13,7 +13,7 @@ import { processScope } from './collection-worker.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { withWorkflowBudget } from './workflow-budget.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
-import { keys, nativeId, hash, integer, list, unique, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
+import { keys, nativeId, hash, integer, list, unique, choice, canonicalJSON, digest, fail, safeErrorCode } from './workflow-values.mjs';
 
 const identityOf = ({ client, sessionId }) => ({ client, sessionId });
 const oldHash = value => { if (value !== null) hash(value); };
@@ -39,12 +39,41 @@ async function sourceBoundary(selection, sourcePath, expectedSourceIdentity, uni
 }
 
 /** Explicit inspection of one named source. No transcript content or filesystem writes. */
-export async function captureSelectionStatus(capability, { selection, sourcePath = null }) {
+export async function captureSelectionStatus(capability, { selection, sourcePath = null, scopeId, includeReaderAllocation = false }) {
   selection = await selected(selection);
+  if (scopeId !== undefined) nativeId(scopeId);
+  if (typeof includeReaderAllocation !== 'boolean') fail('INVALID_WORKFLOW');
   await assertWorkflowStorage(capability); // Status and restrictive controls remain available after opting out.
   const store = await openWorkflowIntake(capability), current = await readSelection(store, identityOf(selection));
   if (current.state && current.state.source.projectRoot !== selection.cwd) fail('SOURCE_IDENTITY_MISMATCH');
-  return { ...current, source: sourcePath === null ? null : await snapshotSourceMetadata(sourcePath) };
+  const readerAllocation = includeReaderAllocation || scopeId !== undefined
+    ? await selectionHeadroom(store, selection, current.state, scopeId) : undefined;
+  return { ...current, source: sourcePath === null ? null : await snapshotSourceMetadata(sourcePath),
+    ...(readerAllocation === undefined ? {} : { readerAllocation }) };
+}
+
+const headroomReadErrors = new Set(['READER_ALLOCATION_INCONSISTENT', 'INVALID_INTAKE_METADATA', 'INVALID_READER_PROGRESS',
+  'INVALID_READER_CHECKPOINT', 'READER_CHECKPOINT_CAPACITY', 'INTAKE_FILE_CHANGED',
+  'FILE_IDENTITY_CHANGED', 'FILE_NOT_REGULAR', 'FILE_SIZE_LIMIT_EXCEEDED',
+  'ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EIO']);
+async function selectionHeadroom(store, selection, state, scopeId) {
+  const scopeIds = state ? [...state.intervals, ...state.explicitScopes].map(item => item.id) : [];
+  if (scopeId !== undefined && !scopeIds.includes(scopeId)) fail('UNKNOWN_CAPTURE_SCOPE');
+  if (selection.client === 'codex') return { status: 'not-applicable', scopeIds };
+  const limits = 'Cumulative reserved allocation includes interrupted attempts and obsolete pages; it is not disk usage. Checkpoint counts are references, not page validation. Metadata reads may lag active collection; headroom is informational, not a reservation.';
+  const base = { scopeIds, maxScopes: 32, limits };
+  if (!state || !scopeIds.length) return { ...base, status: 'unavailable', reason: state ? 'no-known-scopes' : 'no-selection', scopes: [] };
+  if (scopeId === undefined && scopeIds.length > base.maxScopes) return { ...base, status: 'scope-selection-required', scopes: [] };
+  const scopes = [];
+  for (const id of scopeId === undefined ? scopeIds : [scopeId]) {
+    try { scopes.push(await readReaderHeadroom(store, identityOf(selection), id, state.source.fileIdentity)); }
+    catch (error) {
+      const code = safeErrorCode(error);
+      if (!headroomReadErrors.has(code)) throw error;
+      scopes.push({ scopeId: id, status: code === 'READER_ALLOCATION_INCONSISTENT' ? 'inconsistent' : 'unavailable', error: code });
+    }
+  }
+  return { ...base, status: scopes.some(item => item.error) ? 'partial' : 'available', scopes };
 }
 
 /** Future start/resume freezes EOF. With no verified current native anchor the

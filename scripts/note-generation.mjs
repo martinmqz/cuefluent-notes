@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Document, Scalar } from 'yaml';
 import { inspectNoteMetadata, isNoteTimestamp, isNoteSkillVersion, validateNoteMetadataValue,
-  validateNoteMetadata, noteSourceIdentity, MAX_NOTE_BYTES } from './note-metadata.mjs';
+  validateNoteMetadata, noteSourceIdentity, MAX_NOTE_BYTES, MAX_METADATA_BYTES, MAX_NOTE_SOURCES } from './note-metadata.mjs';
 import { digest, fail, keys } from './workflow-values.mjs';
 
 const known = { schema_version: true, id: true, type: true, created: true, updated: true, sources: true,
@@ -22,6 +22,9 @@ const inspect = content => {
 };
 const metadataCheck = operation => {
   try { return operation(); } catch { fail('NOTE_METADATA_INVALID'); }
+};
+const capacity = (code, current, proposed, limit) => {
+  throw Object.assign(new Error(code), { code, details: { current, proposed, limit } });
 };
 
 function preserveUnknown(before, after, fields) {
@@ -57,8 +60,16 @@ export function assertInspectedNoteTransition(before, after) {
   return { before, after };
 }
 
+function checkPatchKeys(patch) {
+  metadataCheck(() => {
+    keys(patch, [], ['type', 'context', 'sources', 'series', 'sprint', 'period']);
+    for (const key of ['context', 'series', 'period']) {
+      if (Object.hasOwn(patch, key)) keys(patch[key], [], Object.keys(known[key]));
+    }
+  });
+}
 function patchMetadata(current, patch) {
-  metadataCheck(() => keys(patch, [], ['type', 'context', 'sources', 'series', 'sprint', 'period']));
+  checkPatchKeys(patch);
   const result = structuredClone(current);
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'sources') {
@@ -71,7 +82,6 @@ function patchMetadata(current, patch) {
         if (!existing) result.sources.push(structuredClone(item));
       }
     } else if (['context', 'series', 'period'].includes(key)) {
-      metadataCheck(() => keys(value, [], Object.keys(known[key])));
       result[key] = { ...result[key], ...structuredClone(value) };
     } else result[key] = value;
   }
@@ -117,6 +127,14 @@ export function prepareNote(request) {
     if (previous?.value?.series || Object.hasOwn(value.series ?? {}, 'id')) fail('NOTE_METADATA_SERIES_CONFLICT');
     value.series = { ...value.series, id: `series_${randomUUID()}` };
   }
+  const proposedSources = patch.sources?.length > MAX_NOTE_SOURCES ? patch.sources.length : value.sources?.length ?? 0;
+  if (proposedSources > MAX_NOTE_SOURCES) {
+    // Sources were structurally checked in each input and validated during
+    // merging. Only validate the remaining merged fields on this refusal path.
+    const withoutSources = { ...value, sources: [] };
+    metadataCheck(() => { validateNoteMetadataValue(withoutSources); validateNoteMetadata(withoutSources); });
+    capacity('NOTE_METADATA_SOURCE_CAPACITY', previous?.value?.sources?.length ?? 0, proposedSources, MAX_NOTE_SOURCES);
+  }
   const hashed = request.contentHash || Boolean(previous?.value?.generation?.content_hash);
   const unchanged = previous?.status === 'valid' && body === bodyOf(original, previous) && same(value, previous.value) &&
     (!request.contentHash || previous.value.generation?.content_hash !== undefined);
@@ -135,7 +153,12 @@ export function prepareNote(request) {
   const prefix = previous?.block ? original.slice(0, previous.block.start) : null;
   const position = proposed.block?.start ?? (prefix !== null && body.startsWith(prefix) &&
     (prefix || !body.startsWith('\uFEFF')) ? prefix.length : undefined);
-  const content = insertBlock(body, block, position), after = inspect(content);
+  const content = insertBlock(body, block, position), blockBytes = Buffer.byteLength(block, 'utf8');
+  if (blockBytes > MAX_METADATA_BYTES) {
+    validText(content); // Preserve the whole-note limit before reporting metadata capacity.
+    capacity('NOTE_METADATA_BYTE_CAPACITY', Buffer.byteLength(previous?.block?.raw ?? '', 'utf8'), blockBytes, MAX_METADATA_BYTES);
+  }
+  const after = inspect(content);
   if (after.status !== 'valid' || after.block.raw !== block || !same(after.value, value) || bodyOf(content, after) !== body) fail('NOTE_METADATA_INVALID');
   assertInspectedNoteTransition(previous, after);
   return result(content, after);

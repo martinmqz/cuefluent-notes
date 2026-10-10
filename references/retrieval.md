@@ -81,8 +81,10 @@ file can make coverage checks repeatable:
 }
 ```
 
-`file` is relative to the cases file (absolute paths also work); it must name an
-explicitly selected input. `heading` is the exact visible H2 text and must select
+`file` is relative to the cases file (absolute paths also work); it must name a
+selected input, either explicitly named or discovered beneath a selected folder
+under the [checker bounds](authoring.md#standalone-check-and-its-limits).
+`heading` is the exact visible H2 text and must select
 one section in that file. If an H2 repeats under different topics, add optional
 `h1` with the exact visible H1 text to select the intended heading path. A bare
 H2 that matches multiple sections remains ambiguous. `expected` describes the information and qualifications
@@ -93,9 +95,28 @@ node scripts/check-notes.mjs --cases /private/collection/cases.json /private/col
 ```
 
 The checker tests whether every Unicode word/number in a query occurs somewhere
-in that section's H1, H2 or aliases, ignoring case and punctuation. This deliberate
+in that section's H1, H2 or aliases, using Unicode NFKC normalization and ignoring
+case and punctuation. This deliberate
 coverage heuristic does not reproduce app tokenization, phrase matching or
-ranking. Review near-synonyms, competing sections and broad vocabulary manually.
-Exact shared aliases receive warnings; usefully shared vocabulary need not be
-removed. Cases are optional for ordinary writing; infer vocabulary even without
-a cases file. No query or expected text is printed in diagnostics.
+ranking. For each uniquely resolved target, `competing-query` warns when another
+selected section's H1/H2/aliases also cover every query word. It identifies the
+target file/line and the competitor's `relatedFile`/`relatedLine`, with the case
+number. Body-only terms do not count, and missing or ambiguous targets do not
+produce this warning. A target with missing vocabulary can still have a competitor.
+
+Competition review allows at most 1,000,000 query-word/section comparisons per run.
+Each comparison checks a word against the section's combined H1/H2/alias vocabulary.
+If further comparisons are needed, `competing-query-limit` warns and the report's
+`competingQueries.complete` becomes false even if the warning is outside the 100
+displayed diagnostics. Target resolution and target vocabulary checks continue
+for all cases. `competingQueries.firstIncompleteCase` identifies the first case
+whose competition checks were cut short (one-based); later cases also lack
+competition coverage. Displayed diagnostics prioritize errors over warnings.
+Severity totals count all observed findings, including omitted
+diagnostics; they cannot count findings in competition work that was not performed.
+
+Review near-synonyms, competing sections and broad vocabulary manually. Exact
+shared aliases receive warnings even without cases; usefully shared vocabulary
+need not be removed. Cases are optional for ordinary writing; infer vocabulary
+even without a cases file. The writer supplies no query cases, so it does not
+produce competing-query warnings. No query or expected text is printed in diagnostics.

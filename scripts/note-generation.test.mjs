@@ -12,6 +12,104 @@ const parsed = content => inspectNoteMetadata(content);
 const without = content => { const { block } = parsed(content); return content.slice(0, block.start) + content.slice(block.end); };
 const document = { type: 'document', ref: 'selected/design.md', locator: 'Decision 1' };
 
+test('source capacity reports counts without losing prior sources or charging identical identities', () => {
+  const sources = Array.from({ length: 128 }, (_, i) => ({ type: 'document', ref: `synthetic/${i}.md` }));
+  const original = prepare({ metadata: { sources } }).content;
+  const before = parsed(original).value;
+  assert.equal(prepare({ original, content: original, metadata: { sources: [sources[0]] } }).content, original);
+  assert.throws(() => prepare({ original, content: original, metadata: { sources: [{ type: 'document', ref: 'synthetic/new.md' }] } }),
+    { code: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 128, proposed: 129, limit: 128 } });
+  assert.throws(() => prepare({ metadata: { sources: [...sources, { type: 'document', ref: 'synthetic/new.md' }] } }),
+    { code: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 0, proposed: 129, limit: 128 } });
+  assert.deepEqual(parsed(original).value, before);
+  assert.throws(() => prepare({ original, content: original, metadata: { sources: [{ ...sources[0], extra: 'changed' }] } }),
+    { code: 'NOTE_METADATA_SOURCE_CHANGED' });
+});
+
+test('serialized metadata byte exhaustion reports exact UTF-8 bytes before 128 sources', () => {
+  const sources = Array.from({ length: 29 }, (_, i) => ({ type: 'document', ref: `${i}:` + '界'.repeat(700) }));
+  // Each scalar is within its character limit; UTF-8 bytes exhaust the block first.
+  const original = prepare({ metadata: { sources } }).content;
+  const current = Buffer.byteLength(parsed(original).block.raw);
+  assert(current < 65536);
+  assert.throws(() => prepare({ original, content: original,
+    metadata: { sources: [{ type: 'document', ref: 'new:' + '界'.repeat(1800) }] } }), error => {
+    assert.equal(error.code, 'NOTE_METADATA_BYTE_CAPACITY');
+    assert.equal(error.details.current, current);
+    assert(error.details.proposed > 65536); assert.equal(error.details.limit, 65536);
+    return true;
+  });
+  assert.equal(parsed(original).status, 'valid');
+  assert(parsed(original).diagnostics.some(d => d.code === 'metadata-byte-headroom' && d.severity === 'warning'));
+});
+
+test('capacity diagnostics preserve opaque errors and do not relabel malformed oversized metadata', () => {
+  const sources = Array.from({ length: 129 }, (_, i) => ({ type: 'document', ref: `synthetic/${i}` }));
+  const original = '<!-- cuefluent\nschema_version: 2\nid: future\n-->\n# Topic\n## Work\nEvidence.\n';
+  assert.throws(() => prepare({ original, content: original, metadata: { sources } }), { code: 'NOTE_METADATA_OPAQUE_CHANGED' });
+  for (const metadata of [{ sprint: 'a-->b', sources }, { sources, sprint: 'a-->b' },
+    { sources: sources.map(() => ({ type: 'bogus' })) }, { sources, unknown: true }, { sources, type: 1 },
+    { sources, context: { unsupported: true } },
+    { sources, series: { id: 'series_synthetic', unsupported: true } },
+    { sources, period: { start: '2026-10-01', end: '2026-10-02', timezone: 'UTC', unsupported: true } }]) {
+    assert.throws(() => prepare({ metadata }), { code: 'NOTE_METADATA_INVALID' });
+  }
+  let supported = prepare({ metadata: { context: { project: 'synthetic' }, series: { id: 'series_synthetic' },
+    period: { start: '2026-10-01', end: '2026-10-02', timezone: 'UTC' } } }).content;
+  for (const key of ['context', 'series', 'period']) supported = supported.replace(`${key}:\r\n`, `${key}:\r\n  extension: retained\r\n`);
+  assert.equal(parsed(supported).status, 'valid');
+  for (const key of ['context', 'series', 'period']) assert.equal(parsed(supported).value[key].extension, 'retained');
+  assert.equal(prepare({ original: supported, content: supported }).content, supported);
+  assert.throws(() => prepare({ original: supported, content: supported, metadata: { sources } }),
+    { code: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 0, proposed: 129, limit: 128 } });
+});
+
+test('capacity uses merged partial metadata and preserves mode, proposal and series refusals', () => {
+  const sources = Array.from({ length: 129 }, (_, i) => ({ type: 'document', ref: `overflow/${i}` }));
+  const original = prepare({ metadata: { series: { id: 'series_a' },
+    period: { start: '2026-10-01', end: '2026-10-02', timezone: 'UTC' } } }).content;
+  for (const patch of [{ series: { label: 'B' } }, { period: { end: '2026-10-03' } }]) {
+    assert.equal(parsed(prepare({ original, content: original, metadata: patch }).content).status, 'valid');
+    assert.throws(() => prepare({ original, content: original, metadata: { ...patch, sources } }),
+      { code: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 0, proposed: 129, limit: 128 } });
+  }
+  assert.throws(() => prepare({ createSeries: true, metadata: { series: { label: 'New series' }, sources } }),
+    { code: 'NOTE_METADATA_SOURCE_CAPACITY' });
+  for (const [request, code] of [
+    [{ original: body }, 'NOTE_METADATA_ENRICHMENT_REQUIRED'],
+    [{ original, content: original.replace('series_a', 'series_b') }, 'NOTE_METADATA_PROPOSAL_CHANGED'],
+    [{ original, content: original, createSeries: true }, 'NOTE_METADATA_SERIES_CONFLICT']
+  ]) assert.throws(() => prepare({ ...request, metadata: { sources } }), { code });
+  const populated = prepare({ metadata: { sources: Array.from({ length: 128 }, (_, i) => ({ type: 'document', ref: `prior/${i}` })) } }).content;
+  assert.throws(() => prepare({ original: populated, content: populated, metadata: { sources } }),
+    { code: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 128, proposed: 129, limit: 128 } });
+});
+
+test('source overflow does not combine independently valid source lists into a structural-budget failure', () => {
+  const session = i => ({ type: 'session', client: 'codex', session_id: 'synthetic', unit_id: `unit_${i}`, revision: 'a'.repeat(64) });
+  const retained = Array.from({ length: 128 }, (_, i) => session(i));
+  const sources = Array.from({ length: 250 }, (_, i) => session(i + 128));
+  const original = prepare({ metadata: { sources: retained } }).content;
+  assert.throws(() => prepare({ original, content: original, metadata: { sources } }),
+    { code: 'NOTE_METADATA_SOURCE_CAPACITY', details: { current: 128, proposed: 250, limit: 128 } });
+  assert.deepEqual(parsed(original).value.sources, retained);
+  for (const metadata of [{ sources, type: 1 }, { sources: [...sources.slice(0, -1), { ...sources.at(-1), revision: 'invalid' }] }]) {
+    assert.throws(() => prepare({ original, content: original, metadata }), { code: 'NOTE_METADATA_INVALID' });
+  }
+  // The supplied patch itself must still fit the structural budget.
+  assert.throws(() => prepare({ original, content: original, metadata: { sources: Array.from({ length: 400 }, (_, i) => session(i + 128)) } }),
+    { code: 'NOTE_METADATA_INVALID' });
+});
+
+test('capacity warnings begin at 80 percent and do not change validity', () => {
+  for (const count of [102, 103, 128]) {
+    const inspected = parsed(prepare({ metadata: { sources: Array.from({ length: count }, (_, i) => ({ type: 'document', ref: `${i}` })) } }).content);
+    assert.equal(inspected.status, 'valid');
+    assert.equal(inspected.diagnostics.some(d => d.code === 'metadata-source-headroom'), count >= 103);
+    assert(inspected.diagnostics.every(d => d.severity === 'warning'));
+  }
+});
+
 test('new generated proposals retain visible bytes and receive independent stable IDs, timestamps and optional body hash', () => {
   const first = prepare({ metadata: { sources: [document] }, contentHash: true });
   const second = prepare({});

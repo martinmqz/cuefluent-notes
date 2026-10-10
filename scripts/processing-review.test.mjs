@@ -21,6 +21,18 @@ const page = (f, claim, index = 0) => readProcessingPage(f.capability, { ...f.ar
 const save = (f, p, options) => saveProcessing(f.capability, { ...f.args, expectedClaimHash: p.claimHash, approvedProposalHash: p.proposalHash }, options);
 const metadataSource = f => `sources:\n  - type: session\n    client: ${f.identity.client}\n    session_id: ${f.identity.sessionId}\n    unit_id: ${f.identity.unitId}\n    revision: "${f.capture.evidenceHash}"\n`;
 
+test('processing proposals and saves accept valid notes with source capacity warnings', async t => {
+  const f = await processingFixture(t);
+  const sources = Array.from({ length: 127 }, (_, i) => ({ type: 'document', ref: `synthetic/${i}` }));
+  sources.push({ type: 'session', client: f.identity.client, session_id: f.identity.sessionId,
+    unit_id: f.identity.unitId, revision: f.capture.evidenceHash });
+  const content = prepareNote({ original: null, content: '# Note\n\n## Work\nEvidence.\n',
+    now: '2026-10-09T12:00:00Z', skillVersion: '0.12.0', metadata: { sources } }).content;
+  const proposal = await proposedClaim(f, { content });
+  await save(f, proposal);
+  assert.equal(await fs.readFile(proposal.target, 'utf8'), content);
+});
+
 // Instrument actual file-handle bytes, not the implementation's observation hook.
 function rawReadCounter(files) {
   const open = fs.open, counts = { bytes: 0, opens: 0 };

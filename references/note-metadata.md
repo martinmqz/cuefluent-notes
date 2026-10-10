@@ -108,7 +108,8 @@ Note, project, series and source IDs are case-sensitive ASCII tokens, 1–128
 characters, beginning with a letter or digit and otherwise containing letters,
 digits, dot, underscore, colon or hyphen. IDs are not paths. An intentional new
 note gets a new ID; moving the same note retains it. The checker reports
-collisions only among explicitly selected files, without scanning other files
+collisions among selected files (explicit or discovered beneath a selected folder),
+without scanning unselected locations
 or deciding whether two copies should be merged. Processing proposals reject
 collisions within their proposed batch and with retained derived outputs before
 recording proposal intent. The shared writer rechecks collisions
@@ -211,6 +212,25 @@ note ID, the presence or value of a creation time, or established series ID. Sou
 are additive: retain prior descriptors exactly; never silently truncate provenance
 to fit the 128-source bound. Report capacity or conflicting descriptions for
 review. Unknown values, including nested extensions, must survive updates.
+Preparation reports `NOTE_METADATA_SOURCE_CAPACITY` when the supplied or merged
+source list exceeds 128, and `NOTE_METADATA_BYTE_CAPACITY` when serialized metadata
+exceeds 64 KiB. Numeric details include `current`, `proposed`, and `limit`: source
+list entries for the former, exact UTF-8 block bytes for the latter. For an oversized
+supplied list, `proposed` is that supplied array's length, not the merged count;
+`current` remains the existing note's count. Partial nested patches are validated
+against the merged metadata before capacity is reported. Enrichment, proposal,
+opaque-schema and series refusals take precedence over source capacity.
+Repeated existing identities consume no extra slot within the supplied-list bound.
+Structural/field errors remain `NOTE_METADATA_INVALID`.
+Long references or extensions can exhaust bytes well before 128 sources.
+Extensions can also exhaust the 4,096-node structural budget first; that failure
+remains `NOTE_METADATA_INVALID`. Headroom warnings do not cover structural budgets.
+
+The checker warns on valid metadata at 80% of either bound: 103 sources or 52,429
+bytes. These warnings do not block writer or processing saves, including retained
+derived notes. They do not estimate remaining days or processing invocations.
+For logs, use the explicit [capacity continuation](note-series.md#capacity-continuation-for-logs)
+workflow; living reference notes need a separate restructuring decision.
 Unsupported schemas require retaining the exact opaque block. Malformed blocks
 remain conflicts, even when the proposed replacement would remove the error.
 The plain-Markdown option applies to new notes and existing plain notes. Guarded

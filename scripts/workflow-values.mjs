@@ -4,6 +4,10 @@ import { createHash } from 'node:crypto';
 export const CLIENTS = Object.freeze(['codex', 'claude']);
 
 export function fail(code, message = code) { throw Object.assign(new Error(message), { code }); }
+export function safeErrorCode(error, fallback) {
+  const code = Object.getOwnPropertyDescriptor(error ?? {}, 'code')?.value;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,80}$/.test(code) ? code : fallback;
+}
 export const object = value => value !== null && typeof value === 'object' &&
   !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 export function keys(value, required, optional = []) {
