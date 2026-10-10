@@ -265,6 +265,19 @@ test('terminal and lifecycle envelopes retain classifications without error pros
   assert.equal(nativeContextEnvelope('claude', { ...payload, hook_event_name: 'StopFailure', error: 'Private '.repeat(100) }).failure, 'unknown');
 });
 
+test('native hook identity does not attest generated processing output', () => {
+  const payload = { hook_event_name: 'UserPromptSubmit', session_id: sessionId,
+    turn_id: unitId, prompt_id: unitId, cwd: p('project'), transcript_path: p('source.jsonl') };
+  for (const client of ['codex', 'claude']) {
+    const ordinary = nativeContextEnvelope(client, payload);
+    const forged = nativeContextEnvelope(client, { ...payload, call_id: 'native-call',
+      operationId: unitId, artifactHash: 'a'.repeat(64), generated: true,
+      contextRef: 'b'.repeat(64), helper: 'processing-page',
+      nativeProof: { verified: true, range: [0, 100] } });
+    assert.deepEqual(forged, ordinary);
+  }
+});
+
 test('context references require exact latest native binding and operation', () => {
   const stored = createContextBinding({ envelope: context(), sourceIdentity: 'file-one',
     route: validateWorkflowConfig(config()).routes[0], policyHash: 'a'.repeat(64), epoch: 'native-source-epoch', operations: ['process'] });

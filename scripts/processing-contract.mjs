@@ -11,12 +11,17 @@ export const operationPath = id => `processed/operations/${nativeId(id)}.json`;
 export const PROCESSING_INTERFACE_VERSION = 1;
 export function inspectionProgress(claim) {
   const totalPages = claim.packet.pages.length;
+  const embeddedCaptureBytes = claim.packet.captureBytes.reduce((sum, bytes) => sum + bytes, 0);
   const acknowledged = new Set(claim.acknowledged);
   const nextPage = claim.packet.pages.findIndex((_, index) => !acknowledged.has(index));
   return { state: nextPage === -1 ? 'inspected' : acknowledged.size ? 'inspecting' : 'unread',
     totalPages, issuedPages: claim.issued.length, acknowledgedPages: acknowledged.size,
     nextPage: nextPage === -1 ? null : nextPage, packetBytes: claim.packet.bytes,
-    sourceCompleteness: 'unknown' };
+    sourceCompleteness: 'unknown',
+    projection: { rules: 'full-capture-v1', exclusions: 'disabled-unverified',
+      capturedFileBytes: embeddedCaptureBytes + claim.packet.captureBytes.length,
+      embeddedCaptureBytes, provenCopyExcludedBytes: 0, collectionAvoidedBytes: null,
+      packetBytes: claim.packet.bytes } };
 }
 export const associationPath = (identity, bindingHash) => {
   hash(bindingHash); const i = logicalCaptureIdentity(identity);
@@ -70,5 +75,6 @@ export function validateAssociation(value, identity, bindingHash) {
 }
 export function operationContext(claim) {
   return { operationId: claim.operationId, role: 'processing', selection: claim.selection, authoritative: false,
+    generatedOutputAttribution: 'unverified',
     limit: 'Native processing-turn exclusion and mixed-turn record tagging require a verified native binding; this descriptor supplies neither.' };
 }

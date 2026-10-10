@@ -85,6 +85,31 @@ notification arrival. All stored/latest/selection arguments come from trusted
 helper state, not transcript content. Native context delivery remains a client
 integration gate; without it, controls require explicit session selection.
 
+### Generated-output provenance gate
+
+Generated-copy exclusions are disabled in both collection and processing. The
+runtime cannot currently bind a retained native output range to execution of a
+trusted Cuefluent helper. Supported Codex tool records can retain native call IDs,
+including outputs without a matching call record. An ID alone proves neither
+call ownership nor which program produced the bytes. The Claude reader currently
+retains proven human records only; this is a
+reader coverage limit, not detection of generated copies. Pasted evidence and
+new human corrections remain evidence candidates in both clients.
+
+Enabling exclusions requires verified native session/unit/call ownership, a
+trusted helper invocation, an immutable artifact hash, and exact output ranges.
+Command names, inline markers, operation IDs, matching content hashes and temporal
+proximity do not supply this proof. Neither a context token nor a processing
+operation descriptor can authorize an exclusion or suppress a whole mixed turn.
+Until the gate passes, printed packets and notes can be collected again under
+new native IDs. A processor must compare their evidential value; no helper claims
+to remove these copies automatically.
+
+The configuration-independent `processing-capabilities` command exposes this
+implementation limit; `status.transport.generatedOutput` reports the same
+capabilities. These are not user settings and cannot be enabled by request data.
+See the [CLI contract](workflow-cli.md#supported-read-interface).
+
 ## Immutable capture
 
 Each immutable revision uses `<client>/<session>/<unit>/<evidence-hash20>.json`,

@@ -13,6 +13,19 @@ const token = value => {
 };
 const lifecycleCode = value => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(value) ? value : 'unknown';
 
+/** Implementation capabilities, not user policy or a caller-supplied proof.
+ * No current adapter binds CLI stdout to a native helper invocation/range. */
+export function generatedOutputCapabilities() {
+  return { verified: false, collectionExclusions: false, processingExclusions: false,
+    reason: 'HELPER_INVOCATION_BINDING_UNAVAILABLE',
+    clients: {
+      codex: { retainedEvidence: 'human-assistant-tools', retainedToolCallIds: true, helperInvocationBinding: false },
+      claude: { retainedEvidence: 'proven-human-only', retainedToolCallIds: false, helperInvocationBinding: false }
+    },
+    requiredProof: ['native-session-unit-call-ownership', 'trusted-helper-invocation', 'immutable-artifact-hash', 'exact-output-ranges'],
+    limit: 'Native call identity alone does not prove helper execution. Markers, command text, operation IDs and matching hashes cannot enable exclusions.' };
+}
+
 /** Stateless adapter: intentionally discard prompt/error bodies and all unknown fields. */
 export function nativeContextEnvelope(client, payload) {
   choice(client, ['codex', 'claude']);

@@ -6,6 +6,7 @@ import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { captureSelectionStatus, controlCapture, restrictCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './capture-controls.mjs';
 import { PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
+import { generatedOutputCapabilities } from './workflow-context.mjs';
 import { createProcessingWorkset, prepareWorksetBatch, inspectProcessingWorkset, listProcessingWorksets } from './processing-workset.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
@@ -46,7 +47,7 @@ const commands = {
   'intake-recovery-status': { required: [], run: cap => inspectIntakeRecovery(cap) },
   'intake-recover': { required: ['reviewed', 'offline'], run: (cap, args) => applyIntakeRecovery(cap, args.reviewed, { offline: args.offline }) },
 };
-const extra = ['status', 'defaults', 'configure', 'storage-prepare', 'fingerprint', 'inspect-notes', 'prepare-note', 'direct-save', 'writer-status', 'writer-recover'];
+const extra = ['status', 'defaults', 'configure', 'storage-prepare', 'fingerprint', 'inspect-notes', 'prepare-note', 'direct-save', 'writer-status', 'writer-recover', 'processing-capabilities'];
 export function workflowHelp() {
   return { interfaceVersion: PROCESSING_INTERFACE_VERSION, usage: 'node scripts/workflow.mjs <command> [--config <absolute-path>] --request <absolute-json-file>',
     commands: [...extra, ...Object.keys(commands)], request: 'Collection operations use {collectionId, expectedConfigHash, args}. See references/workflow-cli.md.',
@@ -57,6 +58,11 @@ async function capability(configPath, request) {
   return verifyWorkflowStorage({ configPath, collectionId: request.collectionId, expectedConfigHash: request.expectedConfigHash });
 }
 export async function executeWorkflow(command, request, { configPath } = {}) {
+  if (command === 'processing-capabilities') {
+    keys(request, []);
+    return { interfaceVersion: PROCESSING_INTERFACE_VERSION, generatedOutput: generatedOutputCapabilities(),
+      automaticProcessing: false, modelRunner: false };
+  }
   if (command === 'prepare-note') return prepareNote(request);
   if (command === 'defaults') {
     keys(request, [], ['collectionId']);
@@ -111,7 +117,7 @@ export async function main(args) {
     if (!['--config', '--request'].includes(name) || !value || !path.isAbsolute(value) || Object.hasOwn(options, name)) fail('INVALID_WORKFLOW_ARGUMENTS');
     options[name] = value;
   }
-  if (!options['--request'] && !['status', 'defaults'].includes(command)) fail('WORKFLOW_REQUEST_REQUIRED');
+  if (!options['--request'] && !['status', 'defaults', 'processing-capabilities'].includes(command)) fail('WORKFLOW_REQUEST_REQUIRED');
   let request = {};
   if (options['--request']) {
     // Two bounded Markdown strings can require six JSON bytes per character.
@@ -120,6 +126,7 @@ export async function main(args) {
     try { request = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { fail('INVALID_WORKFLOW_REQUEST_JSON'); }
   }
   if (command === 'prepare-note') return prepareNote(request);
+  if (command === 'processing-capabilities') return executeWorkflow(command, request);
   return withStorageProbes(() => executeWorkflow(command, request, { configPath: options['--config'] }));
 }
 /** Only known numeric capacity measurements may cross the CLI error boundary. */

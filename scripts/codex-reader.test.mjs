@@ -87,6 +87,28 @@ test('native item IDs deduplicate mirrors without deduplicating repeated text', 
   assert.equal((await readCodexSelection(other.args)).pending[0].reason, 'CONFLICTING_CODEX_MIRROR');
 });
 
+test('processing markers and identical output never exclude unproven native records or mixed work', async t => {
+  const echo = JSON.stringify({ format: 'cuefluent-evidence-page', operationId: A,
+    artifactHash: digest('retained evidence'), contextRef: 'a'.repeat(64), generated: true,
+    text: '# Existing draft\n\nVerified real work mentioning Cuefluent.' });
+  const mixed = echo + '\nIndependent test outcome: regression still reproduces.';
+  const correction = 'Correction: the earlier passing result used a recompiled caller.';
+  const f = await fixture(t, [start(A), user(A),
+    response(A, 'function_call', { name: 'exec_command', call_id: 'processing-call', arguments: '{"cmd":"node workflow.mjs processing-page"}' }),
+    response(A, 'function_call_output', { call_id: 'processing-call', output: mixed }),
+    response(A, 'function_call', { name: 'processing-page', call_id: 'different-call', arguments: '{}' }),
+    response(A, 'function_call_output', { call_id: 'different-call', output: mixed }),
+    user(A, correction), end(A)]);
+  const first = await readCodexSelection(f.args), capture = first.candidates[0].capture;
+  const outputs = capture.evidence.filter(item => item.kind === 'tool-result');
+  assert.deepEqual(outputs.map(item => item.text), [mixed, mixed]);
+  assert.notEqual(outputs[0].recordId, outputs[1].recordId);
+  assert(capture.evidence.some(item => item.kind === 'user' && item.text === correction));
+  assert.equal(capture.coverage.partial, false);
+  assert.equal(digest(serializeCapture((await readCodexSelection(f.args)).candidates[0].capture)), digest(serializeCapture(capture)));
+  assert.deepEqual(await fs.readFile(f.source.path), f.bytes);
+});
+
 test('tool outputs keep unknown status unless a structured native result corroborates it', async t => {
   const f = await fixture(t, [start(A), user(A),
     response(A, 'function_call', { name: 'exec_command', call_id: 'call-1', arguments: '{"cmd":"test"}' }),

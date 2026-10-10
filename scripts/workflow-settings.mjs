@@ -12,6 +12,7 @@ import { workflowDiagnostics } from './workflow-diagnostics.mjs';
 import { canonicalJSON, digest, fail, hash } from './workflow-values.mjs';
 import { assignCollectionGenerations } from './collection-grant.mjs';
 import { preflightWindowsConfiguration, windowsSettingsDiagnostics } from './windows-setup-guards.mjs';
+import { generatedOutputCapabilities } from './workflow-context.mjs';
 
 export async function workflowStatus({ configPath, requestedConfigPath, selection, diagnostics = false } = {}, platformFacts = {}) {
   const selected = await resolveWorkflowConfig({ explicit: configPath });
@@ -22,7 +23,8 @@ export async function workflowStatus({ configPath, requestedConfigPath, selectio
     requestedConfigPath, resolvedConfigPath: await canonicalWorkflowPath(configPath, { directory: false }),
     ...await windowsSettingsDiagnostics(configPath, snapshot.config, { ...platformFacts, details: diagnostics }),
     ...(selection ? { route: await resolveWorkflowRoute(snapshot.config, selection) } : {}),
-    transport: { verified: false, automaticProcessing: false, reason: 'Explicit client/session/unit selection is required; current-turn transport is unverified.' } };
+    transport: { verified: false, automaticProcessing: false, generatedOutput: generatedOutputCapabilities(),
+      reason: 'Explicit client/session/unit selection is required; current-turn transport is unverified.' } };
 }
 
 async function privateParent(parent, identity) {

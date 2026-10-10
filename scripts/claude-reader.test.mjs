@@ -62,6 +62,17 @@ async function publish(f, result, unitId = A, cursorHash = null, published = new
   return withIntakeLock(f.store, tx => publishCapture(tx, { ...candidate, ...plan, selectionHash: f.selectionHash, cursorHash, authorize: async () => true }));
 }
 
+test('Claude retains human-supplied processing copies and corrections without trusting markers', async t => {
+  const text = JSON.stringify({ format: 'cuefluent-evidence-page', generated: true,
+    operationId: A, artifactHash: digest('draft'), text: '# Draft note' }) +
+    '\nCorrection: this draft describes a proposed fix, not verified behavior.';
+  const f = await fixture(t, [human(A, text), assistant('Generated status echo')]);
+  const capture = (await readClaudeSelection(f.args)).candidates[0].capture;
+  assert.deepEqual(capture.evidence.map(item => item.text), [text]);
+  assert.equal(capture.coverage.partial, true);
+  assert.deepEqual(await fs.readFile(f.source.path), f.bytes);
+});
+
 test('Claude captures proven human input, never claims a transcript finality fence', async t => {
   const f = await fixture(t, [human(), assistant(), message('system', '', { subtype: 'turn_duration', durationMs: 100 })]);
   const result = await readClaudeSelection(f.args), capture = result.candidates[0].capture;

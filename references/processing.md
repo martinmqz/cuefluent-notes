@@ -167,7 +167,12 @@ inside authoritative metadata folders still block operations. A conflict,
 changed lock or altered metadata is retained for
 inspection; helpers do not silently discard it or choose another state directory.
 
-The returned operation context is explicitly non-authoritative. The current
+The returned operation context is explicitly non-authoritative and reports
+`generatedOutputAttribution: "unverified"`. The
+[generated-output provenance gate](session-workflow.md#generated-output-provenance-gate)
+keeps automatic copy exclusions disabled: matching text or a claimed helper
+marker cannot replace native proof. Preserve new human corrections and independent
+work alongside any echoes. The current
 native transport does not prove which active turn is performing processing, so
 operation IDs, cwd and owner sessions cannot exclude a whole turn or label mixed
 work records. Automatic invocation and native prompts require separate live

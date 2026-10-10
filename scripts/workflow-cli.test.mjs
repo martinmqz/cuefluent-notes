@@ -14,15 +14,52 @@ import { windowsDefaultLocations } from './workflow-paths.mjs';
 import { fingerprint, inspectDirectories } from './safe-update.mjs';
 import { digest, canonicalJSON } from './workflow-values.mjs';
 const cli = fileURLToPath(new URL('./workflow.mjs', import.meta.url));
-async function invoke(args, nodeArgs = []) {
+async function invoke(args, nodeArgs = [], env = process.env) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [...nodeArgs, cli, ...args], { shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...nodeArgs, cli, ...args], { shell: false, stdio: ['ignore', 'pipe', 'pipe'], env });
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => stdout += chunk); child.stderr.on('data', chunk => stderr += chunk);
     child.on('error', reject); child.on('close', code => resolve({ code, stdout, stderr }));
   });
 }
 const envelope = (f, args) => ({ collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash, args });
+test('capabilities require no settings and cannot accept caller-supplied provenance', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-capabilities-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = path.join(root, 'config.json');
+  await fs.writeFile(config, 'not settings');
+  for (const configPath of [config, path.join(root, 'absent', 'config.json')]) {
+    const result = await invoke(['processing-capabilities', '--config', configPath], [], { ...process.env, SystemRoot: '' });
+    assert.equal(result.code, 0, result.stderr);
+    const value = JSON.parse(result.stdout);
+    assert.equal(value.interfaceVersion, 1);
+    assert.equal(value.generatedOutput.verified, false);
+    assert.equal(value.generatedOutput.collectionExclusions, false);
+    assert.equal(value.generatedOutput.processingExclusions, false);
+    assert.equal(value.generatedOutput.reason, 'HELPER_INVOCATION_BINDING_UNAVAILABLE');
+    assert.equal(value.automaticProcessing, false); assert.equal(value.modelRunner, false);
+  }
+  assert.deepEqual(await fs.readdir(root), ['config.json']);
+  assert.equal(await fs.readFile(config, 'utf8'), 'not settings');
+  // Even well-shaped public identifiers are not a helper attestation.
+  for (const field of ['contextRef', 'operationId', 'artifactHash', 'nativeProof', 'enabled']) {
+    await assert.rejects(executeWorkflow('processing-capabilities', { [field]: 'a'.repeat(64) }), { code: 'INVALID_WORKFLOW' });
+  }
+  for (const method of ['readFile', 'realpath', 'lstat', 'readdir', 'mkdir']) {
+    t.mock.method(fs, method, () => { throw new Error('capability query must not access storage'); });
+  }
+  assert.equal((await executeWorkflow('processing-capabilities', {}, { configPath: config })).generatedOutput.verified, false);
+  t.mock.restoreAll();
+});
+test('status and operation diagnostics preserve the same non-authoritative capability contract', async t => {
+  const f = await processingFixture(t);
+  const capabilities = await executeWorkflow('processing-capabilities', {});
+  const status = await executeWorkflow('status', {}, f.options);
+  assert.deepEqual(status.transport.generatedOutput, capabilities.generatedOutput);
+  const prepared = await inspectedClaim(f);
+  assert.equal(prepared.operationContext.authoritative, false);
+  assert.equal(prepared.operationContext.generatedOutputAttribution, 'unverified');
+});
 test('CLI capacity errors expose only approved numeric measurements', async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-capacity-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

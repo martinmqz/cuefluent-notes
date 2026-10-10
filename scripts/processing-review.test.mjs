@@ -33,6 +33,42 @@ test('processing proposals and saves accept valid notes with source capacity war
   assert.equal(await fs.readFile(proposal.target, 'utf8'), content);
 });
 
+test('packet echoes under new identities remain unfiltered, unacknowledged and byte-preserving', async t => {
+  const original = await processingFixture(t, { text: 'An unchanged compiled caller fails; recompilation hides the failure.' });
+  const originalBytes = await fs.readFile(rawFile(original));
+  const first = await inspectedClaim(original), displayed = await page(original, first);
+  await completeProcessing(original.capability, { ...original.args, expectedClaimHash: first.claimHash, outcome: 'unchanged' });
+  const mixed = JSON.stringify(displayed) + '\nIndependent result: a second runtime version also fails.';
+  const range = { startByte: 220, endByte: 280, recordIds: ['message'] };
+  const correction = 'Later correction: the fix is proposed, not verified.';
+  const later = await processingFixture(t, { base: original, evidence: [
+    { kind: 'tool-result', recordId: 'message', range, tool: 'exec_command', callId: 'echo-call', outcome: 'unknown', text: mixed },
+    { kind: 'user', recordId: 'message', range, text: correction }
+  ] });
+  const before = await fs.readFile(rawFile(later));
+  let claim = await prepareProcessing(later.capability, { ...later.args, inputs: later.inputs });
+  const projection = claim.inspection.projection;
+  assert.equal(projection.capturedFileBytes, before.length);
+  assert.equal(projection.embeddedCaptureBytes, before.length - 1);
+  assert.equal(projection.provenCopyExcludedBytes, 0);
+  assert.equal(projection.collectionAvoidedBytes, null);
+  assert.equal(projection.packetBytes, claim.packet.bytes);
+  const exactPacket = renderProcessingPacket([{ input: claim.inputs[0], capture: later.capture }]);
+  assert.equal(claim.packet.hash, exactPacket.hash);
+  const packetParts = [];
+  for (let index = 0; index < claim.packet.pages.length; index++) {
+    const issued = await page(later, claim, index); packetParts.push(issued.evidence.text);
+    claim = { ...claim, claimHash: issued.claimHash };
+  }
+  const projected = JSON.parse(packetParts.join(''));
+  assert.deepEqual(projected.sources[0].capture.evidence.map(item => item.text), [mixed, correction]);
+  const retried = await prepareProcessing(later.capability, { ...later.args, inputs: later.inputs });
+  assert.deepEqual(retried.packet, claim.packet); assert.deepEqual(retried.inspection.projection, projection);
+  assert.equal((await inspectProcessing(later.capability, later.operationId)).inspection.acknowledgedPages, 0);
+  assert.deepEqual(await fs.readFile(rawFile(later)), before);
+  assert.deepEqual(await fs.readFile(rawFile(original)), originalBytes);
+});
+
 // Instrument actual file-handle bytes, not the implementation's observation hook.
 function rawReadCounter(files) {
   const open = fs.open, counts = { bytes: 0, opens: 0 };
@@ -52,6 +88,10 @@ test('extent pages match the full Unicode packet while reading each capture body
   const b = await processingFixture(t, { base: a, text: '第二个 source with \\"slashes\\" and 🐳'.repeat(1700) });
   a.inputs = [...a.inputs, ...b.inputs]; let claim = await prepareProcessing(a.capability, { ...a.args, inputs: a.inputs, budget: { maxInputs: 5, maxPacketBytes: 4 * 1024 * 1024 } });
   const expected = renderProcessingPacket([{ input: claim.inputs[0], capture: a.capture }, { input: claim.inputs[1], capture: b.capture }]);
+  const capturedFileBytes = (await fs.readFile(rawFile(a))).length + (await fs.readFile(rawFile(b))).length;
+  assert.equal(claim.inspection.projection.capturedFileBytes, capturedFileBytes);
+  assert.equal(claim.inspection.projection.embeddedCaptureBytes, capturedFileBytes - 2);
+  assert.equal(claim.inspection.projection.packetBytes, expected.bytes);
   assert(claim.packet.pages.length > 4);
   const counter = rawReadCounter([rawFile(a), rawFile(b)]);
   try {

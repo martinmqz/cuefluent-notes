@@ -17,7 +17,8 @@ echoing source text. Hook launchers separately normalize plugin errors to exit z
 
 `--config` is optional: the configured environment override or platform default is
 used. Duplicate/unknown flags, relative command-line paths and unknown request keys
-are rejected. `status` and `defaults` can omit a request; other commands require one.
+are rejected. `status`, `defaults` and `processing-capabilities` can omit a request;
+other commands require one.
 Every collection command below uses this envelope:
 
 ```json
@@ -150,12 +151,27 @@ Claude publishes proven human-input snapshots with unconfirmed finality.
 
 ### Supported read interface
 
-`--help`, `processing-pending`, and `processing-status` advertise
+`--help`, `processing-capabilities`, `processing-pending`, and `processing-status` advertise
 `interfaceVersion: 1`. This is the public command/read-model contract, independent
 of capture and private-state schema versions. Consumers must use these commands,
 not parse private claims, journals, or receipts. Unknown interface versions require
 an explicit compatibility check. Additive fields may appear; request keys remain
 strict. This interface works without Cuefluent being installed or running.
+
+`processing-capabilities` accepts an empty request `{}` (or no `--request`), without
+a collection envelope. It reads no settings, captures or operation state and
+ignores `--config`. Its versioned response has `generatedOutput`,
+`automaticProcessing: false` and `modelRunner: false`. `generatedOutput` reports
+`verified: false`, `collectionExclusions: false`, `processingExclusions: false`,
+reason `HELPER_INVOCATION_BINDING_UNAVAILABLE`, per-client reader capabilities,
+required proof and a limitation. `status.transport.generatedOutput` uses the same
+shape. Each client reports `retainedEvidence`, `retainedToolCallIds` and
+`helperInvocationBinding`. `retainedToolCallIds` means supported retained tool
+records can carry native call IDs; it does not prove that a matching call record
+exists, call ownership, or trusted helper execution. These flags describe
+implementation support, not consent or feature
+switches. Extra request keys, including claimed provenance, are rejected. See
+[generated-output provenance](session-workflow.md#generated-output-provenance-gate).
 
 Inventory `counts` apply only to the returned head page (`scope:
 "returned-head-page"`): pending, unclaimed, exactly claimed, blocked by an older claim, and handled **revisions**.
@@ -170,6 +186,20 @@ next unacknowledged page (null when all are acknowledged). Delivery is not inspe
 `sourceCompleteness: "unknown"` means these metadata reads did not inspect coverage
 inside captures. Full page acknowledgement does not establish complete original
 source evidence. No raw bodies are read to produce these views.
+
+`inspection.projection` describes the unchanged `full-capture-v1` packet projection:
+`capturedFileBytes` sums the canonical sizes of the claimed capture revisions when
+the batch was prepared, including each final newline; `embeddedCaptureBytes`
+excludes those newlines; `packetBytes`
+also includes the packet's input descriptors and JSON framing. These are not
+original native transcript sizes or a current retention/disk-usage check. Completed
+operations retain these historical measurements even after pruning.
+`provenCopyExcludedBytes` is zero and `exclusions`
+is `disabled-unverified`. `collectionAvoidedBytes: null` means collection-time
+savings are not measured here; it must not be displayed as zero or as processing
+savings. Ordinary reader omissions remain in capture coverage, independently.
+This diagnostic is derived from validated manifests and does not change packet
+hashes or the meaning of existing acknowledgements.
 
 `outcome` is a durable saved/unchanged/skipped/cancelled result or null. A completed
 operation may still have `recoveryRequired: true` while projections/cleanup finish;
