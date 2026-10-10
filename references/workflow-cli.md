@@ -148,6 +148,47 @@ Claude publishes proven human-input snapshots with unconfirmed finality.
 
 ## Processing selected captures
 
+### Supported read interface
+
+`--help`, `processing-pending`, and `processing-status` advertise
+`interfaceVersion: 1`. This is the public command/read-model contract, independent
+of capture and private-state schema versions. Consumers must use these commands,
+not parse private claims, journals, or receipts. Unknown interface versions require
+an explicit compatibility check. Additive fields may appear; request keys remain
+strict. This interface works without Cuefluent being installed or running.
+
+Inventory `counts` apply only to the returned head page (`scope:
+"returned-head-page"`): pending, unclaimed, exactly claimed, blocked by an older claim, and handled **revisions**.
+They are not note counts or collection totals. `operations` covers the selected
+session/unit independently of head pagination, within the existing operation bound.
+Inventory is an advisory concurrent read, not an atomic snapshot or authorization.
+
+Operation status reports `state`: `missing`, `unread`, `inspecting`, `inspected`,
+`draft-staging`, `awaiting-review`, `conflicted`, `blocked`, `recovery-required`, or `completed`.
+`inspection` reports issued/acknowledged/total pages, exact packet bytes and the
+next unacknowledged page (null when all are acknowledged). Delivery is not inspection.
+`sourceCompleteness: "unknown"` means these metadata reads did not inspect coverage
+inside captures. Full page acknowledgement does not establish complete original
+source evidence. No raw bodies are read to produce these views.
+
+`outcome` is a durable saved/unchanged/skipped/cancelled result or null. A completed
+operation may still have `recoveryRequired: true` while projections/cleanup finish;
+use its inspected `recoveryHash`. Proposal intent alone is `draft-staging`, not a
+published draft or approval. `nextAction.command` names a CLI operation when one
+applies; null with `reason` means review or conflict resolution requires judgment.
+These hints do not supply missing request fields, approval, or refreshed hashes.
+`freshness: "metadata-only"` is not a declaration that every input/output is current.
+Both views check every claimed input's head/tombstone/association metadata regardless
+of inventory pagination. Collection-wide transaction, writer, intake and prune
+blockers suppress actionable hints. A fully inspected packet asks for a proposal
+**or a disposition**; inspection alone implies no new knowledge. `selection`,
+`claimHash`, and exact public `inputs` are top-level fields. Inventory omits the
+legacy detailed `claim` projection returned by status; consumers should use the
+public fields, not depend on private packet layout.
+Malformed or changing metadata returns an error rather than a successful empty list.
+Errors from a selected operation include its validated `operationId` for targeted
+inspection; error text never includes corrupt record bytes.
+
 Use a collection envelope and the same operation ID throughout a batch:
 
 1. `processing-pending`: `{selection, limit?, afterUnitId?}`. Reads bounded head,
@@ -171,7 +212,10 @@ Use a collection envelope and the same operation ID throughout a batch:
    relevant existing notes and prior associations. Prepare any
    [note metadata](#prepare-note-metadata) before staging complete Markdown in a
    private proposal file; fingerprint it and the inspected target.
-6. `processing-propose`: `{selection, operationId, expectedClaimHash, proposal}`.
+6. `processing-propose`: `{selection, operationId, expectedClaimHash, proposal?}`.
+   Omit `proposal` only to resume the existing immutable staging intent; an initial
+   proposal is required. Existing copied bytes can resume without the original
+   draft file, but changed/missing required bytes remain a conflict.
    Proposal is `{files, mappings, mode?, expectedManifestHash?}`. Each file has
    `{path, expectedHash, contentPath, expectedContentHash}`. Each input mapping has
    `{identity, paths: [relative output paths]}`. Every input/output must be mapped.

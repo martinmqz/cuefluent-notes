@@ -3,7 +3,8 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import path from 'node:path';
 import { readProcessingState, processingNames, processingSnapshot } from './processing-state.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
-import { validateClaim } from './processing-contract.mjs';
+import { describeProcessingOperation } from './processing.mjs';
+import { validateClaim, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { normalizeWorkflowSelection } from './workflow-selection.mjs';
 import { validateProcessingDisposition, dispositionPath, unitKey } from './capture-retention.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
@@ -65,9 +66,10 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
     const claimed = claims.filter(item => item.claim.inputs.some(input => unitKey(input.identity) === unitKey(identity)));
     if (claimed.length > 1) fail('PROCESSING_CLAIM_CONFLICT');
     const owner = claimed[0];
+    const claimedHeadHash = owner?.claim.inputs.find(input => unitKey(input.identity) === unitKey(identity)).headHash;
     pending.push({ identity, headHash: snapshot.hash, evidenceHash: head.evidenceHash, fileHash: head.fileHash,
-      status: owner ? 'claimed' : 'pending', ...(owner ? { operationId: owner.claim.operationId, claimHash: owner.hash,
-        proposalHash: owner.claim.proposalIntent?.hash ?? null, claimedHeadHash: owner.claim.inputs.find(input => unitKey(input.identity) === unitKey(identity)).headHash } : {}) });
+      status: owner ? claimedHeadHash === snapshot.hash ? 'claimed' : 'blocked-by-claim' : 'pending', ...(owner ? { operationId: owner.claim.operationId, claimHash: owner.hash,
+        proposalHash: owner.claim.proposalIntent?.hash ?? null, claimedHeadHash } : {}) });
   }
   const transactions = [];
   for (const name of await processingNames(ctx, 'transactions')) {
@@ -78,11 +80,23 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
   for (const record of records) if ((await intakeSnapshot(ctx.store, 'state', record.name)).hash !== record.hash) fail('PROCESSING_INVENTORY_CHANGED');
   const journalPending = Boolean((await processingSnapshot(ctx, 'journal.json')).bytes);
   await ctx.guard();
-  const operations = claims.filter(item => item.claim.inputs.some(input => input.identity.client === selection.client &&
-    input.identity.sessionId === selection.sessionId && (!selection.unitId || input.identity.unitId === selection.unitId)))
-    .map(({ claim, hash }) => ({ operationId: claim.operationId, claimHash: hash, proposalHash: claim.proposalIntent?.hash ?? null,
-      acknowledgedPages: claim.acknowledged.length, totalPages: claim.packet.pages.length }));
-  return { pending, handledCount: handled.length, inspectedHeads: records.length, incomplete, nextCursor: incomplete ? nextCursor : null, operations, transactions,
+  const operations = [];
+  for (const { claim, hash: discoveredHash } of claims.filter(item => item.claim.inputs.some(input => input.identity.client === selection.client &&
+    input.identity.sessionId === selection.sessionId && (!selection.unitId || input.identity.unitId === selection.unitId)))) {
+    const detail = await describeProcessingOperation(ctx, claim.operationId);
+    if (detail.claim?.claimHash !== discoveredHash) fail('PROCESSING_INVENTORY_CHANGED');
+    const { claim: legacyClaim, ...view } = detail;
+    operations.push({ ...view, acknowledgedPages: detail.inspection?.acknowledgedPages ?? null,
+      totalPages: detail.inspection?.totalPages ?? null });
+  }
+  await ctx.guard();
+  return { interfaceVersion: PROCESSING_INTERFACE_VERSION,
+    counts: { scope: 'returned-head-page', pendingRevisions: pending.length,
+      unclaimedRevisions: pending.filter(item => item.status === 'pending').length,
+      claimedRevisions: pending.filter(item => item.status === 'claimed').length,
+      blockedByClaimRevisions: pending.filter(item => item.status === 'blocked-by-claim').length, handledRevisions: handled.length },
+    operationScope: 'selected-session-not-head-page', sourceCompleteness: 'unknown',
+    pending, handledCount: handled.length, inspectedHeads: records.length, incomplete, nextCursor: incomplete ? nextCursor : null, operations, transactions,
     intakeBlocked: Boolean(await lstatOrNull(path.join(ctx.collection.intakeStateDir, '.intake-lock'))),
     journalPending,
     limit: 'Metadata discovery only. Incomplete inventory does not mark omitted units handled; narrow selection or raise the bounded limit.' };

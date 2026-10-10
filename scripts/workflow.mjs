@@ -5,6 +5,7 @@ import { workflowStatus, configureWorkflow, prepareConfiguredStorage } from './w
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { captureSelectionStatus, controlCapture, restrictCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './capture-controls.mjs';
+import { PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
   completeProcessing, inspectProcessing, recoverProcessing } from './processing.mjs';
@@ -27,7 +28,7 @@ const commands = {
   'processing-prepare': { required: ['selection', 'operationId', 'inputs'], optional: ['reconsider'], run: prepareProcessing },
   'processing-page': { required: ['selection', 'operationId', 'expectedClaimHash', 'page'], run: readProcessingPage },
   'processing-ack': { required: ['selection', 'operationId', 'expectedClaimHash', 'pages'], run: acknowledgeProcessingPages },
-  'processing-propose': { required: ['selection', 'operationId', 'expectedClaimHash', 'proposal'], run: proposeProcessing },
+  'processing-propose': { required: ['selection', 'operationId', 'expectedClaimHash'], optional: ['proposal'], run: proposeProcessing },
   'processing-save': { required: ['selection', 'operationId', 'expectedClaimHash', 'approvedProposalHash', 'trigger'], run: saveProcessing },
   'processing-complete': { required: ['selection', 'operationId', 'expectedClaimHash', 'outcome'], optional: ['expectedRecoveryHash'], run: completeProcessing },
   'processing-status': { required: ['operationId'], run: (cap, args) => inspectProcessing(cap, args.operationId) },
@@ -42,7 +43,7 @@ const commands = {
 };
 const extra = ['status', 'defaults', 'configure', 'storage-prepare', 'fingerprint', 'inspect-notes', 'prepare-note', 'direct-save', 'writer-status', 'writer-recover'];
 export function workflowHelp() {
-  return { usage: 'node scripts/workflow.mjs <command> [--config <absolute-path>] --request <absolute-json-file>',
+  return { interfaceVersion: PROCESSING_INTERFACE_VERSION, usage: 'node scripts/workflow.mjs <command> [--config <absolute-path>] --request <absolute-json-file>',
     commands: [...extra, ...Object.keys(commands)], request: 'Collection operations use {collectionId, expectedConfigHash, args}. See references/workflow-cli.md.',
     transport: 'No verified current-turn contextRef. Select native sessions explicitly; never choose the latest session by cwd.' };
 }
@@ -127,7 +128,9 @@ export function workflowErrorReport(error) {
   }
   // Parser/OS exceptions never echo source bodies. Writer-authored diagnostics
   // are fixed guidance (occasionally with a selected path), bounded separately.
+  const operationId = Object.getOwnPropertyDescriptor(error ?? {}, 'operationId')?.value;
   return { error: code,
+    ...(typeof operationId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(operationId) ? { operationId } : {}),
     ...(Object.keys(details).length ? { details } : {}),
     ...(code === 'SAFE_UPDATE_REJECTED' && typeof error.safeMessage === 'string'
       ? { reason: error.safeMessage.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 500) } : {}),

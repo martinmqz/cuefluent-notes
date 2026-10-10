@@ -5,7 +5,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
-import { prepareProcessing, completeProcessing, inspectProcessing, saveProcessing } from './processing.mjs';
+import { prepareProcessing, completeProcessing, inspectProcessing, saveProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing } from './processing.mjs';
+import { executeWorkflow, workflowHelp, workflowErrorReport } from './workflow.mjs';
 import { captureRelativePath } from './capture-contract.mjs';
 
 test('pending and operation status read only metadata and create no lock/state files', async t => {
@@ -28,6 +29,52 @@ test('claims stay visible until cleanup and exact handled revisions leave pendin
     { fault: at => { if (at === 'disposition') throw new Error('crash'); } }), /crash/);
   pending = await pendingProcessing(f.capability, { selection: f.selection });
   assert.equal(pending.pending.length, 0); assert.equal(pending.handledCount, 1); assert.equal(pending.operations.length, 1);
+  assert.equal(pending.operations[0].state, 'completed');
+  assert.equal(pending.operations[0].recoveryRequired, true);
+  assert.deepEqual(pending.counts, { scope: 'returned-head-page', pendingRevisions: 0, unclaimedRevisions: 0, claimedRevisions: 0, blockedByClaimRevisions: 0, handledRevisions: 1 });
+});
+
+test('public operation view distinguishes delivery, inspection, review and completion without claiming source completeness', async t => {
+  const f = await processingFixture(t, { text: 'Synthetic evidence. '.repeat(4000) });
+  let claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  let status = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(status.interfaceVersion, 1); assert.equal(status.state, 'unread');
+  assert.equal(status.inspection.packetBytes, claim.packet.bytes);
+  const issued = await readProcessingPage(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, page: 0 });
+  status = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(status.state, 'unread'); assert.equal(status.inspection.issuedPages, 1);
+  assert.equal(status.nextAction.page, 0);
+  claim = await acknowledgeProcessingPages(f.capability, { ...f.args, expectedClaimHash: issued.claimHash, pages: [{ index: 0, hash: issued.hash }] });
+  status = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(status.state, 'inspecting'); assert.equal(status.nextAction.page, 1);
+  for (let page = 1; page < claim.packet.pages.length; page++) {
+    const next = await readProcessingPage(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, page });
+    claim = await acknowledgeProcessingPages(f.capability, { ...f.args, expectedClaimHash: next.claimHash, pages: [{ index: page, hash: next.hash }] });
+  }
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'inspected');
+  const proposal = await proposedClaim(f, { claim });
+  status = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(status.state, 'awaiting-review'); assert.equal(status.sourceCompleteness, 'unknown');
+  assert.equal(status.proposalHash, proposal.proposalHash);
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash, outcome: 'cancelled' });
+  status = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(status.state, 'completed'); assert.equal(status.outcome, 'cancelled');
+  assert.equal(status.nextAction, null); assert.equal(status.claim, null);
+});
+
+test('published draft differs from interrupted staging through the public CLI', async t => {
+  const f = await processingFixture(t);
+  const proposal = await proposedClaim(f);
+  const request = { collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash, args: { operationId: f.operationId } };
+  assert.equal(workflowHelp().interfaceVersion, 1);
+  const status = await executeWorkflow('processing-status', request, { configPath: f.options.configPath });
+  assert.equal(status.state, 'awaiting-review'); assert.equal(status.proposalHash, proposal.proposalHash);
+  const record = path.join(f.collection.notes.writerStateDir, 'proposals', f.operationId, 'record.json');
+  await fs.unlink(record);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'draft-staging');
+  await fs.unlink(proposal.contentPath);
+  await executeWorkflow('processing-propose', { ...request, args: { ...f.args, expectedClaimHash: proposal.claimHash } }, { configPath: f.options.configPath });
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
 });
 
 test('pending pagination leaves omitted heads unhandled and does not imply native ordering', async t => {
@@ -43,6 +90,38 @@ test('pending pagination leaves omitted heads unhandled and does not imply nativ
   assert.equal(second.pending.length, 1); assert.equal(second.incomplete, false);
   assert.notEqual(first.pending[0].identity.unitId, second.pending[0].identity.unitId);
   assert.equal(first.handledCount + second.handledCount, 0);
+});
+
+test('metadata status refuses a concurrently changing claim and corrupt progress', async t => {
+  const f = await processingFixture(t);
+  await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  const file = path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`);
+  const original = await fs.readFile(file, 'utf8'), claim = JSON.parse(original);
+  const open = fs.open; let reads = 0;
+  fs.open = async (name, ...args) => {
+    if (name === file && ++reads === 2) await fs.writeFile(file, JSON.stringify({ ...claim, issued: [0] }));
+    return open(name, ...args);
+  };
+  try { await assert.rejects(inspectProcessing(f.capability, f.operationId), /PROCESSING_INVENTORY_CHANGED/); }
+  finally { fs.open = open; }
+  await fs.writeFile(file, JSON.stringify({ ...claim, acknowledged: [0] }));
+  await assert.rejects(inspectProcessing(f.capability, f.operationId), /UNISSUED_PROCESSING_PAGE/);
+});
+
+test('head conflict remains visible without reading capture bodies', async t => {
+  const f = await processingFixture(t);
+  await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  const file = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
+  const head = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(file, JSON.stringify({ ...head, generation: head.generation + 1 }));
+  await fs.unlink(path.join(f.collection.rawDir, captureRelativePath(f.identity, f.capture.evidenceHash)));
+  const view = await pendingProcessing(f.capability, { selection: f.selection });
+  assert.equal(view.operations[0].state, 'conflicted');
+  assert.equal(view.operations[0].conflict, 'PROCESSING_HEAD_CHANGED');
+  assert.equal(view.counts.claimedRevisions, 0); assert.equal(view.counts.blockedByClaimRevisions, 1);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).conflict, 'PROCESSING_HEAD_CHANGED');
+  const later = await pendingProcessing(f.capability, { selection: f.selection, afterUnitId: f.identity.unitId });
+  assert.equal(later.pending.length, 0); assert.equal(later.operations[0].conflict, 'PROCESSING_HEAD_CHANGED');
 });
 
 test('processing discovery and claims remain usable through parent aliases and after worktree deletion', async t => {
@@ -93,4 +172,30 @@ test('a head removed during enumeration invalidates the page instead of hiding l
   finally { fs.open = open; }
   assert(removed);
   assert.equal((await pendingProcessing(f.capability, { selection: { ...f.selection, unitId: f.identity.unitId } })).pending.length, 0);
+});
+
+
+test('status after note replacement shows exact recovery and blocks other collection work', async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  const other = await processingFixture(t, { base: f });
+  await prepareProcessing(other.capability, { ...other.args, inputs: other.inputs });
+  await assert.rejects(saveProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash, approvedProposalHash: proposal.proposalHash },
+    { fault: at => { if (at === 'afterReplace') throw new Error('crash'); } }), /crash/);
+  assert.match(await fs.readFile(proposal.target, 'utf8'), /rollout paused/);
+  const view = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(view.state, 'recovery-required'); assert(view.recoveryHash); assert.equal(view.nextAction.command, 'processing-recover');
+  const blocked = await inspectProcessing(other.capability, other.operationId);
+  assert.equal(blocked.state, 'blocked'); assert.equal(blocked.nextAction.command, null);
+  assert(blocked.blockers.includes('PROCESSING_RECOVERY_REQUIRED'));
+});
+
+test('a corrupt proposal reports its operation identity without exposing its bytes', async t => {
+  const f = await processingFixture(t); await proposedClaim(f);
+  await fs.writeFile(path.join(f.collection.notes.writerStateDir, 'proposals', f.operationId, 'record.json'), '{');
+  await assert.rejects(pendingProcessing(f.capability, { selection: f.selection }), error => {
+    const report = workflowErrorReport(error);
+    assert.equal(report.operationId, f.operationId);
+    assert(!JSON.stringify(report).includes('record.json'));
+    return true;
+  });
 });

@@ -6,7 +6,7 @@ import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { unitKey, assertNoPrune, readLineageRecord, dispositionPath, validateProcessingDisposition, tombstonePath, assertCaptureRetained } from './capture-retention.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
 import { withProcessingState, readProcessingState, processingSnapshot, processingJSON, writeProcessingJSON, removeProcessingJSON, processingNames } from './processing-state.mjs';
-import { claimPath, proposalPath, transactionPath, operationPath, associationPath, validateClaim, validateAssociation, operationContext } from './processing-contract.mjs';
+import { claimPath, proposalPath, transactionPath, operationPath, associationPath, validateClaim, validateAssociation, operationContext, inspectionProgress, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { renderProcessingPacket, packetManifest, validatePageIndex, PROCESSING_PAGE_BYTES } from './processing-packet.mjs';
 import { processingPageLayout, processingPagePaths, readProcessingExtent } from './processing-page.mjs';
@@ -19,9 +19,13 @@ import { canonicalJSON, digest, fail, keys, list, hash, nativeId, unique, choice
 const equal = (a, b) => canonicalJSON(a) === canonicalJSON(b);
 const explicit = 'explicitProcess';
 const inputReference = input => ({ identity: input.identity, headHash: input.headHash });
-const summary = (claim, claimHash) => ({ operationId: claim.operationId, claimHash, inputs: claim.inputs,
-  packet: claim.packet, issued: claim.issued, acknowledged: claim.acknowledged, proposalIntentHash: claim.proposalIntent?.hash ?? null,
-  operationContext: operationContext(claim) });
+const summary = (claim, claimHash) => ({ operationId: claim.operationId, claimHash,
+  inputs: claim.inputs.map(({ identity, projectRoot, headHash, evidenceHash, fileHash, associationHash, dispositionHash }) =>
+    ({ identity: { ...identity }, projectRoot, headHash, evidenceHash, fileHash, associationHash, dispositionHash })),
+  packet: { hash: claim.packet.hash, bytes: claim.packet.bytes, pages: [...claim.packet.pages],
+    captureBytes: [...claim.packet.captureBytes], pageEnds: [...claim.packet.pageEnds] },
+  issued: [...claim.issued], acknowledged: [...claim.acknowledged], proposalIntentHash: claim.proposalIntent?.hash ?? null,
+  operationContext: operationContext(claim), createdAt: claim.createdAt, inspection: inspectionProgress(claim) });
 async function readWriterReceipt(ctx, operationId) {
   await processingSnapshot(ctx, `processed/writes/${nativeId(operationId)}/record.json`);
   return writerReceipt(ctx.collection.notes.writerStateDir, operationId);
@@ -168,6 +172,7 @@ export async function proposeProcessing(capability, { selection, operationId, ex
         if (proposalHash(requested) !== claim.proposalIntent.hash) fail('PROCESSING_PROPOSAL_CHANGED');
       }
     } else {
+      if (proposal === undefined) fail('PROCESSING_PROPOSAL_REQUIRED');
       value = await buildProcessingProposal(ctx, claim, proposal);
       claim.proposalIntent = { hash: proposalHash(value), value };
       saved = { claim, hash: (await writeProcessingJSON(ctx, claimPath(operationId), claim, saved.hash)).hash };
@@ -432,12 +437,72 @@ export async function recoverProcessing(capability, { operationId, expectedRecov
   });
 }
 
-export async function inspectProcessing(capability, operationId) {
+export async function describeProcessingOperation(ctx, operationId) {
   nativeId(operationId);
-  const ctx = await readProcessingState(capability, null, 'maintenance');
+  try { return await describeOperation(ctx, operationId); }
+  catch (error) { error.operationId = operationId; throw error; }
+}
+async function describeOperation(ctx, operationId) {
   const operation = await processingSnapshot(ctx, operationPath(operationId)), tx = await transactionSnapshot(ctx, operationId);
-  const claim = await processingSnapshot(ctx, claimPath(operationId));
-  const result = { operationId, recoveryHash: operation.hash ?? tx.hash, outcome: operation.bytes ? validateOperation(intakeJSON(operation), ctx, operationId).outcome : null,
-    claim: claim.bytes ? summary((await loadClaim(ctx, operationId)).claim, claim.hash) : null, pendingTransaction: tx.hash !== null };
+  const saved = await processingSnapshot(ctx, claimPath(operationId));
+  const completed = operation.bytes ? validateOperation(intakeJSON(operation), ctx, operationId) : null;
+  const claim = saved.bytes ? validateClaim(intakeJSON(saved)) : null;
+  if (claim && (claim.operationId !== operationId || claim.bindingHash !== ctx.bindingHash || !equal(claim.binding, ctx.binding))) fail('PROCESSING_BINDING_CHANGED');
+  const basis = claim ?? completed?.claim ?? tx.value?.claim;
+  let published = false, proposalSnapshot = null;
+  if (claim?.proposalIntent) {
+    checkedInspection(claim);
+    const proposal = await processingSnapshot(ctx, proposalPath(operationId));
+    proposalSnapshot = proposal;
+    if (proposal.bytes) {
+      if (proposalHash(validateProcessingProposal(intakeJSON(proposal), claim)) !== claim.proposalIntent.hash) fail('PROCESSING_PROPOSAL_CHANGED');
+      published = true;
+    }
+  }
+  const inspection = basis ? inspectionProgress(basis) : null;
+  let conflict = claim && claim.policyHash !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : null;
+  const blockers = [];
+  if (claim && !completed && !tx.hash) {
+    if (!conflict) {
+      try { await checkCurrentInputMetadata(ctx, claim); }
+      catch (error) {
+        if (['PROCESSING_HEAD_CHANGED', 'PROCESSING_INPUT_CHANGED', 'CAPTURE_PRUNED'].includes(error.code)) conflict = error.code;
+        else if (['INTAKE_RECOVERY_REQUIRED', 'PRUNE_RECOVERY_REQUIRED'].includes(error.code)) blockers.push(error.code);
+        else throw error;
+      }
+    }
+    try { await assertNoTransaction(ctx); }
+    catch (error) {
+      if (['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED'].includes(error.code)) blockers.push(error.code);
+      else throw error;
+    }
+  }
+  const state = completed ? 'completed' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
+    : claim?.proposalIntent ? 'draft-staging' : inspection?.state ?? 'missing';
+  const recoveryRequired = Boolean(tx.hash || (completed && saved.hash));
+  const nextAction = recoveryRequired ? { command: 'processing-recover' }
+    : completed ? null
+    : conflict ? { command: null, reason: 'resolve-conflict' }
+    : blockers.length ? { command: null, reason: 'inspect-collection-recovery' }
+    : state === 'awaiting-review' ? { command: null, reason: 'review-proposal' }
+    : state === 'draft-staging' ? { command: 'processing-propose' }
+    : state === 'inspected' ? { command: null, reason: 'choose-proposal-or-disposition', commands: ['processing-propose', 'processing-complete'] }
+    : inspection?.nextPage !== null && inspection?.nextPage !== undefined ? { command: 'processing-page', page: inspection.nextPage } : null;
+  // Metadata-only status is advisory, but never combine two versions of a claim.
+  for (const [name, snapshot] of [[claimPath(operationId), saved], [operationPath(operationId), operation], [transactionPath(operationId), tx], ...(proposalSnapshot ? [[proposalPath(operationId), proposalSnapshot]] : [])]) {
+    if ((await processingSnapshot(ctx, name)).hash !== snapshot.hash) fail('PROCESSING_INVENTORY_CHANGED');
+  }
+  return { interfaceVersion: PROCESSING_INTERFACE_VERSION, operationId, state, inspection, nextAction, conflict, blockers,
+    claimHash: saved.hash, selection: basis ? { ...basis.selection } : null,
+    inputs: basis ? basis.inputs.map(input => ({ identity: { ...input.identity }, headHash: input.headHash, evidenceHash: input.evidenceHash, fileHash: input.fileHash })) : [],
+    createdAt: basis?.createdAt ?? null, inputCount: basis?.inputs.length ?? 0,
+    proposalHash: basis?.proposalIntent?.hash ?? null, recoveryRequired,
+    sourceCompleteness: 'unknown', freshness: 'metadata-only',
+    recoveryHash: operation.hash ?? tx.hash, outcome: completed?.outcome ?? null,
+    claim: claim ? summary(claim, saved.hash) : null, pendingTransaction: tx.hash !== null };
+}
+export async function inspectProcessing(capability, operationId) {
+  const ctx = await readProcessingState(capability, null, 'maintenance');
+  const result = await describeProcessingOperation(ctx, operationId);
   await ctx.guard(); return result;
 }

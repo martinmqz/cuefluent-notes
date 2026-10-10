@@ -7,6 +7,17 @@ export const claimPath = id => `claims/${nativeId(id)}.json`;
 export const proposalPath = id => `proposals/${nativeId(id)}/record.json`;
 export const transactionPath = id => `transactions/${nativeId(id)}.json`;
 export const operationPath = id => `processed/operations/${nativeId(id)}.json`;
+// Public read-model version; independent of persisted claim/capture schemas.
+export const PROCESSING_INTERFACE_VERSION = 1;
+export function inspectionProgress(claim) {
+  const totalPages = claim.packet.pages.length;
+  const acknowledged = new Set(claim.acknowledged);
+  const nextPage = claim.packet.pages.findIndex((_, index) => !acknowledged.has(index));
+  return { state: nextPage === -1 ? 'inspected' : acknowledged.size ? 'inspecting' : 'unread',
+    totalPages, issuedPages: claim.issued.length, acknowledgedPages: acknowledged.size,
+    nextPage: nextPage === -1 ? null : nextPage, packetBytes: claim.packet.bytes,
+    sourceCompleteness: 'unknown' };
+}
 export const associationPath = (identity, bindingHash) => {
   hash(bindingHash); const i = logicalCaptureIdentity(identity);
   return `processed/associations/${bindingHash.slice(0, 20)}/${i.client}/${i.sessionId}/${i.unitId}.json`;
