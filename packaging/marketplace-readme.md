@@ -14,7 +14,7 @@ for permitted use, licensing inquiries, and how the license applies to your note
 and bundled dependencies.
 
 Existing users: read the
-[coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.12.0/references/setup.md#existing-settings)
+[coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/setup.md#existing-settings)
 before running update or installation commands against shared storage.
 
 ## Codex
@@ -36,7 +36,7 @@ session, review/trust hooks, then say **Set up Cuefluent Notes**. Choose collect
 and processing separately: collection starts off and processing starts Manual.
 Only the v0.7.1-or-earlier capture settings are preserved without import.
 
-**Upgrading from v0.9.0–v0.11.0:** keep existing workflow settings, paths and
+**Upgrading from v0.9.0–v0.12.0:** keep existing workflow settings, paths and
 captures; fresh setup is not required. Update every client plugin/helper sharing
 the store to the same version and start fresh sessions afterward.
 
@@ -46,11 +46,11 @@ package-backed collections may continue while their prepared storage verifies,
 but missing roots cannot be recreated and additions needing new roots are frozen.
 Private paths under the profile, outside verified non-roaming LocalAppData,
 require a local, loaded, non-roaming profile and content indexing protection. Review
-[Windows storage selection](https://github.com/martinmqz/cuefluent-notes/blob/v0.12.0/references/setup.md#windows-storage-selection)
+[Windows storage selection](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/setup.md#windows-storage-selection)
 before changing paths or retrying a refused setup. Do not create a second writer
 for the same notes. Fresh setup and the complete Desktop/CLI workflow in a clean
 Windows account remain unverified; see the
-[verification scope](https://github.com/martinmqz/cuefluent-notes/blob/v0.12.0/references/verification.md).
+[verification scope](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/verification.md).
 
 **Upgrading from v0.8.0:** keep the existing workflow settings, paths and
 captures; fresh setup is not required. Before updating, stop collection
@@ -60,7 +60,7 @@ Codex and Claude when used, before starting fresh sessions or resuming work.
 New stored captures and suspension metadata are unreadable by v0.8.0; mixed-version
 access and downgrading that collection are unsupported. Updating does not rename
 existing raw folders or rerun storage preparation. Follow the
-[upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.12.0/references/setup.md#existing-settings)
+[upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/setup.md#existing-settings)
 before changing storage visibility or handling a blocked intake lock.
 
 Use explicit processing commands until live current-turn transport is verified.
@@ -77,4 +77,4 @@ listing. For usage, updates, and source installation, see the
 [source repository](https://github.com/martinmqz/cuefluent-notes).
 Edit the source and templates on `main`; do not edit generated packages.
 If your existing marketplace registration selects the old `marketplace` branch,
-follow the [branch migration instructions](https://github.com/martinmqz/cuefluent-notes/blob/v0.12.0/README.md#switch-an-older-marketplace-registration-to-main).
+follow the [branch migration instructions](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/README.md#switch-an-older-marketplace-registration-to-main).
