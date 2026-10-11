@@ -5,10 +5,23 @@ v0.13.0. The default CLI and `cuefluent_control` MCP paths could reject the nati
 Node environment before launching Claude, reporting `INVALID_PROCESSING_CLIENT`
 or `PROCESSING_CONTROL_FAILED`.
 
-The launch adapter now copies the native environment as it does for ordinary
-inheritance. Custom environment overrides still receive strict validation. Engine
-credentials remain environment data, and the child launch still removes the
+The launch adapter now copies the inherited host environment, including copies
+passed by a controller. Custom environment overrides still receive strict
+validation. Engine credentials remain environment data, and the child launch removes the
 inherited Claude nested-session sentinel without changing the parent environment.
+
+## Runtime, license and downloads
+
+Requires **Node.js 22+** on the client's PATH and the matching native client CLI
+for processing. Cuefluent Notes is source-available under the
+[Sustainable Use License 1.0](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/LICENSE.md),
+not an OSI-approved open-source license. See the
+[licensing summary](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/README.md#license).
+
+Assets include Codex and Claude plugin ZIPs in hook-enabled and manual variants,
+a marketplace snapshot, and `SHA256SUMS` for verifying the downloaded archives.
+Choose one variant per client. See
+[package verification](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/references/distribution.md#verify-a-selected-package).
 
 ## Updating
 

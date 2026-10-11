@@ -161,30 +161,32 @@ or per-session writers. A custom raw directory does not relocate intake state.
 
 ## Existing settings
 
-Keep all client plugins/helpers sharing a store on the same version. To upgrade an
-existing v0.8.0–v0.13.0 workflow to v0.13.1:
+Keep all client plugins/helpers sharing a store on the same released version.
+For an existing session-collection workflow:
 
 1. Stop collection entrypoints and processing, close affected client sessions,
    and let their running workers and processing clients finish before replacing
    packages. Preserve unfinished operations; do not delete claims, locks or journals.
 2. Keep the inspected workflow settings, storage paths, notes and consent choices.
-   Fresh setup or storage migration is not required.
+   Do not rerun fresh setup or move storage unless the selected release explicitly
+   requires it.
 3. Update every client plugin and standalone helper using that collection to
-   v0.13.1 before any of them resumes access, including both Codex and Claude when
-   used. A worker can process registrations from either client.
-4. Start fresh client sessions. Review changed hooks and the new `cuefluent_control`
-   MCP server registration and permissions, then inspect existing operations and
+   the selected release before any of them resumes access, including Codex and
+   Claude when used. A worker can process registrations from either client.
+4. Start fresh client sessions. Review hook or `cuefluent_control` MCP registration
+   and permission changes when prompted, then inspect existing operations and
    resume them through their supported processing/recovery commands.
 
-v0.13.1 fixes Claude processing launch without changing storage formats or command
-schemas from v0.13.0. The following compatibility boundary applies to upgrades
-from versions before v0.13.0.
+Check the selected release notes for additional compatibility changes. The
+following storage boundary applies when upgrading from before v0.13.0; it does
+not imply a new boundary for every subsequent patch.
 
 v0.13.0 changes reader rules, including Claude reader-rules revision 2, Codex
 per-kind tool budgets and verified processing-control exclusions, and adds
 processing state for worksets and reusable chats. Old and new helpers can produce
 different capture revisions or disagree about that state. Mixed-version access
-and downgrading a collection after v0.13.0 has written to it are unsupported.
+across this boundary, and downgrading such a collection to a version before
+v0.13.0, are unsupported.
 Existing immutable captures, packets and active operations are preserved; do not
 rebuild them or discard state to bypass a revision conflict. See
 [processing recovery](processing.md#outcomes-and-recovery).

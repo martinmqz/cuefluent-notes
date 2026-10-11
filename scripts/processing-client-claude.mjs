@@ -14,7 +14,8 @@ function environment(value) {
   if (!object(value) || Object.keys(value).length > 256) fail('INVALID_PROCESSING_CLIENT');
   for (const [name, entry] of Object.entries(value)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) fail('INVALID_PROCESSING_CLIENT');
-    string(entry, 32768, { empty: true });
+    try { string(entry, 32768, { empty: true }); }
+    catch { fail('INVALID_PROCESSING_CLIENT'); }
   }
   return { ...value };
 }
@@ -29,7 +30,7 @@ function toolNames(value) {
  * controller supplies the sole engine server and reserves/excludes the UUID in
  * beforeDispatch. The server must bind every operation to that reservation and
  * must never expose model-callable approval or arbitrary command execution. */
-export function createClaudeProcessingClient(options) {
+export function createClaudeProcessingClient(options, { env: baseEnv = process.env } = {}) {
   keys(options, ['executable', 'cwd', 'engine', 'allowedTools'], ['env', 'timeoutMs', 'maxOutputBytes', 'spawn']);
   const { executable, cwd, engine } = options;
   string(executable, 4096); string(cwd, 4096);
@@ -48,10 +49,11 @@ export function createClaudeProcessingClient(options) {
   if (Object.keys(engineEnv).some(name => !/^CUEFLUENT_ENGINE_[A-Z0-9_]+$/.test(name))) fail('INVALID_PROCESSING_CLIENT');
   // Authentication is process environment data, never an MCP JSON command-line
   // argument. Native Claude forwards these variables to its engine child.
-  // Controllers forward process.env explicitly. It is Node's native environment
-  // object, not a plain override map; handle it exactly like omitted inheritance.
-  const inheritedEnv = options.env === undefined || options.env === process.env
-    ? process.env : environment(options.env);
+  // Host dependencies supply the inherited OS environment, as in the Codex
+  // adapter. It may be a copy and contain Windows names such as ProgramFiles(x86).
+  // Explicit replacement maps and engine overrides retain strict validation;
+  // serialized requests cannot supply the host dependency environment.
+  const inheritedEnv = options.env === undefined ? baseEnv : environment(options.env);
   const env = { ...inheritedEnv, ...engineEnv };
   // This explicitly requested native controller owns a separate restricted run.
   // Do not inherit the enclosing Claude session's nested-launch sentinel.
