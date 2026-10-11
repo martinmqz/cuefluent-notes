@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "query": "payment conflict",
+      "file": "feature-behavior.md",
+      "heading": "Active authorization conflict",
+      "expected": "POST /v2/payment-intents returns 409 when an active authorization exists; charge outcomes and caller next steps remain unestablished."
+    },
+    {
+      "query": "payment intent",
+      "file": "feature-behavior.md",
+      "heading": "Active authorization conflict",
+      "expected": "The documented endpoint and the active authorization condition for its 409 response."
+    },
+    {
+      "query": "active auth",
+      "file": "feature-behavior.md",
+      "heading": "Active authorization conflict",
+      "expected": "An active authorization causes the documented conflict response; this does not establish prevention of duplicate charges."
+    },
+    {
+      "query": "throttle",
+      "file": "feature-behavior.md",
+      "heading": "Request rate limit",
+      "expected": "Exceeding 60 requests per minute per client returns 429 with Retry-After: 30; the threshold rationale is unknown."
+    },
+    {
+      "query": "manual retry",
+      "file": "decision.md",
+      "heading": "Retry decision",
+      "expected": "The September 1, 2026 decision keeps retries after 409 user-initiated during operator inspection; implementation and deployment are unconfirmed."
+    },
+    {
+      "query": "Lantern",
+      "file": "decision.md",
+      "heading": "Retry decision",
+      "expected": "The retry decision for the fictional project nicknamed Lantern and its recorded rationale."
+    },
+    {
+      "query": "409 decision",
+      "file": "decision.md",
+      "heading": "Retry decision",
+      "expected": "The team's recorded rationale was to avoid repeated requests while operators inspect the existing authorization."
+    },
+    {
+      "query": "standup update",
+      "file": "standup.md",
+      "heading": "Client conflict progress",
+      "expected": "The September 4 standup describes the September 3 fake-transport result, distinguishes its later recording date, and keeps the live check pending."
+    },
+    {
+      "query": "yesterday client work",
+      "file": "standup.md",
+      "heading": "Client conflict progress",
+      "expected": "Yesterday means September 3 within this dated standup; neither the older reproduction nor the undated help-text issue is counted as yesterday's work."
+    },
+    {
+      "query": "client review meeting",
+      "file": "meeting-summary.md",
+      "heading": "Integration check before rollout decision",
+      "expected": "Rina reported the limited test result, Omar proposed the integration check, and the group agreed the check should precede a rollout decision."
+    },
+    {
+      "query": "rollout readiness",
+      "file": "meeting-summary.md",
+      "heading": "Integration check before rollout decision",
+      "expected": "A live integration check was proposed, with no recorded completed run, owner, due date, or rollout approval."
+    },
+    {
+      "query": "client error mapping",
+      "file": "task-summary.md",
+      "heading": "Authorization conflict investigation",
+      "expected": "One fake-transport test mapped 409 to AuthorizationConflict, preserved intent_demo_17, and issued no automatic retry during that invocation."
+    },
+    {
+      "query": "client-conflict-04",
+      "file": "task-summary.md",
+      "heading": "Authorization conflict investigation",
+      "expected": "The test occurred on September 3 at 10:05 UTC and was recorded on September 4 at 08:00 UTC; live service behavior, repeated invocations, and deployment remain unverified."
+    },
+    {
+      "query": "verification limits",
+      "file": "knowledge-base.md",
+      "heading": "Contract and client verification boundaries",
+      "expected": "The API contract, one client test, and documentation review establish different claims and do not certify the deployed client."
+    },
+    {
+      "query": "Atlas sprint 20.26 sandbox access",
+      "file": "standups-sprint-20-26.md",
+      "heading": "September 22 sandbox access blocker",
+      "expected": "Rina reported access was pending on September 22; no completed live integration check was recorded."
+    },
+    {
+      "query": "20.26 planned integration check",
+      "file": "standups-sprint-20-26.md",
+      "heading": "October 1 planned integration check",
+      "expected": "Omar proposed a check after access became available; no owner, due date, completed run or rollout approval was recorded."
+    },
+    {
+      "query": "Atlas sprint 20.27 sandbox access",
+      "file": "standups-sprint-20-27.md",
+      "heading": "October 5 sandbox access update",
+      "expected": "Rina reported access available on October 5; the September 22 blocker remains earlier context and does not prove check completion."
+    },
+    {
+      "query": "20.27 one request integration result",
+      "file": "standups-sprint-20-27.md",
+      "heading": "October 6 one-request integration result",
+      "expected": "Omar reported one sandbox request returning 409 and AuthorizationConflict with no retry in that invocation; charge outcome, repeated calls, production deployment and rollout approval remain unestablished."
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "cuefluent_control": {
+      "command": "node",
+      "args": [
+        "./skills/cuefluent-notes/scripts/processing-mcp.mjs",
+        "--client",
+        "codex"
+      ],
+      "cwd": "."
+    }
+  }
+}

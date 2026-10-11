@@ -1,0 +1,16 @@
+{
+  "name": "cuefluent-notes",
+  "version": "0.13.0",
+  "private": true,
+  "type": "module",
+  "license": "SUL-1.0",
+  "description": "Selected session evidence and searchable Markdown notes with independent collection and processing.",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.2",
+    "markdown-it-footnote": "4.0.0",
+    "yaml": "2.9.1"
+  }
+}
