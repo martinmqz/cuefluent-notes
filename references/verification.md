@@ -51,6 +51,11 @@ without using shared-runner performance as a correctness threshold.
 separately on macOS and Windows. It does not use the user's profile,
 authentication, model calls or hook trust.
 
+The client-smoke job skips tag refs. It strictly validates a Claude package and
+marketplace built separately in its disposable source checkout; these are not the
+exact Linux CI archives attached to a draft release. Exact release-asset validation
+and live acceptance remain separate [publication checks](publishing.md#publish-the-github-marketplace).
+
 The registration checks cover source installation. When released catalogs are
 committed on `main`, they also cover removing and re-adding the `cuefluent` marketplace
 without duplicate plugin registrations. A source-only checkout reports the
@@ -81,6 +86,8 @@ integration works.
   outside the reproducible suite. They exercise restricted create/resume, tool restrictions, formal control
   identity and host review-form delivery. They do not establish desktop sidebar
   visibility, physical user approval, or a complete live desktop workflow.
+  The native client resolves the processing model under restricted launch settings;
+  persistent controller status does not yet report that resolved model.
 - Arbitrary generated-output copy attribution remains unverified. The
   [dedicated controller](processing-chat.md) disables inherited hooks and supports
   exact native record exclusions; inline processing output in ordinary chats can

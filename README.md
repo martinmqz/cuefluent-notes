@@ -8,7 +8,7 @@ evidence into clear, searchable Markdown. Directly saving user-selected material
 also works without session collection. Notes stay ordinary files with descriptive
 names and optional type folders.
 
-**v0.8.0** introduces this replacement workflow. Published versions through
+**v0.8.0** introduced this replacement workflow. Published versions through
 **v0.7.1** use the prior workflow. The new workflow does not import old capture
 settings. Fresh setup leaves collection off and processing Manual. Installation
 and hook trust enable neither process.
@@ -21,8 +21,34 @@ fictional.
 
 ### From the marketplace
 
-This repository currently provides source code only. It has no published
-marketplace catalogs or release downloads. Use the source installation below.
+Marketplace installation uses the published packages on the repository's `main`
+branch. A release becomes installable this way after its package-update PR merges;
+a GitHub release alone does not update the catalog. Check the
+[main branch](https://github.com/martinmqz/cuefluent-notes/tree/main) for `release.json`
+and both marketplace catalogs. If they are absent, use [source installation](#from-source).
+
+Once the catalogs are available, choose your client:
+
+**Codex**
+
+```sh
+codex plugin marketplace add martinmqz/cuefluent-notes --ref main
+codex plugin add cuefluent-notes@cuefluent
+```
+
+**Claude Code**
+
+```sh
+claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#main
+claude plugin install cuefluent-notes@cuefluent --scope user
+```
+
+These complete packages need Git, Node.js 22+ on the client's PATH and a current
+client CLI; no source checkout or npm install is needed. Published
+[release downloads](https://github.com/martinmqz/cuefluent-notes/releases) also offer
+manual ZIPs without hooks. See [package installation](references/distribution.md).
+Keep one active installation per client and update through its original method.
+This is a publisher-hosted marketplace, not an OpenAI or Anthropic directory listing.
 
 ### From source
 
@@ -61,8 +87,10 @@ for this user. Clone the repository and run its install:codex npm script
 
 ### Start using it
 
-1. Start a fresh session after installation and review the plugin's hooks in
-   your client. Codex exposes hook trust through `/hooks`.
+1. Start a fresh session after installation. Review the plugin's hooks and the
+   bundled `cuefluent_control` MCP server registration and permissions in your
+   client; Codex exposes hook trust through `/hooks`. Both package variants
+   include the server, which the client can start when loading the plugin.
 2. Say **“Set up Cuefluent Notes.”** Select a project and where Markdown should go.
    The agent prepares private, machine-local evidence and state directories.
 3. Choose collection and processing separately. Collection can cover selected
@@ -100,16 +128,60 @@ Cuefluent's recursive loading and search ranking remain separately unverified.
 
 ### Update a marketplace installation
 
-No marketplace update is available from this repository. Existing installed
-packages continue to use their current versions. Keep private notes, workflow
-settings and evidence storage when changing installation methods.
+Before updating clients that share a collection, follow the
+[coordinated upgrade steps](references/setup.md#existing-settings). Preserve notes,
+settings, captures and active operations. The catalog's `release.json` identifies
+the available package version; it may lag development source or a newly published
+release until the package-update PR merges.
+
+**Codex**
+
+```sh
+codex plugin marketplace upgrade cuefluent
+codex plugin add cuefluent-notes@cuefluent
+```
+
+**Claude Code**
+
+```sh
+claude plugin marketplace update cuefluent
+claude plugin update cuefluent-notes@cuefluent --scope user
+```
+
+Use the scope of your existing Claude installation if it differs from `user`.
+Restart affected clients after all shared-store helpers are updated. Review changed
+hooks and the `cuefluent_control` MCP registration and permissions before resuming;
+neither installation nor server availability enables collection or automatic
+Markdown processing. See [processing chat prerequisites](references/processing-chat.md).
 
 #### Switch an older marketplace registration to main
 
-This source-only repository has no marketplace catalog to register yet. Do not
-remove a working registration solely to point it here. Use the source installer
-only after removing the previous plugin registration and preserving its package;
-the installer refuses to overwrite a package owned by another installation method.
+Registrations pinned to `marketplace` do not follow `main` automatically. First
+confirm that both catalogs and `release.json` are published on `main`, then follow
+the [coordinated upgrade steps](references/setup.md#existing-settings). Do not
+remove a working registration before its replacement is available.
+
+For a Codex registration named `cuefluent`:
+
+```sh
+codex plugin marketplace remove cuefluent
+codex plugin marketplace add martinmqz/cuefluent-notes --ref main
+codex plugin add cuefluent-notes@cuefluent
+```
+
+For a Claude user installation registered as `cuefluent`:
+
+```sh
+claude plugin marketplace remove cuefluent --scope user
+claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#main --scope user
+claude plugin install cuefluent-notes@cuefluent --scope user
+```
+
+Use the existing marketplace name and Claude scope if different. Keep notes,
+workflow settings, evidence and writer state outside the replaceable package;
+do not rerun setup or move storage for this registration change. Restart the
+client and review changed hooks and MCP permissions. The old branch may be absent,
+so a migration notice from that branch is not required to make this switch.
 
 ### Update or customize a source installation
 
@@ -127,16 +199,17 @@ npm run install:codex
 Updates preserve the previous package in a backup directory printed by the
 installer. A package installed by another method is left untouched: use that
 method to update it, or remove/move that copy before switching to this installer.
-Start a new session after updates and review changed hook definitions.
+Start a new session after updates and review changed hooks and the bundled
+`cuefluent_control` MCP registration and permissions.
 
 Append `-- --manual` for a package with no hooks, or `-- --cli /absolute/path`
 to choose a client executable. Run `node scripts/install.mjs --help` for options.
 The source checkout is needed for updates; installed helpers run independently.
 
 See [installation details and troubleshooting](references/distribution.md#guided-installer)
-for locations, compatibility, and recovery. The `main` branch currently contains
-development source only. A published marketplace includes `release.json` to
-identify its package version independently of development source.
+for locations, compatibility, and recovery. Published marketplace packages coexist
+with development source on `main`; `release.json` identifies their version
+independently of the source package version.
 
 ## Use the workflow
 
