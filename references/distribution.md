@@ -2,9 +2,12 @@
 
 The builder creates standalone directories for Codex and Claude Code.
 Both contain the same skill and local runtime, with host-specific manifests.
-The packaged helpers have no runtime dependency on this source checkout, npm,
+The deterministic helpers have no runtime dependency on this source checkout, npm,
 Cuefluent, its app packages, or a network service. Node 22 or later must be
 available to the client.
+The optional [processing chat](processing-chat.md) also needs the matching native
+client CLI and its normal authentication to run an agent; model usage belongs to
+that client account.
 
 ## GitHub-hosted marketplace
 
@@ -385,7 +388,12 @@ For upgrades, rebuild into a fresh directory, review the package and changes,
 then update the one installed variant through that client's supported process.
 Keep user notes, private policy, and update state outside the replaceable package.
 Changed Codex hook definitions need renewed trust; validate reload behavior for
-each host rather than assuming both update the same way.
+each host rather than assuming both update the same way. Both variants also
+register the `cuefluent_control` MCP server through `.mcp.json`; review its
+registration and permissions on update. The client may start that server when
+loading the plugin. Only an explicit processing request launches or resumes the
+restricted agent session. Follow the [coordinated upgrade](setup.md#existing-settings)
+and [processing chat](processing-chat.md) guidance before resuming shared storage.
 
 ## Compatibility and verification status
 

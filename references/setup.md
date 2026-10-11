@@ -161,18 +161,46 @@ or per-session writers. A custom raw directory does not relocate intake state.
 
 ## Existing settings
 
-Keep all client plugins/helpers sharing a store on the same version. For Windows
-storage changes, follow [Windows storage selection](#windows-storage-selection)
-and preserve existing paths and consent; the new default is not a migration.
+Keep all client plugins/helpers sharing a store on the same version. To upgrade an
+existing v0.8.0–v0.12.0 workflow to v0.13.0:
 
-For the v0.8.0-to-v0.9.0 upgrade, preserve the existing workflow settings and
-storage paths; fresh setup is not required. Before updating, stop collection
-entrypoints and processing, close affected client sessions, and let running
-workers finish. Update every client plugin/helper sharing the collection to
-v0.9.0 before starting fresh sessions or resuming work, including both Codex and
-Claude when used. A worker may process registrations from either client.
+1. Stop collection entrypoints and processing, close affected client sessions,
+   and let their running workers and processing clients finish before replacing
+   packages. Preserve unfinished operations; do not delete claims, locks or journals.
+2. Keep the inspected workflow settings, storage paths, notes and consent choices.
+   Fresh setup or storage migration is not required.
+3. Update every client plugin and standalone helper using that collection to
+   v0.13.0 before any of them resumes access, including both Codex and Claude when
+   used. A worker can process registrations from either client.
+4. Start fresh client sessions. Review changed hooks and the new `cuefluent_control`
+   MCP server registration and permissions, then inspect existing operations and
+   resume them through their supported processing/recovery commands.
 
-The new reader accepts v0.8.0 captures, but writes `reader.headerClientVersion`
+v0.13.0 changes reader rules, including Claude reader-rules revision 2, Codex
+per-kind tool budgets and verified processing-control exclusions, and adds
+processing state for worksets and reusable chats. Old and new helpers can produce
+different capture revisions or disagree about that state. Mixed-version access
+and downgrading a collection after v0.13.0 has written to it are unsupported.
+Existing immutable captures, packets and active operations are preserved; do not
+rebuild them or discard state to bypass a revision conflict. See
+[processing recovery](processing.md#outcomes-and-recovery).
+
+Both hook and manual packages include the MCP server. It starts when loaded by
+the client; an explicit `process` request can launch or resume a restricted native
+client session using its normal authentication and model resolution. When
+processing is enabled with collection off, trusted hooks may still store source
+identity and byte-boundary metadata. Explicit native controls can read bounded
+recent source records to verify their call. This creates no collection interval or
+worker. Review [processing chat prerequisites and privacy boundaries](processing-chat.md)
+before using the handoff. Installation grants neither collection nor processing
+consent, and Automatic still needs an explicit processing request.
+
+For Windows storage changes, follow
+[Windows storage selection](#windows-storage-selection) and preserve existing
+paths and consent; the profile default is not a migration.
+
+The earlier v0.9.0 format change also applies when upgrading from v0.8.0 directly.
+Current readers accept v0.8.0 captures, but write `reader.headerClientVersion`
 provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
 these formats. Mixed-version access and downgrading a collection used by v0.9.0
 to v0.8.0 are unsupported. Existing immutable capture bytes are preserved;
