@@ -190,8 +190,8 @@ For recognized workflow settings:
    and permission changes when prompted, then inspect existing operations and
    resume them through their supported processing/recovery commands.
 
-Check the selected [release notes](https://github.com/martinmqz/cuefluent-notes/releases)
-for storage compatibility and downgrade boundaries. Configuration recognition
+Review the [storage compatibility boundaries](#storage-compatibility) below and
+the selected release notes for any additional changes. Configuration recognition
 does not prove that older helpers can read newer captures, reader caches or
 processing state. A patch does not necessarily introduce a new storage boundary.
 Preserve existing immutable captures, packets and active operations; do not
@@ -240,6 +240,30 @@ to all project sessions. Native IDs must come from an explicit selection; never
 choose the latest session by cwd or copy a transcript record UUID as a prompt ID.
 The replacement does not import legacy capture configuration or support
 mixed-version operation. Old settings are not permission to enable new collection.
+
+### Storage compatibility
+
+The following historical boundaries still matter when skipping releases. Keep
+all helpers sharing a collection on the same release, including both clients
+when used; a worker can process registrations from either client.
+
+v0.13.0 changed reader rules, including Claude reader-rules revision 2, Codex
+per-kind tool budgets and verified processing-control exclusions, and added
+processing state for worksets and reusable chats. Old and new helpers can produce
+different capture revisions or disagree about that state. Mixed-version access
+across this boundary, and downgrading a collection written by v0.13.0 or later to
+a version before v0.13.0, are unsupported.
+
+The v0.9.0 format change also applies when upgrading directly from v0.8.0.
+Current readers accept v0.8.0 captures, but write `reader.headerClientVersion`
+provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
+these formats. Mixed-version access and downgrading a collection used by v0.9.0
+or later to v0.8.0 are unsupported. Existing immutable capture bytes are preserved;
+reader caches can be replaced under the current reader's rules.
+
+Preserve immutable captures, packets and active operations across these upgrades.
+Do not rebuild or discard them to bypass a conflict; use
+[processing recovery](processing.md#outcomes-and-recovery).
 
 ## Boundaries and diagnostics
 
