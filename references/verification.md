@@ -51,11 +51,13 @@ without using shared-runner performance as a correctness threshold.
 separately on macOS and Windows. It does not use the user's profile,
 authentication, model calls or hook trust.
 
-The registration checks cover both source installation and the released catalogs
-committed on `main`, including removing and re-adding the `cuefluent` marketplace
-without duplicate plugin registrations. Source-install checks use the full main
-layout, including repo-scoped catalogs. Marketplace checks verify the installed
-identity, release version and cached checker/workflow helpers. They use local
+The registration checks cover source installation. When released catalogs are
+committed on `main`, they also cover removing and re-adding the `cuefluent` marketplace
+without duplicate plugin registrations. A source-only checkout reports the
+marketplace checks as skipped; a partially present marketplace fails. Source-install
+checks use the checkout layout, including repo-scoped catalogs when present.
+Marketplace checks verify the installed identity, release version and cached
+checker/workflow helpers. They use local
 catalogs; remote Git
 authentication, GitHub PR creation/CI dispatch and protected-branch merging still
 require separate checks.

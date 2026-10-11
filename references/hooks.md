@@ -3,7 +3,7 @@
 Hooks connect client lifecycle metadata to a short-lived deterministic worker.
 Collection and agent processing have independent consent; installation and hook
 trust activate neither. See [setup](setup.md), [explicit controls](workflow-cli.md)
-and the [client contract gate](session-workflow.md#client-contract-and-transport-gate).
+and the [client contracts and transport limits](session-workflow.md#client-contracts-and-transport-limits).
 
 ## Events and boundaries
 

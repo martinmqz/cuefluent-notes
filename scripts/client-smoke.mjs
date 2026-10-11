@@ -23,6 +23,14 @@ async function profile(directory, pinnedPath) {
   return env;
 }
 try {
+  const marketplacePaths = [];
+  for (const relative of MARKETPLACE_PATHS) {
+    try { await fs.lstat(path.join(source, relative)); marketplacePaths.push(relative); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  assert.ok(marketplacePaths.length === 0 || marketplacePaths.length === MARKETPLACE_PATHS.length,
+    'A published marketplace must contain every managed path.');
+  const hasMarketplace = marketplacePaths.length !== 0;
   let env = await profile(root);
   const home = env.HOME;
   const tools = path.join(root, 'clients');
@@ -41,13 +49,14 @@ try {
       recursive: true, filter: file => path.basename(file) !== 'node_modules',
     });
   }
-  // Match a main clone, including both repo-scoped catalogs and full packages.
-  for (const relative of MARKETPLACE_PATHS) {
+  // Include released catalogs and packages when this checkout publishes them.
+  for (const relative of marketplacePaths) {
     await fs.cp(path.join(source, relative), path.join(checkout, relative), { recursive: true });
   }
   const git = args => run('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: checkout });
   git(['init', '--initial-branch=main']);
-  git(['add', '.']); git(['add', '-f', '--', ...MARKETPLACE_PATHS]);
+  git(['add', '.']);
+  if (hasMarketplace) git(['add', '-f', '--', ...marketplacePaths]);
   git(['-c', 'user.name=Client Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '-m', 'test: seed complete source checkout']);
   run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: checkout });
   // Claude's npm entry is a placeholder until postinstall copies this locked
@@ -86,6 +95,12 @@ try {
     await verifyHelpers(destination);
     console.log(JSON.stringify({ platform: process.platform, client, version, freshInstall: true,
       repeatUpdate: true, registrations: 1, capture: 'unconfigured', liveModel: false }));
+
+    if (!hasMarketplace) {
+      console.log(JSON.stringify({ platform: process.platform, client,
+        marketplaceInstall: 'skipped', reason: 'No published marketplace package in this source checkout.' }));
+      continue;
+    }
 
     // A separate profile exercises the committed main catalog and the one-time
     // remove/re-add migration. Never alter the source-installer registration.

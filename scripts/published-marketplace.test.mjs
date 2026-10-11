@@ -9,10 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { trackedMarketplaceFiles, verifyMarketplaceFiles } from './marketplace-content.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-test('tracked main catalogs resolve to complete packages matching published release digests', async () => {
+test('tracked main catalogs resolve to complete packages matching published release digests', async t => {
   // Source versions may target the next release. Check tracked package files,
   // including edits, but exclude untracked Finder/Explorer housekeeping files.
-  verifyMarketplaceFiles(await trackedMarketplaceFiles(root));
+  const files = await trackedMarketplaceFiles(root);
+  if (files.length === 0) return t.skip('Source-only checkout: no published marketplace package.');
+  verifyMarketplaceFiles(files);
 });
 
 test('tracked verification ignores OS housekeeping files but reads tracked edits', async t => {

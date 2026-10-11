@@ -8,8 +8,9 @@ available to the client.
 
 ## GitHub-hosted marketplace
 
-The [README marketplace commands](../README.md#from-the-marketplace) install
-released packages from `main` under the marketplace name
+Check the [README](../README.md#from-the-marketplace) for current availability.
+A source-only checkout has no marketplace catalogs or published packages.
+When a release is published, its packages use `main` and the marketplace name
 `cuefluent`. Codex reads `.agents/plugins/marketplace.json` and installs
 `plugins/cuefluent-notes`; Claude reads `.claude-plugin/marketplace.json` and
 installs `claude/cuefluent-notes`. Each package has its own host manifest and
