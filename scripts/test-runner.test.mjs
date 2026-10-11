@@ -15,7 +15,7 @@ for (const statuses of [[1, 0], [0, 7], [2, 7], [null, 0], ['spawn-error', 0], [
     // This process only simulates phase dispatch. Its spoofed platform must not
     // invoke Windows ACL tools or create settings as if it were a native host.
     await fs.writeFile(path.join(root, 'test-support', 'isolated-settings.mjs'), '// No settings or native storage in this orchestration-only fixture.\n');
-    const names = ['collection-hooks.test.mjs', 'collection-package.test.mjs', 'windows-discovery.test.mjs', 'ordinary.test.mjs'];
+    const names = ['collection-hooks.test.mjs', 'collection-package.test.mjs', 'windows-acl-probe.test.mjs', 'windows-discovery.test.mjs', 'ordinary.test.mjs'];
     await Promise.all(names.map(name => fs.writeFile(path.join(root, name), '')));
     // Only orchestration is simulated: no filesystem or client behavior is
     // claimed as native Windows coverage by this isolated child process.

@@ -10,7 +10,7 @@ const files = (await fs.readdir(directory)).filter(file => file.endsWith('.test.
 if (!files.length) throw new Error('No test files found.');
 // Real-clock hook/worker checks must not compete with filesystem stress fixtures
 // on Windows. Preserve their production deadlines and run every test once.
-const timed = new Set(['collection-hooks.test.mjs', 'collection-package.test.mjs', 'windows-discovery.test.mjs']);
+const timed = new Set(['collection-hooks.test.mjs', 'collection-package.test.mjs', 'windows-discovery.test.mjs', 'windows-acl-probe.test.mjs']);
 const phases = process.platform === 'win32'
   ? [{ files: files.filter(file => timed.has(file)), serial: true },
     { files: files.filter(file => !timed.has(file)), serial: false }]

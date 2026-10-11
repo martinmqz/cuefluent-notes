@@ -9,8 +9,8 @@ import { ACL_PROBE, probeEnvironment, windowsTools, privacyIdentity, protectNewD
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true') throw new Error('WINDOWS_CI_REQUIRED');
 
 const stages = [
-  ['$paths=ConvertFrom-Json', 'json'], ['$item=Get-Item', 'item'],
-  ['$acl=Microsoft.PowerShell.Security', 'acl'], ['$raw=[Security.AccessControl.RawSecurityDescriptor]', 'descriptor'],
+  ['$paths=ConvertFrom-Json', 'json'], ['$attributes=[IO.File]', 'attributes'],
+  ['$acl=if(', 'acl'], ['$raw=[Security.AccessControl.RawSecurityDescriptor]', 'descriptor'],
   ['$drive=[IO.DriveInfo]', 'drive'], ['$aces=@(', 'aces'],
   ['@{path=$p;', 'result'], ['ConvertTo-Json -Depth', 'serialize'],
 ];

@@ -33,9 +33,16 @@ Functional capture and scheduler tests use controlled budget clocks so native
 permission-check latency does not change their expected results. Separate tests
 exercise budget expiration, retry, and the default monotonic clock. CLI checks
 use the production clock; functional checks are not throughput benchmarks.
-On Windows, the real-clock hook and detached-package checks run serially before
-the other test files, so concurrent filesystem stress fixtures do not consume
-their timing budgets. Production hook and worker deadlines remain unchanged.
+On Windows, native ACL query comparisons, real-clock hook and detached-package
+checks run serially before the other test files, so concurrent filesystem stress
+fixtures do not consume their timing budgets. Production hook and worker
+deadlines remain unchanged.
+The native ACL comparison checks direct .NET queries against PowerShell provider
+snapshots, including inherited permissions, denied and broad grants, junctions,
+changed permissions and attributes. Long names retain the existing provider
+behavior; a native comparison verifies matching results or matching refusal.
+The comparison reports warm-query timings
+without using shared-runner performance as a correctness threshold.
 
 ## Client registration checks
 

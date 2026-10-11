@@ -59,20 +59,29 @@ export function probeEnvironment(paths, nativeEnvironment = process.env) {
     CUEFLUENT_PRIVACY_PATHS: paths };
 }
 
-// Fixed source, paths only through environment data. RawSecurityDescriptor exposes
-// every ACE, including forms GetAccessRules would otherwise normalize or omit.
+// Fixed source, paths only through environment data. Query .NET directly rather
+// than invoking the PowerShell provider for every ordinary path. Retain the
+// provider for long paths: Windows PowerShell's .NET path limits vary by host.
+// Use the conservative 248-character directory cutoff for files too, even
+// though their legacy limit is 260, so both use one provider fallback boundary.
+// No permission results are cached; every ACE is read on every query.
 export const ACL_PROBE = String.raw`$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);
 $paths=ConvertFrom-Json $env:CUEFLUENT_PRIVACY_PATHS;
 $result=@(foreach($p in $paths) {
-  $item=Get-Item -Force -LiteralPath $p;
-  $acl=Microsoft.PowerShell.Security\Get-Acl -LiteralPath $p;
+  if($p.Length -ge 248) {
+    $item=Get-Item -Force -LiteralPath $p; $attributes=$item.Attributes;
+    $acl=Microsoft.PowerShell.Security\Get-Acl -LiteralPath $p;
+  } else {
+    $attributes=[IO.File]::GetAttributes($p);
+    $acl=if($attributes -band [IO.FileAttributes]::Directory) {[IO.Directory]::GetAccessControl($p)} else {[IO.File]::GetAccessControl($p)};
+  }
   $raw=[Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(),0);
   $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($p));
   $aces=@(foreach($ace in $raw.DiscretionaryAcl) {
     @{type=[int]$ace.AceType; flags=[int]$ace.AceFlags; mask=[int]$ace.AccessMask; sid=$ace.SecurityIdentifier.Value}
   });
   @{path=$p; owner=$raw.Owner.Value; protected=$acl.AreAccessRulesProtected;
-    daclPresent=($null -ne $raw.DiscretionaryAcl); aces=$aces; attributes=[int]$item.Attributes;
+    daclPresent=($null -ne $raw.DiscretionaryAcl); aces=$aces; attributes=[int]$attributes;
     driveType=[int]$drive.DriveType; driveFormat=$drive.DriveFormat}
 }); ConvertTo-Json -Depth 6 -Compress -InputObject $result`;
 
