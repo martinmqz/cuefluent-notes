@@ -162,7 +162,7 @@ or per-session writers. A custom raw directory does not relocate intake state.
 ## Existing settings
 
 Keep all client plugins/helpers sharing a store on the same version. To upgrade an
-existing v0.8.0–v0.12.0 workflow to v0.13.0:
+existing v0.8.0–v0.13.0 workflow to v0.13.1:
 
 1. Stop collection entrypoints and processing, close affected client sessions,
    and let their running workers and processing clients finish before replacing
@@ -170,11 +170,15 @@ existing v0.8.0–v0.12.0 workflow to v0.13.0:
 2. Keep the inspected workflow settings, storage paths, notes and consent choices.
    Fresh setup or storage migration is not required.
 3. Update every client plugin and standalone helper using that collection to
-   v0.13.0 before any of them resumes access, including both Codex and Claude when
+   v0.13.1 before any of them resumes access, including both Codex and Claude when
    used. A worker can process registrations from either client.
 4. Start fresh client sessions. Review changed hooks and the new `cuefluent_control`
    MCP server registration and permissions, then inspect existing operations and
    resume them through their supported processing/recovery commands.
+
+v0.13.1 fixes Claude processing launch without changing storage formats or command
+schemas from v0.13.0. The following compatibility boundary applies to upgrades
+from versions before v0.13.0.
 
 v0.13.0 changes reader rules, including Claude reader-rules revision 2, Codex
 per-kind tool budgets and verified processing-control exclusions, and adds

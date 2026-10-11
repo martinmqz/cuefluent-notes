@@ -40,14 +40,14 @@ Only the v0.7.1-or-earlier capture settings are preserved without import.
 
 ## Updating
 
-For an existing v0.8.0–v0.12.0 workflow, preserve settings, paths, captures and
+For an existing v0.8.0–v0.13.0 workflow, preserve settings, paths, captures and
 active operations; fresh setup is not required. Before replacing packages, stop
 collection entrypoints and processing, close affected sessions, and let workers
 and processing clients finish. Update every client plugin/helper sharing the
-store to v0.13.0 before resuming. Mixed-version access and downgrading after this
+store to v0.13.1 before resuming. Mixed-version access and downgrading after this
 version writes to the store are unsupported. Follow the
-[coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/setup.md#existing-settings)
-and [marketplace update commands](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/README.md#update-a-marketplace-installation).
+[coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/references/setup.md#existing-settings)
+and [marketplace update commands](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/README.md#update-a-marketplace-installation).
 
 Review changed hooks **and the new MCP server** before resuming. Both hook and
 manual packages contain `.mcp.json`, which registers `cuefluent_control`; the
@@ -55,12 +55,12 @@ client may start it when loading the plugin. An explicit processing request uses
 its native CLI authentication and model resolution. Processing-enabled routes may
 register source metadata even with collection off; the explicit handoff can
 inspect bounded source content to verify the native call. See
-[processing chat prerequisites and privacy](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/processing-chat.md).
+[processing chat prerequisites and privacy](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/references/processing-chat.md).
 
 Existing Windows package stores are preserved, with additions needing missing
 roots frozen pending separate migration. Do not create a second writer or move
 paths to bypass a refusal; follow
-[Windows storage selection](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/setup.md#windows-storage-selection).
+[Windows storage selection](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/references/setup.md#windows-storage-selection).
 
 ## Processing
 
@@ -73,8 +73,8 @@ verified native identities. Mixed work and corrections remain eligible evidence.
 If the native tool, binding or form is unavailable, leave the work pending and
 report the limitation. Standalone agents can use the explicit CLI workflow from
 an uncaptured context; do not silently process inline in a captured work chat.
-See [processing and recovery](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/processing-chat.md)
-and [verification limits](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/verification.md).
+See [processing and recovery](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/references/processing-chat.md)
+and [verification limits](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/references/verification.md).
 
 Keep notes outside the installed package. Remove any previous standalone or
 source-installer copy before switching installation methods, so only one copy is
@@ -85,5 +85,5 @@ Both variants use the same plugin identity; choose one per client.
 This is a publisher-hosted marketplace, not an OpenAI or Anthropic public-directory
 listing. Edit source and templates on `main`, not generated packages. If your
 existing marketplace registration selects the old `marketplace` branch, follow the
-[branch migration instructions](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/README.md#switch-an-older-marketplace-registration-to-main)
+[branch migration instructions](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/README.md#switch-an-older-marketplace-registration-to-main)
 once the replacement catalogs are available.

@@ -48,7 +48,11 @@ export function createClaudeProcessingClient(options) {
   if (Object.keys(engineEnv).some(name => !/^CUEFLUENT_ENGINE_[A-Z0-9_]+$/.test(name))) fail('INVALID_PROCESSING_CLIENT');
   // Authentication is process environment data, never an MCP JSON command-line
   // argument. Native Claude forwards these variables to its engine child.
-  const env = { ...(options.env === undefined ? process.env : environment(options.env)), ...engineEnv };
+  // Controllers forward process.env explicitly. It is Node's native environment
+  // object, not a plain override map; handle it exactly like omitted inheritance.
+  const inheritedEnv = options.env === undefined || options.env === process.env
+    ? process.env : environment(options.env);
+  const env = { ...inheritedEnv, ...engineEnv };
   // This explicitly requested native controller owns a separate restricted run.
   // Do not inherit the enclosing Claude session's nested-launch sentinel.
   delete env.CLAUDECODE;
