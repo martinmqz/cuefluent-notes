@@ -1,6 +1,6 @@
 # Cuefluent Notes license
 
-Copyright (c) 2026 Martin Marquez and contributors.
+Copyright (c) 2026 Cuefluent.
 
 Cuefluent Notes is licensed under the Sustainable Use License, Version 1.0,
 reproduced below. Third-party components retain their own licenses and notices.

@@ -9,10 +9,9 @@ No npm install or source checkout is needed.
 
 Cuefluent Notes is source-available under the
 [Sustainable Use License 1.0](plugins/cuefluent-notes/LICENSE.md).
-Personal, non-commercial and internal business use are permitted. Redistribution
-must be free of charge and for non-commercial purposes; commercial redistribution
-or selling access requires separate permission. Using the plugin does not apply
-its license to your own notes. Bundled dependencies retain their own licenses.
+See the [licensing summary](plugins/cuefluent-notes/skills/cuefluent-notes/README.md#license)
+for permitted use, licensing inquiries, and how the license applies to your notes
+and bundled dependencies.
 
 Existing users: read the
 [coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.12.0/references/setup.md#existing-settings)

@@ -86,6 +86,7 @@ function verifyMarketplace(files, tag, archiveMatches) {
       if (!verified.trustedReleaseVerified) throw new Error(`${client}: invalid package inventory.`);
       if (verified.client !== client || verified.version !== release.version || verified.variant !== 'hooks') throw new Error(`${client}: package inventory identity differs from marketplace release.`);
       if (client === 'claude' && entries[0].description !== manifest.description) throw new Error('Claude catalog description differs from plugin manifest.');
+      if (client === 'claude' && entries[0].license !== manifest.license) throw new Error('Claude catalog license differs from plugin manifest.');
     }
     packages.push({ manifest, files: pluginFiles, inventory: Boolean(inventory) });
   }

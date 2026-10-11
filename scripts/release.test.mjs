@@ -1,3 +1,4 @@
+import { SOURCE_CHECKOUT_INPUTS } from './package-inputs.mjs';
 import './test-support/isolated-settings.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -159,7 +160,7 @@ test('release templates reject outside symlinks and checkout paths before produc
   const root = await fixture(t);
   const checkout = path.join(root, 'source');
   await fs.mkdir(checkout);
-  for (const relative of ['package.json', 'package-lock.json', 'SKILL.md', 'README.md', 'LICENSE.md', 'scripts', 'packaging', 'references', 'examples', 'node_modules']) {
+  for (const relative of [...SOURCE_CHECKOUT_INPUTS, 'node_modules']) {
     await fs.cp(path.join(sourceRoot, relative), path.join(checkout, relative), { recursive: true });
   }
   const privateFile = path.join(root, 'private.txt');

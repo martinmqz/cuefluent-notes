@@ -48,7 +48,7 @@ and check its frontmatter against the affected repository paths.
   Preserve explicit file destinations and folder routing. Keep authored and
   derived ownership separate, including during interrupted updates.
 - Keep both client packages self-contained, including runtime dependencies and
-  license notices. Change `SOURCE_FILES` in `scripts/package.mjs` only for intended
+  license notices. Change `SOURCE_FILES` in `scripts/package-inputs.mjs` only for intended
   shipped content. Exclude repository guidance, development tools, tests, and
   private planning from installed packages.
 - Keep real user notes, private evidence, private capture configuration, and

@@ -1,3 +1,4 @@
+import { SOURCE_CHECKOUT_INPUTS } from './package-inputs.mjs';
 // Real CLI registration checks, with no authentication, model calls or hook trust.
 // Run explicitly: node scripts/client-smoke.mjs (downloads pinned client CLIs).
 import assert from 'node:assert/strict';
@@ -44,7 +45,7 @@ try {
   await fs.cp(path.join(source, 'scripts/client-fixture'), tools, { recursive: true });
   run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: tools });
   // Build in a disposable checkout, never mutate the developer's dependencies.
-  for (const name of ['scripts', 'packaging', 'references', 'examples', 'SKILL.md', 'README.md', 'LICENSE.md', 'package.json', 'package-lock.json', '.gitignore', '.gitattributes']) {
+  for (const name of [...SOURCE_CHECKOUT_INPUTS, '.gitignore', '.gitattributes']) {
     await fs.cp(path.join(source, name), path.join(checkout, name), {
       recursive: true, filter: file => path.basename(file) !== 'node_modules',
     });
@@ -93,6 +94,12 @@ try {
     assert.equal(client === 'codex' ? sourceEntry.pluginId : sourceEntry.id,
       `cuefluent-notes@${client === 'codex' ? 'personal' : 'skills-dir'}`);
     await verifyHelpers(destination);
+    if (client === 'claude') {
+      run(cli, ['plugin', 'validate', '--strict', '--json', destination]);
+      const release = path.join(root, 'built-marketplace');
+      run(process.execPath, [path.join(checkout, 'scripts/release.mjs'), '--out', release], { cwd: checkout });
+      run(cli, ['plugin', 'validate', '--strict', '--json', release]);
+    }
     console.log(JSON.stringify({ platform: process.platform, client, version, freshInstall: true,
       repeatUpdate: true, registrations: 1, capture: 'unconfigured', liveModel: false }));
 

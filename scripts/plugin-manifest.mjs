@@ -13,11 +13,13 @@ export function validatePluginManifest(manifest, client) {
   // Older published packages legitimately lack the controller. Validate their
   // inventories without making them claim the new capability.
   const hasMcp = object(manifest) && Object.hasOwn(manifest, 'mcpServers');
-  const common = ['name', 'version', 'description', 'author', ...(hasMcp ? ['mcpServers'] : [])];
+  const hasLicense = object(manifest) && Object.hasOwn(manifest, 'license');
+  const common = ['name', 'version', 'description', 'author', ...(hasMcp ? ['mcpServers'] : []), ...(hasLicense ? ['license'] : [])];
   const validCommon = CLIENTS.includes(client) && fields(manifest, client === 'codex' ? [...common, 'skills', 'interface'] : common) &&
     manifest.name === 'cuefluent-notes' && text(manifest.version) && manifest.version === manifest.version.trim() && semver.test(manifest.version) &&
     text(manifest.description) && fields(manifest.author, ['name']) && text(manifest.author.name) &&
-    (!hasMcp || manifest.mcpServers === './.mcp.json');
+    (!hasMcp || manifest.mcpServers === './.mcp.json') &&
+    (!hasLicense || (text(manifest.license) && manifest.license === manifest.license.trim()));
   let validInterface = true;
   if (validCommon && client === 'codex') {
     const labels = ['displayName', 'shortDescription', 'longDescription', 'developerName', 'category'];
@@ -45,7 +47,7 @@ export function validateProcessingMcp(manifest, client) {
 export function validateManifestPair(codex, claude) {
   validatePluginManifest(codex, 'codex');
   validatePluginManifest(claude, 'claude');
-  if (['name', 'version', 'description', 'mcpServers'].some(key => codex[key] !== claude[key]) ||
+  if (['name', 'version', 'description', 'mcpServers', 'license'].some(key => codex[key] !== claude[key]) ||
       codex.author.name !== claude.author.name || codex.interface.shortDescription !== codex.description ||
       codex.interface.developerName !== codex.author.name) throw new Error('Shared plugin manifest metadata differs.');
 }

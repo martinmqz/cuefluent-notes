@@ -258,8 +258,12 @@ Cuefluent Notes is source-available under the
 non-commercial, or internal business purposes. Redistribution must be free of
 charge and for non-commercial purposes. Selling the plugin, commercial
 redistribution, or selling access to it requires separate permission from the
-copyright holders. This is not an OSI-approved open-source license; the full
-license controls.
+applicable copyright holders. For licensing inquiries, [open an issue with
+Cuefluent](https://github.com/martinmqz/cuefluent-notes/issues/new). An inquiry does
+not grant permission or guarantee that a separate license is available.
+Contributors retain their copyrights; contributing under this license does not
+assign ownership or grant Cuefluent additional sublicensing rights. This is not
+an OSI-approved open-source license; the full license controls.
 
 Using the plugin does not place this license on your inputs, captures, or authored
 notes. Any plugin code or other third-party material copied into them retains its

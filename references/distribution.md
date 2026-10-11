@@ -180,6 +180,8 @@ Each output contains:
 ```text
 codex/cuefluent-notes/
   .codex-plugin/plugin.json
+  .mcp.json
+  README.md
   LICENSE.md
   package-inventory.json       # exact files, sizes and SHA-256 digests
   skills/cuefluent-notes/
@@ -195,6 +197,8 @@ codex/cuefluent-notes/
   hooks/hooks.json             # hook variant only
 claude/cuefluent-notes/
   .claude-plugin/plugin.json
+  .mcp.json
+  README.md
   LICENSE.md
   package-inventory.json
   skills/cuefluent-notes/       # same complete skill and runtime
