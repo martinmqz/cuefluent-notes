@@ -162,7 +162,11 @@ or per-session writers. A custom raw directory does not relocate intake state.
 ## Existing settings
 
 Keep all client plugins/helpers sharing a store on the same released version.
-For an existing session-collection workflow:
+Upgrades from **v0.7.1 or earlier require fresh setup**, with separate collection
+and processing consent. Preserve old settings and files without importing them.
+
+The following upgrade steps apply to existing session-collection workflows
+created with **v0.8.0 or later**:
 
 1. Stop collection entrypoints and processing, close affected client sessions,
    and let their running workers and processing clients finish before replacing

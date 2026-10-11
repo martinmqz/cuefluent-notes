@@ -40,8 +40,9 @@ Only the v0.7.1-or-earlier capture settings are preserved without import.
 
 ## Updating
 
-For an existing session-collection workflow, preserve settings, paths, captures
-and active operations; fresh setup is not required. Before replacing packages, stop
+For an existing session-collection workflow created with **v0.8.0 or later**,
+preserve settings, paths, captures and active operations; fresh setup is not
+required. Before replacing packages, stop
 collection entrypoints and processing, close affected sessions, and let workers
 and processing clients finish. Update every client plugin/helper sharing the
 store to the same released version before resuming. Check the release notes for
