@@ -44,7 +44,7 @@ try {
   await fs.cp(path.join(source, 'scripts/client-fixture'), tools, { recursive: true });
   run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: tools });
   // Build in a disposable checkout, never mutate the developer's dependencies.
-  for (const name of ['scripts', 'packaging', 'references', 'examples', 'SKILL.md', 'README.md', 'package.json', 'package-lock.json', '.gitignore', '.gitattributes']) {
+  for (const name of ['scripts', 'packaging', 'references', 'examples', 'SKILL.md', 'README.md', 'LICENSE.md', 'package.json', 'package-lock.json', '.gitignore', '.gitattributes']) {
     await fs.cp(path.join(source, name), path.join(checkout, name), {
       recursive: true, filter: file => path.basename(file) !== 'node_modules',
     });
