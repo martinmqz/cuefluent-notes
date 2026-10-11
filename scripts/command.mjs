@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 // cmd escaping adapted from cross-spawn (lib/util/escape.js and lib/parse.js).
 // https://github.com/moxystudio/node-cross-spawn
@@ -52,17 +52,25 @@ export function resolveCommand(command, { env = process.env, cwd = process.cwd()
   return executable;
 }
 
-/** Source installer/test utility; no dependencies are needed before npm ci. */
-export function spawnCommand(command, args, options = {}) {
-  if (process.platform !== 'win32') return spawnSync(command, args, { ...options, shell: false });
+function invocation(command, args, options) {
+  if (process.platform !== 'win32') return [command, args, { ...options, shell: false }];
   const env = options.env ?? process.env;
   const executable = windowsExecutable(command, env, options.cwd ?? process.cwd());
-  if (!executable) return spawnSync(command, args, { ...options, shell: false });
-  if (/\.(?:mjs|cjs|js)$/i.test(executable)) return spawnSync(process.execPath, [executable, ...args], { ...options, shell: false });
-  if (/\.(?:exe|com)$/i.test(executable)) return spawnSync(executable, args, { ...options, shell: false });
+  if (!executable) return [command, args, { ...options, shell: false }];
+  if (/\.(?:mjs|cjs|js)$/i.test(executable)) return [process.execPath, [executable, ...args], { ...options, shell: false }];
+  if (/\.(?:exe|com)$/i.test(executable)) return [executable, args, { ...options, shell: false }];
   if (!/\.(?:cmd|bat)$/i.test(executable)) throw new Error('Use a native executable, Node script, or Windows command shim.');
   const twice = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(executable);
   const invocation = [escapeCommand(executable), ...args.map(arg => escapeArgument(arg, twice))].join(' ');
-  return spawnSync(environment(env, 'ComSpec') ?? 'cmd.exe', ['/d', '/s', '/v:off', '/c', `"${invocation}"`],
-    { ...options, shell: false, windowsVerbatimArguments: true });
+  return [environment(env, 'ComSpec') ?? 'cmd.exe', ['/d', '/s', '/v:off', '/c', `"${invocation}"`],
+    { ...options, shell: false, windowsVerbatimArguments: true }];
+}
+
+/** Literal argument transport for native clients and supported Windows shims. */
+export function spawnCommand(command, args, options = {}) {
+  return spawnSync(...invocation(command, args, options));
+}
+
+export function spawnStreamingCommand(command, args, options = {}) {
+  return spawn(...invocation(command, args, options));
 }

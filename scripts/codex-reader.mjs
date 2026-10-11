@@ -6,12 +6,16 @@ import { createCapture, validateCapture, clientVersion } from './capture-contrac
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
 import { absolutePath } from './workflow-paths.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
+import { verifyCodexProcessingControl, isProcessingControlProof } from './processing-control-proof.mjs';
+import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
-import { nativeId, integer, timestamp, string, choice, canonicalJSON, fail } from './workflow-values.mjs';
+import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
 // v2 allocates separate bounded call/result text pools and preserves native
 // descriptors after text exhaustion. Published v1 captures remain immutable.
 export const CODEX_READER_VERSION = '2';
+// Retain every supported historical reader independently of later reader bumps.
+export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2' });
 const structural = new Set(['compacted', 'token_usage_record', 'world_state', 'retained_context', 'security_risk_score',
   'inter_agent_communication', 'inter_agent_communication_metadata', 'realtime_item']);
 const ignoredEvents = new Set(['token_count', 'thread_goal_updated', 'thread_settings_applied', 'agent_reasoning',
@@ -180,7 +184,9 @@ function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion) {
 }
 
 /** Library-only preview/extraction. Selection and source are helper-owned, never transcript controls. */
-export async function readCodexSelection({ state, scopeId, cursor = null, loadHead = null, capturedAt = new Date().toISOString(), deadline = Infinity, now = Date.now, ...limits }) {
+export async function readCodexSelection({ state, scopeId, cursor = null, loadHead = null, resolveProcessingDispatch = null,
+  resolveProcessingExecution = null,
+  capturedAt = new Date().toISOString(), deadline = Infinity, now = Date.now, ...limits }) {
   validateSelectionState(state); nativeId(scopeId); timestamp(capturedAt);
   const scope = currentIntervals(state).find(item => item.id === scopeId) ?? state.explicitScopes.find(item => item.id === scopeId);
   if (!scope) fail('CAPTURE_NOT_SELECTED');
@@ -303,7 +309,7 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
     ? orderOf(a.record) - orderOf(b.record) : a.record.startByte - b.record.startByte);
   const nativeOrder = { kind: scan.metadata.historyMode === 'paginated' ? 'native-sequence' : 'verified-lifecycle',
     units: [...new Set(ordered.map(item => item.unitId))], anchors: knownAnchors };
-  const candidates = [], pending = [], eligibility = new Map();
+  const candidates = [], pending = [], processingControls = [], eligibility = new Map();
   for (const unit of units.values()) {
     try {
     if (unit.fault) { pending.push({ unitId: unit.id, reason: unit.fault }); continue; }
@@ -325,16 +331,45 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
     if (unit.end.endByte - unit.end.startByte > 64 * 1024) { pending.push({ unitId: unit.id, reason: 'SOURCE_ANCHOR_LIMIT' }); continue; }
     // An already-published unit may be reread while an earlier unit holds the
     // cursor. Reproduce its original rules rather than replacing finalized data.
-    const prior = (await loadHead?.(unit.id))?.capture;
+    const loadedHead = await loadHead?.(unit.id), prior = loadedHead?.capture;
     let readerVersion = CODEX_READER_VERSION;
     if (prior) {
       validateCapture(prior);
       if (prior.identity.client !== 'codex' || prior.identity.sessionId !== source.sessionId || prior.identity.unitId !== unit.id ||
           prior.source.fileIdentity !== source.fileIdentity || prior.source.path !== source.path || prior.projectRoot !== source.projectRoot) fail('SOURCE_IDENTITY_MISMATCH');
       if (prior.reader.name !== 'codex-rollout') fail('UNSUPPORTED_CODEX_READER');
-      readerVersion = choice(prior.reader.version, ['1', CODEX_READER_VERSION]);
+      readerVersion = choice(prior.reader.version, Object.keys(CODEX_TOOL_RULES));
     }
-    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget, readerVersion);
+    // Only a trusted native controller receipt plus a complete byte-level proof
+    // can exclude a control-only turn. Published evidence keeps its old identity
+    // and content; absent head loading is not evidence that no head exists.
+    const selectedSkill = unit.records.some(record => record.value.payload?.item?.type === 'UserMessage' &&
+      record.value.payload.item.content?.some?.(part => part.type === 'skill' && part.name === 'cuefluent-notes'));
+    if (!prior && !loadedHead?.head && typeof loadHead === 'function' && typeof resolveProcessingExecution === 'function' && unit.terminal === 'completed') {
+      const receipt = await resolveProcessingExecution({ client: 'codex', sessionId: source.sessionId, unitId: unit.id });
+      if (receipt) {
+        const execution = await verifyProcessingExecution({ source, unitId: unit.id, fromByte: unit.start.startByte,
+          endByte: unit.end.endByte }, { resolveExecution: async () => receipt });
+        if (isProcessingExecutionProof(execution)) {
+          const original = scan.records.filter(record => record.startByte >= execution.fromByte && record.endByte <= execution.endByte);
+          if (digest(canonicalJSON(original.map(record => ({ startByte: record.startByte, endByte: record.endByte, hash: record.hash })))) !== execution.recordsHash) fail('SOURCE_CHANGED');
+          processingControls.push(execution); eligibility.set(unit.id, 'excluded'); continue;
+        }
+      }
+    }
+    if (!prior && !loadedHead?.head && typeof loadHead === 'function' && typeof resolveProcessingDispatch === 'function' &&
+        unit.terminal === 'completed' && selectedSkill) {
+      checkBudget();
+      const control = await verifyCodexProcessingControl({ source, unitId: unit.id,
+        fromByte: unit.start.startByte, endByte: unit.end.endByte }, { resolveDispatch: resolveProcessingDispatch });
+      checkBudget();
+      if (isProcessingControlProof(control)) {
+        const original = scan.records.filter(record => record.startByte >= control.fromByte && record.endByte <= control.endByte);
+        if (digest(canonicalJSON(original.map(record => record.hash))) !== control.recordsHash) fail('SOURCE_CHANGED');
+        processingControls.push(control); eligibility.set(unit.id, 'excluded'); continue;
+      }
+    }
+    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget, CODEX_TOOL_RULES[choice(readerVersion, Object.keys(CODEX_TOOL_RULES))]);
     if (!collected.evidence.length && !collected.omissions.length) { noEvidence.push(unit.id); eligibility.set(unit.id, 'excluded'); continue; }
     const occurredAt = Number.isSafeInteger(unit.start.value.payload.started_at)
       ? new Date(unit.start.value.payload.started_at * 1000).toISOString() : unit.start.value.timestamp;
@@ -347,7 +382,7 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
     candidates.push({ capture, proof, scopeId });
     } catch (error) { pending.push({ unitId: unit.id, reason: error.code ?? 'UNSUPPORTED_CODEX_UNIT' }); }
   }
-  return { candidates, pending, noEvidence, unanchoredUnits: [...unanchoredUnits], blocked, anchorUpdates, selection, from, frames, eligibility, scopeId,
+  return { candidates, pending, noEvidence, processingControls, unanchoredUnits: [...unanchoredUnits], blocked, anchorUpdates, selection, from, frames, eligibility, scopeId,
     nativeAnchors: anchors, cursorAnchors: scan.records.map(record => record.tailAnchor),
     recordAnchors: scan.records.filter(record => record.id && (!blocked || record.endByte <= blocked.offset)).map(anchor),
     diagnostics: { pendingTail: scan.pendingTail, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd } };

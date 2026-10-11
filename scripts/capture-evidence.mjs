@@ -48,6 +48,9 @@ export function evidenceCollector(previous = { evidence: [], omissions: [] }, { 
   };
   const add = (kind, record, value) => {
     const isTool = Object.hasOwn(toolBudgets, kind);
+    // Validate v2 tool payloads even when no evidence capacity remains. NUL
+    // replacement still happens below; shape/Unicode failures are coded errors.
+    if (isTool && !legacy) string(typeof value.text === 'string' ? value.text.replaceAll('\0', '\ufffd') : value.text, 64 * 1024 * 1024, { empty: true });
     if (evidence.length >= 2048 || serializedBytes >= serializedLimit - 2048) {
       omit(isTool && !legacy ? (evidence.length >= 2048 ? 'tool-evidence-record-limit' : 'tool-evidence-serialized-limit') : 'evidence-budget-exhausted', record,
         isTool && !legacy ? { bytes: Buffer.byteLength(value.text) } : {}); return;
@@ -74,9 +77,10 @@ export function evidenceCollector(previous = { evidence: [], omissions: [] }, { 
     }
     if (isTool && legacy && tools >= MAX_CAPTURE_TOOL_BYTES) { omit('tool-budget-exhausted', record, { bytes: Buffer.byteLength(value.text) }); return; }
     const limit = isTool && !legacy ? [
-      { bytes: MAX_TOOL_BYTES, reason: 'tool-excerpt-truncated' },
       { bytes: toolBudgets[kind].perCall - (callBytes.get(`${kind}:${value.callId}`) ?? 0), reason: `${kind}-call-limit` },
       { bytes: toolBudgets[kind].total - kindBytes[kind], reason: `${kind}-budget-exhausted` },
+      // Older retained evidence may exceed one v2 kind's allocation. Preserve
+      // those bytes without admitting new text above the shared format ceiling.
       { bytes: MAX_CAPTURE_TOOL_BYTES - tools, reason: 'tool-budget-exhausted' }
     ].sort((a, b) => a.bytes - b.bytes)[0] : { bytes: isTool ? Math.min(MAX_TOOL_BYTES, MAX_CAPTURE_TOOL_BYTES - tools) : serializedLimit, reason: 'text-truncated' };
     let clipped = clipUTF8(value.text, Math.max(0, limit.bytes));

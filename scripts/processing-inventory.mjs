@@ -1,11 +1,9 @@
-import fs from 'node:fs/promises';
-import { checkWorkflowBudget } from './workflow-budget.mjs';
 import path from 'node:path';
-import { readProcessingState, processingNames, processingSnapshot } from './processing-state.mjs';
+import { readProcessingState, processingNames, processingSnapshot, nativeNamePage } from './processing-state.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { describeProcessingOperation } from './processing.mjs';
 import { validateClaim, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
-import { normalizeWorkflowSelection } from './workflow-selection.mjs';
+import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
 import { validateProcessingDisposition, dispositionPath, unitKey } from './capture-retention.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
 import { lstatOrNull } from './file-io.mjs';
@@ -20,26 +18,16 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
   const ctx = await readProcessingState(capability, selection, 'explicitProcess');
   const claims = [];
   for (const name of await processingNames(ctx, 'claims')) {
-    const saved = await processingSnapshot(ctx, name), claim = validateClaim(intakeJSON(saved));
+    const saved = await processingSnapshot(ctx, name);
+    if (!saved.bytes) fail('PROCESSING_INVENTORY_CHANGED');
+    const claim = validateClaim(intakeJSON(saved));
     if (claim.bindingHash === ctx.bindingHash) claims.push({ claim, hash: saved.hash });
   }
-  const units = [], directory = path.dirname(await intakePath(ctx.store, 'state', `heads/${selection.client}/${selection.sessionId}/.list`));
-  let incomplete = false;
-  if (selection.unitId) units.push(selection.unitId);
-  else if (await lstatOrNull(directory)) {
-    let scanned = 0;
-    for await (const entry of await fs.opendir(directory)) {
-      checkWorkflowBudget();
-      if (++scanned > 65536) fail('PENDING_INVENTORY_CAPACITY');
-      if (!entry.isFile() || !entry.name.endsWith('.json')) fail('INVALID_CAPTURE_HEAD');
-      const unitId = nativeId(entry.name.slice(0, -5));
-      if (afterUnitId !== null && unitId <= afterUnitId) continue;
-      // Scan the complete bounded directory, retaining only the lexical page
-      // and one lookahead. Filesystem enumeration order is not a cursor.
-      units.push(unitId); units.sort();
-      if (units.length > limit + 1) units.pop();
-    }
-  }
+  const directory = path.dirname(await intakePath(ctx.store, 'state', `heads/${selection.client}/${selection.sessionId}/.list`));
+  const page = selection.unitId ? { ids: [selection.unitId], incomplete: false }
+    : await nativeNamePage(directory, { limit, afterId: afterUnitId, invalidCode: 'INVALID_CAPTURE_HEAD', capacityCode: 'PENDING_INVENTORY_CAPACITY' });
+  const units = page.ids;
+  let incomplete = page.incomplete;
   const pending = [], handled = [], records = [];
   let nextCursor = null;
   for (const unitId of units.sort().filter(id => afterUnitId === null || id > afterUnitId)) {
@@ -80,10 +68,11 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
   for (const record of records) if ((await intakeSnapshot(ctx.store, 'state', record.name)).hash !== record.hash) fail('PROCESSING_INVENTORY_CHANGED');
   const journalPending = Boolean((await processingSnapshot(ctx, 'journal.json')).bytes);
   await ctx.guard();
-  const operations = [];
-  for (const { claim, hash: discoveredHash } of claims.filter(item => item.claim.inputs.some(input => input.identity.client === selection.client &&
-    input.identity.sessionId === selection.sessionId && (!selection.unitId || input.identity.unitId === selection.unitId)))) {
-    const detail = await describeProcessingOperation(ctx, claim.operationId);
+  const operations = [], collectionBlockers = [
+    ...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []), ...(journalPending ? ['WRITER_RECOVERY_REQUIRED'] : [])
+  ];
+  for (const { claim, hash: discoveredHash } of claims.filter(item => item.claim.inputs.some(input => selectionIncludesIdentity(selection, input.identity)))) {
+    const detail = await describeProcessingOperation(ctx, claim.operationId, null, collectionBlockers);
     if (detail.claim?.claimHash !== discoveredHash) fail('PROCESSING_INVENTORY_CHANGED');
     const { claim: legacyClaim, ...view } = detail;
     operations.push({ ...view, acknowledgedPages: detail.inspection?.acknowledgedPages ?? null,

@@ -2,6 +2,7 @@
   "name": "cuefluent-notes",
   "version": "0.12.0",
   "description": "Capture and organize your knowledge for fast recall—right on cue.",
+  "mcpServers": "./.mcp.json",
   "author": {
     "name": "Cuefluent Notes contributors"
   }

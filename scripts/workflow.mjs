@@ -10,13 +10,15 @@ import { generatedOutputCapabilities } from './workflow-context.mjs';
 import { createProcessingWorkset, prepareWorksetBatch, inspectProcessingWorkset, listProcessingWorksets } from './processing-workset.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
-  completeProcessing, inspectProcessing, recoverProcessing } from './processing.mjs';
+  completeProcessing, inspectProcessing, recoverProcessing, readProcessingProposal } from './processing.mjs';
 import { captureStorageStatus, previewCapturePrune, applyCapturePrune, recoverCapturePrune, abandonCapturePrune } from './capture-maintenance.mjs';
 import { inspectIntakeRecovery, applyIntakeRecovery } from './intake-recovery.mjs';
 import { fingerprint, inspectDirectories, inspectExistingDirectories, inspectState, recover } from './safe-update.mjs';
 import { saveDirectNote } from './direct-save.mjs';
 import { prepareNote } from './note-generation.mjs';
-import { keys, id, hash, list, fail, canonicalJSON, safeErrorCode } from './workflow-values.mjs';
+import { PROCESSING_PACKET_BYTES } from './processing-packet.mjs';
+import { openProcessingController, PROCESSING_CONTROLLER_INTERFACE_VERSION } from './processing-controller.mjs';
+import { keys, id, hash, list, fail, canonicalJSON, safeErrorCode, isNativeId } from './workflow-values.mjs';
 
 // Public request schemas expose selections and inspected hashes, never native
 // reader proofs, lock capabilities, callback code or hook-context authority.
@@ -30,11 +32,12 @@ const commands = {
   'processing-worksets': { required: [], optional: ['selection', 'limit', 'afterWorksetId'], run: listProcessingWorksets },
   'processing-workset-create': { required: ['selection', 'worksetId', 'inputs'], optional: ['runBudget', 'unscannedRemainder'], run: createProcessingWorkset },
   'processing-workset-status': { required: ['worksetId'], run: inspectProcessingWorkset },
-  'processing-workset-prepare': { required: ['worksetId', 'expectedWorksetHash', 'indexes'], optional: ['batchBudget', 'parallelism'], run: prepareWorksetBatch },
+  'processing-workset-prepare': { required: ['worksetId', 'expectedWorksetHash', 'indexes'], optional: ['batchBudget', 'parallelism', 'acceptPolicyChange'], run: prepareWorksetBatch },
   'processing-prepare': { required: ['selection', 'operationId', 'inputs'], optional: ['reconsider', 'budget', 'parallelism'], run: prepareProcessing },
   'processing-page': { required: ['selection', 'operationId', 'expectedClaimHash', 'page'], run: readProcessingPage },
   'processing-ack': { required: ['selection', 'operationId', 'expectedClaimHash', 'pages'], run: acknowledgeProcessingPages },
   'processing-propose': { required: ['selection', 'operationId', 'expectedClaimHash'], optional: ['proposal'], run: proposeProcessing },
+  'processing-proposal': { required: ['selection', 'operationId', 'expectedClaimHash', 'expectedProposalHash'], run: readProcessingProposal },
   'processing-save': { required: ['selection', 'operationId', 'expectedClaimHash', 'approvedProposalHash', 'trigger'], run: saveProcessing },
   'processing-complete': { required: ['selection', 'operationId', 'expectedClaimHash', 'outcome'], optional: ['expectedRecoveryHash'], run: completeProcessing },
   'processing-status': { required: ['operationId'], run: (cap, args) => inspectProcessing(cap, args.operationId) },
@@ -47,11 +50,19 @@ const commands = {
   'intake-recovery-status': { required: [], run: cap => inspectIntakeRecovery(cap) },
   'intake-recover': { required: ['reviewed', 'offline'], run: (cap, args) => applyIntakeRecovery(cap, args.reviewed, { offline: args.offline }) },
 };
-const extra = ['status', 'defaults', 'configure', 'storage-prepare', 'fingerprint', 'inspect-notes', 'prepare-note', 'direct-save', 'writer-status', 'writer-recover', 'processing-capabilities'];
+const chatCommands = {
+  'processing-chat-status': { required: ['client'], method: 'status' },
+  'processing-chat-run': { required: ['client', 'requestId', 'selection', 'expectedChatHash'], method: 'run' },
+  'processing-chat-abandon': { required: ['client', 'requestId', 'expectedChatHash', 'offline'], method: 'abandon' },
+  'processing-chat-reconcile': { required: ['client', 'requestId', 'expectedChatHash'], method: 'reconcile' },
+  'processing-chat-reauthorize': { required: ['client', 'expectedChatHash', 'previousPolicyHash'], method: 'reauthorize' },
+  'processing-chat-rollover': { required: ['client', 'expectedChatHash'], method: 'rollover' },
+};
+const extra = ['status', 'defaults', 'configure', 'storage-prepare', 'fingerprint', 'inspect-notes', 'prepare-note', 'direct-save', 'writer-status', 'writer-recover', 'processing-capabilities', ...Object.keys(chatCommands)];
 export function workflowHelp() {
   return { interfaceVersion: PROCESSING_INTERFACE_VERSION, usage: 'node scripts/workflow.mjs <command> [--config <absolute-path>] --request <absolute-json-file>',
     commands: [...extra, ...Object.keys(commands)], request: 'Collection operations use {collectionId, expectedConfigHash, args}. See references/workflow-cli.md.',
-    transport: 'No verified current-turn contextRef. Select native sessions explicitly; never choose the latest session by cwd.' };
+    transport: 'No verified hook current-turn contextRef. CLI commands require explicit selection; native MCP controls verify their actual call against existing registration. Never choose the latest session by cwd.' };
 }
 async function capability(configPath, request) {
   id(request.collectionId); hash(request.expectedConfigHash);
@@ -61,7 +72,22 @@ export async function executeWorkflow(command, request, { configPath } = {}) {
   if (command === 'processing-capabilities') {
     keys(request, []);
     return { interfaceVersion: PROCESSING_INTERFACE_VERSION, generatedOutput: generatedOutputCapabilities(),
-      automaticProcessing: false, modelRunner: false };
+      automaticProcessing: false, modelRunner: false,
+      controller: { interfaceVersion: PROCESSING_CONTROLLER_INTERFACE_VERSION, execution: 'installed-native-client',
+        independentModelRunner: false, desktopVisibility: 'unverified' } };
+  }
+  if (Object.hasOwn(chatCommands, command)) {
+    keys(request, ['collectionId', 'expectedConfigHash', 'args']);
+    const definition = chatCommands[command];
+    keys(request.args, definition.required);
+    id(request.collectionId); hash(request.expectedConfigHash);
+    configPath ??= (await resolveWorkflowConfig()).configPath;
+    const controller = await openProcessingController({ configPath, collectionId: request.collectionId,
+      expectedConfigHash: request.expectedConfigHash, client: request.args.client });
+    try {
+      const { client: _client, ...args } = request.args;
+      return await controller[definition.method](args);
+    } finally { await controller.close(); }
   }
   if (command === 'prepare-note') return prepareNote(request);
   if (command === 'defaults') {
@@ -140,19 +166,19 @@ export function workflowErrorReport(error) {
   }
   if (['PROCESSING_RESUME_REQUIRED', 'PROCESSING_PROPOSAL_QUEUE_FULL'].includes(code)) {
     const ids = Object.getOwnPropertyDescriptor(error.details ?? {}, 'operationIds')?.value;
-    if (Array.isArray(ids) && ids.length <= 100 && ids.every(value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value))) details.operationIds = [...ids];
+    if (Array.isArray(ids) && ids.length <= 100 && ids.every(isNativeId)) details.operationIds = [...ids];
   }
   if (code === 'PROCESSING_BATCH_BUDGET') {
     const sizes = Object.getOwnPropertyDescriptor(error.details ?? {}, 'inputSizes')?.value;
-    if (Array.isArray(sizes) && sizes.length <= 20 && sizes.every(item => item && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < 20 && Number.isSafeInteger(item.packetBytes) && item.packetBytes > 0 && item.packetBytes <= 4194304)) details.inputSizes = sizes.map(({ index, packetBytes }) => ({ index, packetBytes }));
+    if (Array.isArray(sizes) && sizes.length <= 20 && sizes.every(item => item && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < 100 && Number.isSafeInteger(item.packetBytes) && item.packetBytes > 0 && item.packetBytes <= PROCESSING_PACKET_BYTES)) details.inputSizes = sizes.map(({ index, packetBytes }) => ({ index, packetBytes }));
   }
   // Parser/OS exceptions never echo source bodies. Writer-authored diagnostics
   // are fixed guidance (occasionally with a selected path), bounded separately.
   const operationId = Object.getOwnPropertyDescriptor(error ?? {}, 'operationId')?.value;
   const worksetId = Object.getOwnPropertyDescriptor(error ?? {}, 'worksetId')?.value;
   return { error: code,
-    ...(typeof worksetId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(worksetId) ? { worksetId } : {}),
-    ...(typeof operationId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(operationId) ? { operationId } : {}),
+    ...(isNativeId(worksetId) ? { worksetId } : {}),
+    ...(isNativeId(operationId) ? { operationId } : {}),
     ...(Object.keys(details).length ? { details } : {}),
     ...(['SAFE_UPDATE_REJECTED', 'INVALID_PROCESSING_MARKDOWN'].includes(code) && typeof error.safeMessage === 'string'
       ? { reason: error.safeMessage.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 500) } : {}),

@@ -14,7 +14,8 @@ const token = value => {
 const lifecycleCode = value => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(value) ? value : 'unknown';
 
 /** Implementation capabilities, not user policy or a caller-supplied proof.
- * No current adapter binds CLI stdout to a native helper invocation/range. */
+ * Arbitrary CLI stdout has no verified copy attribution. The dedicated native
+ * controller has a separate, narrower record proof; neither is user policy. */
 export function generatedOutputCapabilities() {
   return { verified: false, collectionExclusions: false, processingExclusions: false,
     reason: 'HELPER_INVOCATION_BINDING_UNAVAILABLE',
@@ -23,6 +24,11 @@ export function generatedOutputCapabilities() {
       claude: { retainedEvidence: 'proven-human-only', retainedToolCallIds: false, helperInvocationBinding: false }
     },
     requiredProof: ['native-session-unit-call-ownership', 'trusted-helper-invocation', 'immutable-artifact-hash', 'exact-output-ranges'],
+    isolatedProcessing: { interfaceVersion: 1, execution: 'installed-native-client',
+      collectionExclusions: 'verified-native-records-only', processingExclusions: false,
+      codex: 'completed-restricted-unit', claude: 'controller-input-only',
+      sourceControls: 'verified-formal-skill-invocation', inheritedHooks: 'disabled-before-input',
+      review: 'native-host-form', desktopVisibility: 'unverified' },
     limit: 'Native call identity alone does not prove helper execution. Markers, command text, operation IDs and matching hashes cannot enable exclusions.' };
 }
 

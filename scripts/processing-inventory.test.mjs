@@ -199,3 +199,15 @@ test('a corrupt proposal reports its operation identity without exposing its byt
     return true;
   });
 });
+
+
+test('head-only collection inventory does not re-read raw bytes but full use still validates them', async t => {
+  const { readCaptureHead } = await import('./intake-store.mjs');
+  const f = await processingFixture(t);
+  const raw = path.join(f.collection.rawDir, captureRelativePath(f.identity, f.capture.evidenceHash));
+  await fs.writeFile(raw, '{corrupt capture');
+  const head = await readCaptureHead(f.store, f.identity, { metadataOnly: true });
+  assert.equal(head.hash, f.published.headHash); assert.equal(head.capture, null);
+  await assert.rejects(readCaptureHead(f.store, f.identity));
+  await assert.rejects(prepareProcessing(f.capability, { ...f.args, inputs: f.inputs }));
+});

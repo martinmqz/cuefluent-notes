@@ -6,6 +6,7 @@
     "name": "Cuefluent Notes contributors"
   },
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Cuefluent Notes",
     "shortDescription": "Capture and organize your knowledge for fast recall—right on cue.",

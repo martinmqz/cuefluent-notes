@@ -31,8 +31,9 @@ export function id(value) {
   if (typeof value !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(value)) fail('INVALID_WORKFLOW');
   return value;
 }
+export const isNativeId = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 export function nativeId(value) {
-  if (typeof value !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value)) fail('UNSUPPORTED_NATIVE_IDENTITY');
+  if (!isNativeId(value)) fail('UNSUPPORTED_NATIVE_IDENTITY');
   return value;
 }
 export function hash(value) {

@@ -1,10 +1,11 @@
-import { normalizeWorkflowSelection } from './workflow-selection.mjs';
+import { PROCESSING_PACKET_BYTES } from './processing-packet.mjs';
+import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
 import { unitKey, readTombstone, dispositionPath, validateProcessingDisposition } from './capture-retention.mjs';
 import { intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readProcessingState, withProcessingState, processingSnapshot, writeProcessingJSON, processingNamePage } from './processing-state.mjs';
 import { claimPath, operationPath, PROCESSING_INTERFACE_VERSION, validateProcessingSelection } from './processing-contract.mjs';
-import { describeProcessingOperation, prepareProcessingInState, processingBudget, activeProcessingClaims } from './processing.mjs';
+import { describeProcessingOperation, prepareProcessingInState, processingBudget, activeProcessingClaims, processingCollectionBlockers } from './processing.mjs';
 import { keys, nativeId, hash, integer, list, unique, timestamp, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
 const file = id => `processed/worksets/${nativeId(id)}.json`;
@@ -36,9 +37,10 @@ function validate(value, ctx, worksetId) {
   references(value.inputs); budget(value.budget);
   if (value.unscannedRemainder !== null && typeof value.unscannedRemainder !== 'boolean') fail('INVALID_PROCESSING_WORKSET');
   list(value.attempts, value.budget.maxBatches).forEach(attempt => {
-    keys(attempt, ['operationId', 'indexes', 'packetHash', 'packetBytes']);
+    keys(attempt, ['operationId', 'indexes', 'packetHash', 'packetBytes'], ['policyHash']);
+    if (attempt.policyHash !== undefined) hash(attempt.policyHash);
     nativeId(attempt.operationId); hash(attempt.packetHash); integer(attempt.packetBytes);
-    if (attempt.packetBytes < 1 || attempt.packetBytes > 4 * 1024 * 1024 ||
+    if (attempt.packetBytes < 1 || attempt.packetBytes > PROCESSING_PACKET_BYTES ||
         !equal(indexesOf(attempt.indexes, value.inputs), attempt.indexes) || attempt.operationId !== operationFor(worksetId, attempt.indexes)) fail('INVALID_PROCESSING_WORKSET');
   });
   unique(value.attempts.flatMap(attempt => attempt.indexes));
@@ -55,7 +57,9 @@ async function load(ctx, worksetId, expectedHash) {
     return { value, hash: snapshot.hash };
   } catch (error) { error.worksetId = worksetId; throw error; }
 }
-const view = (value, worksetHash) => ({ interfaceVersion: PROCESSING_INTERFACE_VERSION, worksetId: value.worksetId, worksetHash,
+const view = (value, worksetHash, currentPolicyHash = value.policyHash) => ({ interfaceVersion: PROCESSING_INTERFACE_VERSION, worksetId: value.worksetId, worksetHash,
+  policyState: value.policyHash === currentPolicyHash ? 'current' : 'changed',
+  conflict: value.policyHash === currentPolicyHash ? null : 'WORKFLOW_POLICY_CHANGED',
   selection: { ...value.selection }, inputs: value.inputs.map(input => ({ identity: { ...input.identity }, headHash: input.headHash })),
   createdAt: value.createdAt, budget: { ...value.budget }, unscannedRemainder: value.unscannedRemainder,
   chargedBatches: value.attempts.length, chargedPacketBytes: value.attempts.reduce((n, attempt) => n + attempt.packetBytes, 0) });
@@ -69,25 +73,30 @@ export async function createProcessingWorkset(capability, { selection, worksetId
     if (prior.bytes) {
       const saved = await load(ctx, worksetId);
       if (!equal(saved.value.selection, selection) || !equal(saved.value.inputs, inputs) || !equal(saved.value.budget, valueBudget) || saved.value.unscannedRemainder !== unscannedRemainder) fail('PROCESSING_WORKSET_CONFLICT');
-      return view(saved.value, saved.hash);
+      if (saved.value.policyHash !== ctx.policyHash) throw Object.assign(new Error('WORKFLOW_POLICY_CHANGED'), { code: 'WORKFLOW_POLICY_CHANGED', worksetId });
+      return view(saved.value, saved.hash, ctx.policyHash);
     }
     const value = validate({ format: 'cuefluent-processing-workset', version: 1, worksetId, bindingHash: ctx.bindingHash,
       policyHash: ctx.policyHash, selection, createdAt: new Date().toISOString(), inputs, budget: valueBudget, unscannedRemainder, attempts: [] }, ctx, worksetId);
     for (const input of inputs) if ((await intakeSnapshot(ctx.store, 'state', `heads/${unitKey(input.identity)}.json`)).hash !== input.headHash) fail('PROCESSING_HEAD_CHANGED');
     const saved = await writeProcessingJSON(ctx, file(worksetId), value, null);
-    return view(value, saved.hash);
+    return view(value, saved.hash, ctx.policyHash);
   });
 }
 
-export async function prepareWorksetBatch(capability, { worksetId, expectedWorksetHash, indexes, batchBudget, parallelism = 1 }, options = {}) {
+export async function prepareWorksetBatch(capability, { worksetId, expectedWorksetHash, indexes, batchBudget, parallelism = 1, acceptPolicyChange = false }, options = {}) {
+  if (typeof acceptPolicyChange !== 'boolean') fail('INVALID_PROCESSING_REQUEST');
   nativeId(worksetId); hash(expectedWorksetHash); let limits = processingBudget(batchBudget);
   const initial = await readProcessingState(capability, null, 'maintenance');
   const selected = await load(initial, worksetId, expectedWorksetHash);
   return withProcessingState(capability, selected.value.selection, 'explicitProcess', async ctx => {
     const saved = await load(ctx, worksetId, expectedWorksetHash), { value } = saved;
-    if (value.policyHash !== ctx.policyHash) fail('WORKFLOW_POLICY_CHANGED');
     indexes = indexesOf(indexes, value.inputs);
     const operationId = operationFor(worksetId, indexes), attempt = value.attempts.find(item => item.operationId === operationId);
+    // Only a genuinely new batch may accept fresh policy. Previously charged
+    // admissions keep their exact policy even if no claim was published yet.
+    const admissionPolicyHash = attempt?.policyHash ?? value.policyHash;
+    if (admissionPolicyHash !== ctx.policyHash && (attempt || !acceptPolicyChange)) fail('WORKFLOW_POLICY_CHANGED');
     // A pre-claim crash retains the already selected workload as well as its hash.
     if (attempt && batchBudget === undefined) limits = { maxInputs: indexes.length, maxPacketBytes: attempt.packetBytes };
     if (!attempt && value.attempts.some(item => item.indexes.some(index => indexes.includes(index)))) fail('WORKSET_INPUT_ALREADY_ATTEMPTED');
@@ -100,23 +109,31 @@ export async function prepareWorksetBatch(capability, { worksetId, expectedWorks
           return;
         }
         if (view(value).chargedPacketBytes + claim.packet.bytes > value.budget.maxPacketBytes) fail('PROCESSING_WORKSET_BUDGET');
-        value.attempts.push({ operationId, indexes, packetHash: claim.packet.hash, packetBytes: claim.packet.bytes });
+        value.attempts.push({ operationId, indexes, packetHash: claim.packet.hash, packetBytes: claim.packet.bytes, policyHash: ctx.policyHash });
         await writeProcessingJSON(ctx, file(worksetId), value, saved.hash);
         await options.fault?.('workset-admission');
       }
+    }).catch(error => {
+      if (error.code === 'PROCESSING_BATCH_BUDGET' && error.details?.inputSizes) {
+        error.details.inputSizes = error.details.inputSizes.map(item => ({ ...item, index: indexes[item.index] }));
+      }
+      throw error;
     });
     const admitted = value.attempts.find(item => item.operationId === operationId);
     if (!admitted || result.packet.hash !== admitted.packetHash || result.packet.bytes !== admitted.packetBytes) fail('PROCESSING_WORKSET_CHANGED');
     const current = await load(ctx, worksetId);
-    return { ...result, workset: view(current.value, current.hash) };
+    return { ...result, workset: view(current.value, current.hash, ctx.policyHash) };
   });
 }
 
 export async function inspectProcessingWorkset(capability, { worksetId }) {
   const ctx = await readProcessingState(capability, null, 'maintenance'), saved = await load(ctx, worksetId), { value } = saved;
-  const operations = [];
+  const operations = [], collectionBlockers = await processingCollectionBlockers(ctx);
   for (const attempt of value.attempts) {
-    const { claim, ...status } = await describeProcessingOperation(ctx, attempt.operationId);
+    const { claim, ...status } = await describeProcessingOperation(ctx, attempt.operationId, {
+      selection: value.selection, policyHash: attempt.policyHash ?? value.policyHash, inputs: attempt.indexes.map(index => value.inputs[index]),
+      packetHash: attempt.packetHash, packetBytes: attempt.packetBytes,
+    }, collectionBlockers);
     operations.push({ ...status, indexes: attempt.indexes, admissionPending: status.state === 'missing' });
   }
   const claims = await activeProcessingClaims(ctx), items = [];
@@ -130,7 +147,8 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
     const owner = owners[0]?.claim;
     const changed = (await intakeSnapshot(ctx.store, 'state', `heads/${unitKey(input.identity)}.json`)).hash !== input.headHash;
     const pruned = Boolean(await readTombstone(ctx.store, input.identity));
-    const blocked = value.policyHash !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
+    const attempt = value.attempts.find(item => item.indexes.includes(index));
+    const blocked = (attempt?.policyHash ?? value.policyHash) !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
       : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
     const elsewhere = done && done.operationId !== operation?.operationId;
     // Input disposition is current; operation outcomes remain historical. A
@@ -149,7 +167,7 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
   }
   if ((await processingSnapshot(ctx, file(worksetId))).hash !== saved.hash) fail('PROCESSING_WORKSET_CHANGED');
   await ctx.guard();
-  const summary = view(value, saved.hash);
+  const summary = view(value, saved.hash, ctx.policyHash);
   // Each group is an independent dimension; its buckets do not overlap.
   const operationCounts = { recoveryRequired: 0, terminal: 0, awaitingReview: 0, blocked: 0, admissionPending: 0, inspection: 0 };
   const outcomeCounts = { saved: 0, unchanged: 0, skipped: 0, cancelled: 0 };
@@ -191,9 +209,9 @@ export async function listProcessingWorksets(capability, { selection = null, lim
     } catch (error) { error.worksetId = worksetId; throw error; }
     snapshots.push({ worksetId, hash: snapshot.hash });
     if (value.bindingHash !== ctx.bindingHash) continue;
-    if (selection && !value.inputs.some(input => input.identity.client === selection.client && input.identity.sessionId === selection.sessionId && (!selection.unitId || input.identity.unitId === selection.unitId)) &&
+    if (selection && !value.inputs.some(input => selectionIncludesIdentity(selection, input.identity)) &&
         !equal(selection, value.selection)) continue;
-    const { inputs, ...summary } = view(value, snapshot.hash);
+    const { inputs, ...summary } = view(value, snapshot.hash, ctx.policyHash);
     worksets.push({ ...summary, inputCount: inputs.length });
   }
   for (const saved of snapshots) if ((await processingSnapshot(ctx, file(saved.worksetId))).hash !== saved.hash) fail('PROCESSING_INVENTORY_CHANGED');

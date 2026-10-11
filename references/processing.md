@@ -2,8 +2,10 @@
 
 The replacement helpers turn explicitly selected immutable capture revisions
 into reviewed Markdown updates. Collection and processing consent are separate.
-The helper does not invoke a model or decide whether evidence is useful;
-the active agent reads the evidence and writes the proposed prose. See
+The engine does not decide whether evidence is useful. The existing agent reads
+the evidence and writes the proposed prose. The optional
+[native-client controller](processing-chat.md) runs that agent in a reusable,
+restricted processing session; standalone CLI operations remain available. See
 [session workflow](session-workflow.md) for the native identity and transport limits.
 
 ## Selection and inspection
@@ -32,9 +34,11 @@ Admission defaults to one active inspection batch per collection, shared by both
 clients. Resume the existing operation first. An explicit `parallelism` of 1–5
 changes only that admission check; logical-unit reservations still apply. Fully
 inspected published proposals release the inspection slot but reserve their inputs.
-At most five proposals may await disposition; proposing also rechecks this bound.
-Existing excess claims remain resumable, and identical preparation retries do not
-reapply smaller defaults to an already reserved packet. No claim expires or is
+At most five proposal intents may await disposition; interrupted staging reserves
+a slot as soon as its immutable intent is recorded. A new intent rechecks this
+bound, while resuming an existing intent never requires another queue slot.
+Existing excess claims and proposal intents remain resumable. Identical preparation
+retries do not reapply smaller defaults to an already reserved packet. No claim expires or is
 cancelled to make room. Admission errors identify blocking operation IDs when known.
 
 For a backlog, freeze a finite [workset](workflow-cli.md#finite-processing-worksets)
@@ -86,6 +90,27 @@ interruption, obtain actual page progress, claim hashes, proposals and recovery
 state through the CLI. Do not create a separate scratchpad, claims ledger or writer
 state without an authorized destination. Published proposals already persist
 exact draft bytes; merely describing an unstaged draft does not preserve it.
+
+Workset creation and each admitted batch bind their exact settings hash. Even an
+unrelated settings edit makes the creation policy stale: workset listings/status
+report `policyState: "changed"` and `WORKFLOW_POLICY_CHANGED`, and an exact create
+retry refuses instead of appearing to renew the workset. Inspect existing
+operations first; no automatic consent renewal is provided.
+
+To continue **unattempted** inputs after reviewing current consent, explicitly pass
+`acceptPolicyChange: true` to `processing-workset-prepare`, with the inspected
+workset hash and current configuration hash. The new batch checks present source
+permissions and records its own policy hash. It keeps the frozen selection,
+existing operations, total charged budget and old admission policies unchanged.
+A retry of this admitted batch uses its own policy, without needing the flag again.
+The flag cannot reauthorize an existing claim or an interrupted pre-claim admission.
+Each later policy change requires another explicit decision for new batches.
+
+Committed work can finish its supported metadata recovery; unapplied claims may
+be explicitly cancelled. A failed transaction without a committed receipt can
+remain blocked by changed policy; follow its recovery constraints rather than
+replacing state or refreshing stored hashes. Preserve receipts and charged history.
+A new workset is not needed just because new batches need current consent.
 
 Before making another subject file, compare the relevant existing notes and prior
 associations. Consolidate related evidence across selected sessions and clients;

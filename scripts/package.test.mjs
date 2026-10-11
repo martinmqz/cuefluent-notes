@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process';
 import { buildPackages } from './package.mjs';
 import { exampleChecks } from './check-examples.mjs';
 import { inspectNoteMetadata } from './note-metadata.mjs';
+import { validateProcessingMcp } from './plugin-manifest.mjs';
+import { smokeEnvironment } from './smoke-environment.mjs';
 import MarkdownIt from 'markdown-it';
 
 const sourceVersion = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -31,6 +33,25 @@ async function inventory(root, prefix = '') {
     else files.push(relative);
   }
   return files;
+}
+async function checkController(pkg, directory) {
+  const configuration = JSON.parse(await fs.readFile(path.join(pkg.root, '.mcp.json')));
+  validateProcessingMcp(configuration, pkg.client);
+  const server = configuration.mcpServers.cuefluent_control;
+  const args = server.args.map(value => value.replace('${CLAUDE_PLUGIN_ROOT}', pkg.root));
+  const cwd = server.cwd === '.' ? pkg.root : directory;
+  const input = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'package-test', version: '1' } } },
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+  ].map(value => JSON.stringify(value) + '\n').join('');
+  const profile = path.join(directory, `${pkg.client}-controller-profile`), env = smokeEnvironment(profile);
+  const result = spawnSync(process.execPath, args, { cwd, env, input, encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const replies = result.stdout.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(replies[0].result.serverInfo.name, 'cuefluent_control');
+  assert.deepEqual(replies[1].result.tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_review']);
+  await assert.rejects(fs.stat(profile), { code: 'ENOENT' }, 'Discovery must not create settings or start a native client.');
 }
 async function checkDocumentation(root, files) {
   const parser = new MarkdownIt();
@@ -60,6 +81,7 @@ test('selected-client builds publish only that complete runtime and reject inval
     assert.equal(pkg.client, client);
     await fs.stat(path.join(pkg.root, `.${client}-plugin/plugin.json`));
     await fs.stat(path.join(pkg.root, 'hooks/hooks.json'));
+    await checkController(pkg, directory);
     assert.equal(run(path.join(pkg.skillRoot, 'scripts/check-notes.mjs'), [path.join(pkg.skillRoot, 'examples/decision.md')], directory).errors, 0);
   }
   const invalid = path.join(directory, 'invalid');
@@ -77,6 +99,8 @@ test('manual bundles run checker and guarded writes from isolated directories wi
     const manifest = JSON.parse(await fs.readFile(path.join(pkg.root, expectedManifest), 'utf8'));
     assert.equal(manifest.name, 'cuefluent-notes');
     assert.equal(manifest.version, sourceVersion);
+    assert.equal(manifest.mcpServers, './.mcp.json');
+    await checkController(pkg, directory);
     await assert.rejects(fs.stat(path.join(pkg.root, 'hooks')), { code: 'ENOENT' });
     const files = await inventory(pkg.root);
     for (const obsolete of ['setup', 'hooks', 'hook-definition', 'capture-policy', 'config-update', 'capture-completion']) assert(!files.includes(`skills/cuefluent-notes/scripts/${obsolete}.mjs`));

@@ -108,6 +108,24 @@ test('builds reject stale shared metadata and stale catalog text with no publish
   }
 });
 
+test('builds reject missing or changed controller declarations before publishing output', async t => {
+  const { root, source } = await fixture(t);
+  const output = path.join(root, 'output');
+  const { buildPackages } = await import(pathToFileURL(path.join(source, 'scripts/package.mjs')));
+  for (const [relative, change] of [
+    ['packaging/codex/plugin.json', value => { delete value.mcpServers; }],
+    ['packaging/claude/plugin.json', value => { value.mcpServers = '../unrelated.json'; }],
+    ['packaging/codex/mcp.json', value => { delete value.mcpServers.cuefluent_control.cwd; }],
+    ['packaging/claude/mcp.json', value => { value.mcpServers.cuefluent_control.args[2] = 'codex'; }],
+  ]) {
+    const file = path.join(source, relative), original = await fs.readFile(file), value = JSON.parse(original);
+    change(value); await fs.writeFile(file, JSON.stringify(value));
+    await assert.rejects(buildPackages({ outDir: output }), /controller|manifest metadata|MCP configuration/);
+    await assert.rejects(fs.stat(output), { code: 'ENOENT' });
+    await fs.writeFile(file, original);
+  }
+});
+
 test('marketplace verification rejects coherently rehashed divergence between client payloads', async () => {
   let { version, files } = await releaseFixture();
   const prefix = 'claude/cuefluent-notes/';

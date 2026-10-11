@@ -13,7 +13,7 @@ import { processingPageLayout, processingPagePaths, readProcessingExtent } from 
 import { buildProcessingProposal, validateProcessingProposal, copyProcessingProposal, verifyProcessingProposal, verifyExistingProposalParents, proposalHash } from './processing-proposal.mjs';
 import { applyPlan, recover, finalizeRecordedWriter, verifyPlanTargets } from './safe-update.mjs';
 import { readWriterReceipt as writerReceipt } from './writer-protocol.mjs';
-import { syncDirectory } from './file-io.mjs';
+import { syncDirectory, readBoundedBytes } from './file-io.mjs';
 import { canonicalJSON, digest, fail, keys, list, hash, nativeId, unique, choice, timestamp, integer } from './workflow-values.mjs';
 
 const equal = (a, b) => canonicalJSON(a) === canonicalJSON(b);
@@ -84,9 +84,15 @@ async function loadClaim(ctx, operationId, expectedHash) {
 function checkedInspection(claim) {
   if (claim.acknowledged.length !== claim.packet.pages.length) fail('PROCESSING_INSPECTION_INCOMPLETE');
 }
+export async function processingCollectionBlockers(ctx) {
+  const blockers = [];
+  if ((await processingNames(ctx, 'transactions')).length) blockers.push('PROCESSING_RECOVERY_REQUIRED');
+  if ((await processingSnapshot(ctx, 'journal.json')).bytes) blockers.push('WRITER_RECOVERY_REQUIRED');
+  return blockers;
+}
 async function assertNoTransaction(ctx) {
-  if ((await processingNames(ctx, 'transactions')).length) fail('PROCESSING_RECOVERY_REQUIRED');
-  if ((await processingSnapshot(ctx, 'journal.json')).bytes) fail('WRITER_RECOVERY_REQUIRED');
+  const blockers = await processingCollectionBlockers(ctx);
+  if (blockers.length) fail(blockers[0]);
 }
 async function requireIncomplete(ctx, operationId) {
   if ((await processingSnapshot(ctx, operationPath(operationId))).bytes) fail('PROCESSING_OPERATION_COMPLETE');
@@ -104,7 +110,9 @@ export async function activeProcessingClaims(ctx) {
   for (const name of await processingNames(ctx, 'claims')) {
     const operationId = nativeId(name.slice('claims/'.length, -5));
     try {
-      const claim = validateClaim(await processingJSON(ctx, name));
+      const snapshot = await processingSnapshot(ctx, name);
+      if (!snapshot.bytes) fail('PROCESSING_INVENTORY_CHANGED');
+      const claim = validateClaim(intakeJSON(snapshot));
       if (claim.bindingHash !== ctx.bindingHash) continue;
       if (!equal(claim.binding, ctx.binding) || name !== claimPath(claim.operationId)) fail('PROCESSING_BINDING_CHANGED');
       let published = false;
@@ -142,8 +150,8 @@ export async function prepareProcessingInState(ctx, { operationId, inputs, recon
   for (const { claim } of claims) {
     if (claim.inputs.some(input => inputs.some(ref => unitKey(ref.identity) === unitKey(input.identity)))) fail('PROCESSING_INPUT_CLAIMED');
   }
-  const queued = claims.filter(item => item.published).length, active = claims.length - queued;
-  if (queued >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued, limit: 5, operationIds: claims.filter(item => item.published).map(item => item.claim.operationId) });
+  const queued = claims.filter(item => item.claim.proposalIntent).length, active = claims.filter(item => !item.published).length;
+  if (queued >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued, limit: 5, operationIds: claims.filter(item => item.claim.proposalIntent).map(item => item.claim.operationId) });
   if (active >= parallelism) budgetError('PROCESSING_RESUME_REQUIRED', { current: active, limit: parallelism, operationIds: claims.filter(item => !item.published).map(item => item.claim.operationId) });
   const sources = [], associations = [];
   for (const reference of inputs) {
@@ -151,11 +159,9 @@ export async function prepareProcessingInState(ctx, { operationId, inputs, recon
     if (current.input.dispositionHash !== null && !reconsider) fail('PROCESSING_INPUT_ALREADY_HANDLED');
     sources.push({ input: current.input, capture: current.capture }); associations.push(current.association);
   }
-  const packet = renderProcessingPacket(sources), descriptors = sources.map(source => source.input);
+  const packet = renderProcessingPacket(sources, { maxBytes: limits.maxPacketBytes }), descriptors = sources.map(source => source.input);
   const workload = { packetBytes: packet.bytes, renderedPageBytes: packet.pages.reduce((total, page) => total + page.bytes, 0),
     estimatedTokens: Math.ceil(packet.bytes / 4), estimator: 'UTF-8 bytes divided by four; not measured model tokens' };
-  if (packet.bytes > limits.maxPacketBytes) budgetError('PROCESSING_BATCH_BUDGET', { packetBytes: packet.bytes, maxPacketBytes: limits.maxPacketBytes,
-    inputSizes: sources.map((source, index) => ({ index, packetBytes: renderProcessingPacket([source]).bytes })) });
   const claim = validateClaim({ format: 'cuefluent-processing-claim', version: 1, operationId, bindingHash: ctx.bindingHash, binding: ctx.binding,
     selection: ctx.selection, policyHash: ctx.policyHash, createdAt: new Date().toISOString(), inputs: descriptors, inputsHash: digest(canonicalJSON(descriptors)),
     packet: packetManifest(sources, packet), issued: [], acknowledged: [], proposalIntent: null });
@@ -207,9 +213,9 @@ export async function proposeProcessing(capability, { selection, operationId, ex
     await assertNoTransaction(ctx); await requireIncomplete(ctx, operationId);
     let saved = await loadClaim(ctx, operationId, expectedClaimHash); const { claim } = saved;
     checkedInspection(claim); await currentInputs(ctx, claim);
-    const active = await activeProcessingClaims(ctx), existing = active.find(item => item.claim.operationId === operationId);
-    const queued = active.filter(item => item.published && item.claim.operationId !== operationId);
-    if (!existing?.published && queued.length >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued.length, limit: 5, operationIds: queued.map(item => item.claim.operationId) });
+    const active = await activeProcessingClaims(ctx);
+    const queued = active.filter(item => item.claim.proposalIntent && item.claim.operationId !== operationId);
+    if (!claim.proposalIntent && queued.length >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued.length, limit: 5, operationIds: queued.map(item => item.claim.operationId) });
     let value;
     if (claim.proposalIntent) {
       value = validateProcessingProposal(claim.proposalIntent.value, claim);
@@ -319,12 +325,12 @@ function validateOperation(value, ctx, operationId) {
   }
   return value;
 }
-async function publishOperation(ctx, saved, outcome, proposal = null, receipt = null, cancelledTransactionHash = null) {
+async function publishOperation(ctx, saved, outcome, proposal = null, receipt = null, cancelledTransactionHash = null, beforePublish) {
   const value = { format: 'cuefluent-processing-operation', version: 1, operationId: saved.claim.operationId, bindingHash: ctx.bindingHash,
     claim: saved.claim, claimHash: saved.hash, outcome, processedAt: receipt?.value.committedAt ?? new Date().toISOString(), proposal, writerReceiptHash: receipt?.hash ?? null,
     ...(cancelledTransactionHash === null ? {} : { cancelledTransactionHash }) };
   validateOperation(value, ctx, value.operationId);
-  return { value, ...(await writeProcessingJSON(ctx, operationPath(value.operationId), value, null)) };
+  return { value, ...(await writeProcessingJSON(ctx, operationPath(value.operationId), value, null, { beforePublish })) };
 }
 async function projectRecord(ctx, name, value, previousHash) {
   const old = await processingSnapshot(ctx, name);
@@ -437,7 +443,7 @@ export async function saveProcessing(capability, { selection, operationId, expec
     const value = { format: 'cuefluent-processing-transaction', version: 1, operationId, bindingHash: ctx.bindingHash,
       claim, claimHash: saved.hash, proposal, proposalHash: approvedProposalHash, trigger, writerBinding: writerBinding(claim, proposal), plan: proposal.plan, planHash: digest(canonicalJSON(proposal.plan)) };
     validateTransaction(value, ctx, operationId);
-    const tx = { value, ...(await writeProcessingJSON(ctx, transactionPath(operationId), value, null)) };
+    const tx = { value, ...(await writeProcessingJSON(ctx, transactionPath(operationId), value, null, { beforePublish: options.beforeCommit })) };
     await options.fault?.('write-intent');
     return executeTransaction(ctx, tx, options);
   });
@@ -462,7 +468,7 @@ export async function completeProcessing(capability, { selection, operationId, e
       cancelledTransactionHash = tx.hash;
     } else await assertNoTransaction(ctx);
     if (outcome === 'unchanged') { checkedInspection(saved.claim); await currentInputs(ctx, saved.claim); }
-    const record = await publishOperation(ctx, saved, outcome, null, null, cancelledTransactionHash); await options.fault?.('operation-receipt');
+    const record = await publishOperation(ctx, saved, outcome, null, null, cancelledTransactionHash, options.beforeCommit); await options.fault?.('operation-receipt');
     return finishOperation(ctx, record, options);
   });
 }
@@ -484,17 +490,24 @@ export async function recoverProcessing(capability, { operationId, expectedRecov
   });
 }
 
-export async function describeProcessingOperation(ctx, operationId) {
+export async function describeProcessingOperation(ctx, operationId, expectedAdmission = null, collectionBlockers = null) {
   nativeId(operationId);
-  try { return await describeOperation(ctx, operationId); }
+  try { return await describeOperation(ctx, operationId, expectedAdmission, collectionBlockers); }
   catch (error) { error.operationId = operationId; throw error; }
 }
-async function describeOperation(ctx, operationId) {
+async function describeOperation(ctx, operationId, expectedAdmission, collectionBlockers) {
   const operation = await processingSnapshot(ctx, operationPath(operationId)), tx = await transactionSnapshot(ctx, operationId);
   const saved = await processingSnapshot(ctx, claimPath(operationId));
   const completed = operation.bytes ? validateOperation(intakeJSON(operation), ctx, operationId) : null;
   const claim = saved.bytes ? validateClaim(intakeJSON(saved)) : null;
   if (claim && (claim.operationId !== operationId || claim.bindingHash !== ctx.bindingHash || !equal(claim.binding, ctx.binding))) fail('PROCESSING_BINDING_CHANGED');
+  // A durable workset admission precedes its claim. Its exposed operation ID
+  // alone cannot prove that a later ordinary operation resumed that admission.
+  if (expectedAdmission) for (const candidate of [claim, completed?.claim, tx.value?.claim].filter(Boolean)) {
+    if (!equal(candidate.selection, expectedAdmission.selection) || candidate.policyHash !== expectedAdmission.policyHash ||
+        !equal(candidate.inputs.map(inputReference), expectedAdmission.inputs) ||
+        candidate.packet.hash !== expectedAdmission.packetHash || candidate.packet.bytes !== expectedAdmission.packetBytes) fail('PROCESSING_OPERATION_CONFLICT');
+  }
   const basis = claim ?? completed?.claim ?? tx.value?.claim;
   let published = false, proposalSnapshot = null;
   if (claim?.proposalIntent) {
@@ -518,11 +531,7 @@ async function describeOperation(ctx, operationId) {
         else throw error;
       }
     }
-    try { await assertNoTransaction(ctx); }
-    catch (error) {
-      if (['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED'].includes(error.code)) blockers.push(error.code);
-      else throw error;
-    }
+    blockers.push(...(collectionBlockers ?? await processingCollectionBlockers(ctx)));
   }
   const state = completed ? 'completed' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
     : claim?.proposalIntent ? 'draft-staging' : inspection?.state ?? 'missing';
@@ -552,4 +561,39 @@ export async function inspectProcessing(capability, operationId) {
   const ctx = await readProcessingState(capability, null, 'maintenance');
   const result = await describeProcessingOperation(ctx, operationId);
   await ctx.guard(); return result;
+}
+
+/** Exact, bounded review material for a selected immutable proposal. Delivery is
+ * read-only and does not acknowledge evidence or authorize the writer. Consumers
+ * must not replace these inspected hashes while waiting for a user's decision. */
+export async function readProcessingProposal(capability, { selection, operationId, expectedClaimHash, expectedProposalHash }) {
+  hash(expectedClaimHash); hash(expectedProposalHash);
+  return withProcessingState(capability, await selected(selection), explicit, async ctx => {
+    await requireIncomplete(ctx, operationId);
+    const saved = await loadClaim(ctx, operationId, expectedClaimHash), { claim } = saved;
+    checkedInspection(claim); const sources = await currentInputs(ctx, claim); await assertNoTransaction(ctx);
+    const proposal = await loadProposal(ctx, claim, expectedProposalHash);
+    await verifyProcessingProposal(ctx, proposal); await verifyExistingProposalParents(proposal);
+    const files = []; let total = 0;
+    for (const [index, file] of proposal.plan.files.entries()) {
+      const draft = await processingSnapshot(ctx, proposal.copies[index].path);
+      if (draft.hash !== file.expectedContentHash) fail('PROCESSING_PROPOSAL_CHANGED');
+      const original = await readBoundedBytes(path.join(proposal.plan.root, file.path), { maxBytes: 2 * 1024 * 1024, missing: true, noFollow: true });
+      if ((original === null ? null : digest(original)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');
+      total += draft.bytes.length + (original?.length ?? 0);
+      if (total > 4 * 1024 * 1024) fail('PROCESSING_REVIEW_LIMIT');
+      const decode = bytes => bytes === null ? null : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      files.push({ path: file.path, expectedHash: file.expectedHash, contentHash: file.expectedContentHash,
+        original: decode(original), proposed: decode(draft.bytes) });
+    }
+    await verifyExistingProposalParents(proposal); await verifyPlanTargets(proposal.plan);
+    if ((await processingSnapshot(ctx, claimPath(operationId))).hash !== saved.hash) fail('PROCESSING_CLAIM_CHANGED');
+    await ctx.guard();
+    return { interfaceVersion: PROCESSING_INTERFACE_VERSION, operationId, claimHash: saved.hash,
+      proposalHash: expectedProposalHash, files, createDirectories: proposal.plan.createDirectories ?? [],
+      inputs: claim.inputs.map(inputReference), inspection: inspectionProgress(claim),
+      sourceCoverage: sources.map(({ input, capture }) => ({ identity: input.identity, terminal: capture.terminal,
+        partial: capture.coverage.partial, omissions: structuredClone(capture.coverage.omissions) })),
+      mappings: structuredClone(proposal.mappings) };
+  });
 }

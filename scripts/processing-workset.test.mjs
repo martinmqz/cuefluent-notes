@@ -7,6 +7,7 @@ import { processingFixture, inspectedClaim, proposedClaim } from './test-support
 import { createProcessingWorkset, prepareWorksetBatch, inspectProcessingWorkset, listProcessingWorksets } from './processing-workset.mjs';
 import { prepareProcessing, completeProcessing, inspectProcessing, proposeProcessing } from './processing.mjs';
 import { executeWorkflow, workflowErrorReport } from './workflow.mjs';
+import { pendingProcessing } from './processing-inventory.mjs';
 
 test('actual serialized batch bytes gate admission without reserving an oversized singleton', async t => {
   const f = await processingFixture(t, { text: '雪\\"\n'.repeat(16000) });
@@ -203,4 +204,235 @@ test('workset resumes durable page progress, exact review and committed-save rec
   await recoverProcessing(f.capability, { operationId: batch.operationId, expectedRecoveryHash: status.operations[0].recoveryHash });
   status = await inspectProcessingWorkset(f.capability, { worksetId });
   assert.equal(status.outcomeCounts.saved, 1); assert.equal(status.inputCounts.handled, 1); assert.equal(status.operationCounts.terminal, 1);
+});
+
+for (const completed of [false, true]) for (const mismatch of ['inputs', 'packet']) {
+  test(`workset status rejects a reused admission ID with different ${mismatch}, completed=${completed}`, async t => {
+    const f = await processingFixture(t), worksetId = randomUUID();
+    const created = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+    await assert.rejects(prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: created.worksetHash, indexes: [0] },
+      { fault: () => { throw new Error('crash'); } }), /crash/);
+    const admitted = await inspectProcessingWorkset(f.capability, { worksetId });
+    const operationId = admitted.operations[0].operationId;
+    let inputs;
+    if (mismatch === 'inputs') inputs = (await processingFixture(t, { base: f })).inputs;
+    else {
+      // Identical capture references can have a different packet after another
+      // operation changes their exact disposition metadata.
+      const external = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+      await completeProcessing(f.capability, { ...f.args, expectedClaimHash: external.claimHash, outcome: 'skipped' });
+      inputs = f.inputs;
+    }
+    const wrong = await prepareProcessing(f.capability, { selection: f.selection, operationId, inputs, reconsider: mismatch === 'packet' });
+    if (completed) await completeProcessing(f.capability, { selection: f.selection, operationId, expectedClaimHash: wrong.claimHash, outcome: 'skipped' });
+    const file = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', worksetId + '.json');
+    const before = await fs.readFile(file);
+    await assert.rejects(inspectProcessingWorkset(f.capability, { worksetId }), error => {
+      assert.deepEqual(workflowErrorReport(error), { error: 'PROCESSING_OPERATION_CONFLICT', operationId }); return true;
+    });
+    assert.deepEqual(await fs.readFile(file), before, 'the original charged admission remains intact');
+    const listed = (await listProcessingWorksets(f.capability)).worksets[0];
+    assert.equal(listed.worksetHash, admitted.worksetHash); assert.equal(listed.chargedBatches, 1);
+    assert.equal((await inspectProcessing(f.capability, operationId)).state, completed ? 'completed' : 'unread');
+    if (mismatch === 'inputs') assert.equal((await pendingProcessing(f.capability, { selection: f.selection })).counts.unclaimedRevisions, 1);
+  });
+}
+
+
+test('workset size diagnostics identify frozen indexes even for an out-of-order batch', async t => {
+  const f = await processingFixture(t), inputs = [...f.inputs];
+  for (let i = 1; i < 8; i++) inputs.push(...(await processingFixture(t, { base: f, text: 'x'.repeat(i * 1000) })).inputs);
+  const worksetId = randomUUID();
+  const workset = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs });
+  await assert.rejects(prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: workset.worksetHash,
+    indexes: [7, 3], batchBudget: { maxInputs: 2, maxPacketBytes: 1 } }), error => {
+    const report = workflowErrorReport(error);
+    assert.equal(report.error, 'PROCESSING_BATCH_BUDGET');
+    assert.deepEqual(report.details.inputSizes.map(item => item.index), [3, 7]);
+    assert(report.details.inputSizes[1].packetBytes > report.details.inputSizes[0].packetBytes);
+    return true;
+  });
+  assert.equal((await inspectProcessingWorkset(f.capability, { worksetId })).chargedBatches, 0);
+});
+
+test('over-ceiling batches return every measured input without creating a claim', async t => {
+  const f = await processingFixture(t, { text: 'x'.repeat(1500000) }), inputs = [...f.inputs];
+  for (let i = 0; i < 2; i++) inputs.push(...(await processingFixture(t, { base: f, text: 'y'.repeat(1500000) })).inputs);
+  await assert.rejects(prepareProcessing(f.capability, { ...f.args, inputs, budget: { maxInputs: 3, maxPacketBytes: 4194304 } }), error => {
+    const report = workflowErrorReport(error);
+    assert.equal(report.error, 'PROCESSING_BATCH_BUDGET'); assert(report.details.packetBytes > 4194304);
+    assert.deepEqual(report.details.inputSizes.map(item => item.index), [0, 1, 2]);
+    assert(report.details.inputSizes.every(item => item.packetBytes > 1500000)); return true;
+  });
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'missing');
+});
+
+test('staged proposals reserve queue space and legacy staging resumes at the queue cap', async t => {
+  const f = await processingFixture(t);
+  for (let i = 0; i < 4; i++) await proposedClaim(i === 0 ? f : await processingFixture(t, { base: f }), { name: `queued-${i}.md` });
+  const a = await processingFixture(t, { base: f }), b = await processingFixture(t, { base: f });
+  const first = await inspectedClaim(a), second = await inspectedClaim(b, { parallelism: 2 });
+  const draft = path.join(f.root, 'queue-draft.md'), content = '# Synthetic subject\n\n## Decision\n\nKeep this result.\n';
+  const { digest } = await import('./workflow-values.mjs');
+  await fs.writeFile(draft, content, { mode: 0o600 });
+  await assert.rejects(proposeProcessing(a.capability, { ...a.args, expectedClaimHash: first.claimHash,
+    proposal: { files: [{ path: 'staged.md', expectedHash: null, contentPath: draft, expectedContentHash: digest(content) }],
+      mappings: [{ identity: a.identity, paths: ['staged.md'] }] } }, { fault: at => { if (at === 'proposal-intent') throw new Error('crash'); } }), /crash/);
+  let status = await inspectProcessing(a.capability, a.operationId);
+  assert.equal(status.state, 'draft-staging');
+  await assert.rejects(proposedClaim(b, { claim: second, name: 'sixth.md' }), /PROCESSING_PROPOSAL_QUEUE_FULL/);
+  // Simulate the old interleaving: a fifth other publication completed while A
+  // had durable intent but no record. Its owned staged bytes remain resumable.
+  const { withProcessingState, processingSnapshot, writeProcessingJSON } = await import('./processing-state.mjs');
+  const { buildProcessingProposal, copyProcessingProposal, proposalHash } = await import('./processing-proposal.mjs');
+  const { intakeJSON } = await import('./intake-io.mjs');
+  await withProcessingState(b.capability, b.selection, 'explicitProcess', async ctx => {
+    const name = `claims/${b.operationId}.json`, snapshot = await processingSnapshot(ctx, name), claim = intakeJSON(snapshot);
+    const proposal = await buildProcessingProposal(ctx, claim, { files: [{ path: 'other.md', expectedHash: null, contentPath: draft, expectedContentHash: digest(content) }],
+      mappings: [{ identity: b.identity, paths: ['other.md'] }] });
+    claim.proposalIntent = { hash: proposalHash(proposal), value: proposal };
+    await writeProcessingJSON(ctx, name, claim, snapshot.hash); await copyProcessingProposal(ctx, proposal);
+    await writeProcessingJSON(ctx, `proposals/${b.operationId}/record.json`, proposal, null);
+  });
+  assert.equal(status.nextAction.command, 'processing-propose');
+  const resumed = await proposeProcessing(a.capability, { ...a.args, expectedClaimHash: status.claimHash });
+  assert.equal(resumed.proposalHash, status.proposalHash);
+  assert.equal((await inspectProcessing(a.capability, a.operationId)).state, 'awaiting-review');
+});
+
+test('changed settings explicitly stale worksets while preserving budgets and cancellation', async t => {
+  const f = await processingFixture(t), worksetId = randomUUID();
+  const args = { selection: f.selection, worksetId, inputs: f.inputs };
+  const workset = await createProcessingWorkset(f.capability, args);
+  const batch = await prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] });
+  const { digest } = await import('./workflow-values.mjs');
+  const { verifyWorkflowStorage } = await import('./workflow-storage.mjs');
+  f.config.routes[0].id = 'renamed-fixture'; // An otherwise unrelated config edit.
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes);
+  f.capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
+  let status = await inspectProcessingWorkset(f.capability, { worksetId });
+  assert.equal(status.policyState, 'changed'); assert.equal(status.conflict, 'WORKFLOW_POLICY_CHANGED');
+  assert.equal(status.chargedBatches, 1); assert.equal(status.worksetHash, batch.workset.worksetHash);
+  assert.equal((await listProcessingWorksets(f.capability)).worksets[0].policyState, 'changed');
+  await assert.rejects(createProcessingWorkset(f.capability, args), error => {
+    assert.deepEqual(workflowErrorReport(error), { error: 'WORKFLOW_POLICY_CHANGED', worksetId }); return true;
+  });
+  await assert.rejects(prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: status.worksetHash, indexes: [0] }), /WORKFLOW_POLICY_CHANGED/);
+  await completeProcessing(f.capability, { selection: f.selection, operationId: batch.operationId, expectedClaimHash: batch.claimHash, outcome: 'cancelled' });
+  status = await inspectProcessingWorkset(f.capability, { worksetId });
+  assert.equal(status.chargedBatches, 1); assert.equal(status.outcomeCounts.cancelled, 1);
+  assert.equal(status.remainingSelected, 1);
+});
+
+
+for (const inventory of ['workset', 'pending']) test(`${inventory} reports a disappearing listed claim as a retryable inventory change`, async t => {
+  const f = await processingFixture(t), worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  const directory = path.join(f.collection.notes.writerStateDir, 'claims');
+  const file = path.join(directory, `${f.operationId}.json`), opendir = fs.opendir;
+  t.mock.method(fs, 'opendir', async (name, ...args) => {
+    const dir = await opendir(name, ...args);
+    if (name !== directory) return dir;
+    return { async *[Symbol.asyncIterator]() {
+      for await (const entry of dir) yield entry;
+      await fs.unlink(file);
+    } };
+  });
+  await assert.rejects(inventory === 'workset' ? inspectProcessingWorkset(f.capability, { worksetId })
+    : pendingProcessing(f.capability, { selection: f.selection }), { code: 'PROCESSING_INVENTORY_CHANGED' });
+});
+
+test('workset status reads collection blockers once for multiple operations and preserves both blockers', async t => {
+  const f = await processingFixture(t), b = await processingFixture(t, { base: f }), worksetId = randomUUID();
+  const created = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: [...f.inputs, ...b.inputs] });
+  const first = await prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: created.worksetHash, indexes: [0] });
+  await prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: first.workset.worksetHash, indexes: [1], parallelism: 2 });
+  const transactions = path.join(f.collection.notes.writerStateDir, 'transactions');
+  const { privacyIdentity, protectNewDirectory } = await import('./storage-platform.mjs');
+  await fs.mkdir(transactions, { mode: 0o700 }); await protectNewDirectory(transactions, await privacyIdentity());
+  await fs.writeFile(path.join(transactions, `${randomUUID()}.json`), '{}', { mode: 0o600 });
+  await fs.writeFile(path.join(f.collection.notes.writerStateDir, 'journal.json'), '{}', { mode: 0o600 });
+  const opendir = fs.opendir; let scans = 0;
+  t.mock.method(fs, 'opendir', async (name, ...args) => { if (name === transactions) scans++; return opendir(name, ...args); });
+  const status = await inspectProcessingWorkset(f.capability, { worksetId });
+  assert.equal(scans, 1); assert.equal(status.operations.length, 2);
+  for (const operation of status.operations) assert.deepEqual(operation.blockers, ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED']);
+});
+
+test('error diagnostics retain the full workset index range and only native IDs', () => {
+  assert.deepEqual(workflowErrorReport({ code: 'PROCESSING_BATCH_BUDGET', details: { inputSizes: [{ index: 99, packetBytes: 100 }] } }).details.inputSizes,
+    [{ index: 99, packetBytes: 100 }]);
+  for (const value of [null, {}, 'not-an-id', 'ABCDEF00-0000-0000-0000-000000000000']) {
+    assert.deepEqual(workflowErrorReport({ code: 'PROCESSING_OPERATION_CONFLICT', operationId: value, worksetId: value }), { error: 'PROCESSING_OPERATION_CONFLICT' });
+  }
+});
+
+
+test('present null claim metadata remains corruption, not a disappeared-file race', async t => {
+  const f = await processingFixture(t), worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  await fs.writeFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`), 'null');
+  await assert.rejects(inspectProcessingWorkset(f.capability, { worksetId }), error => {
+    assert.deepEqual(workflowErrorReport(error), { error: 'INVALID_WORKFLOW', operationId: f.operationId }); return true;
+  });
+});
+
+
+test('explicit current-policy batches keep charged history and cannot reauthorize old admissions', async t => {
+  const f = await processingFixture(t), b = await processingFixture(t, { base: f }), c = await processingFixture(t, { base: f });
+  const worksetId = randomUUID(), inputs = [...f.inputs, ...b.inputs, ...c.inputs];
+  const created = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs });
+  const first = await prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: created.worksetHash, indexes: [0] });
+  await assert.rejects(prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: first.workset.worksetHash, indexes: [1], parallelism: 2 },
+    { fault: () => { throw new Error('crash'); } }), /crash/);
+  // Older worksets omit per-attempt policy; that means their creation policy.
+  const file = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', worksetId + '.json');
+  const old = JSON.parse(await fs.readFile(file, 'utf8'));
+  for (const attempt of old.attempts) delete attempt.policyHash;
+  await fs.writeFile(file, JSON.stringify(old));
+  const oldBytes = await fs.readFile(file);
+  const before = await inspectProcessingWorkset(f.capability, { worksetId });
+  const { digest } = await import('./workflow-values.mjs');
+  const { verifyWorkflowStorage } = await import('./workflow-storage.mjs');
+  f.config.routes[0].id = 'current-fixture';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes);
+  f.capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
+  const call = args => executeWorkflow('processing-workset-prepare', { collectionId: f.collection.id, expectedConfigHash: digest(bytes),
+    args: { worksetId, expectedWorksetHash: before.worksetHash, parallelism: 2, ...args } }, { configPath: f.options.configPath });
+  for (const indexes of [[0], [1]]) await assert.rejects(call({ indexes, acceptPolicyChange: true }), /WORKFLOW_POLICY_CHANGED/);
+  await assert.rejects(call({ indexes: [0, 2], acceptPolicyChange: true }), /WORKSET_INPUT_ALREADY_ATTEMPTED/);
+  await assert.rejects(call({ indexes: [2] }), /WORKFLOW_POLICY_CHANGED/);
+  await assert.rejects(call({ indexes: [2], acceptPolicyChange: 'true' }), /INVALID_PROCESSING_REQUEST/);
+  assert.deepEqual(await fs.readFile(file), oldBytes);
+  const next = await call({ indexes: [2], acceptPolicyChange: true });
+  assert.equal(next.workset.chargedBatches, 3);
+  assert.equal(next.workset.chargedPacketBytes, before.chargedPacketBytes + next.packet.bytes);
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(persisted.inputs, inputs); assert.deepEqual(persisted.attempts.slice(0, 2), old.attempts);
+  assert.equal(persisted.policyHash, old.policyHash); assert.equal(persisted.attempts[2].policyHash, digest(bytes));
+  const retry = await call({ indexes: [2], expectedWorksetHash: next.workset.worksetHash });
+  assert.equal(retry.claimHash, next.claimHash); assert.equal(retry.workset.chargedBatches, 3);
+  const status = await inspectProcessingWorkset(f.capability, { worksetId });
+  assert.equal(status.policyState, 'changed');
+  assert.equal(status.operations.find(op => op.operationId === next.operationId).conflict, null);
+  assert.equal(status.items[2].state, 'unread');
+  assert.equal(status.items[0].conflict, 'WORKFLOW_POLICY_CHANGED');
+  assert.equal(status.items[1].conflict, 'WORKFLOW_POLICY_CHANGED');
+});
+
+
+test('accepting changed policy cannot bypass an excluded source or alter the frozen workset', async t => {
+  const f = await processingFixture(t), worksetId = randomUUID();
+  const created = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  f.config.routes[0].excluded = true;
+  const { digest } = await import('./workflow-values.mjs');
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes);
+  const file = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', worksetId + '.json');
+  const before = await fs.readFile(file);
+  await assert.rejects(executeWorkflow('processing-workset-prepare', { collectionId: f.collection.id, expectedConfigHash: digest(bytes),
+    args: { worksetId, expectedWorksetHash: created.worksetHash, indexes: [0], acceptPolicyChange: true } },
+  { configPath: f.options.configPath }), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+  assert.deepEqual(await fs.readFile(file), before);
 });

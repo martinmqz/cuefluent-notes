@@ -44,10 +44,19 @@ silently stolen. A failed spawn retains queued metadata. See
 [recovery](session-workflow.md#blocked-intake-and-explicit-recovery).
 
 Hook output contains bounded status and native identity metadata, not raw evidence.
-**Live current-turn context delivery is unverified.** No usable `contextRef` is
-emitted and automatic Markdown processing is disabled. Use explicit session/unit
-selection and an explicit processing command. Native Save / Skip rendering and
-agent compliance are separate live tests; emitted JSON proves neither.
+**Live hook-to-agent current-turn context delivery is unverified.** Hooks emit no
+usable `contextRef` and do not start automatic Markdown processing. The separate
+[processing-chat controller](processing-chat.md) handles explicit skill requests
+through a verified native MCP call, using the existing client and engine. It does
+not derive identity or consent from a hook notice. Explicit CLI processing with
+selected sessions/units also remains available.
+
+Controlled processing launches disable inherited hooks. Readers can also verify
+exact controller-run receipts and formal source-chat controls; they never exclude
+an entire session just because it is labeled for processing. Real work and
+corrections in that session keep their normal collection boundaries. Native
+protocol fixtures cover dispatch and host review-form transport; attended desktop
+rendering and agent compliance remain separate acceptance checks.
 
 `workflow.mjs status` distinguishes packaged registration from unknown client
 trust, restrictions/feature flags and Node launch PATH. Check the client's own

@@ -12,6 +12,7 @@ in the source repository for the current jobs.
 | Consent and controls | Independent collection/processing settings, opt-outs, stale settings, explicit selection and zero-write ingress for disabled or unconfigured projects |
 | Private storage | Native permissions, path/link replacement, owner checks, local storage requirements, hidden raw roots, profile/indexing policy, aliased native folder facts and explicit maintenance |
 | Processing and writes | Exact input claims, acknowledged evidence pages, metadata-only operation states, bounded packet admission, frozen worksets, cross-client admission, proposals, conflict detection, coordinated receipts, retries and injected recovery failures |
+| Processing controller | Metadata-only status and review, guarded offline retirement with preserved engine work, pre-dispatch retry, historical namespace reuse, exact native-call rebinding, nonfatal host notifications, policy rechecks and narrower-claim resumption; synthetic native transports do not establish live Desktop behavior |
 | Backlog acceptance | Synthetic repeated facts completed unchanged, multiple revisions mapped to one existing subject note, resumed/reversed-order correction review with rejection of prior proposal authority, unavailable-image and output-gap retention; authored fixture text tests engine preservation, not model synthesis |
 | Capture fairness and echoes | Bounded per-call/kind tool text, explicit clipping descriptors, Unicode accounting, later failure/correction retention, old-reader replay and checkpoint continuity; forged markers and new identities retain unproven echoes |
 | Portable note metadata | Bounded YAML structure, comment placement, safe unknown fields, unsupported schemas, selected-file ID collisions, descriptive dates/source references and unchanged heading/alias vocabulary; no app indexing or hash-freshness claim |
@@ -65,12 +66,16 @@ integration works.
 
 ## Evidence limits
 
-- Synthetic reader fixtures and emitted hook payloads do not establish live
-  current-turn identity transport or context delivery. Native Save / Skip
-  rendering, conversational current-turn controls and automatic Markdown
-  processing are not verified; use the supported explicit CLI operations.
-- Generated-output attribution remains unverified. Collection and processing copy
-  exclusions are disabled; processing output can still enter later captures.
+- Synthetic reader fixtures and emitted hook payloads do not establish live hook
+  current-turn identity transport or automatic Markdown processing. Native-client
+  protocol experiments use disposable profiles and synthetic provider responses
+  outside the reproducible suite. They exercise restricted create/resume, tool restrictions, formal control
+  identity and host review-form delivery. They do not establish desktop sidebar
+  visibility, physical user approval, or a complete live desktop workflow.
+- Arbitrary generated-output copy attribution remains unverified. The
+  [dedicated controller](processing-chat.md) disables inherited hooks and supports
+  exact native record exclusions; inline processing output in ordinary chats can
+  still enter later captures. Processing does not filter existing packet copies.
   Budget fairness improves future retention but cannot restore previously omitted
   text. Complete page inspection does not establish complete original sources.
 - Claude extraction preserves proven human input with unconfirmed coverage;

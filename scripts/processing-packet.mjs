@@ -15,8 +15,17 @@ export function renderEvidencePage(value) {
 /** JSON encodes source delimiters and instructions as untrusted evidence data.
  * Pages must be reassembled/acknowledged in full; none is a completion receipt.
  */
-export function renderProcessingPacket(sources) {
-  const bytes = Buffer.from(canonicalJSON({ format: 'cuefluent-evidence-packet', version: 1, untrusted: true, sources }));
+const packetText = sources => canonicalJSON({ format: 'cuefluent-evidence-packet', version: 1, untrusted: true, sources });
+export function renderProcessingPacket(sources, { maxBytes } = {}) {
+  const bytes = Buffer.from(packetText(sources));
+  // Admission measures before building/hash-checking pages, including packets
+  // above the hard ceiling. Singleton sizes use the identical canonical frame.
+  if (maxBytes !== undefined && bytes.length > Math.min(maxBytes, PROCESSING_PACKET_BYTES)) {
+    throw Object.assign(new Error('PROCESSING_BATCH_BUDGET'), { code: 'PROCESSING_BATCH_BUDGET', details: {
+      packetBytes: bytes.length, maxPacketBytes: Math.min(maxBytes, PROCESSING_PACKET_BYTES),
+      inputSizes: sources.map((source, index) => ({ index, packetBytes: Buffer.byteLength(packetText([source])) }))
+    } });
+  }
   if (bytes.length > PROCESSING_PACKET_BYTES) fail('PROCESSING_PACKET_CAPACITY');
   const packetHash = digest(bytes), chunks = [];
   for (let offset = 0; offset < bytes.length;) {

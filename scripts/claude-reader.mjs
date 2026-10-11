@@ -8,12 +8,15 @@ import { verifySourceCursor } from './intake-store.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
 import { createCapture, validateCapture, assertCaptureExtension, clientVersion, captureReader } from './capture-contract.mjs';
+import { SKILL_ROOT } from './runtime-paths.mjs';
+import { loadClaudeProcessingSkill, claudeProcessingCommandKind, isClaudeProcessingCommand, verifyClaudeProcessingControl, isProcessingControlProof } from './processing-control-proof.mjs';
+import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { nativeId, timestamp, canonicalJSON, fail } from './workflow-values.mjs';
 
 export const CLAUDE_READER_VERSION = '1';
 // Bump when compatibility or classification rules change. This expires only
 // disposable suspensions, independently of immutable captures/checkpoints.
-export const CLAUDE_READER_RULES_REVISION = 1;
+export const CLAUDE_READER_RULES_REVISION = 2;
 const metadataTypes = new Set(['summary', 'custom-title', 'ended-by-model', 'ai-title', 'last-prompt', 'tag',
   'agent-name', 'agent-color', 'agent-setting', 'pr-link', 'frame-link', 'artifact-comment-monitor',
   'artifact-autoreact-ledger', 'file-history-snapshot', 'file-history-delta', 'attribution-snapshot',
@@ -92,6 +95,7 @@ const progressAt = (source, record) => ({ sourceIdentity: source.fileIdentity, o
  * Carry is bounded metadata; no unowned payload enters a capture or checkpoint.
  */
 export async function readClaudeSelection({ state, scopeId, cursor = null, checkpoint = null, heads = new Map(), loadHead = null,
+  resolveProcessingDispatch = null, resolveProcessingExecution = null, processingSkillPath = path.join(SKILL_ROOT, 'SKILL.md'),
   capturedAt = new Date().toISOString(), deadline = Infinity, now = Date.now, ...limits }) {
   validateSelectionState(state); nativeId(scopeId); timestamp(capturedAt);
   const scope = currentIntervals(state).find(item => item.id === scopeId) ?? state.explicitScopes.find(item => item.id === scopeId);
@@ -236,7 +240,22 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
     return anchors.every((item, i) => i === 0 || linked(anchors[i - 1], item))
       ? { kind: 'native-links', units: anchors.map(item => item.unitId), anchors } : null;
   };
-  const candidates = [], pending = [], eligibility = new Map(), noEvidence = [], covered = [];
+  const candidates = [], pending = [], eligibility = new Map(), noEvidence = [], covered = [], processingControls = [];
+  const trustedSkills = new Map();
+  const excludeInput = (proof, records) => {
+    if (proof.evidenceScope !== 'controller-input' || proof.recordIds.length !== 1) return false;
+    const input = records.find(record => record.id === proof.recordIds[0]);
+    if (!input) return false; // A later same-prompt correction is not the sealed input.
+    if (input.startByte !== proof.inputRange.fromByte || input.endByte !== proof.inputRange.endByte || input.hash !== proof.inputRange.hash) fail('SOURCE_CHANGED');
+    // Preserve native unit/ancestry metadata without claiming absent evidence on
+    // replay. human-empty is already a structural, no-evidence checkpoint kind.
+    const metadata = rows.get(input.id), oldKind = metadata.kind;
+    metadata.kind = 'human-empty';
+    try { validateReaderCheckpoint(carry); checkpointPageBuilder(carry); }
+    catch (error) { metadata.kind = oldKind; throw error; }
+    const frame = frames.find(value => value.recordIds?.includes(input.id)); if (frame) frame.kind = 'structural';
+    processingControls.push(proof); return true;
+  };
   for (const [unitId, records] of changes) {
     try {
       checkBudget();
@@ -257,9 +276,38 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
             baseline.source.fileIdentity !== source.fileIdentity || baseline.source.path !== source.path || baseline.projectRoot !== source.projectRoot ||
             baseline.reader.name !== 'claude-transcript' || baseline.reader.version !== CLAUDE_READER_VERSION || captureReader(baseline.reader).headerClientVersion !== scan.metadata.version) fail('CAPTURE_REVISION_CONFLICT');
       }
+      const provenInputs = new Set();
+      if (!baseline && !previous?.head && typeof loadHead === 'function') {
+        if (typeof resolveProcessingExecution === 'function') {
+          const receipt = await resolveProcessingExecution({ client: 'claude', sessionId: source.sessionId, unitId });
+          if (receipt) {
+            const execution = await verifyProcessingExecution({ source, unitId, fromByte: receipt.fromByte, endByte: receipt.endByte }, { resolveExecution: async () => receipt });
+            if (isProcessingExecutionProof(execution) && excludeInput(execution, records)) for (const id of execution.recordIds) provenInputs.add(id);
+          }
+        }
+        if (!provenInputs.size && typeof resolveProcessingDispatch === 'function' && isClaudeProcessingCommand(records[0]?.value)) {
+          const controlKind = claudeProcessingCommandKind(records[0].value);
+          if (!trustedSkills.has(controlKind)) trustedSkills.set(controlKind, loadClaudeProcessingSkill({ skillPath: processingSkillPath, control: controlKind }));
+          if (await trustedSkills.get(controlKind)) {
+            const input = records[0], laterInput = scan.records.find(record => record.startByte > input.startByte && human(record.value));
+            const endByte = laterInput?.startByte ?? to.offset;
+            const control = await verifyClaudeProcessingControl({ source, unitId, fromByte: input.startByte, endByte }, { resolveDispatch: resolveProcessingDispatch, trustedSkill: await trustedSkills.get(controlKind) });
+            if (isProcessingControlProof(control) && excludeInput(control, records)) for (const id of control.recordIds) provenInputs.add(id);
+            else {
+              const finished = scan.records.some(record => record.startByte > input.startByte && record.endByte <= endByte &&
+                record.value.type === 'assistant' && record.value.message?.stop_reason === 'end_turn' &&
+                record.value.attributionSkill === 'cuefluent-notes:cuefluent-notes');
+              // Deferral is not exclusion. A torn formal command has no proof
+              // yet; keep its cursor held until completion or a later real input.
+              if (!laterInput && !finished) { pending.push({ unitId, reason: 'PROCESSING_CONTROL_PROVENANCE_PENDING' }); continue; }
+            }
+          }
+        }
+      }
       const oldHuman = (checkpoint?.records ?? []).filter(item => item.kind === 'human' && item.unitId === unitId);
       if (oldHuman.length && (!baseline || oldHuman.some(item => !baseline.source.ranges.some(r => r.recordIds.includes(item.id))))) fail('CAPTURE_BASELINE_REQUIRED');
       const additions = records.filter(record => {
+        if (provenInputs.has(record.id)) return false;
         const old = baseline?.source.ranges.find(range => range.recordIds.includes(record.id));
         if (old) {
           if (canonicalJSON(old) !== canonicalJSON(captureRange(record))) fail('CAPTURE_REVISION_CONFLICT');
@@ -289,7 +337,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       candidates.push({ capture, proof, scopeId, expectedHeadHash: previous?.hash ?? null });
     } catch (error) { pending.push({ unitId, reason: error.code ?? 'UNSUPPORTED_CLAUDE_UNIT' }); }
   }
-  return { candidates, covered, pending, noEvidence, unanchoredUnits: [], blocked, anchorUpdates, selection, from, to, frames, eligibility, checkpoint: carry,
+  return { candidates, covered, pending, noEvidence, processingControls, unanchoredUnits: [], blocked, anchorUpdates, selection, from, to, frames, eligibility, checkpoint: carry,
     nativeAnchors: carry.units.map(unit => ({ unitId: unit.id, record: anchor(rows.get(unit.recordId)) })), recordAnchors: scan.records.filter(record => record.id && record.endByte <= to.offset).map(anchor),
     diagnostics: { pendingTail: scan.pendingTail, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd,
       automaticCeilingReached: Boolean(scope.upper && scan.snapshotEnd >= ceiling && !scan.limited && !scan.blocked),

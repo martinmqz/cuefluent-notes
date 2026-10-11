@@ -5,7 +5,7 @@ import { assertWorkflowStorage, assertPrivatePaths } from './workflow-storage.mj
 import { openProcessingIntake, inspectIntakeStore, withIntakeLock, guardStore, intakePath, intakeSnapshot, intakeJSON, writeIntakeStage } from './intake-io.mjs';
 import { withWorkflowWriterLocks } from './capture-maintenance.mjs';
 import { lstatOrNull, removeOwnedStage, syncDirectory, isOwnedStage } from './file-io.mjs';
-import { canonicalJSON, fail } from './workflow-values.mjs';
+import { canonicalJSON, fail, isNativeId } from './workflow-values.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 
 export async function readProcessingState(capability, selection, operation) {
@@ -38,10 +38,10 @@ export async function processingSnapshot(ctx, name) {
 }
 export const processingJSON = async (ctx, name) => intakeJSON(await processingSnapshot(ctx, name));
 
-export async function writeProcessingJSON(ctx, name, value, expectedHash) {
-  return writeProcessingBytes(ctx, name, Buffer.from(canonicalJSON(value) + '\n'), expectedHash);
+export async function writeProcessingJSON(ctx, name, value, expectedHash, options) {
+  return writeProcessingBytes(ctx, name, Buffer.from(canonicalJSON(value) + '\n'), expectedHash, options);
 }
-export async function writeProcessingBytes(ctx, name, bytes, expectedHash) {
+export async function writeProcessingBytes(ctx, name, bytes, expectedHash, { beforePublish } = {}) {
   const before = await processingSnapshot(ctx, name);
   if (before.hash !== expectedHash) fail('PROCESSING_STATE_CHANGED');
   if (!Buffer.isBuffer(bytes)) fail('INVALID_PROCESSING_BYTES');
@@ -57,6 +57,8 @@ export async function writeProcessingBytes(ctx, name, bytes, expectedHash) {
     await ctx.guard();
     if ((await processingSnapshot(ctx, name)).hash !== expectedHash || !await isOwnedStage(stage.file, stage.identity, bytes, { guard: stageGuard })) fail('PROCESSING_STATE_CHANGED');
     await guardStore(ctx.writer, [stage.file, target]);
+    // Synchronous admission boundary, immediately before durable publication.
+    beforePublish?.();
     await fs.rename(stage.file, target); await syncDirectory(path.dirname(target));
   } finally { await removeOwnedStage(stage.file, stage.identity, bytes, { guard: stageGuard }); }
   return processingSnapshot(ctx, name);
@@ -76,7 +78,7 @@ export async function processingNames(ctx, directory, limit = 100) {
   if (!await lstatOrNull(parent)) return [];
   const names = [];
   for await (const entry of await fs.opendir(parent)) {
-    if (!entry.isFile() || !/^[0-9a-f-]{36}\.json$/.test(entry.name)) fail('UNKNOWN_PROCESSING_STATE');
+    if (!entry.isFile() || !entry.name.endsWith('.json') || !isNativeId(entry.name.slice(0, -5))) fail('UNKNOWN_PROCESSING_STATE');
     names.push(`${directory}/${entry.name}`);
     if (names.length > limit) fail('PROCESSING_CAPACITY');
   }
@@ -88,12 +90,15 @@ export async function processingNames(ctx, directory, limit = 100) {
 export async function processingNamePage(ctx, directory, { limit, afterId }) {
   const target = await intakePath(ctx.writer, 'state', `${directory}/.list`), parent = path.dirname(target);
   await assertPrivatePaths(ctx.capability, [parent]);
+  return nativeNamePage(parent, { limit, afterId });
+}
+export async function nativeNamePage(parent, { limit, afterId, invalidCode = 'UNKNOWN_PROCESSING_STATE', capacityCode = 'PROCESSING_INVENTORY_CAPACITY' }) {
   if (!await lstatOrNull(parent)) return { ids: [], incomplete: false, nextCursor: null };
   const ids = []; let scanned = 0;
   for await (const entry of await fs.opendir(parent)) {
     checkWorkflowBudget();
-    if (++scanned > 65536) fail('PROCESSING_INVENTORY_CAPACITY');
-    if (!entry.isFile() || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.json$/.test(entry.name)) fail('UNKNOWN_PROCESSING_STATE');
+    if (++scanned > 65536) fail(capacityCode);
+    if (!entry.isFile() || !entry.name.endsWith('.json') || !isNativeId(entry.name.slice(0, -5))) fail(invalidCode);
     const id = entry.name.slice(0, -5);
     if (afterId !== null && id <= afterId) continue;
     ids.push(id); ids.sort(); if (ids.length > limit + 1) ids.pop();

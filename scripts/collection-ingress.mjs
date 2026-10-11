@@ -21,6 +21,8 @@ export const registrationPath = identity => `ingress/registrations/${choice(iden
 export const wakePath = identity => `ingress/wake/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const suspendedPath = identity => `ingress/suspended/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const drainedPath = identity => `ingress/drained/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
+export const processingSourceDirectory = client => `ingress/processing-sources/${choice(client, ['codex', 'claude'])}`;
+export const processingSourcePath = (identity, policyHash) => `${processingSourceDirectory(identity.client)}/${nativeId(identity.sessionId)}/${hash(policyHash)}/record.json`;
 // Shape version only; reader-owned rules revisions invalidate cached results.
 export const READER_SUSPENSION_VERSION = 2;
 
@@ -34,6 +36,38 @@ export async function snapshotSourceMetadata(file) {
   const after = await fs.lstat(canonical, { bigint: true });
   if (!sameFileIdentity(stat, after) || after.size < stat.size || after.nlink !== 1n) fail('SOURCE_CHANGED');
   return { path: canonical, fileIdentity: stableSourceIdentity(stat), eofByte: integer(Number(stat.size)) };
+}
+
+export function validateProcessingSource(value, identity, policyHash, bytes) {
+  keys(value, ['format', 'version', 'client', 'sessionId', 'policyHash', 'cwd', 'snapshot']);
+  if (value.format !== 'cuefluent-processing-source' || value.version !== 1 || value.client !== identity.client ||
+      value.sessionId !== identity.sessionId || value.policyHash !== policyHash) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  processingSourcePath(value, value.policyHash);
+  keys(value.snapshot, ['path', 'fileIdentity', 'eofByte']);
+  hash(value.snapshot.fileIdentity); integer(value.snapshot.eofByte);
+  for (const file of [value.cwd, value.snapshot.path]) if (!path.isAbsolute(string(file))) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  if (!bytes.equals(Buffer.from(canonicalJSON(value) + '\n'))) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  return value;
+}
+
+// A locator and future read floor only: no collection registration, interval,
+// wake or transcript read. The immutable floor is scoped to the exact policy.
+async function registerProcessingSource(store, envelope, snapshot, configPath) {
+  if (envelope.sourcePath === null) return;
+  const source = await snapshotSourceMetadata(envelope.sourcePath);
+  if (!source) return;
+  const name = processingSourcePath(envelope, snapshot.hash);
+  const previous = await intakeSnapshot(store, 'state', name, { maxBytes: 16384 });
+  if (previous.bytes !== null) {
+    const old = validateProcessingSource(intakeJSON(previous), envelope, snapshot.hash, previous.bytes);
+    if (old.snapshot.path !== source.path || old.snapshot.fileIdentity !== source.fileIdentity ||
+        source.eofByte < old.snapshot.eofByte || old.cwd !== envelope.cwd) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    return;
+  }
+  if ((await readWorkflowSnapshot(configPath)).hash !== snapshot.hash) fail('WORKFLOW_POLICY_CHANGED');
+  await publishIngressMetadata(store, name, { format: 'cuefluent-processing-source', version: 1,
+    client: envelope.client, sessionId: envelope.sessionId, policyHash: snapshot.hash,
+    cwd: envelope.cwd, snapshot: source }, { exclusive: true });
 }
 
 /** Atomic bounded metadata; no intake lock, source content, model, or note writes.
@@ -155,7 +189,10 @@ export async function collectionIngress(client, payload, { configPath, launch = 
   if (await lstatOrNull(await intakePath(store, 'state', '.intake-maintenance'))) return { status: 'offline-maintenance', context: null };
   const notice = intakeJSON(await intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 }));
   const blocked = Boolean(await lstatOrNull(await intakePath(store, 'state', '.intake-lock')));
-  if (!route.intended.collect) return { status: 'processing-only', intakeBlocked: blocked, context: null, notice, selection: envelope };
+  if (!route.intended.collect) {
+    await registerProcessingSource(store, envelope, snapshot, configPath);
+    return { status: 'processing-only', intakeBlocked: blocked, context: null, notice, selection: envelope };
+  }
   const selected = await readSelection(store, { client, sessionId: envelope.sessionId });
   const paused = selected.state?.paused === true;
   if (paused) {

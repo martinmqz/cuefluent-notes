@@ -139,3 +139,12 @@ test('per-call boundaries step back inside multibyte characters', () => {
   assert(out.evidence.every(item => !item.text.includes('\ufffd')));
   assert.equal(omittedBytes(out), 60000 - 8190 - 16383);
 });
+
+
+for (const full of ['records', 'bytes']) test(`invalid tool text stays a coded error after ${full} exhaustion`, () => {
+  const out = full === 'records' ? append(evidenceCollector(), Array.from({ length: 2048 }, () => row('user', 'x')))
+    : append(evidenceCollector(), [row('user', 'x'.repeat(2 * 1024 * 1024))]);
+  for (const text of [undefined, null, 3, {}, '\ud800']) {
+    assert.throws(() => append(out, [row('tool-call', text, 'malformed')], 5000), { code: 'INVALID_WORKFLOW' });
+  }
+});

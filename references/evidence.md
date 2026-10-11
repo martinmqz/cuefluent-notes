@@ -28,8 +28,9 @@ child-agent material are not primary work evidence.
 
 Generated notes, echoed packets and processing summaries do not independently
 verify their own contents. Preserve original work in mixed turns while excluding
-generated copies; no verified whole-turn/mixed-record processing tag is currently
-available. Reuse previous note associations and compare the current subject note
+generated copies. Arbitrary inline work has no verified whole-turn/mixed-record
+processing tag; the [dedicated controller](processing-chat.md) has a narrower
+native proof contract. Reuse previous note associations and compare the current subject note
 before writing a later revision. Keep usable asset links, but never claim to have
 inspected omitted inline/base64 data or unavailable images.
 

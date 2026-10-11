@@ -480,3 +480,29 @@ test('tool truncation is UTF-8-safe, disclosed, and keeps the entire envelope bo
   assert.ok(Buffer.byteLength(capture.evidence.at(-1).text) <= 32768);
   assert.ok(!capture.evidence.at(-1).text.includes('\ufffd')); assert.ok(serializeCapture(capture).length <= 2 * 1024 * 1024);
 });
+
+
+test('Codex reader versions have explicit historical tool-allocation mappings', async t => {
+  const { CODEX_READER_VERSION, CODEX_TOOL_RULES } = await import('./codex-reader.mjs');
+  assert.equal(CODEX_TOOL_RULES['1'], '1'); assert.equal(CODEX_TOOL_RULES['2'], '2');
+  assert(['1', '2'].includes(CODEX_TOOL_RULES[CODEX_READER_VERSION]), 'a reader bump must choose an independently supported tool rule set');
+  const f = await fixture(t, ordinary());
+  const current = (await readCodexSelection(f.args)).candidates[0].capture;
+  for (const version of ['1', '2']) {
+    const prior = { ...current, reader: { ...current.reader, version } };
+    const read = await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: prior }) });
+    assert.equal(read.candidates[0].capture.reader.version, version);
+  }
+  const unknown = { ...current, reader: { ...current.reader, version: 'future' } };
+  const refused = await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: unknown }) });
+  assert.equal(refused.candidates.length, 0); assert.equal(refused.pending[0].reason, 'INVALID_WORKFLOW');
+});
+
+
+test('malformed tool arguments after envelope exhaustion hold the unit with a workflow diagnostic', async t => {
+  const f = await fixture(t, [start(A), ...Array.from({ length: 2048 }, () => user(A, 'Retained synthetic evidence.')),
+    response(A, 'function_call', { name: 'exec_command', call_id: 'missing-arguments' }), end(A)]);
+  const result = await readCodexSelection(f.args);
+  assert.equal(result.candidates.length, 0);
+  assert.deepEqual(result.pending, [{ unitId: A, reason: 'INVALID_WORKFLOW' }]);
+});

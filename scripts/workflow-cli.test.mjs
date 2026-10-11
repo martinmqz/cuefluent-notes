@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { saveProcessing } from './processing.mjs';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { processingFixture, inspectedClaim, proposedClaim } from './test-support/processing-fixture.mjs';
-import { executeWorkflow, workflowErrorReport } from './workflow.mjs';
+import { executeWorkflow, workflowErrorReport, workflowHelp } from './workflow.mjs';
 import { prepareNote } from './note-generation.mjs';
 import { windowsDefaultLocations } from './workflow-paths.mjs';
 import { fingerprint, inspectDirectories } from './safe-update.mjs';
@@ -23,13 +23,38 @@ async function invoke(args, nodeArgs = [], env = process.env) {
   });
 }
 const envelope = (f, args) => ({ collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash, args });
+test('chat recovery commands expose strict schemas before settings or native access', async () => {
+  const commands = workflowHelp().commands;
+  for (const command of ['processing-chat-reauthorize', 'processing-chat-rollover', 'processing-chat-abandon']) {
+    assert(commands.includes(command));
+    const args = { client: 'codex', expectedChatHash: digest('chat'),
+      ...(command === 'processing-chat-reauthorize' ? { previousPolicyHash: digest('policy') } : {}),
+      ...(command === 'processing-chat-abandon' ? { requestId: '11111111-1111-4111-8111-111111111111', offline: true } : {}) };
+    const request = { collectionId: 'default', expectedConfigHash: digest('current'), args };
+    for (const key of Object.keys(args)) {
+      const missing = structuredClone(request); delete missing.args[key];
+      await assert.rejects(executeWorkflow(command, missing), { code: 'INVALID_WORKFLOW' });
+    }
+    await assert.rejects(executeWorkflow(command, { ...request, args: { ...args, approve: true } }), { code: 'INVALID_WORKFLOW' });
+  }
+});
 test('capabilities require no settings and cannot accept caller-supplied provenance', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-capabilities-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const config = path.join(root, 'config.json');
   await fs.writeFile(config, 'not settings');
+  const preload = path.join(root, 'probe-guard.mjs');
+  // Windows Node needs SystemRoot during startup. Reject storage subprocesses
+  // after startup instead of breaking the runtime before the CLI can execute.
+  await fs.writeFile(preload, `import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+childProcess.spawn = childProcess.spawnSync = () => {
+  throw Object.assign(new Error('Unexpected storage subprocess'), { code: 'UNEXPECTED_STORAGE_SUBPROCESS' });
+};
+syncBuiltinESMExports();
+`);
   for (const configPath of [config, path.join(root, 'absent', 'config.json')]) {
-    const result = await invoke(['processing-capabilities', '--config', configPath], [], { ...process.env, SystemRoot: '' });
+    const result = await invoke(['processing-capabilities', '--config', configPath], ['--import', pathToFileURL(preload).href]);
     assert.equal(result.code, 0, result.stderr);
     const value = JSON.parse(result.stdout);
     assert.equal(value.interfaceVersion, 1);
@@ -38,8 +63,12 @@ test('capabilities require no settings and cannot accept caller-supplied provena
     assert.equal(value.generatedOutput.processingExclusions, false);
     assert.equal(value.generatedOutput.reason, 'HELPER_INVOCATION_BINDING_UNAVAILABLE');
     assert.equal(value.automaticProcessing, false); assert.equal(value.modelRunner, false);
+    assert.equal(value.generatedOutput.isolatedProcessing.collectionExclusions, 'verified-native-records-only');
+    assert.equal(value.generatedOutput.isolatedProcessing.processingExclusions, false);
+    assert.equal(value.controller.execution, 'installed-native-client');
+    assert.equal(value.controller.desktopVisibility, 'unverified');
   }
-  assert.deepEqual(await fs.readdir(root), ['config.json']);
+  assert.deepEqual((await fs.readdir(root)).sort(), ['config.json', 'probe-guard.mjs']);
   assert.equal(await fs.readFile(config, 'utf8'), 'not settings');
   // Even well-shaped public identifiers are not a helper attestation.
   for (const field of ['contextRef', 'operationId', 'artifactHash', 'nativeProof', 'enabled']) {

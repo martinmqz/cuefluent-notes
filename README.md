@@ -97,11 +97,19 @@ for this user. Clone the repository and run its install:codex npm script
    sessions or future sessions in the project. Processing can be Manual,
    Prompted (approve Save / Skip), or Automatic within your chosen scope.
 
-The current client transport is not verified for automatic processing or
-conversational current-turn controls. **Use an explicit processing request** and
-select the native session/units; the agent must not infer identity from the current
-folder. Automatic collection can run after setup and hook trust. New selection
-starts at the current file boundary, excluding the initial boundary unit; it does
+**Processing starts with an explicit request.** For the reusable processing chat,
+select the Cuefluent Notes skill in Codex and enter `process`, or use
+`/cuefluent-notes:cuefluent-notes process` in Claude. Invoke the same skill with
+`review` to review an exact proposal through the client's supported native form.
+The controller uses the existing native client and processing engine; it does not
+require the Cuefluent app. See [processing chats](references/processing-chat.md)
+for prerequisites, capture prevention and recovery.
+
+Hook notifications do not automatically start Markdown processing. Explicit CLI
+processing remains available with selected native sessions/units; identity is
+never inferred from the current folder. Automatic collection can run after setup
+and hook trust. New selection starts at the current file boundary, excluding the
+initial boundary unit; it does
 not sweep historical session contents. Explicit historical capture reviews a
 fixed byte window and named units.
 
@@ -306,9 +314,11 @@ writer conflicts/recovery and detached packages. CI uses Node 22 on native
 Windows, Linux and macOS, including Windows shells and a standard-user ACL check.
 See [verification scope](references/verification.md) for automated coverage,
 pinned-client registration tests and remaining limits. Historical live-model
-checks for v0.7.1 do not certify this replacement. Live current-turn transport,
-native Save / Skip rendering, desktop launch PATH and Cuefluent loading/ranking
-remain unverified. Publication status is on the
+checks for v0.7.1 do not certify this replacement. Isolated native protocol
+fixtures exercise explicit processing dispatch, restricted tools and review-form
+transport. They do not establish attended desktop rendering, sidebar visibility,
+agent synthesis quality, automatic processing from hook notices, desktop launch
+PATH or Cuefluent loading/ranking. Publication status is on the
 [releases page](https://github.com/martinmqz/cuefluent-notes/releases).
 
 The project has no assigned license. Bundled dependencies retain their own

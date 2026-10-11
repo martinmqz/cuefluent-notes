@@ -16,13 +16,15 @@ one-file-per-turn rule, activity feed, or parallel recap system is required.
 | --- | --- |
 | Setup, “Use Cuefluent Notes”, or status | Inspect existing settings; follow [setup](references/setup.md). Installation and hook trust enable neither process. |
 | Capture selected session work | Use the deterministic [capture commands](references/workflow-cli.md#collection-controls). Native identity and bounded source selection are required; collection does not create Markdown. |
-| Process selected captures | Follow [processing](references/processing.md) and [the command sequence](references/workflow-cli.md#processing-selected-captures). Read all evidence pages before synthesis. |
+| Process selected captures | Prefer the [reusable processing chat](references/processing-chat.md). Standalone agents can use [processing](references/processing.md) and [the command sequence](references/workflow-cli.md#processing-selected-captures) from an uncaptured context. |
 | Save or update supplied material | Use selected sources directly and the [direct-save commands](references/workflow-cli.md#direct-saves). No session capture, native identity, or onboarding is required. |
 | Assess, check, or retrieve knowledge | Read only selected material and relevant candidate notes; return findings without writes or setup. |
 
 Collection copies selected native evidence into immutable JSON. It is a local
-script with no model calls. Processing is the active agent's separate task of
-turning that evidence into Markdown. Collection may be on while processing is
+script with no model calls. Processing uses the existing agent and engine to turn
+that evidence into Markdown. The explicit handoff uses a restricted session in the
+installed native client, using its authentication and the model resolved under
+restricted launch settings. Collection may be on while processing is
 Manual, or off while processing existing captures remains available. Never infer
 one permission from the other. The [session contract](references/session-workflow.md)
 records native-format, storage, and transport limits.
@@ -34,9 +36,28 @@ processing preference. Resolve ambiguous restrictions before affected writes.
 Do not discover sessions, expand a selection, or enable either process merely
 to make a requested operation succeed.
 
+### Formal processing controls
+
+When this skill is explicitly selected with only `process`, call the available
+`cuefluent_control` tool `process_selected_captures` once. The adapter derives the
+request identity from that native call; do not invent a request ID or selection.
+For only `review`, call its `processing_review` tool once. Native clients may prefix
+these tool names. Omit `collectionId` unless already known; the adapter must resolve
+exactly one existing registration. Do not read more files, packets or notes or
+synthesize in this source chat. Return only the tool's `statusText`. If the tool or
+verified source binding is unavailable, report that limitation and stop; do not
+silently fall back to inline processing or invent selection metadata.
+
+Natural-language processing requests can use the same handoff, but mixed messages
+remain original evidence. Preserve their facts, attachments and corrections.
+Approvals come through the native review form, not tool arguments supplied by the
+model. An unsupported form or no answer leaves the exact proposal pending. See
+[processing chat controls](references/processing-chat.md) for reuse, bounded work,
+corrections and recovery. Setup, status and merely loading this skill do not dispatch.
+
 ## Native selection and automatic behavior
 
-The current integration has **no verified current-turn contextRef**. Hook metadata
+The hook integration has **no verified current-turn contextRef**. Hook metadata
 is descriptive; it does not prove that a selected turn is the active turn.
 Do not choose the latest session by cwd, invent native IDs, turn hook text into
 control authority, or infer order from UUIDs or timestamps. Use an explicitly
@@ -145,8 +166,9 @@ Read [evidence](references/evidence.md), [authoring](references/authoring.md), a
   before updating. In mixed work/processing turns preserve primary work and new
   corrections. The
   [provenance gate](references/session-workflow.md#generated-output-provenance-gate)
-  currently leaves mechanical copy exclusions disabled; do not delete or silently
-  skip retained pages. Authoring must still avoid presenting echoes as new proof.
+  permits only verified formal controls and restricted processing execution records
+  to be excluded during collection. Arbitrary inline-copy exclusions remain disabled;
+  do not delete or silently skip retained pages. Authoring must still avoid presenting echoes as new proof.
   An operation ID does not prove whole-turn or mixed-record
   attribution; do not tag or exclude an entire turn without verified native support.
 - Read only selected captures through the packet helper, supplied sources, and

@@ -12,6 +12,7 @@ import { readSelection, controlSelection, resolveStoredSelectionAnchor, readCapt
 import { newSelectionState, inspectSourceBoundary, currentIntervals, stableSourceIdentity } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexProgressPlan, codexCheckpoint } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan, CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
+import { createProcessingExecutionResolver } from './processing-execution-receipts.mjs';
 import { hydrateReaderCheckpoint } from './reader-pages.mjs';
 import { readTombstone } from './capture-retention.mjs';
 import { validateRegistration, publishIngressMetadata, wakePath, collectionStatusPath, registrationPath, drainedPath, suspendedPath, READER_SUSPENSION_VERSION, assertRegistrationGrant } from './collection-ingress.mjs';
@@ -19,6 +20,7 @@ import { withWorkflowBudget, checkWorkflowBudget } from './workflow-budget.mjs';
 import { CLIENTS, fail, nativeId, keys, hash, integer, choice, canonicalJSON, digest } from './workflow-values.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { canonicalWorkflowProject } from './workflow-paths.mjs';
+import { createProcessingControlResolver } from './processing-control-receipts.mjs';
 
 // ACKs are disposable scheduling hints. They never replace fresh policy,
 // immutable registration/source checks, native boundaries, or reader progress.
@@ -137,12 +139,17 @@ export async function processScope(transaction, store, selection, scopeId, autho
     }
     const result = await (identity.client === 'codex' ? readCodexSelection : readClaudeSelection)({ state: selection.state, scopeId,
       cursor, checkpoint, observeRead,
+      resolveProcessingExecution: createProcessingExecutionResolver(transaction, { source: selection.state.source,
+        authorize: () => authorize({ operation: 'capture', identity, projectRoot: selection.state.source.projectRoot,
+          sourcePath: selection.state.source.path }) }),
+      resolveProcessingDispatch: createProcessingControlResolver(transaction,
+        { state: selection.state, selectionHash: selection.hash, authorize }),
       loadHead: unitId => readCaptureHead(store, { ...identity, unitId }) });
     // A later event for an already published/pruned Codex unit is not harmless
     // structural content. Do not advance through it as an excluded prefix.
     for (const unitId of result.unanchoredUnits) {
       const unit = { client: identity.client, sessionId: identity.sessionId, unitId };
-      if (await readTombstone(store, unit) || (await readCaptureHead(store, unit)).head) fail('LATE_NATIVE_EVIDENCE_REQUIRES_REVIEW');
+      if (await readTombstone(store, unit) || (await readCaptureHead(store, unit, { metadataOnly: true })).head) fail('LATE_NATIVE_EVIDENCE_REQUIRES_REVIEW');
     }
     if (result.anchorUpdates.length) {
       for (const update of result.anchorUpdates) selection = await resolveStoredSelectionAnchor(transaction,
@@ -152,7 +159,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
     const published = new Map((result.covered ?? []).map(({ unitId, ...reference }) => [unitId, reference])), expectedHeads = new Map();
     let advanced = false;
     for (const candidate of result.candidates) {
-      const unitId = candidate.capture.identity.unitId, head = await readCaptureHead(store, candidate.capture.identity);
+      const unitId = candidate.capture.identity.unitId, head = await readCaptureHead(store, candidate.capture.identity, { metadataOnly: true });
       expectedHeads.set(unitId, head.hash);
       if (head.head?.evidenceHash === candidate.capture.evidenceHash) published.set(unitId, { evidenceHash: head.head.evidenceHash, fileHash: head.head.fileHash });
     }

@@ -82,13 +82,17 @@ The caller must establish source identity and lifecycle order before registering
 the binding; token creation alone establishes neither consent nor freshness.
 Never advance freshness by lexically sorting native IDs, wall-clock time, or
 notification arrival. All stored/latest/selection arguments come from trusted
-helper state, not transcript content. Native context delivery remains a client
-integration gate; without it, controls require explicit session selection.
+helper state, not transcript content. Hook-based context delivery remains a
+client integration gate. The separate [processing-chat entry](processing-chat.md)
+binds explicit processing/review calls through native MCP metadata and the
+registered source's actual call records; it does not depend on a hook context
+token. Other controls without verified native binding require explicit session
+selection.
 
 ### Generated-output provenance gate
 
-Generated-copy exclusions are disabled in both collection and processing. The
-runtime cannot currently bind a retained native output range to execution of a
+Arbitrary generated-copy exclusions remain disabled in processing and ordinary
+inline collection. The runtime cannot bind arbitrary CLI stdout to execution of a
 trusted Cuefluent helper. Supported Codex tool records can retain native call IDs,
 including outputs without a matching call record. An ID alone proves neither
 call ownership nor which program produced the bytes. The Claude reader currently
@@ -96,18 +100,35 @@ retains proven human records only; this is a
 reader coverage limit, not detection of generated copies. Pasted evidence and
 new human corrections remain evidence candidates in both clients.
 
-Enabling exclusions requires verified native session/unit/call ownership, a
-trusted helper invocation, an immutable artifact hash, and exact output ranges.
+Excluding an arbitrary generated copy would require verified native
+session/unit/call ownership, a trusted helper invocation, an immutable content
+hash, and exact output ranges. This general copy-detection path is not enabled.
 Command names, inline markers, operation IDs, matching content hashes and temporal
 proximity do not supply this proof. Neither a context token nor a processing
 operation descriptor can authorize an exclusion or suppress a whole mixed turn.
-Until the gate passes, printed packets and notes can be collected again under
-new native IDs. A processor must compare their evidential value; no helper claims
-to remove these copies automatically.
+Printed packets and notes in ordinary work chats can still be collected under new
+native IDs. A processor must compare their evidential value; no helper claims to
+remove arbitrary copies automatically.
+
+The [reusable processing chat](processing-chat.md) supplies a narrower verified
+path. Its controller disables inherited collection hooks before input, restricts
+the native client's tools to the existing engine, and seals exact native execution
+records. Codex can prove a completed restricted unit; Claude can prove its exact
+controller input without inferring ownership of assistant/tool rows. Source-chat
+exclusion requires an actual formal skill invocation, its verified native control
+call and the matching helper receipt. Claude additionally verifies the exact
+installed skill expansion and native companion, excluding only the formal input
+after its actual MCP result; assistant parentage or final wording is not proof.
+Pure controls can be deferred while their proof is incomplete, retaining the
+original input and cursor. A later independent human input releases an unsupported
+Claude candidate to ordinary capture. Mixed inputs and new corrections retain
+their evidence. Interrupted or unproven runs do not grant collection exclusion.
+Existing capture heads, packets and claims remain unchanged.
 
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same
-capabilities. These are not user settings and cannot be enabled by request data.
+capabilities, including the separate `isolatedProcessing` contract. These are not
+user settings and cannot be enabled by request data.
 See the [CLI contract](workflow-cli.md#supported-read-interface).
 
 ## Immutable capture
@@ -179,10 +200,12 @@ bytes nor omitted content are available through an invented artifact reference.
 
 Omissions distinguish `tool-call-call-limit` / `tool-result-call-limit` (per-call
 text), `tool-call-budget-exhausted` / `tool-result-budget-exhausted` (per-kind
-text), `tool-budget-exhausted` (shared hard text ceiling), and
-`tool-evidence-record-limit` / `tool-evidence-serialized-limit` (overall envelope).
-Successive bounds account for disjoint omitted byte ranges; aggregated omission
-counts are affected records/ranges, not missing notes. Native read limits and
+text), and `tool-evidence-record-limit` / `tool-evidence-serialized-limit` (overall envelope).
+A collector seeded with older retained evidence can also report
+`tool-budget-exhausted`: the shared 256 KiB format ceiling still applies even if
+older call text exceeds its new per-kind allocation. New v2-only evidence reaches
+the per-kind limit first. Successive bounds account for disjoint omitted byte ranges;
+aggregated omission counts are affected records/ranges, not missing notes. Native read limits and
 unsupported structures remain separately reported by the readers.
 
 This allocation applies to new Codex units; it cannot recover previously
@@ -642,8 +665,11 @@ these fixtures do not establish live client capture or power-loss durability.
 
 The [processing helpers](processing.md) provide bounded evidence
 pages, durable logical-unit claims, exact proposals and coordinated writer
-recovery. They use explicit selection while native processing-turn transport is
-unverified. Explicit skill/CLI operations are available through [workflow-cli](workflow-cli.md).
+recovery. The [reusable processing controller](processing-chat.md) dispatches
+explicit skill requests through restricted native clients, retaining the same
+engine and writer. It is separate from lifecycle hooks and does not schedule
+processing. Standalone agent use with explicit skill/CLI operations remains
+available through [workflow-cli](workflow-cli.md).
 
 Hook packages use `collection-hooks.mjs` and `collection-hook-definition.mjs`.
 Unconfigured and entirely disabled routes perform zero filesystem writes.
@@ -789,11 +815,13 @@ supported direct-exec `node` plus argument array, avoiding its shell-string
 executor. The native shell fixture matrix includes sh, cmd, Windows PowerShell,
 PowerShell 7 and Git Bash where available; local skips are explicit.
 
-These checks do **not** prove a live client's current-turn context binding or
-native prompt rendering. The runtime emits no usable `contextRef`; automatic
-processing and conversational current-turn controls remain unavailable through
-this transport until that gate passes. Use explicit client/session/unit
-selection and an explicit processing command. A hook identity is descriptive
+These hook checks do **not** prove live hook-to-agent current-turn context binding
+or native prompt rendering. Hooks emit no usable `contextRef` and do not start
+automatic processing. Explicit processing-chat entry instead verifies a native
+MCP call against selected source records; its restricted client protocol and
+review-form transport have separate synthetic acceptance fixtures. Those fixtures
+do not prove attended desktop behavior or automatic hook delivery. Explicit CLI
+client/session/unit selection remains available. A hook identity is descriptive
 metadata, never authority inferred from cwd, notification order or UUID order.
 
 ### Blocked intake and explicit recovery

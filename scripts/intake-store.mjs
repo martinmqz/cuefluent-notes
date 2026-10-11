@@ -32,12 +32,15 @@ function validateHead(value, identity) {
   if (canonicalJSON(value.identity) !== canonicalJSON(identity)) fail('INVALID_CAPTURE_HEAD');
   return value;
 }
-export async function readCaptureHead(store, identity) {
+export async function readCaptureHead(store, identity, { metadataOnly = false } = {}) {
   await assertCaptureRetained(store, identity);
   const snapshot = await intakeSnapshot(store, 'state', headPath(identity));
   const head = intakeJSON(snapshot);
   if (head === null) return { head: null, hash: snapshot.hash, capture: null };
   validateHead(head, identity);
+  // Advisory identity/hash inventory only. Publication and evidence use retain
+  // the default full raw read, validation and exact file-hash check.
+  if (metadataOnly) return { head, hash: snapshot.hash, capture: null };
   const raw = await captureSnapshot(store, captureRelativePath(identity, head.evidenceHash));
   const capture = intakeJSON(raw);
   if (raw.hash !== head.fileHash || !capture || capture.evidenceHash !== head.evidenceHash ||

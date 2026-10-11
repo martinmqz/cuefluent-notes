@@ -147,6 +147,96 @@ calls because native anchor resolution can update selection metadata. No model o
 Markdown writer runs during collection. Codex needs its supported terminal proof;
 Claude publishes proven human-input snapshots with unconfirmed finality.
 
+## Processing chat controls
+
+The optional native-client controller uses the existing engine. It launches the
+installed `codex` or `claude` executable with the client's authentication and the
+model resolved under restricted launch settings, and reuses a dedicated chat. It is explicit, not a
+hook-triggered model runner. See [entry, review and recovery](processing-chat.md).
+These commands use the collection envelope and return `interfaceVersion: 1`:
+
+| Command | `args` |
+| --- | --- |
+| `processing-chat-status` | `{client}`; reads the selected local client-profile binding without launching a native client or dispatching a model turn |
+| `processing-chat-run` | `{client, requestId, selection, expectedChatHash}`; exact status hash, or null for a missing binding; handles at most one bounded operation |
+| `processing-chat-reconcile` | `{client, requestId, expectedChatHash}`; reinspects a known terminal's unresolved operation, or verifies an exact sealed Codex completion, failure or interruption; live owners and unproven outcomes remain blocked |
+| `processing-chat-abandon` | `{client, requestId, expectedChatHash, offline: true}`; explicitly retires a creating/busy run or unknown creation/dispatch outcome after the operator stops its controller and native child; refuses live or unverified owners and preserves all engine work |
+| `processing-chat-reauthorize` | `{client, expectedChatHash, previousPolicyHash}`; explicitly accepts current settings for the registry, preserving existing engine claims and proposal hashes |
+| `processing-chat-rollover` | `{client, expectedChatHash}`; archives settled request history while retaining the same native chat and exact-request replay protection |
+
+`client` is `codex` or `claude`; `requestId` is a new UUID for each explicit run,
+reused for retries of that exact request. A duplicate never dispatches again.
+`state` is `missing`, `creating`, `idle`, `busy`, `awaiting-review` or `blocked`.
+`chatHash` binds registry mutations; `policyHash` exposes the registry's accepted
+settings hash for explicit reauthorization. `nativeStatus` distinguishes a completed,
+failed or interrupted native run; null means no terminal is available for the
+current state. `operationId` points to authoritative engine
+status. `chat` identifies the native session, while `desktopVisibility` remains
+`unverified`. Neither `idle` nor a native completed turn means a note was saved.
+Busy or blocked state must not be bypassed with another binding or writer.
+`processing-chat-abandon` archives the exact binding and returns blocked status
+with `RUN_ABANDONED`. It does not cancel an engine operation or mark its evidence
+handled. Inspect any surviving operation before continuing. Only a subsequent
+explicit run with a new request ID creates a replacement native session; the
+abandoned request can never dispatch again. `offline: true` records the operator's
+confirmation that both the controller and native child are stopped, including
+for older records with no saved owner. It is not a model-selected retry flag.
+
+The installed `cuefluent_control` MCP server exposes three strict tools:
+
+| Tool | Arguments |
+| --- | --- |
+| `processing_status` | `{collectionId?}` |
+| `process_selected_captures` | `{collectionId?, selection?, requestId?}` |
+| `processing_review` | `{collectionId?}` |
+
+The MCP `arguments` member may be omitted or null for an empty argument object;
+other non-object values are rejected. Native source verification still applies.
+
+Native metadata must bind the actual call to an already registered source: an
+active or paused selection, explicit capture scopes, or a processing-only hook
+binding. Processing-only bindings record a locator and future byte boundary under
+the current policy; they never enable collection. The explicit request verifies
+the native source header and exact call within the bounded recent range.
+Omitted collection selection must resolve uniquely from bounded registration
+metadata; no new source is discovered. Omitted evidence `selection` selects the
+source session, not just its control turn. A formal skill control rejects a
+selection that differs from its verified source. Other explicit selections still
+require existing policy. MCP dispatch identity derives from the verified native
+session and call ID: redelivery replays, while another invocation is new even if
+the model repeats its optional `requestId` hint. The returned `requestId` is the
+authoritative controller identity. CLI request IDs remain explicit as described
+above. Native tool namespaces can add client-specific prefixes.
+Outputs are versioned bounded status with `statusText`, `status`, `requestId`,
+`collectionId`, `chat`, `nextAction` and diagnostic codes. They contain no evidence
+or draft text. Tool arguments accept no approval or source-proof object.
+If the engine disposition committed but registry or receipt bookkeeping failed,
+the response is `completed` with `nextAction: "inspect"` and a bounded diagnostic.
+Inspect the existing operation; do not repeat its save. That response does not
+claim successful capture-exclusion bookkeeping.
+`processing_review` sends the exact proposal through the correlated native host
+form; an unsupported or closed form preserves the pending proposal. A model's
+tool arguments cannot substitute for that host response.
+Cancelling the MCP request before its save intent or disposition starts publication
+leaves the proposal pending, including after the form returns. Once publication
+starts, the engine finishes or reports its error/recovery state; late cancellation
+does not suppress that result or undo a save.
+
+The restricted child engine tool schemas are declared in
+`scripts/processing-tool-contracts.mjs` (interface version 1). Only the selected
+engine operations, note inspection and proposal preparation are exposed. There
+is no save, shell, setup or consent-changing tool in that channel. Consumers must
+not parse the private chat registry or mint native proof receipts.
+`guidance_read({guide})` accepts only `authoring`, `retrieval`, `evidence`,
+`placement`, `metadata`, `series` or `processing`, returning the complete bundled
+guide (at most 64 KiB), its hash, and recording-time context. It accepts no path.
+Restricted `prepare_note` takes `{original, content, metadata?, enrich?,
+contentHash?, createSeries?}`; the adapter supplies the installed package version
+and current UTC recording time. Evidence occurrence dates stay source-derived.
+The standalone `prepare-note` CLI contract is unchanged.
+Serialized child-engine results are bounded to 256 KiB; oversized results return
+`PROCESSING_ENGINE_OUTPUT_LIMIT` as a tool error without truncated evidence.
+
 ## Processing selected captures
 
 ### Supported read interface
@@ -167,7 +257,12 @@ ignores `--config`. Its versioned response has `generatedOutput`,
 `verified: false`, `collectionExclusions: false`, `processingExclusions: false`,
 reason `HELPER_INVOCATION_BINDING_UNAVAILABLE`, per-client reader capabilities,
 required proof and a limitation. `status.transport.generatedOutput` uses the same
-shape. Each client reports `retainedEvidence`, `retainedToolCallIds` and
+shape. These top-level copy flags describe arbitrary inline output. The separate
+`generatedOutput.isolatedProcessing` object describes verified native controller
+records and formal skill controls, with per-client proof scope, inherited-hook
+restriction and native review channel. `controller` reports interface version 1,
+`execution: "installed-native-client"`, `independentModelRunner: false` and
+`desktopVisibility: "unverified"`. Each client reports `retainedEvidence`, `retainedToolCallIds` and
 `helperInvocationBinding`. `retainedToolCallIds` means supported retained tool
 records can carry native call IDs; it does not prove that a matching call record
 exists, call ownership, or trusted helper execution. These flags describe
@@ -223,6 +318,16 @@ inspection; error text never includes corrupt record bytes.
 
 Use a collection envelope and the same operation ID throughout a batch:
 
+`processing-proposal` accepts `{selection, operationId, expectedClaimHash,
+expectedProposalHash}` in `args`. It returns the exact reviewed proposal and
+current originals, mappings, inspection and per-input source coverage, with
+`interfaceVersion: 1`. Both hashes are required; changed inputs, notes, parents,
+policy or proposal refuse the read. It holds only short validation locks and
+creates no approval. Drafts plus originals are bounded to 4 MiB; native forms
+have the smaller 256 KiB limit. Run this explicit draft read outside captured
+work chats when avoiding echoed content. Use the unchanged save/recovery commands
+below for standalone operation.
+
 1. `processing-pending`: `{selection, limit?, afterUnitId?}`. Reads bounded head,
    disposition and operation metadata, not raw bodies. Default limit 20, maximum
    100. Pages are lexical pagination, never chronological/native order. Each call
@@ -239,12 +344,14 @@ Use a collection envelope and the same operation ID throughout a batch:
    `budget: {maxInputs, maxPacketBytes}` can select 1–20 inputs and 1–4194304 bytes.
    Larger singletons require that explicit choice. `parallelism` defaults to 1
    active inspection, with a maximum of 5; it applies across the collection, not
-   just this session or workset. Five published proposals is a separate fixed cap.
+   just this session or workset. A separate fixed cap allows five durable proposal
+   intents (staging or published); resuming an existing intent does not need another slot.
    Budget rejection publishes no claim. Known capacity errors return numeric
    details; admission blockers can include bounded `operationIds` for status.
    A measured byte rejection also reports `inputSizes: [{index, packetBytes}]`:
    each original request index's standalone packet cost, including framing. This
-   identifies oversized revisions without repeated singleton reads. Inventory
+   identifies oversized revisions without repeated singleton reads, including when
+   the combined packet exceeds the 4 MiB hard ceiling. Inventory
    remains metadata-only and cannot estimate unmeasured raw bodies.
 3. `processing-page`: `{selection, operationId, expectedClaimHash, page}`.
    Page indexes start at zero. Read the complete returned evidence page.
@@ -297,26 +404,39 @@ atomic snapshot. Workset IDs are UUIDs. Nothing automatically extends a workset.
   creation time, input count and charged budgets, never raw bodies. The lexical
   cursor covers examined workset files; selection/binding filtering can yield an
   empty page with `incomplete: true`. Continue its cursor. Use a returned ID with
-  status rather than opening private files or creating a replacement run.
+  status rather than opening private files. `policyState` and `conflict` report
+  whether settings changed; see the policy-change handling below.
 - `processing-workset-create`: `{selection, worksetId, inputs, runBudget?,
   unscannedRemainder?}`. Freeze 1–100 exact `{identity, headHash}` inputs.
   `runBudget: {maxBatches, maxPacketBytes}` defaults to 5 batches and 327680 bytes;
   maximums are 20 batches and 16777216 bytes. `unscannedRemainder` is a caller's
   inventory limitation (boolean or null/unknown), not proof the whole queue was
   enumerated. Exact creation retries return the existing workset without resetting
-  progress; changing a selection requires a new explicit workset.
+  progress when the saved settings hash still matches. Changed settings return
+  `WORKFLOW_POLICY_CHANGED`; changing a selection requires a new explicit workset.
 - `processing-workset-prepare`: `{worksetId, expectedWorksetHash, indexes,
-  batchBudget?, parallelism?}`. Select 1–20 unique zero-based indexes from the
+  batchBudget?, parallelism?, acceptPolicyChange?}`. Select 1–20 unique zero-based indexes from the
   frozen list. `batchBudget` has the same shape/limits as preparation's `budget`.
-  Workset and batch budgets both apply; a new workset cannot bypass collection
-  admission. The engine derives the same operation ID from the same index set.
+  A byte-budget error returns `inputSizes[].index` as the frozen workset index
+  (0–99), irrespective of request ordering. Workset and batch budgets both apply;
+  a new workset cannot bypass collection admission. The engine derives the same operation ID from the same index set.
+  After a settings change, `acceptPolicyChange: true` explicitly permits only a
+  new batch of unattempted inputs under the request's current config hash. The
+  default is false. Frozen inputs, total charges and earlier admission policies
+  stay intact. Every input still needs current permission. The flag cannot renew
+  an existing claim or a charged pre-claim admission; those retain their exact
+  old policy. Retrying a new batch already admitted under the current hash does
+  not need the flag again. This is not authorization to change settings.
   Use the returned ordinary processing claim for page/ack/propose/save/complete.
   Admission intent charges actual packet bytes before publishing the claim. An
   interrupted admission resumes only its exact selection and packet, without a
   second charge; inspect the workset for its current hash before retrying. A
   completed operation is inspected/recovered, never prepared as a fresh save.
 - `processing-workset-status`: `{worksetId}`. Metadata-only progress over the
-  frozen selection. Reports per-input states, operation states, charged and
+  frozen selection. `policyState` is `current` or `changed`; `conflict` is null
+  or `WORKFLOW_POLICY_CHANGED` relative to the creation policy. Individual batches
+  admitted under current consent can still proceed; each operation reports its own
+  state. Reports per-input states, operation states, charged and
   remaining budgets, `operationCounts`, `outcomeCounts`, `inputCounts`, `remainingSelected`, and
   `budgetExhausted`. Operation counts are not note counts; input counts are not
   global queue totals. Each count group is a separate dimension with disjoint
@@ -340,7 +460,11 @@ outcome causes the engine to chase newly arriving captures. Stop when the run
 budget stops new admission or review is needed, and report unattempted, blocked
 and cancelled-but-unhandled inputs.
 Existing operations and already charged admissions remain resumable at an exhausted
-budget; finish/recover them rather than creating a replacement run.
+budget while their policy and inputs remain valid. Settings changes do not renew
+workset consent: exact create retries fail, and status/listing disclose the stale
+policy. Follow [policy-change handling](processing.md#resume-and-reconcile-a-workset)
+for explicit new-batch consent, cancellation and committed recovery; do not
+refresh stored hashes or reset charged budgets.
 Workset files are helper-managed plans and do not prevent authorized pruning.
 
 ## Direct saves

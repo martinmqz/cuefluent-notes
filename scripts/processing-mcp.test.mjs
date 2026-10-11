@@ -1,0 +1,782 @@
+import test from './test-support/storage-test.mjs';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { PassThrough, Writable } from 'node:stream';
+import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
+import { openProcessingController } from './processing-controller.mjs';
+import { runProcessingMcp } from './processing-mcp.mjs';
+import { readSelection, controlSelection, readCaptureHead } from './intake-store.mjs';
+import { canonicalJSON, digest } from './workflow-values.mjs';
+import { inspectProcessing, readProcessingProposal } from './processing.mjs';
+import { reviewProcessingProposal } from './processing-host-review.mjs';
+import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
+import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
+import { collectionIngress } from './collection-ingress.mjs';
+import { stableSourceIdentity } from './capture-selection.mjs';
+import { processScope } from './collection-worker.mjs';
+import { verifyWorkflowStorage } from './workflow-storage.mjs';
+
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((a, b) => { resolve = a; reject = b; });
+  return { promise, resolve, reject };
+};
+const initialize = { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: { elicitation: { form: {} } }, clientInfo: { name: 'synthetic', version: '1' } } };
+const body = row => { assert(row.result, JSON.stringify(row.error)); return JSON.parse(row.result.content[0].text); };
+const selectedInput = f => ({ client: f.selection.client, sessionId: f.selection.sessionId, cwd: f.selection.cwd });
+async function harness(t, f, overrides = {}) {
+  const h = { opens: 0, closes: 0, creates: 0, resumes: 0, dispatches: 0, responses: [], waiters: new Map(), nativeSkill: false,
+    script: async call => call('processing_pending', {}), jobs: [], closing: [], forms: [], formWaiters: [] };
+  const input = new PassThrough();
+  const output = new Writable({ write(chunk, _encoding, done) {
+    for (const line of chunk.toString().trim().split('\n')) {
+      const row = JSON.parse(line); h.responses.push(row); h.waiters.get(row.id)?.resolve(row); h.waiters.delete(row.id);
+      if (row.method === 'elicitation/create') { h.forms.push(row); h.formWaiters.shift()?.resolve(row); }
+      if (row.error) h.formWaiters.shift()?.reject(new Error(row.error.message));
+    }
+    done();
+  } });
+  const openCodex = async options => ({ profileId: digest('synthetic-profile'),
+    async create() {
+      h.creates++; const sessionId = randomUUID();
+      return { client: 'codex', sessionId, cwd: options.cwd, sourcePath: path.join(f.root, `${sessionId}.jsonl`),
+        profileId: digest('synthetic-profile'), transport: 'codex-app-server', desktopVerified: false, toolContractHash: digest(canonicalJSON(options.tools)) };
+    },
+    async resume(session) { h.resumes++; return session; },
+    async startTurn(request) {
+      const unitId = randomUUID(); h.dispatches++;
+      await request.roleGuard({ ...request.session, unitId: null, phase: 'before-input' });
+      await request.roleGuard({ ...request.session, unitId, phase: 'started' });
+      await h.script((name, args) => options.onEngineTool({ tool: `cuefluent_${name}`, arguments: args }));
+      return { ...request.session, unitId, status: 'completed', model: 'synthetic-model', output: 'PRIVATE SYNTHETIC DRAFT' };
+    },
+    async close() {}
+  });
+  const dependencies = {
+    execution: { async beforeExecution() {}, async guardExecution() {}, async afterExecution() {} },
+    async resolveInvocation(capability, context, invocation) {
+      const selected = await readSelection(f.store, { client: f.identity.client, sessionId: f.identity.sessionId });
+      return Object.freeze({ source: f.source, selection: f.selection, selectionHash: selected.hash,
+        nativeSkill: h.nativeSkill, unitId: f.identity.unitId, argsHash: digest(canonicalJSON(invocation.arguments)),
+        tool: `mcp__cuefluent_control.${invocation.tool}`, callId: context.toolCallId });
+    },
+    async openController(context, options) {
+      h.opens++;
+      const controller = await openProcessingController(context, { ...options, openCodex, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host') });
+      let closed = false;
+      return { ...controller, async run(args) { const job = controller.run(args); h.jobs.push(job); return job; },
+        async finishReview(args) {
+          h.finishReviewCalls = (h.finishReviewCalls ?? 0) + 1;
+          await h.beforeFinishReview?.();
+          if (h.finishReviewFailure) throw h.finishReviewFailure;
+          return controller.finishReview(args);
+        },
+        async close() {
+          await controller.close();
+          if (!closed) { closed = true; h.closes++; h.closing.shift()?.resolve(); }
+          if (h.closeFailure) throw h.closeFailure;
+        } };
+    },
+    ...overrides
+  };
+  h.server = runProcessingMcp({ client: 'codex', configPath: f.options.configPath, input, output, env: {} }, dependencies);
+  h.server.catch(() => {});
+  h.send = row => {
+    const ready = deferred(); h.waiters.set(row.id, ready); input.write(JSON.stringify(row) + '\n'); return ready.promise;
+  };
+  let nextId = 1;
+  h.call = async (name, argumentsValue) => {
+    const id = nextId++;
+    await h.beforeCall?.(name, argumentsValue, id);
+    const identity = h.nativeIdentity ?? f.identity;
+    return h.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: argumentsValue,
+      _meta: { callId: h.callId ?? `call_${id}`, itemId: `item_${id}`, 'x-codex-turn-metadata': {
+        session_id: identity.sessionId, thread_id: identity.sessionId, turn_id: identity.unitId } } } });
+  };
+  h.nextForm = () => {
+    const ready = deferred(), timer = setTimeout(() => ready.reject(new Error('Expected native review form was not emitted')), 10000);
+    h.formWaiters.push({ resolve: row => { clearTimeout(timer); ready.resolve(row); },
+      reject: error => { clearTimeout(timer); ready.reject(error); } });
+    return ready.promise;
+  };
+  h.answer = (form, result) => input.write(`${JSON.stringify({ jsonrpc: '2.0', id: form.id, result })}\n`);
+  h.notify = row => input.write(JSON.stringify(row) + '\n');
+  h.end = () => input.end();
+  h.whenClosed = () => { const ready = deferred(); h.closing.push(ready); return ready.promise; };
+  t.after(async () => { h.release?.(); input.end(); await h.server; });
+  assert.equal((await h.send(initialize)).result.serverInfo.name, 'cuefluent_control');
+  return h;
+}
+
+test('MCP admission returns while native processing is pending, and shutdown waits for its owned finite job', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), gate = deferred(); h.release = gate.resolve;
+  h.script = async call => { await gate.promise; await call('processing_pending', {}); };
+  const requestId = randomUUID();
+  const admitted = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
+  assert.equal(admitted.status, 'busy'); assert.notEqual(admitted.requestId, requestId);
+  h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
+  const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(status.status, 'busy'); assert.equal(status.chat.sessionId, admitted.chat.sessionId);
+  const duplicate = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
+  assert.equal(duplicate.status, 'busy'); assert.deepEqual(duplicate.diagnostics, ['PROCESSING_CHAT_BUSY']);
+  assert.equal(duplicate.requestId, admitted.requestId);
+  assert.match(duplicate.statusText, /PROCESSING_CHAT_BUSY/);
+  h.end(); let ended = false; h.server.then(() => { ended = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ended, false); assert.equal(h.closes, 0);
+  gate.resolve(); await h.server;
+  await h.jobs[0]; // Cancelling the completed admission cannot abort its accepted run.
+  assert.equal(h.opens, 1); assert.equal(h.creates, 1); assert.equal(h.dispatches, 1); assert.equal(h.closes, 1);
+  assert(!JSON.stringify(h.responses).includes('PRIVATE SYNTHETIC DRAFT'));
+  assert(!JSON.stringify(h.responses).includes(f.root));
+});
+
+test('cancellation during admission aborts the owned job without dispatch or response and leaves the chat reusable', async t => {
+  const f = await processingFixture(t), gate = deferred(), entered = deferred();
+  const h = await harness(t, f, { execution: { async guardExecution() {}, async afterExecution() {},
+    async beforeExecution() { entered.resolve(); await gate.promise; } } });
+  h.release = gate.resolve; h.nativeSkill = true;
+  const closed = h.whenClosed();
+  void h.call('process_selected_captures', { collectionId: f.collection.id });
+  await entered.promise;
+  h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
+  await h.send({ jsonrpc: '2.0', id: 100, method: 'ping' });
+  assert(!h.responses.some(row => row.id === 1)); assert.equal(h.dispatches, 0);
+  gate.resolve(); await closed;
+  await assert.rejects(h.jobs[0], { code: 'PROCESSING_CONTROL_CANCELLED' });
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'idle');
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`)), { code: 'ENOENT' });
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'missing');
+  const nextClosed = h.whenClosed();
+  assert.equal((await h.call('process_selected_captures', { collectionId: f.collection.id })).error, undefined);
+  await nextClosed; assert.equal(h.dispatches, 1); assert.equal(h.creates, 1);
+});
+
+test('completed-request replay and status reuse durable state without another native dispatch', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), requestId = randomUUID(), closed = h.whenClosed();
+  const first = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
+  await closed;
+  const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(status.status, 'idle'); assert.equal(status.chat.sessionId, first.chat.sessionId);
+  const replayClosed = h.whenClosed();
+  h.callId = 'call_1';
+  const replay = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
+  await replayClosed;
+  assert.equal(replay.status, 'idle'); assert.equal(replay.chat.sessionId, first.chat.sessionId);
+  assert.equal(h.creates, 1); assert.equal(h.dispatches, 1); assert.equal(h.opens, h.closes);
+  h.callId = undefined;
+  const newClosed = h.whenClosed();
+  const next = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
+  await newClosed;
+  assert.notEqual(next.requestId, first.requestId);
+  assert.equal(h.creates, 1); assert.equal(h.dispatches, 2);
+});
+
+test('formal native-call replay preserves its original receipt after completion and reconnect', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
+  const first = await h.call('process_selected_captures', args);
+  assert.equal(body(first).status, 'busy'); await closed;
+  const receiptFile = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
+  const bytes = await fs.readFile(receiptFile);
+  h.callId = 'call_1';
+  assert.deepEqual((await h.call('process_selected_captures', args)).result, first.result);
+  assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readFile(receiptFile), bytes);
+  h.end(); await h.server;
+  const again = await harness(t, f); again.nativeSkill = true; again.callId = 'call_1';
+  assert.deepEqual((await again.call('process_selected_captures', args)).result, first.result);
+  assert.equal(again.dispatches, 0); assert.equal(again.opens, 0);
+  again.callId = undefined;
+  assert.equal(body(await again.call('processing_status', args)).status, 'idle');
+  assert.deepEqual(await fs.readFile(receiptFile), bytes);
+});
+
+test('formal replay rejects a changed stored response without changing its receipt or dispatching', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
+  assert.equal((await h.call('process_selected_captures', args)).error, undefined); await closed;
+  const receiptFile = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
+  const receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8'));
+  receipt.dispatch.response.status = 'completed';
+  const bytes = canonicalJSON(receipt) + '\n'; await fs.writeFile(receiptFile, bytes);
+  h.callId = 'call_1';
+  assert.equal((await h.call('process_selected_captures', args)).error.message, 'PROCESSING_CONTROL_FAILED');
+  assert.equal(h.dispatches, 1); assert.equal(await fs.readFile(receiptFile, 'utf8'), bytes);
+});
+
+test('formal native-call replay while busy returns the original admission without another dispatch', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), gate = deferred();
+  h.nativeSkill = true; h.release = gate.resolve; h.script = () => gate.promise;
+  const args = { collectionId: f.collection.id }, first = await h.call('process_selected_captures', args);
+  assert.equal(body(first).status, 'busy'); h.callId = 'call_1';
+  const replay = await h.call('process_selected_captures', args);
+  assert.deepEqual(replay.result, first.result); assert.equal(h.dispatches, 1);
+  gate.resolve();
+});
+
+test('formal processing cannot replace its verified source selection with model arguments', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const row = await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID(),
+    selection: { ...selectedInput(f), sessionId: randomUUID() } });
+  assert.equal(row.error.message, 'PROCESSING_CONTROL_SELECTION_MISMATCH');
+  assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
+});
+
+test('formal processing existing evidence remains available with collection disabled', async t => {
+  const f = await processingFixture(t), config = JSON.parse(await fs.readFile(f.options.configPath, 'utf8'));
+  config.routes[0].collection.enabled = false;
+  const bytes = JSON.stringify(config); await fs.writeFile(f.options.configPath, bytes);
+  f.options.expectedConfigHash = digest(bytes);
+  f.capability = await verifyWorkflowStorage(f.options);
+  f.store = await openWorkflowIntake(f.capability);
+  const h = await harness(t, f); h.nativeSkill = true;
+  const closed = h.whenClosed();
+  const result = await h.call('process_selected_captures', { collectionId: f.collection.id });
+  assert.equal(result.error, undefined);
+  await closed;
+  assert.equal(h.dispatches, 1);
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'idle');
+  await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+});
+
+test('read-only status and unconfigured collection lookup dispatch no model and write no configuration', async t => {
+  const f = await processingFixture(t), config = await fs.readFile(f.options.configPath), before = await fs.readdir(f.collection.intakeStateDir);
+  const h = await harness(t, f);
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'missing');
+  const missing = await h.call('process_selected_captures', { collectionId: 'not-configured', requestId: randomUUID() });
+  assert.equal(missing.error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal(h.creates, 0); assert.equal(h.dispatches, 0); assert.equal(h.opens, 1); assert.equal(h.closes, 1);
+  assert.deepEqual(await fs.readFile(f.options.configPath), config);
+  assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
+});
+
+test('request admission closes its controller if initial status fails before a job is registered', async t => {
+  const f = await processingFixture(t); let opened = 0, closed = 0;
+  const h = await harness(t, f, { async openController() {
+    opened++;
+    return { async status() { throw Object.assign(new Error('private detail'), { code: 'WORKFLOW_POLICY_CHANGED' }); },
+      async close() { closed++; } };
+  } });
+  const result = await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID() });
+  assert.equal(result.error.message, 'WORKFLOW_POLICY_CHANGED'); assert.equal(opened, 1); assert.equal(closed, 1);
+  assert(!JSON.stringify(result).includes('private detail'));
+});
+
+test('verified native skill admission writes its exact parent control receipt before returning status', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), gate = deferred(); h.release = gate.resolve; h.nativeSkill = true;
+  h.script = async () => gate.promise;
+  const requestId = randomUUID(), args = { collectionId: f.collection.id, requestId };
+  const row = await h.call('process_selected_captures', args);
+  assert.equal(row.error, undefined);
+  const response = body(row);
+  assert.equal(response.status, 'busy');
+  const directory = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId);
+  const files = await fs.readdir(directory); assert.equal(files.length, 1);
+  const receipt = JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
+  assert.equal(receipt.dispatch.callId, 'call_1'); assert.equal(receipt.dispatch.unitId, f.identity.unitId);
+  assert.equal(receipt.dispatch.argsHash, digest(canonicalJSON(args))); assert.equal(receipt.dispatch.resultHash, digest(canonicalJSON(row.result)));
+  assert.equal(receipt.dispatch.statusText, 'Cuefluent processing: busy.');
+  assert.equal(receipt.dispatch.sourcePath, f.source.path);
+  gate.resolve();
+});
+
+test('ordinary invocations do not fabricate parent-control receipts', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), closed = h.whenClosed();
+  const row = await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID() });
+  assert.equal(row.error, undefined); await closed;
+  await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+});
+
+test('implicit status skips an unrelated unprepared collection without creating its storage', async t => {
+  const f = await processingFixture(t), config = JSON.parse(await fs.readFile(f.options.configPath, 'utf8'));
+  const other = path.join(f.root, 'unprepared');
+  config.collections.push({ id: 'unprepared', rawDir: path.join(other, 'raw'), intakeStateDir: path.join(other, 'state'),
+    notes: { notesDir: path.join(other, 'notes'), writerStateDir: path.join(other, 'writer') } });
+  config.routes.push({ ...config.routes[0], id: 'unprepared', projectRoot: path.join(f.root, 'other-project'), collectionId: 'unprepared' });
+  const bytes = JSON.stringify(config); await fs.writeFile(f.options.configPath, bytes);
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  f.store = await openWorkflowIntake(f.capability);
+  const h = await harness(t, f);
+  assert.equal(body(await h.call('processing_status', {})).status, 'missing');
+  assert.equal(h.creates, 0);
+  await assert.rejects(fs.lstat(other), { code: 'ENOENT' });
+});
+
+test('policy revocation at admission still refuses native dispatch without leaving a pending job', async t => {
+  const f = await processingFixture(t), h = await harness(t, f, {
+    execution: { async guardExecution() {}, async afterExecution() {}, async beforeExecution() {
+      f.config.routes[0].excluded = true; await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+    } }
+  });
+  h.nativeSkill = true;
+  const closed = h.whenClosed();
+  assert.equal((await h.call('process_selected_captures', {})).error.message, 'WORKFLOW_POLICY_CHANGED');
+  await closed;
+  assert.equal(h.dispatches, 0); assert.equal(h.opens, h.closes);
+});
+
+test('collection selection churn omits exclusion proof without aborting separately authorized processing', async t => {
+  const f = await processingFixture(t), h = await harness(t, f, {
+    execution: { async guardExecution() {}, async afterExecution() {}, async beforeExecution() {
+      await withIntakeLock(f.store, async tx => {
+        const selected = await readSelection(f.store, f.identity);
+        await controlSelection(tx, { source: f.source, expectedHash: selected.hash, authorize: async () => true,
+          request: { id: randomUUID(), client: f.identity.client, sessionId: f.identity.sessionId,
+            expectedRevision: selected.state.revision, operation: 'exclude', unitId: f.identity.unitId } });
+      });
+    } },
+  });
+  h.nativeSkill = true;
+  const closed = h.whenClosed(), requestId = randomUUID();
+  const result = await h.call('process_selected_captures', { collectionId: f.collection.id, requestId });
+  assert.equal(result.error, undefined);
+  assert(body(result).diagnostics.includes('PROCESSING_EXCLUSION_UNVERIFIED'));
+  await closed;
+  assert.equal((await h.jobs[0]).state, 'idle');
+  assert.equal(h.dispatches, 1); assert.equal(h.opens, h.closes);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+  h.end(); await h.server;
+});
+
+const draft = '# PRIVATE-SYNTHETIC-PROPOSAL\n\n## Decision\n\nKeep the rollout paused.\n';
+function proposeThroughTools(f) {
+  return async call => {
+    let claim = await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+    for (let page = 0; page < claim.packet.pages.length; page++) {
+      const read = await call('processing_page', { operationId: f.operationId, expectedClaimHash: claim.claimHash, page });
+      claim = await call('processing_ack', { operationId: f.operationId, expectedClaimHash: read.claimHash,
+        pages: [{ index: page, hash: read.hash }] });
+    }
+    await call('processing_propose', { operationId: f.operationId, expectedClaimHash: claim.claimHash,
+      proposal: { files: [{ path: 'meetings/rollout.md', expectedHash: null, content: draft }],
+        mappings: [{ identity: f.identity, paths: ['meetings/rollout.md'] }] } });
+  };
+}
+async function proposeInChat(f, h) {
+  h.script = proposeThroughTools(f);
+  const closed = h.whenClosed(), requestId = randomUUID();
+  const first = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId, selection: selectedInput(f) }));
+  await closed;
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+  return first;
+}
+
+test('source review requires a correlated host action and saves the exact engine proposal without exposing the draft to the source model', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), first = await proposeInChat(f, h);
+  const forged = await h.call('processing_review', { collectionId: f.collection.id, decision: 'save' });
+  assert.equal(forged.error.message, 'PROCESSING_CONTROL_INVALID_REQUEST');
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  const nextForm = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  const form = await nextForm;
+  assert(form.params.message.includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+  assert(form.params.message.includes((await inspectProcessing(f.capability, f.operationId)).proposalHash));
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  h.answer(form, { action: 'accept', content: { decision: 'save' } });
+  const result = body(await review);
+  assert.equal(result.status, 'idle'); assert.equal(result.chat.sessionId, first.chat.sessionId);
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+  h.script = async call => { assert.deepEqual((await call('processing_pending', {})).pending, []); };
+  const closed = h.whenClosed(); body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID(), selection: selectedInput(f) }));
+  await closed; assert.equal(h.creates, 1); assert.equal(h.dispatches, 2);
+});
+
+test('formal review replay preserves its exact completed result without another host form or write', async t => {
+  for (const decision of ['save', 'skip', 'cancel']) await t.test(decision, async t => {
+    const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+    h.nativeSkill = true; h.callId = 'review_call';
+    const args = { collectionId: f.collection.id }, next = h.nextForm(), review = h.call('processing_review', args);
+    h.answer(await next, { action: 'accept', content: { decision } });
+    const first = await review; assert.equal(first.error, undefined);
+    const operation = await inspectProcessing(f.capability, f.operationId);
+    const receiptFile = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest(h.callId).slice(0, 24)}.json`);
+    const receipt = await fs.readFile(receiptFile);
+    assert.deepEqual((await h.call('processing_review', args)).result, first.result);
+    assert.equal(h.forms.length, 1); assert.equal(h.finishReviewCalls, 1);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), operation);
+    assert.deepEqual(await fs.readFile(receiptFile), receipt);
+    if (decision === 'save') assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+    else assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+});
+
+test('review cancellation after host approval but before durable publication preserves the proposal and inputs', async t => {
+  for (const decision of ['save', 'skip', 'cancel']) await t.test(decision, async t => {
+    const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+    const before = await inspectProcessing(f.capability, f.operationId), entered = deferred(), gate = deferred();
+    h.release = gate.resolve;
+    const open = fs.open; let staged = false;
+    t.mock.method(fs, 'open', async function(file, ...args) {
+      if (!staged && typeof file === 'string' && path.basename(file).startsWith('.processing-') && args[0] === 'wx') {
+        staged = true; entered.resolve(); await gate.promise;
+      }
+      return open.call(this, file, ...args);
+    });
+    const next = h.nextForm(); void h.call('processing_review', { collectionId: f.collection.id });
+    h.answer(await next, { action: 'accept', content: { decision } });
+    await entered.promise;
+    h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } });
+    await new Promise(resolve => setImmediate(resolve)); gate.resolve();
+    await h.send({ jsonrpc: '2.0', id: 100, method: 'ping' });
+    assert(!h.responses.some(row => row.id === 2)); assert.equal(h.finishReviewCalls ?? 0, 0);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), before);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    assert.deepEqual(await fs.readdir(path.join(f.collection.notes.writerStateDir, 'processing-stages')), []);
+    const retryForm = h.nextForm(), retry = h.call('processing_review', { collectionId: f.collection.id });
+    h.answer(await retryForm, { action: 'accept', content: { decision } });
+    assert.equal((await retry).error, undefined);
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome,
+      { save: 'saved', skip: 'skipped', cancel: 'cancelled' }[decision]);
+  });
+});
+
+test('review cancellation during durable publication preserves the committed result and replay', async t => {
+  for (const decision of ['save', 'skip', 'cancel']) await t.test(decision, async t => {
+    const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+    h.nativeSkill = true; h.callId = 'review_publication';
+    const target = path.join(f.collection.notes.writerStateDir,
+      decision === 'save' ? 'transactions' : 'processed/operations', `${f.operationId}.json`);
+    const rename = fs.rename; let cancelled = false;
+    t.mock.method(fs, 'rename', async function(from, to) {
+      if (!cancelled && to === target) {
+        cancelled = true;
+        h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } });
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      return rename.call(this, from, to);
+    });
+    const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+    h.answer(await next, { action: 'accept', content: { decision } });
+    const result = await review;
+    assert.equal(cancelled, true); assert.equal(body(result).status, 'idle');
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome,
+      { save: 'saved', skip: 'skipped', cancel: 'cancelled' }[decision]);
+    if (decision === 'save') assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+    else assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    assert.deepEqual((await h.call('processing_review', { collectionId: f.collection.id })).result, result.result);
+    assert.equal(h.finishReviewCalls, 1); assert.equal(h.forms.length, 1);
+  });
+});
+
+test('committed source Save stays successful when the chat registry requires later reconciliation', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), first = await proposeInChat(f, h);
+  h.finishReviewFailure = Object.assign(new Error('private registry detail'), { code: 'PROCESSING_CHAT_CONFLICT' });
+  const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  h.answer(await next, { action: 'accept', content: { decision: 'save' } });
+  const row = await review;
+  assert.equal(row.error, undefined);
+  const result = body(row);
+  assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
+  assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
+  assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'awaiting-review');
+  assert.equal(h.finishReviewCalls, 1); assert.equal(h.dispatches, 1);
+  assert(!JSON.stringify(row).includes('private registry detail'));
+});
+
+test('committed source Save survives revoked receipt authorization without fabricating exclusion proof', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), first = await proposeInChat(f, h);
+  const original = await fs.readFile(f.options.configPath), changed = JSON.parse(original);
+  changed.routes[0].collection.enabled = false;
+  h.nativeSkill = true;
+  h.beforeFinishReview = () => fs.writeFile(f.options.configPath, JSON.stringify(changed));
+  const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  h.answer(await next, { action: 'accept', content: { decision: 'save' } });
+  const row = await review;
+  assert.equal(row.error, undefined);
+  const result = body(row);
+  assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
+  assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
+  assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+  await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+  await fs.writeFile(f.options.configPath, original);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'awaiting-review');
+  assert.equal(h.finishReviewCalls, 1); assert.equal(h.dispatches, 1);
+});
+
+test('controller close failure after source Save preserves its committed outcome', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), first = await proposeInChat(f, h);
+  h.closeFailure = Object.assign(new Error('private cleanup detail'), { code: 'PRIVATE_CLEANUP_ERROR' });
+  const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  h.answer(await next, { action: 'accept', content: { decision: 'save' } });
+  const row = await review;
+  assert.equal(row.error, undefined);
+  const result = body(row);
+  assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
+  assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
+  assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  assert.equal(h.finishReviewCalls, 1); assert.equal(h.dispatches, 1);
+  assert(!JSON.stringify(row).includes('private cleanup detail'));
+});
+
+test('exact proposal preview refuses stale hashes and oversized native review never truncates or opens a form', async t => {
+  const f = await processingFixture(t), content = '# Bounded review\n\n## Knowledge\n\n' + 'Synthetic content.\n'.repeat(16000);
+  const proposed = await proposedClaim(f, { content });
+  const args = { ...f.args, expectedClaimHash: proposed.claimHash, expectedProposalHash: proposed.proposalHash };
+  await assert.rejects(readProcessingProposal(f.capability, { ...args, expectedClaimHash: digest('stale claim') }), { code: 'PROCESSING_CLAIM_CHANGED' });
+  await assert.rejects(readProcessingProposal(f.capability, { ...args, expectedProposalHash: digest('stale proposal') }), { code: 'PROCESSING_PROPOSAL_CHANGED' });
+  const preview = await readProcessingProposal(f.capability, args);
+  assert.equal(preview.files[0].proposed, content);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, proposed.claimHash);
+  let elicited = false;
+  await assert.rejects(reviewProcessingProposal(f.capability, f.args, { elicit: async () => { elicited = true; return { action: 'cancel' }; } }),
+    { code: 'PROCESSING_REVIEW_LIMIT' });
+  assert.equal(elicited, false);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('source review preserves exact pending proposal on Later, decline and closed form, then distinguishes skip from cancel', async t => {
+  for (const decision of ['skip', 'cancel']) await t.test(decision, async t => {
+    const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+    const pending = await inspectProcessing(f.capability, f.operationId);
+    for (const response of [{ action: 'accept', content: { decision: 'later' } }, { action: 'decline' }, { action: 'cancel' }]) {
+      const next = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
+      h.answer(await next, response); assert.equal(body(await result).status, 'awaiting-review');
+      assert.equal((await inspectProcessing(f.capability, f.operationId)).proposalHash, pending.proposalHash);
+    }
+    const next = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
+    h.answer(await next, { action: 'accept', content: { decision } });
+    assert.equal(body(await result).status, 'idle');
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, decision === 'skip' ? 'skipped' : 'cancelled');
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []); assert.equal(h.dispatches, 1);
+  });
+});
+
+test('busy source review does not open a form or duplicate the processing session', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), gate = deferred(); h.release = gate.resolve;
+  h.script = async () => gate.promise;
+  await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID() });
+  const status = body(await h.call('processing_review', { collectionId: f.collection.id }));
+  assert.equal(status.status, 'busy'); assert.deepEqual(status.diagnostics, ['PROCESSING_CHAT_BUSY']);
+  assert.equal(h.forms.length, 0); assert.equal(h.creates, 1); assert.equal(h.dispatches, 1); gate.resolve();
+});
+
+test('a settings change while native review is open cannot authorize the stale proposal', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+  const next = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
+  const form = await next, original = await fs.readFile(f.options.configPath), config = JSON.parse(original);
+  config.routes[0].collection.enabled = false;
+  await fs.writeFile(f.options.configPath, JSON.stringify(config));
+  h.answer(form, { action: 'accept', content: { decision: 'save' } });
+  const refused = await result;
+  assert(refused.error); assert(!JSON.stringify(refused).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  await fs.writeFile(f.options.configPath, original);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+});
+
+async function nativeParent(t, f, h, { binding = 'active' } = {}) {
+  const sessionId = binding === 'processing-only' ? randomUUID() : f.identity.sessionId, previous = randomUUID(), stamp = '2026-10-10T12:00:00.000Z';
+  // The pending synthetic capture belongs to this same source session. Replace
+  // the fixture's placeholder bytes before starting its new live interval.
+  const source = { ...f.source, sessionId, ...(binding === 'processing-only' ? { path: path.join(f.project, `${sessionId}.jsonl`) } : {}) };
+  await fs.writeFile(source.path, '');
+  let ordinal = 0, offset = 0;
+  const append = async rows => {
+    const anchors = [], bytes = rows.map(row => {
+      const text = JSON.stringify({ timestamp: stamp, ordinal: ordinal++, ...row }) + '\n';
+      anchors.push({ id: `codex:ordinal:${ordinal - 1}`, startByte: offset, endByte: offset + Buffer.byteLength(text), hash: digest(text) });
+      offset += Buffer.byteLength(text); return text;
+    }).join('');
+    await fs.appendFile(source.path, bytes); return anchors;
+  };
+  const evt = (type, fields = {}) => ({ type: 'event_msg', payload: { type, ...fields } });
+  const item = (unitId, value) => evt('item_completed', { thread_id: sessionId, turn_id: unitId, item: value });
+  const response = (unitId, payload, kinds) => ({ type: 'response_item', payload: { ...payload,
+    internal_chat_message_metadata_passthrough: { turn_id: unitId, ...(kinds ? { content_item_kinds: kinds } : {}) } } });
+  const anchors = await append([{ type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cwd: f.project,
+    cli_version: '0.157.1', source: 'cli', history_mode: 'paginated' } }, evt('task_started', { turn_id: previous, root_turn_id: previous })]);
+  source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
+  const store = await openWorkflowIntake(f.capability, { client: 'codex', sessionId, cwd: f.project, unitId: null }, 'collect');
+  const previousSelection = await readSelection(store, { client: 'codex', sessionId });
+  const selected = binding === 'active' ? await withIntakeLock(store, tx => controlSelection(tx, { source, expectedHash: previousSelection.hash, authorize: async () => true,
+    boundary: { sourceIdentity: source.fileIdentity, eofByte: offset, startsMidRecord: false, unitId: previous, record: anchors.at(-1) },
+    request: { id: randomUUID(), client: 'codex', sessionId, unitId: previous, operation: 'start', expectedRevision: previousSelection.state.revision } })) : previousSelection;
+  if (binding === 'manual') {
+    // Align the disposable selection with the replacement native fixture bytes.
+    // Its already-published raw capture stays byte-for-byte intact.
+    selected.state.explicitScopes[0].start = anchors.at(-1);
+    await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${sessionId}.json`, selected.state, selected.hash));
+  }
+  const controls = [], metadata = new Map();
+  h.beforeCall = async (name, args, callNumber) => {
+    const unitId = randomUUID(), command = name === 'processing_review' ? 'review' : 'process';
+    h.nativeIdentity = { client: 'codex', sessionId, unitId }; controls.push(unitId);
+    metadata.set(callNumber, { unitId, name, args });
+    await append([evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
+      { type: 'turn_context', payload: { turn_id: unitId, root_turn_id: unitId } },
+      response(unitId, { type: 'message', id: `input_${callNumber}`, role: 'user', content: [{ type: 'input_text', text: command }] }, ['user.text']),
+      item(unitId, { type: 'UserMessage', id: `user_${callNumber}`, content: binding === 'processing-only' ? [{ type: 'text', text: command }] : [
+        { type: 'skill', name: 'cuefluent-notes', path: fileURLToPath(new URL('../SKILL.md', import.meta.url)) },
+        { type: 'text', text: command, text_elements: [] }] }),
+      response(unitId, { type: 'function_call', id: `item_${callNumber}`, call_id: `call_${callNumber}`,
+        namespace: 'mcp__cuefluent_control', name, arguments: JSON.stringify(args) })]);
+  };
+  const finish = async rpc => {
+    assert(rpc.result, JSON.stringify(rpc));
+    const { unitId, name, args } = metadata.get(rpc.id), status = body(rpc).statusText;
+    await append([item(unitId, { type: 'McpToolCall', id: `call_${rpc.id}`, server: 'cuefluent_control', tool: name,
+      arguments: args, status: 'completed', result: rpc.result }),
+    response(unitId, { type: 'function_call_output', id: `output_${rpc.id}`, call_id: `call_${rpc.id}`, output: rpc.result.content[0].text }),
+    item(unitId, { type: 'AgentMessage', id: `status_${rpc.id}`, content: [{ type: 'Text', text: status }] }),
+    response(unitId, { type: 'message', id: `status_${rpc.id}`, role: 'assistant', content: [{ type: 'output_text', text: status }] }),
+    evt('task_complete', { turn_id: unitId, last_agent_message: status })]);
+  };
+  const work = async text => {
+    const unitId = randomUUID();
+    await append([evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
+      item(unitId, { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text }] }),
+      evt('task_complete', { turn_id: unitId })]);
+    return unitId;
+  };
+  return { source, store, selected, controls, finish, work };
+}
+
+test('omitted MCP arguments bind to the exact empty native invocation', async t => {
+  const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+  await nativeParent(t, f, h);
+  const recordCall = h.beforeCall;
+  // Clients record the model's empty input object while omitting the optional
+  // MCP wire member. Verification must compare the same canonical input.
+  h.beforeCall = (name, args, callNumber) => recordCall(name, args ?? {}, callNumber);
+  assert.equal(body(await h.call('processing_status')).status, 'missing');
+  const closed = h.whenClosed();
+  assert.equal(body(await h.call('process_selected_captures')).status, 'busy');
+  await closed;
+  assert.equal(body(await h.call('processing_review')).status, 'idle');
+  assert.equal(h.dispatches, 1); assert.equal(h.forms.length, 0);
+});
+
+test('collection-off native controls process and review manual backlog without enabling collection', async t => {
+  for (const binding of ['manual', 'processing-only']) for (const explicit of [true, false]) await t.test(`${binding}, explicit=${explicit}`, async t => {
+    const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+    const parent = await nativeParent(t, f, h, { binding });
+    f.config.routes[0].collection.enabled = false;
+    if (binding === 'processing-only') f.config.routes[0].processing.mode = 'prompted';
+    const config = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, config);
+    f.options.expectedConfigHash = digest(config); f.capability = await verifyWorkflowStorage(f.options);
+    const store = await openWorkflowIntake(f.capability), identity = { client: 'codex', sessionId: parent.source.sessionId };
+    if (binding === 'processing-only') await collectionIngress('codex', { session_id: identity.sessionId, turn_id: randomUUID(),
+      cwd: f.project, transcript_path: parent.source.path, hook_event_name: 'UserPromptSubmit' }, {
+      configPath: f.options.configPath, launch: () => assert.fail('no collection worker') });
+    const selected = await readSelection(store, identity), raw = await fs.readdir(f.collection.rawDir, { recursive: true });
+    const args = explicit ? { collectionId: f.collection.id } : {};
+    assert.equal(body(await h.call('processing_status', args)).status, 'missing');
+    h.script = proposeThroughTools(f); const closed = h.whenClosed();
+    body(await h.call('process_selected_captures', { ...args, ...(binding === 'processing-only' ? { selection: selectedInput(f) } : {}) }));
+    await closed;
+    assert.equal(body(await h.call('processing_status', args)).status, 'awaiting-review');
+    const next = h.nextForm(), review = h.call('processing_review', args);
+    h.answer(await next, { action: 'accept', content: { decision: 'save' } }); body(await review);
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+    assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+    assert.equal((await readSelection(store, identity)).hash, selected.hash);
+    assert.deepEqual(await fs.readdir(f.collection.rawDir, { recursive: true }), raw);
+    assert.equal(await fs.readFile(f.options.configPath, 'utf8'), config);
+    await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+  });
+});
+
+test('paused native source can inspect, process and save an existing proposal with explicit or inferred collection', async t => {
+  for (const explicit of [true, false]) await t.test(explicit ? 'explicit collection' : 'inferred collection', async t => {
+    const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+    const parent = await nativeParent(t, f, h), unitId = await parent.work('Pause collection.');
+    const paused = await withIntakeLock(parent.store, async tx => controlSelection(tx, { source: parent.source,
+      expectedHash: parent.selected.hash, authorize: async () => true,
+      request: { id: randomUUID(), client: 'codex', sessionId: f.identity.sessionId, unitId,
+        operation: 'pause', expectedRevision: parent.selected.state.revision },
+      boundary: { sourceIdentity: parent.source.fileIdentity, eofByte: (await fs.stat(parent.source.path)).size,
+        startsMidRecord: false, unitId, record: null } }));
+    const args = explicit ? { collectionId: f.collection.id } : {};
+    const config = await fs.readFile(f.options.configPath);
+    assert.equal(body(await h.call('processing_status', args)).status, 'missing');
+    h.script = proposeThroughTools(f); const closed = h.whenClosed();
+    assert.equal((await h.call('process_selected_captures', args)).error, undefined); await closed;
+    assert.equal(body(await h.call('processing_status', args)).status, 'awaiting-review');
+    const next = h.nextForm(), review = h.call('processing_review', args);
+    h.answer(await next, { action: 'accept', content: { decision: 'save' } });
+    assert.equal((await review).error, undefined);
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+    assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+    assert.equal((await readSelection(parent.store, f.identity)).hash, paused.hash);
+    assert.deepEqual(await fs.readFile(f.options.configPath), config);
+    await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+  });
+});
+
+test('actual source binding, engine proposal, native review and collection preserve genuine work without creating a control backlog', async t => {
+  for (const mixed of [false, true]) await t.test(mixed ? 'work before and correction after controls' : 'pure controls', async t => {
+    const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+    const parent = await nativeParent(t, f, h), genuine = [];
+    if (mixed) genuine.push(await parent.work('Original work: SDK 605 keeps the rollout paused.'));
+    h.script = proposeThroughTools(f);
+    const closed = h.whenClosed();
+    const processResult = await h.call('process_selected_captures', { requestId: randomUUID(), selection: selectedInput(f) });
+    await parent.finish(processResult); await closed; await h.jobs[0];
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+    const next = h.nextForm(), review = h.call('processing_review', {});
+    const form = await next;
+    assert(form.params.message.includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+    h.answer(form, { action: 'accept', content: { decision: 'save' } });
+    await parent.finish(await review);
+    if (mixed) genuine.push(await parent.work('Correction: SDK 606 is now verified.'));
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+    await withIntakeLock(parent.store, async tx => {
+      const result = await processScope(tx, parent.store, parent.selected, parent.selected.state.intervals[0].id, async () => true);
+      assert.equal(result.saved, genuine.length); assert.equal(result.pending, null);
+      for (const unitId of parent.controls) assert.equal((await readCaptureHead(parent.store, { client: 'codex', sessionId: parent.source.sessionId, unitId })).head, null);
+      for (const unitId of genuine) {
+        const capture = (await readCaptureHead(parent.store, { client: 'codex', sessionId: parent.source.sessionId, unitId })).capture;
+        assert(capture.evidence.some(item => /SDK 60[56]/.test(item.text)));
+      }
+      const replay = await processScope(tx, parent.store, parent.selected, parent.selected.state.intervals[0].id, async () => true);
+      assert.equal(replay.saved, 0);
+    });
+    assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+    assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
+  });
+});
+
+test('a note edit during source review keeps the exact proposal pending and preserves human content', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+  const next = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
+  const form = await next, target = path.join(f.collection.notes.notesDir, 'meetings/rollout.md');
+  await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, '# Human correction\n');
+  h.answer(form, { action: 'accept', content: { decision: 'save' } });
+  assert((await result).error);
+  assert.equal(await fs.readFile(target, 'utf8'), '# Human correction\n');
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+  assert.equal(h.dispatches, 1);
+});
+
+test('cancellation during receipt publication preserves admitted dispatch and its replayable response', async t => {
+  const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+  await nativeParent(t, f, h);
+  const rename = fs.rename; let cancelled = false;
+  t.mock.method(fs, 'rename', async function(from, to) {
+    if (!cancelled && to.includes(`${path.sep}control-dispatch${path.sep}`)) {
+      cancelled = true;
+      h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    return rename.call(this, from, to);
+  });
+  const closed = h.whenClosed();
+  const admitted = body(await h.call('process_selected_captures', { collectionId: f.collection.id }));
+  await closed;
+  assert.equal(cancelled, true); assert.equal(admitted.status, 'busy'); assert.equal(h.dispatches, 1);
+  assert.equal(h.creates, 1); assert.equal(h.responses.filter(row => row.id === 1).length, 1);
+});

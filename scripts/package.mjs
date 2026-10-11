@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { within, lstatOrNull as statOrNull, isMain, compare, CONTROLS, readBoundedBytes, sameFileIdentity } from './file-io.mjs';
 import { collectionHookConfiguration } from './collection-hook-definition.mjs';
-import { validatePluginManifest, validateManifestPair } from './plugin-manifest.mjs';
+import { validatePluginManifest, validateManifestPair, validateProcessingMcp } from './plugin-manifest.mjs';
 import { withPackageInventory, packagePath } from './package-integrity.mjs';
 
 const SOURCE_ROOT = await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
@@ -12,7 +12,7 @@ const SOURCE_FILES = [
   'references/workflow.md', 'references/authoring.md', 'references/evidence.md',
   'references/retrieval.md', 'references/refresh.md', 'references/hooks.md', 'references/distribution.md',
   'references/verification.md', 'references/publishing.md',
-  'references/setup.md', 'references/session-workflow.md', 'references/processing.md', 'references/workflow-cli.md',
+  'references/setup.md', 'references/session-workflow.md', 'references/processing.md', 'references/processing-chat.md', 'references/workflow-cli.md',
   'references/note-metadata.md', 'references/note-series.md',
   'examples/workflow.json',
   'examples/feature-behavior.md', 'examples/decision.md', 'examples/search-vocabulary.md',
@@ -38,18 +38,36 @@ const SOURCE_FILES = [
   'scripts/collection-grant.mjs',
   'scripts/collection-scheduler.mjs',
   'scripts/collection-worker.mjs',
+  'scripts/command.mjs',
   'scripts/direct-save.mjs',
   'scripts/intake-io.mjs',
   'scripts/intake-lock.mjs',
   'scripts/intake-recovery.mjs',
   'scripts/intake-store.mjs',
   'scripts/process-identity.mjs',
+  'scripts/processing-chat-state.mjs',
+  'scripts/processing-chat-recovery.mjs',
+  'scripts/processing-client-claude.mjs',
+  'scripts/processing-client-codex.mjs',
   'scripts/processing-contract.mjs',
+  'scripts/processing-control-proof.mjs',
+  'scripts/processing-control-receipts.mjs',
+  'scripts/processing-control-server.mjs',
+  'scripts/processing-controller.mjs',
+  'scripts/processing-engine-bridge.mjs',
+  'scripts/processing-engine-server.mjs',
+  'scripts/processing-engine-tools.mjs',
+  'scripts/processing-execution-proof.mjs',
+  'scripts/processing-execution-receipts.mjs',
   'scripts/processing-inventory.mjs',
+  'scripts/processing-host-review.mjs',
+  'scripts/processing-mcp.mjs',
+  'scripts/processing-native-invocation.mjs',
   'scripts/processing-packet.mjs',
   'scripts/processing-page.mjs',
   'scripts/processing-proposal.mjs',
   'scripts/processing-state.mjs',
+  'scripts/processing-tool-contracts.mjs',
   'scripts/processing.mjs',
   'scripts/processing-workset.mjs',
   'scripts/reader-checkpoint.mjs',
@@ -227,11 +245,16 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
   for (const [key] of dependencies) dependencyInputs.push(...await dependencyFiles(key));
   for (const source of [...SOURCE_FILES, ...dependencyInputs]) await read(source);
   const manifests = new Map();
+  const mcpConfigurations = new Map();
   for (const client of ['codex', 'claude']) {
     const manifest = await readJSON(`packaging/${client}/plugin.json`, read);
     validatePluginManifest(manifest, client);
     if (manifest.version !== pkg.version) fail('Plugin templates must match the package version.');
+    if (manifest.mcpServers !== './.mcp.json') fail('Plugin templates must declare the bundled processing controller.');
     manifests.set(client, manifest);
+    const mcp = await readJSON(`packaging/${client}/mcp.json`, read);
+    validateProcessingMcp(mcp, client);
+    mcpConfigurations.set(client, mcp);
   }
   validateManifestPair(manifests.get('codex'), manifests.get('claude'));
   const runtimePackage = { name: pkg.name, version: pkg.version, private: true, type: 'module', description: pkg.description, engines: pkg.engines, dependencies: pkg.dependencies };
@@ -252,6 +275,7 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
       add(`${skillRoot}/package.json`, asJSON(runtimePackage));
       add(`${skillRoot}/package-lock.json`, asJSON(runtimeLock));
       add(`.${client}-plugin/plugin.json`, asJSON(manifests.get(client)));
+      add('.mcp.json', asJSON(mcpConfigurations.get(client)));
       if (withHooks) add('hooks/hooks.json', asJSON(collectionHookConfiguration(client)));
       add('README.md', packageReadme(client, pkg.version, withHooks));
       for (const file of withPackageInventory(files, { client, version: pkg.version, withHooks })) await writeNew(path.join(root, file.name), file.bytes);
