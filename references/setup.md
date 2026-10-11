@@ -162,11 +162,20 @@ or per-session writers. A custom raw directory does not relocate intake state.
 ## Existing settings
 
 Keep all client plugins/helpers sharing a store on the same released version.
-Upgrades from **v0.7.1 or earlier require fresh setup**, with separate collection
-and processing consent. Preserve old settings and files without importing them.
+Inspect the selected settings through `workflow.mjs status` before choosing a
+setup path:
 
-The following upgrade steps apply to existing session-collection workflows
-created with **v0.8.0 or later**:
+- **Recognized workflow settings** use `format: "cuefluent-workflow"` with
+  collections and routes. Preserve them and follow the upgrade steps below.
+- **Legacy capture settings only**, without a recognized workflow configuration,
+  require fresh setup with separate collection and processing consent. Preserve
+  the old settings and files without importing them.
+
+An unexpectedly missing, ambiguous, invalid or unsupported configuration needs
+inspection before setup. A filename, installed plugin version or failed status
+command does not establish that the settings are legacy.
+
+For recognized workflow settings:
 
 1. Stop collection entrypoints and processing, close affected client sessions,
    and let their running workers and processing clients finish before replacing
@@ -181,17 +190,11 @@ created with **v0.8.0 or later**:
    and permission changes when prompted, then inspect existing operations and
    resume them through their supported processing/recovery commands.
 
-Check the selected release notes for additional compatibility changes. The
-following storage boundary applies when upgrading from before v0.13.0; it does
-not imply a new boundary for every subsequent patch.
-
-v0.13.0 changes reader rules, including Claude reader-rules revision 2, Codex
-per-kind tool budgets and verified processing-control exclusions, and adds
-processing state for worksets and reusable chats. Old and new helpers can produce
-different capture revisions or disagree about that state. Mixed-version access
-across this boundary, and downgrading such a collection to a version before
-v0.13.0, are unsupported.
-Existing immutable captures, packets and active operations are preserved; do not
+Check the selected [release notes](https://github.com/martinmqz/cuefluent-notes/releases)
+for storage compatibility and downgrade boundaries. Configuration recognition
+does not prove that older helpers can read newer captures, reader caches or
+processing state. A patch does not necessarily introduce a new storage boundary.
+Preserve existing immutable captures, packets and active operations; do not
 rebuild them or discard state to bypass a revision conflict. See
 [processing recovery](processing.md#outcomes-and-recovery).
 
@@ -208,13 +211,6 @@ consent, and Automatic still needs an explicit processing request.
 For Windows storage changes, follow
 [Windows storage selection](#windows-storage-selection) and preserve existing
 paths and consent; the profile default is not a migration.
-
-The earlier v0.9.0 format change also applies when upgrading from v0.8.0 directly.
-Current readers accept v0.8.0 captures, but write `reader.headerClientVersion`
-provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
-these formats. Mixed-version access and downgrading a collection used by v0.9.0
-to v0.8.0 are unsupported. Existing immutable capture bytes are preserved;
-reader caches can be replaced under the current reader's rules.
 
 An upgrade does not rerun storage preparation. Existing Windows collections keep
 their visibility until an explicit `storage-prepare`; offer that operation when
@@ -242,7 +238,7 @@ replacement. Do not move or rename existing notes when changing the setting.
 An excluded route wins over a broader route. A session allowlist is not equivalent
 to all project sessions. Native IDs must come from an explicit selection; never
 choose the latest session by cwd or copy a transcript record UUID as a prompt ID.
-The replacement does not import the old v0.7.1 capture configuration or support
+The replacement does not import legacy capture configuration or support
 mixed-version operation. Old settings are not permission to enable new collection.
 
 ## Boundaries and diagnostics

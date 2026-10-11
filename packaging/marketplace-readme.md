@@ -32,17 +32,20 @@ claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#m
 claude plugin install cuefluent-notes@cuefluent --scope user
 ```
 
-For a **fresh installation or an upgrade from v0.7.1 or earlier**, start a fresh
-session, review hooks and the bundled `cuefluent_control` MCP server registration
-and permissions, then say **Set up Cuefluent Notes**. Choose collection and
-processing separately: collection starts off and processing starts Manual.
-Only the v0.7.1-or-earlier capture settings are preserved without import.
+For a **fresh installation or a setup with only legacy capture settings**, start
+a fresh session, review hooks and the bundled `cuefluent_control` MCP server
+registration and permissions, then say **Set up Cuefluent Notes**. Choose
+collection and processing separately: collection starts off and processing
+starts Manual. Legacy settings are preserved without import. Use the
+[settings inspection guidance](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#existing-settings)
+to distinguish them from a recognized workflow configuration; a failed status
+check is not a reason to start over.
 
 ## Updating
 
-For an existing session-collection workflow created with **v0.8.0 or later**,
-preserve settings, paths, captures and active operations; fresh setup is not
-required. Before replacing packages, stop
+For recognized `cuefluent-workflow` settings with collections and routes,
+preserve settings, paths, captures and active operations. Do not rerun setup
+unless the selected release requires it. Before replacing packages, stop
 collection entrypoints and processing, close affected sessions, and let workers
 and processing clients finish. Update every client plugin/helper sharing the
 store to the same released version before resuming. Check the release notes for

@@ -36,6 +36,16 @@ nor processing consent.
 There are no storage-format or command-schema changes from v0.13.0. Upgrades from
 before v0.13.0 still cross its reader-rule and processing-state changes;
 mixed-version access and downgrading after that boundary are unsupported.
+Those changes include Claude reader-rules revision 2, Codex per-kind tool budgets,
+verified processing-control exclusions, and state for worksets and reusable chats.
+
+Upgrading directly from v0.8.0 also crosses the v0.9.0 storage boundary. Current
+readers accept v0.8.0 captures but write `reader.headerClientVersion`
+provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
+those formats. Mixed-version access or a downgrade across that boundary is
+unsupported. Preserve immutable captures, packets and active operations; do not
+rebuild or discard them to bypass a conflict.
+
 Upgrades from v0.7.1 or earlier require fresh setup, with old files preserved
 without import. Follow the
 [coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.1/references/setup.md#existing-settings).
