@@ -27,5 +27,6 @@
     "@martinmqz/agent-guidance-sync": "0.1.2",
     "fflate": "0.8.3",
     "tar-stream": "3.2.1"
-  }
+  },
+  "license": "SUL-1.0"
 }

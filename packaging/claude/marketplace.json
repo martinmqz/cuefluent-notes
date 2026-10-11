@@ -1,13 +1,14 @@
 {
   "name": "cuefluent",
   "description": "Capture and organize knowledge as searchable, Cuefluent-ready Markdown.",
-  "owner": { "name": "Cuefluent Notes contributors" },
+  "owner": { "name": "Cuefluent" },
   "plugins": [
     {
       "name": "cuefluent-notes",
       "description": "Capture and organize your knowledge for fast recall—right on cue.",
       "source": "./claude/cuefluent-notes",
-      "category": "productivity"
+      "category": "productivity",
+      "license": "SUL-1.0"
     }
   ]
 }

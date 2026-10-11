@@ -7,6 +7,12 @@ Its catalogs and packages are also published on the repository's `main` branch.
 Requires Git, Node.js 22+ on your client's PATH, and a current client CLI.
 No npm install or source checkout is needed.
 
+Cuefluent Notes is source-available under the
+[Sustainable Use License 1.0](plugins/cuefluent-notes/LICENSE.md).
+See the [licensing summary](plugins/cuefluent-notes/skills/cuefluent-notes/README.md#license)
+for permitted use, licensing inquiries, and how the license applies to your notes
+and bundled dependencies.
+
 Existing users: read the
 [coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.12.0/references/setup.md#existing-settings)
 before running update or installation commands against shared storage.

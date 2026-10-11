@@ -1,5 +1,5 @@
 ---
-applyTo: "package*.json,packaging/**,.github/workflows/**,.agents/plugins/**,.claude-plugin/**,plugins/**,claude/**,release.json,README.md,.gitignore,.gitattributes,scripts/*package*.mjs,scripts/release*.mjs,scripts/install*.mjs,scripts/marketplace*,scripts/publish-marketplace*,scripts/published-marketplace*.mjs,scripts/check-release-source.sh,scripts/plugin-manifest*.mjs,scripts/client-fixture/package*.json,scripts/client-smoke*.mjs,scripts/smoke-environment*.mjs,references/distribution.md,references/publishing.md,references/verification.md"
+applyTo: "package*.json,packaging/**,.github/workflows/**,.agents/plugins/**,.claude-plugin/**,plugins/**,claude/**,release.json,README.md,LICENSE.md,.gitignore,.gitattributes,scripts/*package*.mjs,scripts/release*.mjs,scripts/install*.mjs,scripts/marketplace*,scripts/publish-marketplace*,scripts/published-marketplace*.mjs,scripts/check-release-source.sh,scripts/plugin-manifest*.mjs,scripts/client-fixture/package*.json,scripts/client-smoke*.mjs,scripts/smoke-environment*.mjs,references/distribution.md,references/publishing.md,references/verification.md"
 ---
 
 <!-- agent-guidance-sync:generated:v1 source=".agents/rules/distribution.md" target=".github/instructions/agent-guidance/distribution.instructions.md" -->

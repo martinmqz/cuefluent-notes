@@ -180,10 +180,14 @@ Each output contains:
 ```text
 codex/cuefluent-notes/
   .codex-plugin/plugin.json
+  .mcp.json
+  README.md
+  LICENSE.md
   package-inventory.json       # exact files, sizes and SHA-256 digests
   skills/cuefluent-notes/
     SKILL.md
     README.md
+    LICENSE.md
     references/
     examples/
     scripts/
@@ -193,12 +197,16 @@ codex/cuefluent-notes/
   hooks/hooks.json             # hook variant only
 claude/cuefluent-notes/
   .claude-plugin/plugin.json
+  .mcp.json
+  README.md
+  LICENSE.md
   package-inventory.json
   skills/cuefluent-notes/       # same complete skill and runtime
   hooks/hooks.json             # hook variant only
 ```
 
-The package includes the runtime dependency closure and its license notices.
+The package includes the [project license](../LICENSE.md), the runtime dependency
+closure and its separate license notices.
 Tests and the package builder are source-development tools; use the source
 checkout to change or test the implementation. The source README lives inside
 the packaged skill so its relative reference links remain usable.
@@ -404,5 +412,6 @@ configuration. A packaged handler does not prove it is loaded or trusted. Live
 current-turn binding, native prompts, already-open session reload and Cuefluent
 recursive discovery/ranking remain unverified.
 
-The project has no assigned source license. Included third-party dependencies
-keep their own license notices; no project license is implied by those notices.
+The plugin uses the [Sustainable Use License 1.0](../LICENSE.md).
+See the [licensing summary](../README.md#license) for permitted use and the scope
+of the license. Included third-party dependencies retain their own licenses.

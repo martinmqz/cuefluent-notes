@@ -1,3 +1,4 @@
+import { SOURCE_CHECKOUT_INPUTS } from './package-inputs.mjs';
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import fs from 'node:fs/promises';
@@ -30,7 +31,7 @@ async function fixture(t, copy = true) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-build-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = path.join(root, 'source'); await fs.mkdir(source);
-  if (copy) for (const name of ['package.json', 'package-lock.json', 'SKILL.md', 'README.md', 'scripts', 'packaging', 'references', 'examples', 'node_modules']) {
+  if (copy) for (const name of [...SOURCE_CHECKOUT_INPUTS, 'node_modules']) {
     await fs.cp(path.join(sourceRoot, name), path.join(source, name), { recursive: true });
   }
   return { root, source };
@@ -74,6 +75,7 @@ test('package exclusions remove seeded unwanted files while retaining runtime fi
     const files = await archiveFiles(pkg.root);
     assert(!files.some(f => f.bytes.includes('SYNTHETIC_EXCLUDED_SENTINEL')));
     assert(files.some(f => f.name.endsWith('/yaml/LICENSE')));
+    assert(!files.some(f => f.name.endsWith('/scripts/package-inputs.mjs')));
     assert(files.some(f => f.name.endsWith('/yaml/dist/index.js')));
     assert(files.some(f => f.name.endsWith('/yaml/synthetic-path.js') && f.bytes.includes(source)));
   }
@@ -99,13 +101,43 @@ test('builds reject stale shared metadata and stale catalog text with no publish
     ['packaging/codex/plugin.json', value => value.author.name += ' stale'],
     ['packaging/codex/plugin.json', value => value.interface.shortDescription += ' stale'],
     ['packaging/claude/marketplace.json', value => value.plugins[0].description += ' stale'],
+    ['packaging/claude/marketplace.json', value => { value.plugins[0].license = 'MIT'; }],
+    ['packaging/claude/marketplace.json', value => { value.plugins[0].license = 'LicenseRef-Sustainable-Use-1.0'; }],
+    ['packaging/claude/marketplace.json', value => { delete value.plugins[0].license; }],
   ]) {
     const file = path.join(source, relative), original = await fs.readFile(file), value = JSON.parse(original);
     change(value); await fs.writeFile(file, JSON.stringify(value));
-    const result = run(); assert.equal(result.status, 2); assert.match(result.stderr, /metadata differs|description differs/);
+    const result = run(); assert.equal(result.status, 2); assert.match(result.stderr, /metadata differs|description differs|license differs/);
     await assert.rejects(fs.stat(output), { code: 'ENOENT' });
     await fs.writeFile(file, original);
   }
+});
+
+test('builds refuse absent or inconsistent license metadata before publishing output', async t => {
+  const { root, source } = await fixture(t);
+  const output = path.join(root, 'output');
+  const { buildPackages } = await import(pathToFileURL(path.join(source, 'scripts/package.mjs')));
+  for (const [relative, select] of [
+    ['package.json', value => value],
+    ['package-lock.json', value => value.packages['']],
+    ['packaging/codex/plugin.json', value => value],
+    ['packaging/claude/plugin.json', value => value],
+  ]) {
+    const file = path.join(source, relative), original = await fs.readFile(file);
+    for (const license of [undefined, 'MIT', 'LicenseRef-Sustainable-Use-1.0', 'SEE LICENSE IN LICENSE.md']) {
+      const value = JSON.parse(original);
+      if (license === undefined) delete select(value).license;
+      else select(value).license = license;
+      await fs.writeFile(file, JSON.stringify(value));
+      await assert.rejects(buildPackages({ outDir: output }), /license|lockfile disagree/);
+      await assert.rejects(fs.stat(output), { code: 'ENOENT' });
+    }
+    await fs.writeFile(file, original);
+  }
+  const license = path.join(source, 'LICENSE.md');
+  await fs.unlink(license);
+  await assert.rejects(buildPackages({ outDir: output }), /Missing or nonportable package input: LICENSE.md/);
+  await assert.rejects(fs.stat(output), { code: 'ENOENT' });
 });
 
 test('builds reject missing or changed controller declarations before publishing output', async t => {

@@ -4,90 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { within, lstatOrNull as statOrNull, isMain, compare, CONTROLS, readBoundedBytes, sameFileIdentity } from './file-io.mjs';
 import { collectionHookConfiguration } from './collection-hook-definition.mjs';
 import { validatePluginManifest, validateManifestPair, validateProcessingMcp } from './plugin-manifest.mjs';
+import { SOURCE_FILES } from './package-inputs.mjs';
 import { withPackageInventory, packagePath } from './package-integrity.mjs';
 
 const SOURCE_ROOT = await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
-const SOURCE_FILES = [
-  'SKILL.md', 'README.md',
-  'references/workflow.md', 'references/authoring.md', 'references/evidence.md',
-  'references/retrieval.md', 'references/refresh.md', 'references/hooks.md', 'references/distribution.md',
-  'references/verification.md', 'references/publishing.md',
-  'references/setup.md', 'references/session-workflow.md', 'references/processing.md', 'references/processing-chat.md', 'references/workflow-cli.md',
-  'references/note-metadata.md', 'references/note-series.md',
-  'examples/workflow.json',
-  'examples/feature-behavior.md', 'examples/decision.md', 'examples/search-vocabulary.md',
-  'examples/standup.md', 'examples/meeting-summary.md', 'examples/task-summary.md',
-  'examples/knowledge-base.md', 'examples/check-cases.json',
-  'examples/standups-sprint-20-26.md', 'examples/standups-sprint-20-27.md',
-  'scripts/check-notes.mjs', 'scripts/safe-update.mjs', 'scripts/writer-protocol.mjs', 'scripts/workflow-values.mjs', 'scripts/runtime-paths.mjs', 'scripts/file-io.mjs',
-  'scripts/plugin-manifest.mjs', 'scripts/package-integrity.mjs',
-  'scripts/note-organization.mjs',
-  'scripts/note-metadata.mjs',
-  'scripts/note-generation.mjs',
-  'scripts/capture-contract.mjs',
-  'scripts/capture-controls.mjs',
-  'scripts/capture-evidence.mjs',
-  'scripts/capture-maintenance.mjs',
-  'scripts/capture-retention.mjs',
-  'scripts/capture-selection.mjs',
-  'scripts/claude-reader.mjs',
-  'scripts/codex-reader.mjs',
-  'scripts/collection-hook-definition.mjs',
-  'scripts/collection-hooks.mjs',
-  'scripts/collection-ingress.mjs',
-  'scripts/collection-grant.mjs',
-  'scripts/collection-scheduler.mjs',
-  'scripts/collection-worker.mjs',
-  'scripts/command.mjs',
-  'scripts/direct-save.mjs',
-  'scripts/intake-io.mjs',
-  'scripts/intake-lock.mjs',
-  'scripts/intake-recovery.mjs',
-  'scripts/intake-store.mjs',
-  'scripts/process-identity.mjs',
-  'scripts/processing-chat-state.mjs',
-  'scripts/processing-chat-recovery.mjs',
-  'scripts/processing-client-claude.mjs',
-  'scripts/processing-client-codex.mjs',
-  'scripts/processing-contract.mjs',
-  'scripts/processing-control-proof.mjs',
-  'scripts/processing-control-receipts.mjs',
-  'scripts/processing-control-server.mjs',
-  'scripts/processing-controller.mjs',
-  'scripts/processing-engine-bridge.mjs',
-  'scripts/processing-engine-server.mjs',
-  'scripts/processing-engine-tools.mjs',
-  'scripts/processing-execution-proof.mjs',
-  'scripts/processing-execution-receipts.mjs',
-  'scripts/processing-inventory.mjs',
-  'scripts/processing-host-review.mjs',
-  'scripts/processing-mcp.mjs',
-  'scripts/processing-native-invocation.mjs',
-  'scripts/processing-packet.mjs',
-  'scripts/processing-page.mjs',
-  'scripts/processing-proposal.mjs',
-  'scripts/processing-state.mjs',
-  'scripts/processing-tool-contracts.mjs',
-  'scripts/processing.mjs',
-  'scripts/processing-workset.mjs',
-  'scripts/reader-checkpoint.mjs',
-  'scripts/reader-pages.mjs',
-  'scripts/session-jsonl.mjs',
-  'scripts/storage-platform.mjs',
-  'scripts/windows-profile.mjs',
-  'scripts/workflow-budget.mjs',
-  'scripts/workflow-config.mjs',
-  'scripts/workflow-context.mjs',
-  'scripts/workflow-paths.mjs',
-  'scripts/workflow-routes.mjs',
-  'scripts/workflow-selection.mjs',
-  'scripts/workflow-settings.mjs',
-  'scripts/windows-discovery.mjs',
-  'scripts/windows-setup-guards.mjs',
-  'scripts/workflow-diagnostics.mjs',
-  'scripts/workflow-storage.mjs',
-  'scripts/workflow.mjs',
-];
+
 const EXCLUDED_DIRECTORIES = new Set(['node_modules', '.git', '.github', '.hg', '.svn', 'test', 'tests', '__tests__', '__mocks__', 'coverage', 'benchmark', 'benchmarks', 'scripts']);
 const EXCLUDED_FILES = /^(?:\.DS_Store|\.npmignore|\.gitignore|\.travis\.yml|Makefile|(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)|(?:tsconfig(?:\.[^.]+)?\.json)|(?:(?:rollup|webpack|vite|eslint|jest|vitest|babel)\.config\..+)|\.(?:eslint|babel|prettier|nyc|mocha)rc(?:\..+)?)$/;
 const fail = message => { throw new Error(message); };
@@ -147,7 +68,7 @@ function resolveDependency(packages, parent, name) {
 }
 async function runtimeDependencies(pkg, lock, read) {
   if (lock.lockfileVersion !== 3 || !object(lock.packages) || !object(lock.packages['']) ||
-    lock.name !== pkg.name || lock.version !== pkg.version || lock.packages[''].version !== pkg.version ||
+    lock.name !== pkg.name || lock.version !== pkg.version || lock.packages[''].version !== pkg.version || lock.packages[''].license !== pkg.license ||
     !equalMap(pkg.dependencies, lock.packages[''].dependencies)) fail('Package metadata and lockfile disagree; refresh the source dependencies before building.');
   if (!object(pkg.dependencies) || !Object.keys(pkg.dependencies).length ||
     Object.values(pkg.dependencies).some(version => !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version))) fail('Top-level runtime dependencies must use exact pinned versions.');
@@ -211,7 +132,7 @@ async function canonicalOutput(requested) {
   return path.join(canonical, ...missing, path.basename(requested));
 }
 export function packageReadme(client, version, withHooks) {
-  return `# Cuefluent Notes ${version}\n\n${client === 'codex' ? 'Codex' : 'Claude Code'} plugin, ${withHooks ? 'optional hook-enabled' : 'manual'} package. Requires Node.js 22 or later on the host PATH. Runtime dependencies and their license notices are included.\n\nFor a fresh installation or an upgrade from v0.7.1 or earlier, start a fresh task and ask **Set up Cuefluent Notes** to choose collection and processing separately. Existing workflow users must follow the [coordinated upgrade steps](skills/cuefluent-notes/references/setup.md#existing-settings) before updating clients that share storage; preserve existing settings and paths. Read the [setup guide](skills/cuefluent-notes/references/setup.md), [usage guide](skills/cuefluent-notes/README.md), and [distribution instructions](skills/cuefluent-notes/references/distribution.md). Building or copying this package does not install or trust it. ${withHooks ? 'Session collection remains disabled without a separate private configuration and client trust.' : 'This package has no hook registration.'}\n`;
+  return `# Cuefluent Notes ${version}\n\n${client === 'codex' ? 'Codex' : 'Claude Code'} plugin, ${withHooks ? 'optional hook-enabled' : 'manual'} package. Requires Node.js 22 or later on the host PATH. Runtime dependencies and their license notices are included.\n\nSource-available under the [Sustainable Use License 1.0](LICENSE.md). See the [licensing summary](skills/cuefluent-notes/README.md#license) for permitted use and the scope of the license.\n\nFor a fresh installation or an upgrade from v0.7.1 or earlier, start a fresh task and ask **Set up Cuefluent Notes** to choose collection and processing separately. Existing workflow users must follow the [coordinated upgrade steps](skills/cuefluent-notes/references/setup.md#existing-settings) before updating clients that share storage; preserve existing settings and paths. Read the [setup guide](skills/cuefluent-notes/references/setup.md), [usage guide](skills/cuefluent-notes/README.md), and [distribution instructions](skills/cuefluent-notes/references/distribution.md). Building or copying this package does not install or trust it. ${withHooks ? 'Session collection remains disabled without a separate private configuration and client trust.' : 'This package has no hook registration.'}\n`;
 }
 
 /** Build local, fresh plugin directories. Never installs, registers or trusts a plugin. */
@@ -240,6 +161,8 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
   const pkg = await readJSON('package.json', read);
   const lock = await readJSON('package-lock.json', read);
   if (pkg.name !== 'cuefluent-notes' || pkg.private !== true || pkg.type !== 'module' || pkg.engines?.node !== '>=22') fail('Unexpected package identity or runtime requirements.');
+  if (pkg.license !== 'SUL-1.0') fail('Package license must use the registered SUL-1.0 identifier.');
+  const license = await read('LICENSE.md');
   const dependencies = await runtimeDependencies(pkg, lock, read);
   const dependencyInputs = [];
   for (const [key] of dependencies) dependencyInputs.push(...await dependencyFiles(key));
@@ -249,6 +172,7 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
   for (const client of ['codex', 'claude']) {
     const manifest = await readJSON(`packaging/${client}/plugin.json`, read);
     validatePluginManifest(manifest, client);
+    if (manifest.license !== pkg.license) fail('Plugin templates must match the package license.');
     if (manifest.version !== pkg.version) fail('Plugin templates must match the package version.');
     if (manifest.mcpServers !== './.mcp.json') fail('Plugin templates must declare the bundled processing controller.');
     manifests.set(client, manifest);
@@ -257,9 +181,9 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
     mcpConfigurations.set(client, mcp);
   }
   validateManifestPair(manifests.get('codex'), manifests.get('claude'));
-  const runtimePackage = { name: pkg.name, version: pkg.version, private: true, type: 'module', description: pkg.description, engines: pkg.engines, dependencies: pkg.dependencies };
+  const runtimePackage = { name: pkg.name, version: pkg.version, private: true, type: 'module', license: pkg.license, description: pkg.description, engines: pkg.engines, dependencies: pkg.dependencies };
   const runtimeLock = { name: pkg.name, version: pkg.version, lockfileVersion: 3, requires: true,
-    packages: { '': { name: pkg.name, version: pkg.version, dependencies: pkg.dependencies, engines: pkg.engines }, ...Object.fromEntries(dependencies) } };
+    packages: { '': { name: pkg.name, version: pkg.version, license: pkg.license, dependencies: pkg.dependencies, engines: pkg.engines }, ...Object.fromEntries(dependencies) } };
   const canonicalParent = path.dirname(output);
   await fs.mkdir(canonicalParent, { recursive: true });
   if (await fs.realpath(canonicalParent) !== canonicalParent) fail('Output parent changed while preparing the build.');
@@ -276,6 +200,7 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
       add(`${skillRoot}/package-lock.json`, asJSON(runtimeLock));
       add(`.${client}-plugin/plugin.json`, asJSON(manifests.get(client)));
       add('.mcp.json', asJSON(mcpConfigurations.get(client)));
+      add('LICENSE.md', license);
       if (withHooks) add('hooks/hooks.json', asJSON(collectionHookConfiguration(client)));
       add('README.md', packageReadme(client, pkg.version, withHooks));
       for (const file of withPackageInventory(files, { client, version: pkg.version, withHooks })) await writeNew(path.join(root, file.name), file.bytes);

@@ -41,3 +41,19 @@ test('MCP templates cannot introduce arbitrary commands, servers, environment or
   const codex = structuredClone(fixtures.codex.mcp); delete codex.mcpServers.cuefluent_control.cwd;
   assert.throws(() => validateProcessingMcp(codex, 'codex'), /MCP configuration/);
 });
+
+test('license metadata is validated while older manifests remain readable', () => {
+  const older = {};
+  for (const [client, { plugin }] of Object.entries(fixtures)) {
+    assert.equal(plugin.license, 'SUL-1.0');
+    for (const license of [null, {}, [], '', '   ', ' MIT ']) {
+      assert.throws(() => validatePluginManifest({ ...plugin, license }, client), /manifest metadata/);
+    }
+    older[client] = { ...plugin };
+    delete older[client].license;
+    validatePluginManifest(older[client], client);
+  }
+  validateManifestPair(older.codex, older.claude);
+  assert.throws(() => validateManifestPair(fixtures.codex.plugin, older.claude), /metadata differs/);
+  assert.throws(() => validateManifestPair(fixtures.codex.plugin, { ...fixtures.claude.plugin, license: 'MIT' }), /metadata differs/);
+});

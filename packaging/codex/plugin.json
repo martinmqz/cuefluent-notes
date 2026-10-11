@@ -1,9 +1,10 @@
 {
   "name": "cuefluent-notes",
   "version": "0.12.0",
+  "license": "SUL-1.0",
   "description": "Capture and organize your knowledge for fast recall—right on cue.",
   "author": {
-    "name": "Cuefluent Notes contributors"
+    "name": "Cuefluent"
   },
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
@@ -11,7 +12,7 @@
     "displayName": "Cuefluent Notes",
     "shortDescription": "Capture and organize your knowledge for fast recall—right on cue.",
     "longDescription": "Collect selected parts of Codex and Claude sessions as private evidence, then turn reviewed sources into clear, searchable Markdown. Capture decisions, meeting summaries, tasks and knowledge-base notes with independent collection and processing controls. Direct saves are also supported.",
-    "developerName": "Cuefluent Notes contributors",
+    "developerName": "Cuefluent",
     "category": "Productivity",
     "capabilities": [
       "Read",

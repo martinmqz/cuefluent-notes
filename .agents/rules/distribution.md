@@ -11,6 +11,7 @@ paths:
   - claude/**
   - release.json
   - README.md
+  - LICENSE.md
   - .gitignore
   - .gitattributes
   - scripts/*package*.mjs

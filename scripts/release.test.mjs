@@ -1,3 +1,4 @@
+import { SOURCE_CHECKOUT_INPUTS } from './package-inputs.mjs';
 import './test-support/isolated-settings.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -26,6 +27,7 @@ const readJSON = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 
 test('release catalogs resolve complete client packages and all four archives work after extraction', async t => {
   const root = await fixture(t);
+  const license = await fs.readFile(path.join(sourceRoot, 'LICENSE.md'));
   const devDependencies = Object.keys((await readJSON(path.join(sourceRoot, 'package.json'))).devDependencies ?? {});
   const built = await buildRelease({ outDir: path.join(root, 'release with spaces $value') });
   assert.equal(built.archives.length, 4);
@@ -65,6 +67,10 @@ test('release catalogs resolve complete client packages and all four archives wo
     const plugin = path.join(extracted, 'cuefluent-notes');
     await fs.stat(path.join(plugin, `.${archive.client}-plugin/plugin.json`));
     const skill = path.join(plugin, 'skills/cuefluent-notes');
+    assert.deepEqual(await fs.readFile(path.join(plugin, 'LICENSE.md')), license);
+    assert.deepEqual(await fs.readFile(path.join(skill, 'LICENSE.md')), license);
+    assert.equal((await readJSON(path.join(skill, 'package.json'))).license, 'SUL-1.0');
+    assert.equal((await readJSON(path.join(skill, 'package-lock.json'))).packages[''].license, 'SUL-1.0');
     const integrity = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/package-integrity.mjs'), plugin,
       '--expected-inventory-sha256', archive.inventorySha256], { cwd: root, env: { ...process.env, NODE_PATH: '' } }));
     assert.equal(integrity.trustedReleaseVerified, true);
@@ -154,7 +160,7 @@ test('release templates reject outside symlinks and checkout paths before produc
   const root = await fixture(t);
   const checkout = path.join(root, 'source');
   await fs.mkdir(checkout);
-  for (const relative of ['package.json', 'package-lock.json', 'SKILL.md', 'README.md', 'scripts', 'packaging', 'references', 'examples', 'node_modules']) {
+  for (const relative of [...SOURCE_CHECKOUT_INPUTS, 'node_modules']) {
     await fs.cp(path.join(sourceRoot, relative), path.join(checkout, relative), { recursive: true });
   }
   const privateFile = path.join(root, 'private.txt');
