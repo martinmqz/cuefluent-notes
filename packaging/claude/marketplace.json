@@ -8,7 +8,7 @@
       "description": "Capture and organize your knowledge for fast recall—right on cue.",
       "source": "./claude/cuefluent-notes",
       "category": "productivity",
-      "license": "LicenseRef-Sustainable-Use-1.0"
+      "license": "SUL-1.0"
     }
   ]
 }

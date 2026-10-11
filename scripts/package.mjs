@@ -161,7 +161,7 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
   const pkg = await readJSON('package.json', read);
   const lock = await readJSON('package-lock.json', read);
   if (pkg.name !== 'cuefluent-notes' || pkg.private !== true || pkg.type !== 'module' || pkg.engines?.node !== '>=22') fail('Unexpected package identity or runtime requirements.');
-  if (pkg.license !== 'SEE LICENSE IN LICENSE.md') fail('Package license must reference LICENSE.md.');
+  if (pkg.license !== 'SUL-1.0') fail('Package license must use the registered SUL-1.0 identifier.');
   const license = await read('LICENSE.md');
   const dependencies = await runtimeDependencies(pkg, lock, read);
   const dependencyInputs = [];
@@ -172,7 +172,7 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
   for (const client of ['codex', 'claude']) {
     const manifest = await readJSON(`packaging/${client}/plugin.json`, read);
     validatePluginManifest(manifest, client);
-    if (manifest.license !== 'LicenseRef-Sustainable-Use-1.0') fail('Plugin templates must declare the Sustainable Use license.');
+    if (manifest.license !== pkg.license) fail('Plugin templates must match the package license.');
     if (manifest.version !== pkg.version) fail('Plugin templates must match the package version.');
     if (manifest.mcpServers !== './.mcp.json') fail('Plugin templates must declare the bundled processing controller.');
     manifests.set(client, manifest);

@@ -69,8 +69,8 @@ test('release catalogs resolve complete client packages and all four archives wo
     const skill = path.join(plugin, 'skills/cuefluent-notes');
     assert.deepEqual(await fs.readFile(path.join(plugin, 'LICENSE.md')), license);
     assert.deepEqual(await fs.readFile(path.join(skill, 'LICENSE.md')), license);
-    assert.equal((await readJSON(path.join(skill, 'package.json'))).license, 'SEE LICENSE IN LICENSE.md');
-    assert.equal((await readJSON(path.join(skill, 'package-lock.json'))).packages[''].license, 'SEE LICENSE IN LICENSE.md');
+    assert.equal((await readJSON(path.join(skill, 'package.json'))).license, 'SUL-1.0');
+    assert.equal((await readJSON(path.join(skill, 'package-lock.json'))).packages[''].license, 'SUL-1.0');
     const integrity = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/package-integrity.mjs'), plugin,
       '--expected-inventory-sha256', archive.inventorySha256], { cwd: root, env: { ...process.env, NODE_PATH: '' } }));
     assert.equal(integrity.trustedReleaseVerified, true);

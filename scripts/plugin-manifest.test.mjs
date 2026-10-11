@@ -45,7 +45,7 @@ test('MCP templates cannot introduce arbitrary commands, servers, environment or
 test('license metadata is validated while older manifests remain readable', () => {
   const older = {};
   for (const [client, { plugin }] of Object.entries(fixtures)) {
-    assert.equal(plugin.license, 'LicenseRef-Sustainable-Use-1.0');
+    assert.equal(plugin.license, 'SUL-1.0');
     for (const license of [null, {}, [], '', '   ', ' MIT ']) {
       assert.throws(() => validatePluginManifest({ ...plugin, license }, client), /manifest metadata/);
     }

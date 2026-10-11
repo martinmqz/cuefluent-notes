@@ -102,6 +102,7 @@ test('builds reject stale shared metadata and stale catalog text with no publish
     ['packaging/codex/plugin.json', value => value.interface.shortDescription += ' stale'],
     ['packaging/claude/marketplace.json', value => value.plugins[0].description += ' stale'],
     ['packaging/claude/marketplace.json', value => { value.plugins[0].license = 'MIT'; }],
+    ['packaging/claude/marketplace.json', value => { value.plugins[0].license = 'LicenseRef-Sustainable-Use-1.0'; }],
     ['packaging/claude/marketplace.json', value => { delete value.plugins[0].license; }],
   ]) {
     const file = path.join(source, relative), original = await fs.readFile(file), value = JSON.parse(original);
@@ -123,7 +124,7 @@ test('builds refuse absent or inconsistent license metadata before publishing ou
     ['packaging/claude/plugin.json', value => value],
   ]) {
     const file = path.join(source, relative), original = await fs.readFile(file);
-    for (const license of [undefined, 'MIT']) {
+    for (const license of [undefined, 'MIT', 'LicenseRef-Sustainable-Use-1.0', 'SEE LICENSE IN LICENSE.md']) {
       const value = JSON.parse(original);
       if (license === undefined) delete select(value).license;
       else select(value).license = license;
