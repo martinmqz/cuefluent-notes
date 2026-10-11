@@ -1,33 +1,33 @@
 {
-  "version": "0.13.0",
+  "version": "0.13.1",
   "archives": [
     {
-      "name": "cuefluent-notes-0.13.0-codex-hooks.zip",
+      "name": "cuefluent-notes-0.13.1-codex-hooks.zip",
       "client": "codex",
       "variant": "hooks",
-      "sha256": "2d27361ee7e4c1f88800b1dc5b5ba2ad540055fc2a41ca3c77d904c974dd9984",
-      "inventorySha256": "3f043dd739c74e6310944ee32efaea8269ee7ff7d8cf24dfda447e0992c890e7"
+      "sha256": "59c576447aa5e79e7c5ea5683542b3db242d501f7ea15be28ff879a616082594",
+      "inventorySha256": "3d3167b3cc2f140eb820df41b6bbd7fccf7afbf8d3dac9e9d6df89fc73109fd9"
     },
     {
-      "name": "cuefluent-notes-0.13.0-codex-manual.zip",
+      "name": "cuefluent-notes-0.13.1-codex-manual.zip",
       "client": "codex",
       "variant": "manual",
-      "sha256": "4dfc6bfce6da0c9f9d68e8170df64122b14a9d02f940a9cfb5037591cf9423f0",
-      "inventorySha256": "63e37aae99809852fc14519b94e9b5663c4117e20a977d7736c738f4bf8f0d8b"
+      "sha256": "b8885367145a700bced7dedb69aeea9e7d28d6e0fb2baaa9e2f309f973d43125",
+      "inventorySha256": "b8d18f21ff1b0ce99afd0dc7d81570e9ce471e091603fdc66b5f9063bbd261bd"
     },
     {
-      "name": "cuefluent-notes-0.13.0-claude-hooks.zip",
+      "name": "cuefluent-notes-0.13.1-claude-hooks.zip",
       "client": "claude",
       "variant": "hooks",
-      "sha256": "cfed35027e75a2defe5306d7e04a215a41e5dff833e11ba87375b8498c544dcf",
-      "inventorySha256": "aa85ef0b64b104aeb50eef80714452106ed1bdb52691d5e32ff9709b67cb925c"
+      "sha256": "a5539ec3e2a6f89f57cb73322e91381cf0de8f6ad9898601a6400af6a6cf501a",
+      "inventorySha256": "7167dcc9122e408609a37b71b02fec41372cd6fd1910cf748711fad9f67cceb4"
     },
     {
-      "name": "cuefluent-notes-0.13.0-claude-manual.zip",
+      "name": "cuefluent-notes-0.13.1-claude-manual.zip",
       "client": "claude",
       "variant": "manual",
-      "sha256": "b94c23d197d51de719c738b07cbf250c4b58d84c93810554c3cba4379bdab8bd",
-      "inventorySha256": "1bc6606cedd7759ccc3489f38c209cf4e692e02705498f780e10717208c1d1c3"
+      "sha256": "de113303ad17867013327528d3ad1f3d40bf28d5235889acd0852dc59bd353e3",
+      "inventorySha256": "dd457f1181d1e93796520ccfb12850d740b70aeab073a60deac061ceb4ac79d8"
     }
   ]
 }

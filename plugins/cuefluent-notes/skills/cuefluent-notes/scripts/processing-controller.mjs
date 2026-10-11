@@ -105,7 +105,7 @@ export async function openProcessingController(context, dependencies = {}) {
         bridge = await (dependencies.openBridge ?? openProcessingEngineBridge)({ toolNames: declared.map(tool => tool.name),
           declarations: declared, call: engineCall });
         transport = (dependencies.createClaude ?? createClaudeProcessingClient)({ executable: dependencies.claudeExecutable ?? 'claude',
-          cwd, engine: bridge.engine, allowedTools: bridge.allowedTools, env });
+          cwd, engine: bridge.engine, allowedTools: bridge.allowedTools }, { env });
       }
     } catch (error) { await transport?.close?.(); await bridge?.close(); transport = null; bridge = null; throw error; }
   }

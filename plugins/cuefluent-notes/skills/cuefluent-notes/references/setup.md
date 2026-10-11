@@ -161,27 +161,40 @@ or per-session writers. A custom raw directory does not relocate intake state.
 
 ## Existing settings
 
-Keep all client plugins/helpers sharing a store on the same version. To upgrade an
-existing v0.8.0–v0.12.0 workflow to v0.13.0:
+Keep all client plugins/helpers sharing a store on the same released version.
+Inspect the selected settings through `workflow.mjs status` before choosing a
+setup path:
+
+- **Recognized workflow settings** use `format: "cuefluent-workflow"` with
+  collections and routes. Preserve them and follow the upgrade steps below.
+- **Legacy capture settings only**, without a recognized workflow configuration,
+  require fresh setup with separate collection and processing consent. Preserve
+  the old settings and files without importing them.
+
+An unexpectedly missing, ambiguous, invalid or unsupported configuration needs
+inspection before setup. A filename, installed plugin version or failed status
+command does not establish that the settings are legacy.
+
+For recognized workflow settings:
 
 1. Stop collection entrypoints and processing, close affected client sessions,
    and let their running workers and processing clients finish before replacing
    packages. Preserve unfinished operations; do not delete claims, locks or journals.
 2. Keep the inspected workflow settings, storage paths, notes and consent choices.
-   Fresh setup or storage migration is not required.
+   Do not rerun fresh setup or move storage unless the selected release explicitly
+   requires it.
 3. Update every client plugin and standalone helper using that collection to
-   v0.13.0 before any of them resumes access, including both Codex and Claude when
-   used. A worker can process registrations from either client.
-4. Start fresh client sessions. Review changed hooks and the new `cuefluent_control`
-   MCP server registration and permissions, then inspect existing operations and
+   the selected release before any of them resumes access, including Codex and
+   Claude when used. A worker can process registrations from either client.
+4. Start fresh client sessions. Review hook or `cuefluent_control` MCP registration
+   and permission changes when prompted, then inspect existing operations and
    resume them through their supported processing/recovery commands.
 
-v0.13.0 changes reader rules, including Claude reader-rules revision 2, Codex
-per-kind tool budgets and verified processing-control exclusions, and adds
-processing state for worksets and reusable chats. Old and new helpers can produce
-different capture revisions or disagree about that state. Mixed-version access
-and downgrading a collection after v0.13.0 has written to it are unsupported.
-Existing immutable captures, packets and active operations are preserved; do not
+Review the [storage compatibility boundaries](#storage-compatibility) below and
+the selected release notes for any additional changes. Configuration recognition
+does not prove that older helpers can read newer captures, reader caches or
+processing state. A patch does not necessarily introduce a new storage boundary.
+Preserve existing immutable captures, packets and active operations; do not
 rebuild them or discard state to bypass a revision conflict. See
 [processing recovery](processing.md#outcomes-and-recovery).
 
@@ -198,13 +211,6 @@ consent, and Automatic still needs an explicit processing request.
 For Windows storage changes, follow
 [Windows storage selection](#windows-storage-selection) and preserve existing
 paths and consent; the profile default is not a migration.
-
-The earlier v0.9.0 format change also applies when upgrading from v0.8.0 directly.
-Current readers accept v0.8.0 captures, but write `reader.headerClientVersion`
-provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
-these formats. Mixed-version access and downgrading a collection used by v0.9.0
-to v0.8.0 are unsupported. Existing immutable capture bytes are preserved;
-reader caches can be replaced under the current reader's rules.
 
 An upgrade does not rerun storage preparation. Existing Windows collections keep
 their visibility until an explicit `storage-prepare`; offer that operation when
@@ -232,8 +238,32 @@ replacement. Do not move or rename existing notes when changing the setting.
 An excluded route wins over a broader route. A session allowlist is not equivalent
 to all project sessions. Native IDs must come from an explicit selection; never
 choose the latest session by cwd or copy a transcript record UUID as a prompt ID.
-The replacement does not import the old v0.7.1 capture configuration or support
+The replacement does not import legacy capture configuration or support
 mixed-version operation. Old settings are not permission to enable new collection.
+
+### Storage compatibility
+
+The following historical boundaries still matter when skipping releases. Keep
+all helpers sharing a collection on the same release, including both clients
+when used; a worker can process registrations from either client.
+
+v0.13.0 changed reader rules, including Claude reader-rules revision 2, Codex
+per-kind tool budgets and verified processing-control exclusions, and added
+processing state for worksets and reusable chats. Old and new helpers can produce
+different capture revisions or disagree about that state. Mixed-version access
+across this boundary, and downgrading a collection written by v0.13.0 or later to
+a version before v0.13.0, are unsupported.
+
+The v0.9.0 format change also applies when upgrading directly from v0.8.0.
+Current readers accept v0.8.0 captures, but write `reader.headerClientVersion`
+provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
+these formats. Mixed-version access and downgrading a collection used by v0.9.0
+or later to v0.8.0 are unsupported. Existing immutable capture bytes are preserved;
+reader caches can be replaced under the current reader's rules.
+
+Preserve immutable captures, packets and active operations across these upgrades.
+Do not rebuild or discard them to bypass a conflict; use
+[processing recovery](processing.md#outcomes-and-recovery).
 
 ## Boundaries and diagnostics
 
