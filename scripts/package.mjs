@@ -8,7 +8,7 @@ import { withPackageInventory, packagePath } from './package-integrity.mjs';
 
 const SOURCE_ROOT = await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const SOURCE_FILES = [
-  'SKILL.md', 'README.md',
+  'SKILL.md', 'README.md', 'LICENSE.md',
   'references/workflow.md', 'references/authoring.md', 'references/evidence.md',
   'references/retrieval.md', 'references/refresh.md', 'references/hooks.md', 'references/distribution.md',
   'references/verification.md', 'references/publishing.md',
@@ -211,7 +211,7 @@ async function canonicalOutput(requested) {
   return path.join(canonical, ...missing, path.basename(requested));
 }
 export function packageReadme(client, version, withHooks) {
-  return `# Cuefluent Notes ${version}\n\n${client === 'codex' ? 'Codex' : 'Claude Code'} plugin, ${withHooks ? 'optional hook-enabled' : 'manual'} package. Requires Node.js 22 or later on the host PATH. Runtime dependencies and their license notices are included.\n\nFor a fresh installation or an upgrade from v0.7.1 or earlier, start a fresh task and ask **Set up Cuefluent Notes** to choose collection and processing separately. Existing workflow users must follow the [coordinated upgrade steps](skills/cuefluent-notes/references/setup.md#existing-settings) before updating clients that share storage; preserve existing settings and paths. Read the [setup guide](skills/cuefluent-notes/references/setup.md), [usage guide](skills/cuefluent-notes/README.md), and [distribution instructions](skills/cuefluent-notes/references/distribution.md). Building or copying this package does not install or trust it. ${withHooks ? 'Session collection remains disabled without a separate private configuration and client trust.' : 'This package has no hook registration.'}\n`;
+  return `# Cuefluent Notes ${version}\n\n${client === 'codex' ? 'Codex' : 'Claude Code'} plugin, ${withHooks ? 'optional hook-enabled' : 'manual'} package. Requires Node.js 22 or later on the host PATH. Runtime dependencies and their license notices are included.\n\nSource-available under the [Sustainable Use License 1.0](LICENSE.md). See the [licensing summary](skills/cuefluent-notes/README.md#license) for permitted use and the scope of the license.\n\nFor a fresh installation or an upgrade from v0.7.1 or earlier, start a fresh task and ask **Set up Cuefluent Notes** to choose collection and processing separately. Existing workflow users must follow the [coordinated upgrade steps](skills/cuefluent-notes/references/setup.md#existing-settings) before updating clients that share storage; preserve existing settings and paths. Read the [setup guide](skills/cuefluent-notes/references/setup.md), [usage guide](skills/cuefluent-notes/README.md), and [distribution instructions](skills/cuefluent-notes/references/distribution.md). Building or copying this package does not install or trust it. ${withHooks ? 'Session collection remains disabled without a separate private configuration and client trust.' : 'This package has no hook registration.'}\n`;
 }
 
 /** Build local, fresh plugin directories. Never installs, registers or trusts a plugin. */
@@ -257,9 +257,9 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
     mcpConfigurations.set(client, mcp);
   }
   validateManifestPair(manifests.get('codex'), manifests.get('claude'));
-  const runtimePackage = { name: pkg.name, version: pkg.version, private: true, type: 'module', description: pkg.description, engines: pkg.engines, dependencies: pkg.dependencies };
+  const runtimePackage = { name: pkg.name, version: pkg.version, private: true, type: 'module', license: pkg.license, description: pkg.description, engines: pkg.engines, dependencies: pkg.dependencies };
   const runtimeLock = { name: pkg.name, version: pkg.version, lockfileVersion: 3, requires: true,
-    packages: { '': { name: pkg.name, version: pkg.version, dependencies: pkg.dependencies, engines: pkg.engines }, ...Object.fromEntries(dependencies) } };
+    packages: { '': { name: pkg.name, version: pkg.version, license: pkg.license, dependencies: pkg.dependencies, engines: pkg.engines }, ...Object.fromEntries(dependencies) } };
   const canonicalParent = path.dirname(output);
   await fs.mkdir(canonicalParent, { recursive: true });
   if (await fs.realpath(canonicalParent) !== canonicalParent) fail('Output parent changed while preparing the build.');
@@ -276,6 +276,7 @@ export async function buildPackages({ outDir, withHooks = false, clients = ['cod
       add(`${skillRoot}/package-lock.json`, asJSON(runtimeLock));
       add(`.${client}-plugin/plugin.json`, asJSON(manifests.get(client)));
       add('.mcp.json', asJSON(mcpConfigurations.get(client)));
+      add('LICENSE.md', inputs.get('LICENSE.md'));
       if (withHooks) add('hooks/hooks.json', asJSON(collectionHookConfiguration(client)));
       add('README.md', packageReadme(client, pkg.version, withHooks));
       for (const file of withPackageInventory(files, { client, version: pkg.version, withHooks })) await writeNew(path.join(root, file.name), file.bytes);

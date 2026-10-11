@@ -237,7 +237,7 @@ shared local profile directory; existing settings are preserved. See
 [Windows storage selection](references/setup.md#windows-storage-selection) for
 Desktop/CLI selection, package-store limits and profile checks.
 
-## Verification and licensing
+## Verification
 
 Verification covers synthetic readers, consent boundaries, private storage,
 writer conflicts/recovery and detached packages. CI uses Node 22 on native
@@ -251,5 +251,18 @@ agent synthesis quality, automatic processing from hook notices, desktop launch
 PATH or Cuefluent loading/ranking. Publication status is on the
 [releases page](https://github.com/martinmqz/cuefluent-notes/releases).
 
-The project has no assigned license. Bundled dependencies retain their own
-license notices; no project license is inferred from those dependencies.
+## License
+
+Cuefluent Notes is source-available under the
+[Sustainable Use License 1.0](LICENSE.md). You may use and modify it for personal,
+non-commercial, or internal business purposes. Redistribution must be free of
+charge and for non-commercial purposes. Selling the plugin, commercial
+redistribution, or selling access to it requires separate permission from the
+copyright holders. This is not an OSI-approved open-source license; the full
+license controls.
+
+Using the plugin does not place this license on your inputs, captures, or authored
+notes. Any plugin code or other third-party material copied into them retains its
+applicable license. Bundled dependencies keep their own licenses and notices.
+The Cuefluent app is a separate product with its own terms; it is not required to
+use this plugin.

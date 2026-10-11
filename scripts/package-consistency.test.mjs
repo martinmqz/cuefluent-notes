@@ -30,7 +30,7 @@ async function fixture(t, copy = true) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-build-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = path.join(root, 'source'); await fs.mkdir(source);
-  if (copy) for (const name of ['package.json', 'package-lock.json', 'SKILL.md', 'README.md', 'scripts', 'packaging', 'references', 'examples', 'node_modules']) {
+  if (copy) for (const name of ['package.json', 'package-lock.json', 'SKILL.md', 'README.md', 'LICENSE.md', 'scripts', 'packaging', 'references', 'examples', 'node_modules']) {
     await fs.cp(path.join(sourceRoot, name), path.join(source, name), { recursive: true });
   }
   return { root, source };
