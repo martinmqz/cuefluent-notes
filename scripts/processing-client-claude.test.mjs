@@ -4,43 +4,19 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
+import { CLAUDE_TEST_TOOLS as TOOLS, claudeHarness, initialization, completed, success } from './test-support/claude-client.mjs';
 import { createClaudeProcessingClient } from './processing-client-claude.mjs';
 
-const TOOLS = ['mcp__cuefluent_engine__inspect', 'mcp__cuefluent_engine__propose'];
 const cwd = path.resolve('synthetic-processing');
-function initialization(sessionId, patch = {}) {
-  return { type: 'system', subtype: 'init', session_id: sessionId, tools: TOOLS,
-    mcp_servers: [{ name: 'cuefluent_engine', status: 'connected' }],
-    permissionMode: 'dontAsk', slash_commands: [], skills: [], model: 'synthetic-model', claude_code_version: 'fixture', ...patch };
-}
-function completed(sessionId, patch = {}) {
-  return { type: 'result', session_id: sessionId, subtype: 'success', is_error: false,
-    permission_denials: [], result: 'Synthetic status.', ...patch };
-}
 function harness(run) {
-  const calls = [], children = [];
-  const spawn = (executable, args, options) => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
-    const chunks = [];
-    child.stdin = new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } });
-    child.kill = signal => { child.killed = signal; queueMicrotask(() => child.emit('close', null, signal)); return true; };
-    child.send = row => child.stdout.write(`${JSON.stringify(row)}\n`);
-    child.stdin.on('finish', () => run({ child, input: JSON.parse(Buffer.concat(chunks).toString('utf8')), args }));
-    calls.push({ executable, args, options }); children.push(child);
-    queueMicrotask(() => child.emit('spawn')); return child;
-  };
+  const h = claudeHarness(run);
   const client = createClaudeProcessingClient({ executable: 'claude', cwd,
-    engine: { command: process.execPath, args: ['synthetic-engine.mjs'] }, allowedTools: TOOLS, spawn, timeoutMs: 1000 });
-  return { calls, children, client, spawn };
+    engine: { command: process.execPath, args: ['synthetic-engine.mjs'] }, allowedTools: TOOLS, spawn: h.spawn, timeoutMs: 1000 });
+  return { ...h, client };
 }
 function request(sessionId = randomUUID(), changes = {}) {
   return { sessionId, inputId: randomUUID(), resume: false, prompt: 'Process the selected synthetic operation.', beforeDispatch: async () => {}, ...changes };
 }
-function success({ child, args, input }) {
-  const sessionId = args.at(-1); child.send(initialization(sessionId)); child.send({ ...input, isReplay: true });
-  child.send(completed(sessionId)); child.emit('close', 0, null);
-}
-
 test('Claude create/resume uses one native UUID and only the selected engine, after reservation', async () => {
   const h = harness(success), id = randomUUID(), gates = [], events = [];
   const gate = async state => { assert.equal(h.calls.length, gates.length); gates.push(state); };
@@ -241,4 +217,29 @@ test('controlled Claude launch removes the inherited nested-session sentinel wit
   assert.equal(h.calls[0].options.env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_CODE_SESSION_ID);
   assert.equal(h.calls[0].options.env.ANTHROPIC_API_KEY, env.ANTHROPIC_API_KEY);
   assert.equal(h.calls[0].options.env.PATH, env.PATH);
+});
+
+test('custom Claude environments validate exact errors with a valid replacement control', () => {
+  const base = { executable: 'claude', cwd, engine: { command: process.execPath, args: [] }, allowedTools: TOOLS };
+  assert.doesNotThrow(() => createClaudeProcessingClient({ ...base, env: { PATH: 'synthetic-path', EMPTY: '' } }));
+  for (const env of [null, [], Object.create({ inherited: 'value' }), { INVALID: 1 }, { 'INVALID-NAME': 'value' },
+    { INVALID: '\0' }, { INVALID: '\ud800' }, { LARGE: 'x'.repeat(32769) },
+    Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`KEY_${i}`, 'value']))]) {
+    assert.throws(() => createClaudeProcessingClient({ ...base, env }), { code: 'INVALID_PROCESSING_CLIENT' });
+    assert.throws(() => createClaudeProcessingClient({ ...base, engine: { ...base.engine, env } }), { code: 'INVALID_PROCESSING_CLIENT' });
+  }
+});
+
+test('host environment copies retain OS names and sizes independently of replacement-map limits', async () => {
+  const h = harness(success);
+  const env = { ...Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`KEY_${i}`, 'synthetic'])),
+    'ProgramFiles(x86)': 'synthetic programs', 'CommonProgramFiles(x86)': 'synthetic common programs',
+    LARGE: 'x'.repeat(32769), CLAUDECODE: '1' };
+  const original = { ...env };
+  const client = createClaudeProcessingClient({ executable: 'claude', cwd,
+    engine: { command: process.execPath, args: [] }, allowedTools: TOOLS, spawn: h.spawn }, { env });
+  await client.run(request());
+  const { CLAUDECODE: _sentinel, ...expected } = original;
+  assert.deepEqual(h.calls[0].options.env, expected);
+  assert.deepEqual(env, original);
 });

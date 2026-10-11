@@ -32,35 +32,40 @@ claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#m
 claude plugin install cuefluent-notes@cuefluent --scope user
 ```
 
-For a **fresh installation or an upgrade from v0.7.1 or earlier**, start a fresh
-session, review hooks and the bundled `cuefluent_control` MCP server registration
-and permissions, then say **Set up Cuefluent Notes**. Choose collection and
-processing separately: collection starts off and processing starts Manual.
-Only the v0.7.1-or-earlier capture settings are preserved without import.
+For a **fresh installation or a setup with only legacy capture settings**, start
+a fresh session, review hooks and the bundled `cuefluent_control` MCP server
+registration and permissions, then say **Set up Cuefluent Notes**. Choose
+collection and processing separately: collection starts off and processing
+starts Manual. Legacy settings are preserved without import. Use the
+[settings inspection guidance](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#existing-settings)
+to distinguish them from a recognized workflow configuration; a failed status
+check is not a reason to start over.
 
 ## Updating
 
-For an existing v0.8.0–v0.12.0 workflow, preserve settings, paths, captures and
-active operations; fresh setup is not required. Before replacing packages, stop
+For recognized `cuefluent-workflow` settings with collections and routes,
+preserve settings, paths, captures and active operations. Do not rerun setup
+unless the selected release requires it. Before replacing packages, stop
 collection entrypoints and processing, close affected sessions, and let workers
 and processing clients finish. Update every client plugin/helper sharing the
-store to v0.13.0 before resuming. Mixed-version access and downgrading after this
-version writes to the store are unsupported. Follow the
-[coordinated upgrade guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/setup.md#existing-settings)
-and [marketplace update commands](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/README.md#update-a-marketplace-installation).
+store to the same released version before resuming. Check the release notes for
+storage compatibility and downgrade boundaries; a patch does not necessarily
+change stored formats. Follow the
+[coordinated upgrade guide](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#existing-settings)
+and [marketplace update commands](plugins/cuefluent-notes/skills/cuefluent-notes/README.md#update-a-marketplace-installation).
 
-Review changed hooks **and the new MCP server** before resuming. Both hook and
+Review hook or MCP registration and permission changes when prompted. Both hook and
 manual packages contain `.mcp.json`, which registers `cuefluent_control`; the
 client may start it when loading the plugin. An explicit processing request uses
 its native CLI authentication and model resolution. Processing-enabled routes may
 register source metadata even with collection off; the explicit handoff can
 inspect bounded source content to verify the native call. See
-[processing chat prerequisites and privacy](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/processing-chat.md).
+[processing chat prerequisites and privacy](plugins/cuefluent-notes/skills/cuefluent-notes/references/processing-chat.md).
 
 Existing Windows package stores are preserved, with additions needing missing
 roots frozen pending separate migration. Do not create a second writer or move
 paths to bypass a refusal; follow
-[Windows storage selection](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/setup.md#windows-storage-selection).
+[Windows storage selection](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#windows-storage-selection).
 
 ## Processing
 
@@ -73,8 +78,8 @@ verified native identities. Mixed work and corrections remain eligible evidence.
 If the native tool, binding or form is unavailable, leave the work pending and
 report the limitation. Standalone agents can use the explicit CLI workflow from
 an uncaptured context; do not silently process inline in a captured work chat.
-See [processing and recovery](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/processing-chat.md)
-and [verification limits](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/references/verification.md).
+See [processing and recovery](plugins/cuefluent-notes/skills/cuefluent-notes/references/processing-chat.md)
+and [verification limits](plugins/cuefluent-notes/skills/cuefluent-notes/references/verification.md).
 
 Keep notes outside the installed package. Remove any previous standalone or
 source-installer copy before switching installation methods, so only one copy is
@@ -85,5 +90,5 @@ Both variants use the same plugin identity; choose one per client.
 This is a publisher-hosted marketplace, not an OpenAI or Anthropic public-directory
 listing. Edit source and templates on `main`, not generated packages. If your
 existing marketplace registration selects the old `marketplace` branch, follow the
-[branch migration instructions](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.0/README.md#switch-an-older-marketplace-registration-to-main)
+[branch migration instructions](plugins/cuefluent-notes/skills/cuefluent-notes/README.md#switch-an-older-marketplace-registration-to-main)
 once the replacement catalogs are available.

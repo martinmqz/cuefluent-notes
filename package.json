@@ -1,6 +1,6 @@
 {
   "name": "cuefluent-notes",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "private": true,
   "type": "module",
   "description": "Selected session evidence and searchable Markdown notes with independent collection and processing.",
