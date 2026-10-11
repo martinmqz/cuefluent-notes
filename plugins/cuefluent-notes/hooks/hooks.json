@@ -1,0 +1,59 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const fail=()=>{console.error('Cuefluent Notes: collection unavailable; inspect workflow status.');process.exit(0)};process.on('uncaughtException',fail);process.on('unhandledRejection',fail);const timer=setTimeout(fail,2500);Promise.resolve().then(()=>{if(Number(process.versions.node.split('.')[0])<22)throw Error();const p=require('node:path'),r=process.env.PLUGIN_ROOT;if(!r||!p.isAbsolute(r)||p.resolve(r)!==p.join(r,'.'))throw Error();return import(require('node:url').pathToFileURL(p.join(r,'skills/cuefluent-notes/scripts/collection-hooks.mjs')).href)}).then(m=>m.main(['codex'])).then(()=>{clearTimeout(timer);process.exit(0)}).catch(fail)\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const fail=()=>{console.error('Cuefluent Notes: collection unavailable; inspect workflow status.');process.exit(0)};process.on('uncaughtException',fail);process.on('unhandledRejection',fail);const timer=setTimeout(fail,2500);Promise.resolve().then(()=>{if(Number(process.versions.node.split('.')[0])<22)throw Error();const p=require('node:path'),r=process.env.PLUGIN_ROOT;if(!r||!p.isAbsolute(r)||p.resolve(r)!==p.join(r,'.'))throw Error();return import(require('node:url').pathToFileURL(p.join(r,'skills/cuefluent-notes/scripts/collection-hooks.mjs')).href)}).then(m=>m.main(['codex'])).then(()=>{clearTimeout(timer);process.exit(0)}).catch(fail)\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const fail=()=>{console.error('Cuefluent Notes: collection unavailable; inspect workflow status.');process.exit(0)};process.on('uncaughtException',fail);process.on('unhandledRejection',fail);const timer=setTimeout(fail,2500);Promise.resolve().then(()=>{if(Number(process.versions.node.split('.')[0])<22)throw Error();const p=require('node:path'),r=process.env.PLUGIN_ROOT;if(!r||!p.isAbsolute(r)||p.resolve(r)!==p.join(r,'.'))throw Error();return import(require('node:url').pathToFileURL(p.join(r,'skills/cuefluent-notes/scripts/collection-hooks.mjs')).href)}).then(m=>m.main(['codex'])).then(()=>{clearTimeout(timer);process.exit(0)}).catch(fail)\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const fail=()=>{console.error('Cuefluent Notes: collection unavailable; inspect workflow status.');process.exit(0)};process.on('uncaughtException',fail);process.on('unhandledRejection',fail);const timer=setTimeout(fail,2500);Promise.resolve().then(()=>{if(Number(process.versions.node.split('.')[0])<22)throw Error();const p=require('node:path'),r=process.env.PLUGIN_ROOT;if(!r||!p.isAbsolute(r)||p.resolve(r)!==p.join(r,'.'))throw Error();return import(require('node:url').pathToFileURL(p.join(r,'skills/cuefluent-notes/scripts/collection-hooks.mjs')).href)}).then(m=>m.main(['codex'])).then(()=>{clearTimeout(timer);process.exit(0)}).catch(fail)\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const fail=()=>{console.error('Cuefluent Notes: collection unavailable; inspect workflow status.');process.exit(0)};process.on('uncaughtException',fail);process.on('unhandledRejection',fail);const timer=setTimeout(fail,2500);Promise.resolve().then(()=>{if(Number(process.versions.node.split('.')[0])<22)throw Error();const p=require('node:path'),r=process.env.PLUGIN_ROOT;if(!r||!p.isAbsolute(r)||p.resolve(r)!==p.join(r,'.'))throw Error();return import(require('node:url').pathToFileURL(p.join(r,'skills/cuefluent-notes/scripts/collection-hooks.mjs')).href)}).then(m=>m.main(['codex'])).then(()=>{clearTimeout(timer);process.exit(0)}).catch(fail)\"",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

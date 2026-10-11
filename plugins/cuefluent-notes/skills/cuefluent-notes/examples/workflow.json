@@ -1,0 +1,29 @@
+{
+  "format": "cuefluent-workflow",
+  "schemaVersion": 1,
+  "collections": [
+    {
+      "id": "example",
+      "rawDir": "/private-example/cuefluent/.cuefluent-raw",
+      "intakeStateDir": "/private-example/cuefluent/intake",
+      "notes": {
+        "notesDir": "/private-example/notes",
+        "organization": "by-type",
+        "writerStateDir": "/private-example/cuefluent/writer"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "id": "example",
+      "projectRoot": "/projects/example",
+      "clients": ["codex", "claude"],
+      "collectionId": "example",
+      "collection": {
+        "enabled": false,
+        "selection": {"kind": "sessions", "sessionIds": []}
+      },
+      "processing": {"mode": "manual"}
+    }
+  ]
+}

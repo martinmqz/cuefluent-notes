@@ -1,0 +1,33 @@
+{
+  "version": "0.13.0",
+  "archives": [
+    {
+      "name": "cuefluent-notes-0.13.0-codex-hooks.zip",
+      "client": "codex",
+      "variant": "hooks",
+      "sha256": "2d27361ee7e4c1f88800b1dc5b5ba2ad540055fc2a41ca3c77d904c974dd9984",
+      "inventorySha256": "3f043dd739c74e6310944ee32efaea8269ee7ff7d8cf24dfda447e0992c890e7"
+    },
+    {
+      "name": "cuefluent-notes-0.13.0-codex-manual.zip",
+      "client": "codex",
+      "variant": "manual",
+      "sha256": "4dfc6bfce6da0c9f9d68e8170df64122b14a9d02f940a9cfb5037591cf9423f0",
+      "inventorySha256": "63e37aae99809852fc14519b94e9b5663c4117e20a977d7736c738f4bf8f0d8b"
+    },
+    {
+      "name": "cuefluent-notes-0.13.0-claude-hooks.zip",
+      "client": "claude",
+      "variant": "hooks",
+      "sha256": "cfed35027e75a2defe5306d7e04a215a41e5dff833e11ba87375b8498c544dcf",
+      "inventorySha256": "aa85ef0b64b104aeb50eef80714452106ed1bdb52691d5e32ff9709b67cb925c"
+    },
+    {
+      "name": "cuefluent-notes-0.13.0-claude-manual.zip",
+      "client": "claude",
+      "variant": "manual",
+      "sha256": "b94c23d197d51de719c738b07cbf250c4b58d84c93810554c3cba4379bdab8bd",
+      "inventorySha256": "1bc6606cedd7759ccc3489f38c209cf4e692e02705498f780e10717208c1d1c3"
+    }
+  ]
+}

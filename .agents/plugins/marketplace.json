@@ -1,0 +1,12 @@
+{
+  "name": "cuefluent",
+  "interface": { "displayName": "Cuefluent" },
+  "plugins": [
+    {
+      "name": "cuefluent-notes",
+      "source": { "source": "local", "path": "./plugins/cuefluent-notes" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}
