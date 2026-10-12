@@ -1,6 +1,6 @@
 {
   "name": "cuefluent-notes",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "license": "SUL-1.0",
   "description": "Capture and organize your knowledge for fast recall—right on cue.",
   "mcpServers": "./.mcp.json",
