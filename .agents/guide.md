@@ -49,13 +49,12 @@ and check its frontmatter against the affected repository paths.
   license notices. Change `SOURCE_FILES` in `scripts/package-inputs.mjs` only for intended
   shipped content. Exclude repository guidance, development tools, tests, and
   private planning from installed packages.
-- Keep real user notes, private evidence, private capture configuration, and
-  credentials outside the repository. Use synthetic fixtures and disposable test
-  locations by default; test a user's installed plugin or capture settings only
-  when explicitly authorized. Keep private planning outside the repository;
-  put repository implementation plans, review reports, dated test logs, and
-  internal process history in ignored `.local/`, never in committed documentation
-  or installed packages.
+- Keep real user notes, private evidence, and private capture configuration outside
+  the repository. Use synthetic fixtures and disposable test locations by default;
+  test a user's installed plugin or capture settings only when explicitly
+  authorized.
+- Keep plans, review notes, evidence, and machine-specific paths out of source
+  control. Keep secrets and credentials out of source, tests, logs, and evidence.
 - Development and build work does not authorize installation, hook trust,
   capture configuration changes, merging, publication, or visibility changes.
   Perform those actions only within the user's explicit authorization.
