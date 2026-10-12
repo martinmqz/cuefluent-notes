@@ -132,14 +132,23 @@ answering the form.
 Save uses the existing exact-proposal writer. Skip handles only those revisions;
 Cancel releases an unapplied operation; Later, declining or closing the form leaves
 it pending. No filesystem lock spans the decision. Changes to note contents,
-proposals, inputs or policy preserve a conflict and require fresh review. A host
-without form support leaves the proposal pending. An exact review exceeding the
-256 KiB form limit is refused without truncation; use the supported explicit
+proposals, inputs or policy preserve a conflict and require fresh review. The form
+requires MCP `2025-11-25` string-default support. A host negotiating an older
+protocol or lacking form support leaves the proposal pending. An exact review
+exceeding the 256 KiB form limit is refused without truncation; use the supported explicit
 proposal and save commands from an uncaptured context instead.
 
-The preview field displays the proposal; it is not an editor. Changed preview
-text is refused with `PROCESSING_REVIEW_PREVIEW_CHANGED`, leaving the exact
-proposal pending. Reopen review to restore the preview.
+The preview field displays the proposal; it is not an editor. Note-content lines
+are prefixed with `│ `, and control characters and backslashes are visibly escaped
+so note text cannot imitate the review's headings or terminal controls. Each
+file's original and proposed line endings are summarized separately. These display
+changes do not alter the Markdown that Save writes.
+
+Host LF/CRLF/CR line-ending conversion is accepted when the rest of the preview is
+unchanged. Edited, trimmed or collapsed preview text is refused with
+`PROCESSING_REVIEW_PREVIEW_CHANGED`, leaving the exact proposal pending. Reopen
+review to restore the preview; if the host cannot preserve it, use the explicit
+proposal and save commands from an uncaptured context.
 
 For a factual correction, choose Later and provide the correction in the ordinary
 work chat. Capture it through the existing selected-source workflow before using

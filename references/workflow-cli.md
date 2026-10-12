@@ -225,15 +225,23 @@ claim successful capture-exclusion bookkeeping.
 `processing_review` sends the exact proposal through the correlated native host
 form; an unsupported or closed form preserves the pending proposal. A model's
 tool arguments cannot substitute for that host response.
-The form uses a short header, a required `changes` string containing the complete
-readable preview as its default, and a required `decision` enum (`save`, `skip`,
+Native form review requires the negotiated MCP `2025-11-25` schema; older protocols
+retain status and processing access but return `PROCESSING_REVIEW_UNSUPPORTED`
+for review. The form uses a short header, a required `changes` string containing
+the complete readable preview as its default, and a required `decision` enum (`save`, `skip`,
 `cancel`, `later`) without a default. An accepted host response must echo the
-unchanged preview plus the chosen decision. Changed text produces
+unchanged preview plus the chosen decision, allowing LF/CRLF/CR line-ending
+conversion only. Changed, trimmed or collapsed text produces
 `PROCESSING_REVIEW_PREVIEW_CHANGED`; it cannot revise or authorize different note
-bytes. Display line endings are normalized without changing the saved Markdown.
-Only the correlated form response may use the larger form byte budget; ordinary
-MCP requests retain their existing bound. Host decline/cancel responses leave the
-proposal pending, distinct from an accepted `skip` or `cancel` decision. See
+bytes. Quoted note-content lines, escaped controls and per-file line-ending
+summaries distinguish source text from review structure without changing saved bytes.
+The outgoing form is bounded to 256 KiB. Incoming frames allow up to six times
+that size for host JSON escaping, even after a form closes; ordinary MCP requests
+remain bounded to 64 KiB. Late or unknown response IDs are ignored within the
+framing bound. A correlated response whose normalized preview exceeds 256 KiB
+refuses only that review with `PROCESSING_REVIEW_TOO_LARGE`. Frames exceeding the
+hard framing bound still close the connection. Host decline/cancel responses leave
+the proposal pending, distinct from an accepted `skip` or `cancel` decision. See
 [review controls](processing-chat.md#review-controls) for the user workflow.
 Cancelling the MCP request before its save intent or disposition starts publication
 leaves the proposal pending, including after the form returns. Once publication

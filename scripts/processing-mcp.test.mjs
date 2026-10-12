@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { PassThrough, Writable } from 'node:stream';
 import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
+import { withReviewPreview } from './test-support/processing-review.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { runProcessingMcp } from './processing-mcp.mjs';
 import { readSelection, controlSelection, readCaptureHead } from './intake-store.mjs';
@@ -103,10 +104,7 @@ async function harness(t, f, overrides = {}) {
     return ready.promise;
   };
   h.answer = (form, result) => {
-    if (result.action === 'accept' && result.content && !Object.hasOwn(result.content, 'changes')) {
-      result = { ...result, content: { changes: form.params.requestedSchema.properties.changes.default, ...result.content } };
-    }
-    input.write(`${JSON.stringify({ jsonrpc: '2.0', id: form.id, result })}\n`);
+    input.write(`${JSON.stringify({ jsonrpc: '2.0', id: form.id, result: withReviewPreview(form, result) })}\n`);
   };
   h.notify = row => input.write(JSON.stringify(row) + '\n');
   h.end = () => input.end();
@@ -354,7 +352,7 @@ test('collection selection churn omits exclusion proof without aborting separate
 });
 
 const draft = '# PRIVATE-SYNTHETIC-PROPOSAL\n\n## Decision\n\nKeep the rollout paused.\n';
-function proposeThroughTools(f) {
+function proposeThroughTools(f, content = draft, expectedHash = null) {
   return async call => {
     let claim = await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
     for (let page = 0; page < claim.packet.pages.length; page++) {
@@ -363,12 +361,12 @@ function proposeThroughTools(f) {
         pages: [{ index: page, hash: read.hash }] });
     }
     await call('processing_propose', { operationId: f.operationId, expectedClaimHash: claim.claimHash,
-      proposal: { files: [{ path: 'meetings/rollout.md', expectedHash: null, content: draft }],
+      proposal: { files: [{ path: 'meetings/rollout.md', expectedHash, content }],
         mappings: [{ identity: f.identity, paths: ['meetings/rollout.md'] }] } });
   };
 }
-async function proposeInChat(f, h) {
-  h.script = proposeThroughTools(f);
+async function proposeInChat(f, h, content = draft, expectedHash = null) {
+  h.script = proposeThroughTools(f, content, expectedHash);
   const closed = h.whenClosed(), requestId = randomUUID();
   const first = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId, selection: selectedInput(f) }));
   await closed;
@@ -418,6 +416,40 @@ test('editing the native preview refuses Save and preserves the exact proposal f
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'skipped');
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+});
+
+test('native review safely displays controls and accepts a CRLF echo while saving the exact draft bytes', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  const target = path.join(f.collection.notes.notesDir, 'meetings/rollout.md');
+  const original = '# Existing policy\n\n## Decision\n\nOld\u0000\u001b[2Kpolicy.\n';
+  await fs.mkdir(path.dirname(target)); await fs.writeFile(target, original);
+  const content = '# Synthetic policy\r\n\r\n## Decision\r\n\r\nKeep the rollout paused.\u001b[8mHidden\u001b[0m\r\n';
+  await proposeInChat(f, h, content, digest(original));
+  const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  const form = await next, preview = form.params.requestedSchema.properties.changes.default;
+  assert(!preview.includes('\u0000')); assert(!preview.includes('\u001b'));
+  assert(preview.includes('Old\\u0000\\u001b[2Kpolicy.'));
+  assert(preview.includes('\\u001b[8mHidden\\u001b[0m'));
+  h.answer(form, { action: 'accept', content: { decision: 'save', changes: preview.replaceAll('\n', '\r\n') } });
+  assert.equal(body(await review).status, 'idle');
+  assert.equal(await fs.readFile(target, 'utf8'), content);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+});
+
+test('an oversized decoded form reply preserves the exact proposal and permits a new review', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+  const before = await inspectProcessing(f.capability, f.operationId);
+  const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  const form = await next;
+  h.answer(form, { action: 'accept', content: { decision: 'save', changes: 'x'.repeat(256 * 1024 + 1) } });
+  assert.equal((await review).error.message, 'PROCESSING_REVIEW_TOO_LARGE');
+  const after = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(after.claimHash, before.claimHash); assert.equal(after.proposalHash, before.proposalHash);
+  assert.equal(after.state, 'awaiting-review'); assert.equal(after.outcome, null);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  const retry = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
+  h.answer(await retry, { action: 'accept', content: { decision: 'later' } });
+  assert.equal(body(await result).status, 'awaiting-review');
 });
 
 test('formal review replay preserves its exact completed result without another host form or write', async t => {

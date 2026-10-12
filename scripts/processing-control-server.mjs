@@ -5,6 +5,10 @@ import { CLIENTS, canonicalJSON, digest, choice, fail, id, keys, list, nativeId,
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
+// Hosts can encode one character as six ASCII bytes (\\uXXXX), including each
+// UTF-16 surrogate. This fixed framing bound also admits a delayed echo after
+// its form closes. Ordinary requests retain INPUT_BYTES after classification.
+const FRAME_BYTES = 6 * FORM_BYTES;
 const STATES = ['missing', 'creating', 'busy', 'idle', 'awaiting-review', 'blocked', 'completed'];
 const ACTIONS = ['inspect', 'resume', 'review', 'wait', 'none'];
 const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CONTROL_FAILED',
@@ -152,7 +156,10 @@ export async function runProcessingControlServer({ client, input = process.stdin
       choice(row.result.action, ['accept', 'decline', 'cancel']);
       if (row.result.action === 'accept') {
         keys(row.result.content, ['changes', 'decision']);
-        if (row.result.content.changes !== form.preview) fail('PROCESSING_REVIEW_PREVIEW_CHANGED');
+        if (typeof row.result.content.changes !== 'string') fail('PROCESSING_REVIEW_INTERRUPTED');
+        const changes = row.result.content.changes.replace(/\r\n?/g, '\n');
+        if (Buffer.byteLength(changes) > FORM_BYTES) fail('PROCESSING_REVIEW_TOO_LARGE');
+        if (changes !== form.preview.replace(/\r\n?/g, '\n')) fail('PROCESSING_REVIEW_PREVIEW_CHANGED');
         choice(row.result.content.decision, ['save', 'skip', 'cancel', 'later']);
         form.resolve(Object.freeze({ action: 'accept', content: Object.freeze({ decision: row.result.content.decision }) }));
       } else {
@@ -160,7 +167,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
         form.resolve(Object.freeze({ action: row.result.action }));
       }
     } catch (error) {
-      const code = error.code === 'PROCESSING_REVIEW_PREVIEW_CHANGED' ? error.code : 'PROCESSING_REVIEW_INTERRUPTED';
+      const code = ['PROCESSING_REVIEW_PREVIEW_CHANGED', 'PROCESSING_REVIEW_TOO_LARGE'].includes(error.code) ? error.code : 'PROCESSING_REVIEW_INTERRUPTED';
       form.reject(Object.assign(new Error(code), { code }));
     }
   };
@@ -180,7 +187,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
         formSupported = object(elicitation) && (Object.keys(elicitation).length === 0 || object(elicitation.form));
         initialized = true;
         const protocolVersion = ['2025-11-25', '2025-06-18', '2024-11-05'].includes(row.params.protocolVersion) ? row.params.protocolVersion : '2025-11-25';
-        if (protocolVersion === '2024-11-05') formSupported = false;
+        // String defaults carrying the review preview are part of this revision.
+        // Older hosts can use status/processing and the explicit review commands.
+        if (protocolVersion !== '2025-11-25') formSupported = false;
         result = { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'cuefluent_control', version: '1.0.0' } };
       } else {
         if (!initialized) fail('PROCESSING_CONTROL_PROTOCOL');
@@ -243,7 +252,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
                   description: 'Read the full preview, then go to the next field. For corrections, choose Later and provide them in your work chat; do not edit this preview.',
                   default: proposal.message },
                 decision: { type: 'string', title: 'Proposal action',
-                  description: 'Choose an action below. Only Save writes notes.',
+                  description: 'Save writes the exact proposal. Skip handles these captures without saving. Cancel releases the operation and keeps captures pending. Later keeps the proposal pending.',
                   enum: ['save', 'skip', 'cancel', 'later'],
                   enumNames: ['Save exact proposal', 'Skip these captures without saving', 'Cancel operation; keep captures pending', 'Later; keep proposal pending'] }
               }, required: ['changes', 'decision'] } } };
@@ -287,9 +296,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
     try { row = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line)); }
     catch { fail('PROCESSING_CONTROL_PROTOCOL'); }
     if (!object(row)) fail('PROCESSING_CONTROL_PROTOCOL');
-    // A correlated form response echoes its bounded preview. Ordinary calls
-    // retain the smaller request budget even while a form is open.
-    if (line.length > INPUT_BYTES && (Object.hasOwn(row, 'method') || !forms.has(row.id))) fail('PROCESSING_CONTROL_INPUT_LIMIT');
+    // Host responses may echo a preview even after cancellation or completion.
+    // Unknown IDs are ignored; only a live form can return a decision.
+    if (line.length > INPUT_BYTES && Object.hasOwn(row, 'method')) fail('PROCESSING_CONTROL_INPUT_LIMIT');
     if (!Object.hasOwn(row, 'method')) { hostResponse(row); return; }
     keys(row, ['jsonrpc', 'method'], ['id', 'params']);
     if (row.jsonrpc !== '2.0' || typeof row.method !== 'string') fail('PROCESSING_CONTROL_PROTOCOL');
@@ -323,7 +332,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     for await (const chunk of input) {
       const bytes = Buffer.from(chunk); let start = 0, end;
       while ((end = bytes.indexOf(10, start)) >= 0) {
-        if (pending.length + end - start > (forms.size ? FORM_BYTES : INPUT_BYTES)) fail('PROCESSING_CONTROL_INPUT_LIMIT');
+        if (pending.length + end - start > FRAME_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
         const line = Buffer.concat([pending, bytes.subarray(start, end)]); pending = Buffer.alloc(0); start = end + 1;
         if (line.length) {
           try { await processLine(line); }
@@ -333,7 +342,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
           }
         }
       }
-      if (pending.length + bytes.length - start > (forms.size ? FORM_BYTES : INPUT_BYTES)) fail('PROCESSING_CONTROL_INPUT_LIMIT');
+      if (pending.length + bytes.length - start > FRAME_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
       pending = Buffer.concat([pending, bytes.subarray(start)]);
     }
     if (pending.length) fail('PROCESSING_CONTROL_PROTOCOL');
