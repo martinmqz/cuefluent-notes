@@ -38,7 +38,12 @@ the intended session instead of guessing a source.
 
 The adapter briefly retries missing native records in the selected source because
 client persistence can lag tool dispatch. Claude's registered-source fallback
-runs once after that wait; definitive mismatches are refused without retrying.
+runs once after that wait, or immediately if the launch session is unavailable.
+Stopped captures, over-limit tails and changed selections cannot supply a binding,
+but do not block another registered session from proving the exact call. A matching
+call with invalid arguments, tool identity or duplicate records is refused without
+retrying or substituting another session. Storage and source-identity failures
+still stop verification.
 A Codex code-mode call needs a separate verification handshake:
 `verification-required` returns an opaque `retryToken` without delivering evidence,
 starting processing or opening a review. End the current exec, then repeat the

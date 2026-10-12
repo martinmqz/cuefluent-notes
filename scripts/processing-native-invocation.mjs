@@ -17,9 +17,13 @@ import { canonicalJSON, digest, fail, object, isNativeId } from './workflow-valu
 const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
 // A bounded primary wait plus one complete fallback pass, never a scan per retry.
 const MAX_READS = SETTLE_ATTEMPTS + FALLBACK_SOURCES;
-class MissingNativeInvocation extends Error {
+// A candidate may be unavailable without disproving the requested call in a
+// different registered session. Exact-call mismatches remain fatal; only missing
+// records may settle, and privacy/identity failures are never candidate misses.
+class UnavailableNativeSource extends Error {
   constructor() { super('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); this.code = this.message; }
 }
+class MissingNativeInvocation extends UnavailableNativeSource {}
 const bindings = new WeakSet(), pendingBindings = new WeakSet();
 export const isPendingProcessingInvocation = value => object(value) && pendingBindings.has(value);
 export const isProcessingInvocation = value => object(value) && bindings.has(value);
@@ -68,7 +72,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   const store = await openWorkflowIntake(capability);
   const identity = { client: context.client, sessionId: context.sessionId };
   const selected = await readSelection(store, identity);
-  if (selected.state?.safetyStop) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  if (selected.state?.safetyStop) throw new UnavailableNativeSource();
   const intervals = selected.state ? currentIntervals(selected.state) : [];
   const interval = selected.state?.paused ? intervals.at(-1) : intervals.find(value => value.upper === null);
   let source = selected.state?.source, floor = interval ? (selected.state.paused ? interval.upper ?? interval.lower : interval.lower) : null;
@@ -86,7 +90,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     await assertWorkflowStorage(capability, { ...identity, cwd: source.projectRoot }, 'explicitProcess');
     const inspected = await inspectSourceBoundary({ ...identity, path: source.path, projectRoot: source.projectRoot }, {
       frozen: value.snapshot, verifyHeader: (context.client === 'codex' ? codexRegistrationHeader : claudeRegistrationHeader)(source) });
-    if (inspected.status !== 'registered') fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    if (inspected.status !== 'registered') throw new UnavailableNativeSource();
     source = inspected.source; floor = inspected.boundary;
     processingBinding = { name, hash: snapshot.hash };
   }
@@ -95,7 +99,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     signal?.throwIfAborted();
     await assertWorkflowStorage(capability, selection, 'explicitProcess');
     if ((await readSelection(store, identity)).hash !== selected.hash || (processingBinding &&
-        (await intakeSnapshot(store, 'state', processingBinding.name, { maxBytes: 16384 })).hash !== processingBinding.hash)) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+        (await intakeSnapshot(store, 'state', processingBinding.name, { maxBytes: 16384 })).hash !== processingBinding.hash)) throw new UnavailableNativeSource();
     signal?.throwIfAborted();
   };
   const deadline = performance.now() + settleMs;
@@ -135,7 +139,7 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
     maxBytes: MAX_PREFIX, maxRecords: 4096,
     ...(context.client === 'codex' ? { verifyHeader: verifyCodexHeader }
       : { readHeader: claudeRegistrationHeader(source), verifyHeader: value => value }) });
-  if (read.blocked || read.limited) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  if (read.blocked || read.limited) throw new UnavailableNativeSource();
   const argsHash = digest(canonicalJSON(invocation.arguments));
   let call = null, unitId = context.unitId ?? null, nativeSkill = false;
   const nested = context.client === 'codex' ? codexNestedCall(read.records, context, invocation, argsHash) : null;
@@ -201,7 +205,7 @@ async function resolveClaudeFallback(capability, context, invocation, options) {
       if (++inspected > FALLBACK_SOURCES) fail('PROCESSING_SOURCE_DISCOVERY_LIMIT');
       try { matches.push(await resolveBoundInvocation(capability, { ...context, sessionId }, invocation, options)); }
       catch (error) {
-        if (!(error instanceof MissingNativeInvocation) && !['WORKFLOW_NOT_AUTHORIZED', 'ENOENT'].includes(error.code)) throw error;
+        if (!(error instanceof UnavailableNativeSource) && !['WORKFLOW_NOT_AUTHORIZED', 'ENOENT'].includes(error.code)) throw error;
       }
     }
   }
@@ -219,6 +223,6 @@ export async function resolveProcessingInvocation(capability, context, invocatio
   const { configHash } = await workflowProcessingContext(capability);
   const boundOptions = { ...options, signal, requireCompleted, configHash, readBudget: { reads: 0, bytes: 0 } };
   try { return await resolveBoundInvocation(capability, context, invocation, { ...boundOptions, settleMs }); }
-  catch (error) { if (context.client !== 'claude' || !(error instanceof MissingNativeInvocation)) throw error; }
+  catch (error) { if (context.client !== 'claude' || !(error instanceof UnavailableNativeSource)) throw error; }
   return resolveClaudeFallback(capability, context, invocation, { ...boundOptions, settleMs: 0 });
 }

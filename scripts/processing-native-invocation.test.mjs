@@ -493,14 +493,14 @@ test('MCP handshake verifies native bytes end to end and refuses source replacem
 
 // More than a full tail per source reproduces cumulative-budget exhaustion.
 const largeClaudeTail = () => Array.from({ length: 17 }, () => line({ type: 'system', content: 'x'.repeat(128 * 1024) })).join('');
-async function registeredClaudeCandidates(f, count, { matchLast = false } = {}) {
+async function registeredClaudeCandidates(f, count, { matchLast = false, tail = largeClaudeTail } = {}) {
   const first = (await fs.readFile(f.source.path, 'utf8')).split('\n').slice(0, 2).map(JSON.parse);
   const candidates = [];
   for (let i = 0; i < count; i++) {
     const sessionId = randomUUID(), rows = first.map(row => ({ ...row, sessionId }));
     const prefix = rows.map(line).join(''), source = { ...f.source, sessionId, path: path.join(f.project, `${sessionId}.jsonl`) };
     const call = f.nativeCall(); call.sessionId = sessionId;
-    await fs.writeFile(source.path, prefix + largeClaudeTail() + (matchLast && i === count - 1 ? line(call) : ''));
+    await fs.writeFile(source.path, prefix + tail() + (matchLast && i === count - 1 ? line(call) : ''));
     source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
     const boundary = { ...f.boundary, sourceIdentity: source.fileIdentity, eofByte: Buffer.byteLength(prefix),
       record: { id: rows[1].uuid, startByte: Buffer.byteLength(line(rows[0])), endByte: Buffer.byteLength(prefix), hash: digest(line(rows[1])) } };
@@ -561,6 +561,68 @@ test('a definitive Claude mismatch is not retried or hidden by a fallback match'
   t.mock.method(fs, 'opendir', async () => assert.fail('definitive refusal must not scan'));
   await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
   assert.equal(reads.get(f.source.path), 1); assert.equal(reads.get(candidates[0].path), 0);
+});
+
+for (const location of ['primary', 'fallback']) test(`Claude /clear skips an unavailable ${location} source`, async t => {
+  for (const reason of ['safety stop', 'record limit', 'selection change']) await t.test(reason, async t => {
+    const f = await fixture(t, 'claude');
+    const candidates = await registeredClaudeCandidates(f, location === 'primary' ? 1 : 2, { matchLast: true, tail: () => '' });
+    const rejected = location === 'primary' ? f.source : candidates[0], matching = candidates.at(-1);
+    const selectionPath = path.join(f.collection.intakeStateDir, 'sessions', 'claude', `${rejected.sessionId}.json`);
+    if (reason === 'safety stop') {
+      const state = JSON.parse(await fs.readFile(selectionPath, 'utf8'));
+      state.safetyStop = { reason: 'capacity', unitId: randomUUID() };
+      await fs.writeFile(selectionPath, line(state));
+    } else if (reason === 'record limit') {
+      await fs.appendFile(rejected.path, line({ type: 'system', content: 'Synthetic record' }).repeat(4097));
+    } else {
+      const call = f.nativeCall(); call.sessionId = rejected.sessionId;
+      await fs.appendFile(rejected.path, line(call));
+    }
+    let changedSelection;
+    const rejectedBytes = await fs.readFile(rejected.path), beforeSelection = await fs.readFile(selectionPath);
+    const reads = observeNativeReads(t, [f.source, ...candidates], async (file, count) => {
+      if (reason !== 'selection change' || file !== rejected.path || count !== 1) return;
+      const before = await readSelection(f.store, { client: 'claude', sessionId: rejected.sessionId });
+      await withIntakeLock(f.store, tx => controlSelection(tx, { source: rejected, expectedHash: before.hash,
+        request: { id: randomUUID(), operation: 'exclude', client: 'claude', sessionId: rejected.sessionId,
+          unitId: randomUUID(), expectedRevision: before.state.revision }, authorize: async () => true }));
+      changedSelection = await fs.readFile(selectionPath);
+    });
+    const bound = await f.resolve();
+    assert.equal(isProcessingInvocation(bound), true);
+    assert.equal(bound.selection.sessionId, matching.sessionId);
+    assert.equal(bound.callId, f.context.toolCallId);
+    assert.equal(reads.get(rejected.path), reason === 'safety stop' ? 0 : 1);
+    assert.equal(reads.get(matching.path), 1);
+    if (reason === 'selection change') assert.ok(changedSelection);
+    assert.deepEqual(await fs.readFile(selectionPath), changedSelection ?? beforeSelection);
+    assert.deepEqual(await fs.readFile(rejected.path), rejectedBytes);
+  });
+});
+
+test('Claude fallback does not hide an invalid matching call behind a valid candidate', async t => {
+  for (const rejection of ['arguments', 'tool', 'duplicate']) await t.test(rejection, async t => {
+    const f = await fixture(t, 'claude');
+    const [rejected] = await registeredClaudeCandidates(f, 2, { matchLast: true, tail: () => '' });
+    const call = f.nativeCall(); call.sessionId = rejected.sessionId;
+    if (rejection === 'arguments') call.message.content[0].input = { changed: true };
+    if (rejection === 'tool') call.message.content[0].name = 'mcp__cuefluent_control__processing_review';
+    await fs.appendFile(rejected.path, line(call).repeat(rejection === 'duplicate' ? 2 : 1));
+    await assert.rejects(f.resolve(), unavailable);
+  });
+});
+
+test('Claude cannot skip a replaced source to bind a different registered session', async t => {
+  for (const location of ['primary', 'fallback']) await t.test(location, async t => {
+    const f = await fixture(t, 'claude');
+    const candidates = await registeredClaudeCandidates(f, location === 'primary' ? 1 : 2, { matchLast: true, tail: () => '' });
+    const rejected = location === 'primary' ? f.source : candidates[0];
+    const bytes = await fs.readFile(rejected.path);
+    await fs.rename(rejected.path, rejected.path + '.preserved');
+    await fs.writeFile(rejected.path, bytes);
+    await assert.rejects(f.resolve(), { code: 'SOURCE_CHANGED' });
+  });
 });
 
 test('native persistence wait preserves the initially inspected selection', async t => {
