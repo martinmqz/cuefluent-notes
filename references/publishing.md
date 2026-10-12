@@ -7,8 +7,10 @@ are not part of this repository or its automation.
 
 ## Public repository hygiene
 
-Keep real notes, capture configuration, credentials, and private planning outside
-this repository. Commit only synthetic examples. Before making a repository
+Keep real notes, capture configuration and credentials outside this repository.
+Keep implementation plans, review notes, detailed test evidence and machine-specific
+paths in ignored `.local/`; exclude them from commits and package inputs. Commit
+only synthetic examples. Before making a repository
 public, inspect its Git and pull-request history as well as retained Actions logs
 and artifacts; deleting a file from the current branch does not remove history.
 

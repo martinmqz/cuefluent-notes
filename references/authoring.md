@@ -196,6 +196,3 @@ set. A selected folder is not necessarily the app's whole library. The app's
 10 MiB per-file allowance does not enlarge this checker's 2 MiB bound or prove app
 admission. The writer retains its separate 100-operation and 100-file derived
 manifest limits; checker coverage does not enlarge either.
-
-Developer verification from the source checkout: `npm test` exercises observable helper behavior;
-`npm run check:examples` checks the selected synthetic documents and vocabulary.

@@ -344,9 +344,10 @@ outputs and parent directories must use the filesystem's canonical spelling.
 Windows batches conservatively refuse case-only collisions, including missing
 targets. macOS also refuses Unicode case and normalization collisions. These
 rules can reject distinct names on case-sensitive volumes; they do not claim to
-reproduce every filesystem's Unicode comparison table. Native Windows tests
-retain distinct dotless-i, long-s, micro-sign, and decomposed-accent names rather
-than treating JavaScript uppercasing as proof of an NTFS alias.
+reproduce every filesystem's Unicode comparison table. Windows name comparison
+uses lowercase spelling without Unicode normalization; dotless-i, long-s,
+micro-sign and composed/decomposed-accent variants remain distinct. JavaScript
+uppercasing alone does not prove that two names alias on NTFS.
 Linux retains distinct case-sensitive names.
 Junctions and symlinks cannot redirect output parents. Device names, alternate
 data streams, and trailing-dot/space aliases are refused. See

@@ -288,6 +288,6 @@ marker cannot replace native proof. Preserve new human corrections and independe
 work alongside any echoes. The current
 native transport does not prove which active turn is performing processing, so
 operation IDs, cwd and owner sessions cannot exclude a whole turn or label mixed
-work records. Automatic invocation and native prompts require separate live
-transport verification. Fixtures verify deterministic helper behavior, not agent
-judgment, visual inspection, live client delivery or OS power-loss durability.
+work records. Hook notifications do not start processing. Helper success does
+not establish agent judgment, visual inspection, live client delivery or survival
+of sudden power loss. See [verification limits](verification.md).
