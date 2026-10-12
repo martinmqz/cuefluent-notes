@@ -14,10 +14,10 @@ and artifacts; deleting a file from the current branch does not remove history.
 
 Require pull requests and passing CI on `main`, prevent force pushes and branch
 deletion, and enable secret scanning and push protection when GitHub supports
-those settings. Publication prepares a package-update PR and explicitly dispatches
-CI; it does not push to `main`, bypass branch rules or merge the PR. Keep workflow
-tokens read-only by default and actions pinned. Repository visibility and security
-settings are separate from publishing a plugin release.
+those settings. Publication prepares a package-update PR whose CI requires
+maintainer approval; it does not push to `main`, bypass branch rules or merge the
+PR. Keep workflow tokens read-only by default and actions pinned. Repository
+visibility and security settings are separate from publishing a plugin release.
 
 ## Build and inspect a release
 
@@ -93,9 +93,9 @@ including first-use setup and hook trust, before advertising a release. The
    publisher decision; dependency licenses do not license the project itself.
 2. Enable GitHub Actions and allow it to create pull requests. The publication
    job uses `GITHUB_TOKEN` with `contents: write` for its temporary branch and the
-   old branch's README notice, `pull-requests: write` for the draft PR, and
-   `actions: write` to dispatch CI. No main-branch bypass or extra secret is
-   required. Keep the default branch as `main`.
+   old branch's README notice and `pull-requests: write` for the draft PR.
+   No main-branch bypass or extra secret is required. Keep the default branch as
+   `main`.
 3. From the reviewed commit on `main`, create and push `v` followed by that exact
    version (for example, `v0.5.0` when all manifests say `0.5.0`). Do not move or
    reuse an existing version tag. **Prepare release** runs the Node 22 test
@@ -107,10 +107,11 @@ including first-use setup and hook trust, before advertising a release. The
    and its checksums together. Use GitHub's **Publish release** action when ready.
 5. **Publish marketplace** downloads that release's snapshot, verifies its
    checksum, layout and package digests, and prepares `chore/publish-vVERSION`
-   from current `main`. It opens a **draft package-update PR** and explicitly
-   dispatches **Checks** on that branch: PRs created with `GITHUB_TOKEN` do not
-   trigger `pull_request` workflows automatically.
-6. Review that PR, verify its current commit's checks, and merge it through the
+   from current `main`. It opens a **draft package-update PR**. GitHub creates its
+   **Checks** run in an approval-required state because the PR uses `GITHUB_TOKEN`.
+   After reviewing the generated changes, a maintainer with write access selects
+   **Approve workflows to run** in the PR. Publication does not dispatch a second run.
+6. Verify that PR's current commit's checks and merge it through the
    normal protected-main process. Only then are the packages available through
    the [installation commands](../README.md#from-the-marketplace). There is no
    automatic merge or direct main push.
@@ -141,9 +142,10 @@ to receive future releases.
 Ordinary source PRs run checks and upload preview artifacts. Merging the generated
 package-update PR makes its already-published release installable from main.
 Neither kind of merge creates a GitHub Release or updates an installed plugin.
-Publishing a draft manually triggers the publication event; if publishing via
-automation, remember that events produced with `GITHUB_TOKEN` generally do not
-start another workflow. See [GitHub workflow triggering](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow).
+Publishing a draft manually triggers the publication event. A release published
+with `GITHUB_TOKEN` does not trigger that follow-on workflow. Bot-created PRs have
+a separate approval-required exception; see
+[GitHub token workflow triggers](https://docs.github.com/en/actions/concepts/security/github_token#when-github_token-triggers-workflow-runs).
 
 ## Recovery and subsequent releases
 
@@ -154,12 +156,14 @@ start another workflow. See [GitHub workflow triggering](https://docs.github.com
   If a draft already exists, inspect its assets before using it; preparation
   refuses to overwrite a release with the same tag.
 - If publication fails, users keep the prior packages on `main`. Fix permissions,
-  missing/corrupt assets, or PR/dispatch access, then rerun **Publish marketplace**
+  missing/corrupt assets, or PR creation access, then rerun **Publish marketplace**
   against that published release. Retain the original reviewed assets.
 - A retry of an already-published snapshot is a no-op. Same-version replacement
   with different archive digests or a changed marketplace tree is refused, as
   is publishing an older version.
-  An identical prepared branch is reused. If it differs from the update prepared
+  An identical prepared branch and its existing PR are reused; retrying publication
+  does not start another CI run. Use the existing run's approval or rerun controls
+  when appropriate. If the branch differs from the update prepared
   against current main, the publisher refuses to overwrite the existing PR;
   review and update that PR through the normal process. Concurrent publication
   branch updates reject the non-force push. Required checks and merge rules
