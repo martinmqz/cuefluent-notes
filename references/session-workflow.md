@@ -789,8 +789,9 @@ The client contracts are described by [Codex hooks](https://learn.chatgpt.com/do
 and [Claude Code hooks](https://code.claude.com/docs/en/hooks). Codex handlers use
 `turn_id`, Interrupt and `PLUGIN_ROOT`; Claude handlers use `prompt_id`,
 StopFailure, and direct executable `command` plus `args`. The installed client
-must provide the required events and identity fields. Missing required native
-identity reports `UNSUPPORTED_NATIVE_CONTEXT`; version metadata is not a substitute.
+must provide the required events and identity fields. The helper refuses missing
+or invalid required IDs with `UNSUPPORTED_NATIVE_IDENTITY`; the hook emits a
+bounded collection-unavailable diagnostic. Version metadata is not a substitute.
 Check the client's actual hook controls rather than assuming a feature flag or
 trust state.
 
