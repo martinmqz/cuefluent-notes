@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Writable } from 'node:stream';
+import { canonicalJSON, digest } from './workflow-values.mjs';
 import { runProcessingControlServer } from './processing-control-server.mjs';
 
 const sessionId = randomUUID(), unitId = randomUUID(), chatId = randomUUID();
@@ -35,7 +36,7 @@ test('source adapter exposes explicit versioned tools without save, approval or 
   for (const tool of tools) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(tools[0].annotations.readOnlyHint, true); assert.equal(tools[1].annotations.readOnlyHint, false);
   assert.equal(tools[1].inputSchema.properties.selection.additionalProperties, false);
-  assert.deepEqual(Object.keys(tools[2].inputSchema.properties), ['collectionId']);
+  assert.deepEqual(Object.keys(tools[2].inputSchema.properties), ['collectionId', 'retryToken']);
   assert.equal(result.calls.length, 0);
 });
 
@@ -350,4 +351,137 @@ test('actionable engine errors survive the control boundary without private erro
     });
     assert.equal(result.rows[1].error.message, code); assert(!JSON.stringify(result.rows).includes('private source'));
   });
+});
+
+test('Codex verification handshake performs no work until the original native call and response match', async t => {
+  for (const attack of [null, 'arguments', 'turn', 'same cell', 'response', 'selection', 'policy', 'source', 'replay', 'pending', 'unknown']) await t.test(attack ?? 'valid', async () => {
+    const input = new PassThrough(), rows = [], resolvers = new Map();
+    const firstContext = { ...codexMeta(), callId: `exec-${randomUUID()}`, itemId: 'ctc_first' };
+    const nextContext = { ...firstContext, callId: `exec-${randomUUID()}`, itemId: 'ctc_next' };
+    const original = { pending: true, collectionId: 'example', selectionHash: 'selection', configHash: 'policy', outerRecordHash: 'outer',
+      source: { fileIdentity: 'identity' }, selection: { sessionId } };
+    let dispatches = 0, resolutions = 0, challenge;
+    const output = new Writable({ write(bytes, _enc, done) {
+      for (const line of bytes.toString().trim().split('\n')) { const row = JSON.parse(line); rows.push(row); resolvers.get(row.id)?.(row); }
+      done();
+    } });
+    const send = row => input.write(JSON.stringify(row) + '\n');
+    const wait = id => rows.find(row => row.id === id) ?? new Promise(resolve => resolvers.set(id, resolve));
+    const running = runProcessingControlServer({ client: 'codex', input, output,
+      resolveSource: async (context, invocation, { requireCompleted }) => {
+        resolutions++;
+        assert.equal(requireCompleted, resolutions > 1);
+        assert.equal(context.toolCallId, firstContext.callId);
+        assert.deepEqual(invocation.arguments, { collectionId: 'example' });
+        if (resolutions === 1) return original;
+        const resolved = { ...original, pending: false, handshakeResultHash: digest(canonicalJSON(challenge.result)) };
+        if (attack === 'response') resolved.handshakeResultHash = 'forged';
+        if (attack === 'selection') resolved.selectionHash = 'changed';
+        if (attack === 'policy') resolved.configHash = 'changed';
+        if (attack === 'source') resolved.source = { fileIdentity: 'replaced' };
+        if (attack === 'pending') resolved.pending = true;
+        return resolved;
+      },
+      getStatus: async () => { dispatches++; return { status: 'idle', nextAction: 'none' }; },
+      requestProcessing: async () => { dispatches++; return { status: 'busy', nextAction: 'wait' }; }
+    });
+    send(initialize); await wait(0);
+    send(tool('process_selected_captures', { collectionId: 'example' }, firstContext));
+    challenge = await wait(1); assert.equal(dispatches, 0);
+    const value = view(challenge); assert.equal(value.status, 'verification-required');
+    const args = { collectionId: 'example', retryToken: value.retryToken };
+    if (attack === 'arguments') args.collectionId = 'other';
+    if (attack === 'turn') nextContext['x-codex-turn-metadata'] = { ...nextContext['x-codex-turn-metadata'], turn_id: randomUUID() };
+    if (attack === 'same cell') nextContext.itemId = firstContext.itemId;
+    if (attack === 'unknown') args.retryToken = randomUUID();
+    send({ ...tool('process_selected_captures', args, nextContext), id: 2 });
+    const result = await wait(2);
+    if (!attack || attack === 'replay') { assert.equal(view(result).status, 'busy'); assert.equal(dispatches, 1); }
+    else { assert.equal(result.error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED'); assert.equal(dispatches, 0); }
+    if (attack === 'replay' || attack === 'pending') {
+      send({ ...tool('process_selected_captures', args, { ...nextContext, itemId: 'ctc_later', callId: `exec-${randomUUID()}` }), id: 3 });
+      assert.equal((await wait(3)).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED'); assert.equal(dispatches, attack === 'replay' ? 1 : 0);
+    }
+    input.end(); await running;
+  });
+});
+
+async function handshakeHarness(t, { onComplete = () => {} } = {}) {
+  const input = new PassThrough(), rows = [], waits = new Map(), pending = { pending: true, collectionId: 'example', source: { fileIdentity: 'synthetic' }, selection: { sessionId } };
+  let resolutions = 0, dispatches = 0;
+  const output = new Writable({ write(bytes, _encoding, done) {
+    for (const line of bytes.toString().trim().split('\n')) { const row = JSON.parse(line); rows.push(row); waits.get(row.id)?.(row); }
+    done();
+  } });
+  const running = runProcessingControlServer({ client: 'codex', input, output,
+    resolveSource: async (context, _invocation, { requireCompleted }) => {
+      resolutions++;
+      if (!requireCompleted) return pending;
+      onComplete();
+      const original = rows.find(row => row.id === Number(context.itemId.slice(4)));
+      return { ...pending, pending: false, handshakeResultHash: digest(canonicalJSON(original.result)) };
+    },
+    getStatus: async () => { dispatches++; return { status: 'idle', nextAction: 'none' }; },
+    requestProcessing: async () => { dispatches++; return { status: 'busy', nextAction: 'wait' }; }
+  });
+  t.after(async () => { input.end(); await running; });
+  const send = async row => {
+    input.write(JSON.stringify(row) + '\n');
+    return rows.find(value => value.id === row.id) ?? new Promise(resolve => waits.set(row.id, resolve));
+  };
+  await send(initialize);
+  return { call: (id, args = {}) => send({ ...tool('process_selected_captures', { collectionId: 'example', ...args },
+    { ...codexMeta(), itemId: `ctc_${id}`, callId: `exec-${randomUUID()}` }), id }),
+    counts: () => ({ resolutions, dispatches }) };
+}
+
+test('handshake expiry refuses the exact boundary without dispatch or native re-resolution', async t => {
+  for (const age of [59_999, 60_000, 60_001]) await t.test(`age ${age}`, async t => {
+    let now = 100;
+    t.mock.method(performance, 'now', () => now);
+    const h = await handshakeHarness(t), token = view(await h.call(1)).retryToken;
+    now += age;
+    const result = await h.call(2, { retryToken: token });
+    if (age < 60_000) {
+      assert.equal(view(result).status, 'busy'); assert.deepEqual(h.counts(), { resolutions: 2, dispatches: 1 });
+    } else {
+      assert.equal(result.error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+      assert.deepEqual(h.counts(), { resolutions: 1, dispatches: 0 });
+    }
+  });
+});
+
+test('handshake capacity is bounded and expired entries release capacity without admitting old tokens', async t => {
+  let now = 100;
+  t.mock.method(performance, 'now', () => now);
+  const h = await handshakeHarness(t), tokens = [];
+  for (let id = 1; id <= 16; id++) tokens.push(view(await h.call(id)).retryToken);
+  assert.equal(new Set(tokens).size, 16);
+  assert.equal((await h.call(17)).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal(h.counts().dispatches, 0);
+  now += 60_000;
+  assert.equal(view(await h.call(18)).status, 'verification-required');
+  const before = h.counts();
+  assert.equal((await h.call(19, { retryToken: tokens[0] })).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.deepEqual(h.counts(), before); assert.equal(before.dispatches, 0);
+});
+
+test('invalid native settle options retain their request error through MCP', async () => {
+  const { resolveProcessingInvocation } = await import('./processing-native-invocation.mjs');
+  for (const settleMs of [-1, 1500, 0.5, '100', NaN]) {
+    const result = await server([initialize, tool('processing_status', {})], {
+      resolveSource: (context, invocation) => resolveProcessingInvocation(null, context, invocation, { settleMs })
+    });
+    assert.equal(result.rows[1].error.message, 'PROCESSING_CONTROL_INVALID_REQUEST');
+    assert.deepEqual(result.calls, []);
+  }
+});
+
+test('a token expiring while native records settle cannot dispatch', async t => {
+  let now = 100;
+  t.mock.method(performance, 'now', () => now);
+  const h = await handshakeHarness(t, { onComplete: () => { now += 1; } });
+  const token = view(await h.call(1)).retryToken; now += 59_999;
+  assert.equal((await h.call(2, { retryToken: token })).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.deepEqual(h.counts(), { resolutions: 2, dispatches: 0 });
 });

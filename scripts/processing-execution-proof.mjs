@@ -134,6 +134,8 @@ function codexUnit(read, source, unitId, receipt, terminal) {
       (terminal === 'interrupted' && last.payload.reason !== 'interrupted')) return null;
   let user = null, nativeUser = null;
   const calls = new Map(), nativeCalls = new Map(), outputs = new Set(), allowed = new Set(receipt.allowedTools);
+  const cells = new Map(), cellIds = new Set(), nestedCalls = new Set();
+  let activeCell = null;
   for (const row of rows.slice(1, -1)) {
     const p = row.payload;
     if (!object(p)) return null;
@@ -169,7 +171,11 @@ function codexUnit(read, source, unitId, receipt, terminal) {
       if (item.type === 'DynamicToolCall') {
         const terminalCall = (item.status === 'completed' && item.success === true) ||
           (item.status === 'failed' && item.success === false);
-        if (item.namespace != null || !allowed.has(item.tool) || !terminalCall || typeof item.id !== 'string' || nativeCalls.has(item.id)) return null;
+        if (item.namespace != null || !allowed.has(item.tool) || !terminalCall || typeof item.id !== 'string' || nativeCalls.has(item.id) || cells.has(item.id)) return null;
+        if (activeCell !== null) {
+          if (!item.id.startsWith('exec-') || !isNativeId(item.id.slice(5))) return null;
+          nestedCalls.add(item.id);
+        }
         nativeCalls.set(item.id, item.tool);
         continue;
       }
@@ -187,7 +193,7 @@ function codexUnit(read, source, unitId, receipt, terminal) {
         if (text(p.content, 'input_text') !== '<turn_aborted>\nThe user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.\n</turn_aborted>') return null;
         continue;
       }
-      if (kinds.length && kinds.every(kind => ['environments.environment_context', 'skills.instructions'].includes(kind))) {
+      if (kinds.length && kinds.every(kind => ['agents_md.instructions', 'environments.environment_context', 'skills.instructions'].includes(kind))) {
         if (text(p.content, 'input_text') === null) return null;
         continue;
       }
@@ -195,19 +201,35 @@ function codexUnit(read, source, unitId, receipt, terminal) {
       user = text(p.content, 'input_text'); if (user === null) return null;
       continue;
     }
+    // The native client may wrap dynamic engine calls in code-mode exec cells.
+    // Restriction receipts and typed inner events establish provenance; the JS
+    // source is retained as generated content, never parsed as authorization.
+    if (p.type === 'custom_tool_call') {
+      if (activeCell !== null || p.name !== 'exec' || p.namespace != null || typeof p.input !== 'string' ||
+          typeof p.id !== 'string' || !p.id || cellIds.has(p.id) || typeof p.call_id !== 'string' || !p.call_id ||
+          cells.has(p.call_id) || calls.has(p.call_id) || nativeCalls.has(p.call_id)) return null;
+      cellIds.add(p.id); cells.set(p.call_id, false); activeCell = p.call_id; continue;
+    }
+    if (p.type === 'custom_tool_call_output') {
+      if (activeCell === null || activeCell !== p.call_id || row.metadata?.client_authored !== false ||
+          (typeof p.output !== 'string' && text(p.output, 'input_text') === null)) return null;
+      cells.set(activeCell, true); activeCell = null; continue;
+    }
     if (p.type === 'function_call') {
-      if (p.namespace != null || !allowed.has(p.name) || typeof p.call_id !== 'string' || calls.has(p.call_id)) return null;
+      if (activeCell !== null || cells.has(p.call_id) || p.namespace != null || !allowed.has(p.name) || typeof p.call_id !== 'string' || calls.has(p.call_id)) return null;
       calls.set(p.call_id, p.name); continue;
     }
     if (p.type === 'function_call_output') {
-      if (!calls.has(p.call_id) || outputs.has(p.call_id) ||
+      if (activeCell !== null || !calls.has(p.call_id) || outputs.has(p.call_id) ||
           (typeof p.output !== 'string' && text(p.output, 'input_text') === null)) return null;
       outputs.add(p.call_id); continue;
     }
     return null;
   }
   if (user === null || nativeUser !== user || digest(user) !== receipt.inputHash || calls.size !== outputs.size ||
-      nativeCalls.size !== calls.size || [...nativeCalls].some(([id, name]) => calls.get(id) !== name)) return null;
+      activeCell !== null || [...cells.values()].some(complete => !complete) ||
+      nativeCalls.size !== calls.size + nestedCalls.size ||
+      [...nativeCalls].some(([id, name]) => !nestedCalls.has(id) && calls.get(id) !== name)) return null;
   return { evidenceScope: 'unit', recordIds: records.map(record => `codex:ordinal:${record.value.ordinal}`) };
 }
 

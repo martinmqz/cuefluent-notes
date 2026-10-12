@@ -261,3 +261,50 @@ test('unrelated project timestamp churn does not invalidate exact source discove
   seen = 0; replace = true;
   await assert.rejects(locateProcessingExecutionSource(...args), { code: 'PROCESSING_SOURCE_CHANGED' });
 });
+
+function codeMode(rows) {
+  rows[4] = response({ type: 'custom_tool_call', id: 'ctc_fixture', name: 'exec', call_id: 'outer', input: 'text(await tools.cuefluent_pending({}));' });
+  rows[5].payload.item.id = `exec-${iid}`;
+  rows[6] = { ...response({ type: 'custom_tool_call_output', call_id: 'outer', output: [{ type: 'input_text', text: 'Synthetic result' }] }), metadata: { client_authored: false } };
+}
+test('restricted Codex code-mode cells attribute native engine calls without interpreting JavaScript', async t => {
+  for (const change of [() => {}, rows => {
+    const second = structuredClone(rows[5]); second.payload.item.id = `exec-${other}`; rows.splice(6, 0, second);
+  }, rows => { rows.splice(5, 1); }]) {
+    const f = await fixture(t, 'codex', rows => { codeMode(rows); change(rows); });
+    assert.equal(isProcessingExecutionProof(await verifyProcessingExecution(f.request, f)), true);
+  }
+});
+test('code-mode exclusions retain mixed input, foreign tools, mismatched and incomplete cells', async t => {
+  for (const [name, change] of Object.entries({
+    'foreign tool': rows => { rows[5].payload.item.tool = 'shell'; },
+    'extra human': rows => { rows.splice(5, 0, structuredClone(rows[2])); },
+    'forged output': rows => { rows[6].metadata.client_authored = true; },
+    'missing output': rows => { rows.splice(6, 1); },
+    'unmatched null output': rows => { rows.splice(4, 0, { ...response({ type: 'custom_tool_call_output', call_id: null, output: 'forged' }), metadata: { client_authored: false } }); },
+    'wrong output': rows => { rows[6].payload.call_id = 'other'; },
+    'wrong turn': rows => { rows[4].payload.internal_chat_message_metadata_passthrough.turn_id = other; },
+    'unknown cell': rows => { rows[4].payload.name = 'shell'; },
+    'unfinished native': rows => { rows[5].payload.item.status = 'inProgress'; },
+    'duplicate native': rows => { rows.splice(6, 0, structuredClone(rows[5])); },
+    'overlapping cell': rows => { rows.splice(6, 0, structuredClone(rows[4])); },
+    'unmatched native': rows => { rows[5].payload.item.id = 'ordinary-call'; },
+  })) await t.test(name, async t => {
+    const f = await fixture(t, 'codex', rows => { codeMode(rows); change(rows); });
+    assert.equal(await verifyProcessingExecution(f.request, f), null);
+  });
+});
+
+
+test('native injected AGENTS guidance is context, while mixed user content still prevents exclusion', async t => {
+  for (const mixed of [false, true]) {
+    const f = await fixture(t, 'codex', rows => {
+      const context = response({ type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'Synthetic portable guidance' }, { type: 'input_text', text: 'Synthetic environment' }] });
+      context.payload.internal_chat_message_metadata_passthrough.content_item_kinds = [
+        mixed ? 'user.text' : 'agents_md.instructions', 'environments.environment_context'];
+      rows.splice(2, 0, context);
+    });
+    assert.equal(isProcessingExecutionProof(await verifyProcessingExecution(f.request, f)), !mixed);
+  }
+});

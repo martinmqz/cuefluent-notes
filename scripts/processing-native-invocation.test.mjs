@@ -63,7 +63,7 @@ async function fixture(t, client = 'codex', { register = true, midRecord = false
       isSidechain: false, parentUuid: preBoundary.uuid, promptId: unitId, message: { role: 'user', content: '/cuefluent-notes process' } };
   return { ...f, source, context, invocation, skillPath, boundary, selected, store, nativeSkill, nativeCall, spacer,
     append: rows => fs.appendFile(source.path, rows.map(line).join('')),
-    resolve: (ctx = context, call = invocation) => resolveProcessingInvocation(f.capability, ctx, call, { skillPath }) };
+    resolve: (ctx = context, call = invocation) => resolveProcessingInvocation(f.capability, ctx, call, { skillPath, settleMs: 0 }) };
 }
 
 test('Codex typed native invocation binds the selected call and exact native skill input without writes', async t => {
@@ -382,4 +382,268 @@ test('processing hook floors exclude earlier calls and stale policy bindings can
   const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(config) });
   await assert.rejects(resolveProcessingInvocation(capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
   assert.equal(value.snapshot.eofByte, Buffer.byteLength(await fs.readFile(f.source.path)) - Buffer.byteLength(line(f.nativeCall())));
+});
+
+test('delayed Claude native persistence can settle without granting authority to a missing call', async t => {
+  const f = await fixture(t, 'claude'); await f.append([f.spacer()]);
+  const before = await fs.readFile(f.options.configPath);
+  let appended;
+  const timer = setTimeout(() => { appended = f.append([f.nativeCall()]); }, 80);
+  t.after(() => clearTimeout(timer));
+  const result = await resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath });
+  await appended;
+  assert.equal(isProcessingInvocation(result), true);
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  await assert.rejects(resolveProcessingInvocation(f.capability, { ...f.context, toolCallId: 'missing' }, f.invocation,
+    { skillPath: f.skillPath, settleMs: 30 }), unavailable);
+});
+test('native persistence waits are cancelled before dispatch and keep invalid calls refused', async t => {
+  const f = await fixture(t, 'claude'); await f.append([f.spacer()]);
+  const abort = new AbortController();
+  const pending = resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath, signal: abort.signal });
+  abort.abort(); await assert.rejects(pending, { name: 'AbortError' });
+  const call = f.nativeCall(); call.message.content[0].input = { altered: true }; await f.append([call]);
+  await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
+});
+
+function nestedRows(f, result) {
+  f.context.toolCallId = `exec-${randomUUID()}`; f.context.itemId = `ctc_${randomUUID()}`;
+  const outer = { timestamp: stamp, ordinal: 4, type: 'response_item', payload: { type: 'custom_tool_call',
+    id: f.context.itemId, call_id: 'outer', name: 'exec', input: 'Model-written code is not parsed for authority.',
+    internal_chat_message_metadata_passthrough: { turn_id: f.context.unitId } } };
+  const call = { timestamp: stamp, ordinal: 5, type: 'event_msg', payload: { type: 'item_completed',
+    thread_id: f.context.sessionId, turn_id: f.context.unitId, item: { type: 'McpToolCall', id: f.context.toolCallId,
+      server: 'cuefluent_control', tool: f.invocation.tool, arguments: f.invocation.arguments, status: 'completed', result } } };
+  const output = { timestamp: stamp, ordinal: 6, type: 'response_item', metadata: { client_authored: false }, payload: {
+    type: 'custom_tool_call_output', call_id: 'outer', output: 'Synthetic wrapper output', internal_chat_message_metadata_passthrough: { turn_id: f.context.unitId } } };
+  return { outer, call, output };
+}
+test('Codex outer exec can request a handshake but only a completed exact inner call proves invocation', async t => {
+  const f = await fixture(t), result = { content: [{ type: 'text', text: 'Synthetic challenge' }], isError: false };
+  const rows = nestedRows(f, result); await f.append([f.spacer(), f.nativeSkill(), rows.outer]);
+  const pending = await f.resolve(); assert.equal(pending.pending, true); assert.equal(isProcessingInvocation(pending), false);
+  await f.append([rows.call, rows.output]);
+  const bound = await f.resolve(); assert.equal(isProcessingInvocation(bound), true);
+  assert.equal(bound.handshakeResultHash, digest(canonicalJSON(result))); assert.equal(bound.nativeSkill, false);
+  assert.equal(bound.controlExclusionUnsupported, true);
+});
+test('Codex nested binding rejects forged metadata, arguments, duplicate calls and incomplete native results', async t => {
+  for (const [name, change] of Object.entries({
+    arguments: r => { r.call.payload.item.arguments = {}; },
+    server: r => { r.call.payload.item.server = 'other'; },
+    thread: r => { r.call.payload.thread_id = randomUUID(); },
+    turn: r => { r.call.payload.turn_id = randomUUID(); },
+    failure: r => { r.call.payload.item.status = 'failed'; },
+    output: r => { r.output.metadata.client_authored = true; },
+  })) await t.test(name, async t => {
+    const f = await fixture(t), rows = nestedRows(f, { content: [], isError: false }); change(rows);
+    await f.append([f.spacer(), rows.outer, rows.call, rows.output]); await assert.rejects(f.resolve(), unavailable);
+  });
+});
+
+test('MCP handshake verifies native bytes end to end and refuses source replacement between calls', async t => {
+  const { PassThrough, Writable } = await import('node:stream');
+  const { runProcessingControlServer } = await import('./processing-control-server.mjs');
+  for (const variant of ['verified retry', 'replaced source', 'late pair', 'late output', 'never persisted']) await t.test(variant, async t => {
+    const altered = variant === 'replaced source';
+    const f = await fixture(t), r = nestedRows(f, null);
+    await f.append([f.spacer(), r.outer]);
+    const input = new PassThrough(), received = new Map(), waiting = new Map(); let calls = 0;
+    const output = new Writable({ write(bytes, _e, done) {
+      for (const line of bytes.toString().trim().split('\n')) {
+        const row = JSON.parse(line); received.set(row.id, row); waiting.get(row.id)?.(row);
+      }
+      done();
+    } });
+    const send = (id, params, method = 'tools/call') => input.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    const wait = id => received.get(id) ?? new Promise(resolve => waiting.set(id, resolve));
+    const metadata = { callId: f.context.toolCallId, itemId: f.context.itemId,
+      'x-codex-turn-metadata': { thread_id: f.context.sessionId, session_id: f.context.sessionId, turn_id: f.context.unitId } };
+    // Use an actual exposed tool, with the real native resolver and storage guard.
+    f.invocation.tool = 'process_selected_captures'; r.call.payload.item.tool = f.invocation.tool;
+    const server = runProcessingControlServer({ client: 'codex', input, output,
+      resolveSource: async (context, invocation, { signal, requireCompleted }) => ({ ...await resolveProcessingInvocation(f.capability, context, invocation,
+        { skillPath: f.skillPath, signal, requireCompleted, settleMs: variant.startsWith('late') ? 1000 : 0 }), collectionId: f.collection.id }),
+      getStatus: async () => { throw new Error('Unexpected status'); },
+      requestProcessing: async () => { calls++; return { status: 'busy', nextAction: 'wait' }; }
+    });
+    send(0, { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } }, 'initialize'); await wait(0);
+    send(1, { name: f.invocation.tool, arguments: f.invocation.arguments, _meta: metadata });
+    const first = await wait(1); assert.equal(calls, 0);
+    const retryToken = JSON.parse(first.result.content[0].text).retryToken;
+    r.call.payload.item.result = first.result;
+    if (variant === 'late output') await f.append([r.call]);
+    else if (!variant.startsWith('late') && variant !== 'never persisted') await f.append([r.call, r.output]);
+    if (variant.startsWith('late')) observeNativeReads(t, [f.source], async (_file, count) => {
+      if (count === 1) await f.append(variant === 'late pair' ? [r.call, r.output] : [r.output]);
+    });
+    if (altered) {
+      const bytes = await fs.readFile(f.source.path); await fs.rename(f.source.path, f.source.path + '.preserved');
+      await fs.writeFile(f.source.path, bytes);
+    }
+    send(2, { name: f.invocation.tool, arguments: { ...f.invocation.arguments, retryToken },
+      _meta: { ...metadata, callId: `exec-${randomUUID()}`, itemId: 'ctc_second' } });
+    const second = await wait(2);
+    assert.equal(calls, altered || variant === 'never persisted' ? 0 : 1);
+    if (!altered && variant !== 'never persisted') assert.equal(JSON.parse(second.result.content[0].text).status, 'busy');
+    else assert.ok(second.error);
+    input.end(); await server;
+  });
+});
+
+// More than a full tail per source reproduces cumulative-budget exhaustion.
+const largeClaudeTail = () => Array.from({ length: 17 }, () => line({ type: 'system', content: 'x'.repeat(128 * 1024) })).join('');
+async function registeredClaudeCandidates(f, count, { matchLast = false, tail = largeClaudeTail } = {}) {
+  const first = (await fs.readFile(f.source.path, 'utf8')).split('\n').slice(0, 2).map(JSON.parse);
+  const candidates = [];
+  for (let i = 0; i < count; i++) {
+    const sessionId = randomUUID(), rows = first.map(row => ({ ...row, sessionId }));
+    const prefix = rows.map(line).join(''), source = { ...f.source, sessionId, path: path.join(f.project, `${sessionId}.jsonl`) };
+    const call = f.nativeCall(); call.sessionId = sessionId;
+    await fs.writeFile(source.path, prefix + tail() + (matchLast && i === count - 1 ? line(call) : ''));
+    source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
+    const boundary = { ...f.boundary, sourceIdentity: source.fileIdentity, eofByte: Buffer.byteLength(prefix),
+      record: { id: rows[1].uuid, startByte: Buffer.byteLength(line(rows[0])), endByte: Buffer.byteLength(prefix), hash: digest(line(rows[1])) } };
+    candidates.push({ source, boundary });
+  }
+  for (const { source, boundary } of candidates) {
+    const store = await openWorkflowIntake(f.capability, { client: 'claude', sessionId: source.sessionId, cwd: f.project }, 'collect');
+    await withIntakeLock(store, tx => controlSelection(tx, { source, boundary, expectedHash: null,
+      request: { id: randomUUID(), operation: 'start', client: 'claude', sessionId: source.sessionId,
+        unitId: boundary.unitId, expectedRevision: 0 }, authorize: async () => true }));
+  }
+  return candidates.map(item => item.source);
+}
+
+// Append only after the native reader closes its first fixed snapshot. This
+// deterministically exercises a missing record without wall-clock races.
+function observeNativeReads(t, sources, afterRead = async () => {}) {
+  const original = fs.open, reads = new Map(sources.map(source => [source.path, 0]));
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    const handle = await original.call(this, file, ...args);
+    if (reads.has(file) && typeof args[0] === 'number') {
+      reads.set(file, reads.get(file) + 1);
+      const close = handle.close.bind(handle), count = reads.get(file);
+      handle.close = async () => { await close(); await afterRead(file, count); };
+    }
+    return handle;
+  });
+  return reads;
+}
+
+test('Claude settles the primary tail without opening or scanning registered fallback sources', async t => {
+  const f = await fixture(t, 'claude'); await fs.appendFile(f.source.path, largeClaudeTail());
+  const candidates = await registeredClaudeCandidates(f, 20);
+  const reads = observeNativeReads(t, [f.source, ...candidates], async (file, count) => {
+    if (file === f.source.path && count === 1) await f.append([f.nativeCall()]);
+  });
+  t.mock.method(fs, 'opendir', async () => assert.fail('primary settling must not scan fallback directories'));
+  const result = await resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath });
+  assert.equal(result.callId, f.context.toolCallId); assert.equal(reads.get(f.source.path), 2);
+  for (const candidate of candidates) assert.equal(reads.get(candidate.path), 0);
+});
+
+test('Claude fallback can read every full-sized candidate once after the bounded primary wait', async t => {
+  const f = await fixture(t, 'claude'); await fs.appendFile(f.source.path, largeClaudeTail());
+  const candidates = await registeredClaudeCandidates(f, 32, { matchLast: true });
+  const reads = observeNativeReads(t, [f.source, ...candidates]);
+  const result = await resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath });
+  assert.equal(result.selection.sessionId, candidates.at(-1).sessionId);
+  assert.ok(reads.get(f.source.path) >= 1 && reads.get(f.source.path) <= 5);
+  for (const candidate of candidates) assert.equal(reads.get(candidate.path), 1);
+});
+
+test('a definitive Claude mismatch is not retried or hidden by a fallback match', async t => {
+  const f = await fixture(t, 'claude');
+  const bad = f.nativeCall(); bad.message.content[0].input = { changed: true }; await f.append([bad]);
+  const candidates = await registeredClaudeCandidates(f, 1, { matchLast: true });
+  const reads = observeNativeReads(t, [f.source, ...candidates]);
+  t.mock.method(fs, 'opendir', async () => assert.fail('definitive refusal must not scan'));
+  await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
+  assert.equal(reads.get(f.source.path), 1); assert.equal(reads.get(candidates[0].path), 0);
+});
+
+for (const location of ['primary', 'fallback']) test(`Claude /clear skips an unavailable ${location} source`, async t => {
+  for (const reason of ['safety stop', 'record limit', 'selection change']) await t.test(reason, async t => {
+    const f = await fixture(t, 'claude');
+    const candidates = await registeredClaudeCandidates(f, location === 'primary' ? 1 : 2, { matchLast: true, tail: () => '' });
+    const rejected = location === 'primary' ? f.source : candidates[0], matching = candidates.at(-1);
+    const selectionPath = path.join(f.collection.intakeStateDir, 'sessions', 'claude', `${rejected.sessionId}.json`);
+    if (reason === 'safety stop') {
+      const state = JSON.parse(await fs.readFile(selectionPath, 'utf8'));
+      state.safetyStop = { reason: 'capacity', unitId: randomUUID() };
+      await fs.writeFile(selectionPath, line(state));
+    } else if (reason === 'record limit') {
+      await fs.appendFile(rejected.path, line({ type: 'system', content: 'Synthetic record' }).repeat(4097));
+    } else {
+      const call = f.nativeCall(); call.sessionId = rejected.sessionId;
+      await fs.appendFile(rejected.path, line(call));
+    }
+    let changedSelection;
+    const rejectedBytes = await fs.readFile(rejected.path), beforeSelection = await fs.readFile(selectionPath);
+    const reads = observeNativeReads(t, [f.source, ...candidates], async (file, count) => {
+      if (reason !== 'selection change' || file !== rejected.path || count !== 1) return;
+      const before = await readSelection(f.store, { client: 'claude', sessionId: rejected.sessionId });
+      await withIntakeLock(f.store, tx => controlSelection(tx, { source: rejected, expectedHash: before.hash,
+        request: { id: randomUUID(), operation: 'exclude', client: 'claude', sessionId: rejected.sessionId,
+          unitId: randomUUID(), expectedRevision: before.state.revision }, authorize: async () => true }));
+      changedSelection = await fs.readFile(selectionPath);
+    });
+    const bound = await f.resolve();
+    assert.equal(isProcessingInvocation(bound), true);
+    assert.equal(bound.selection.sessionId, matching.sessionId);
+    assert.equal(bound.callId, f.context.toolCallId);
+    assert.equal(reads.get(rejected.path), reason === 'safety stop' ? 0 : 1);
+    assert.equal(reads.get(matching.path), 1);
+    if (reason === 'selection change') assert.ok(changedSelection);
+    assert.deepEqual(await fs.readFile(selectionPath), changedSelection ?? beforeSelection);
+    assert.deepEqual(await fs.readFile(rejected.path), rejectedBytes);
+  });
+});
+
+test('Claude fallback does not hide an invalid matching call behind a valid candidate', async t => {
+  for (const rejection of ['arguments', 'tool', 'duplicate']) await t.test(rejection, async t => {
+    const f = await fixture(t, 'claude');
+    const [rejected] = await registeredClaudeCandidates(f, 2, { matchLast: true, tail: () => '' });
+    const call = f.nativeCall(); call.sessionId = rejected.sessionId;
+    if (rejection === 'arguments') call.message.content[0].input = { changed: true };
+    if (rejection === 'tool') call.message.content[0].name = 'mcp__cuefluent_control__processing_review';
+    await fs.appendFile(rejected.path, line(call).repeat(rejection === 'duplicate' ? 2 : 1));
+    await assert.rejects(f.resolve(), unavailable);
+  });
+});
+
+test('Claude cannot skip a replaced source to bind a different registered session', async t => {
+  for (const location of ['primary', 'fallback']) await t.test(location, async t => {
+    const f = await fixture(t, 'claude');
+    const candidates = await registeredClaudeCandidates(f, location === 'primary' ? 1 : 2, { matchLast: true, tail: () => '' });
+    const rejected = location === 'primary' ? f.source : candidates[0];
+    const bytes = await fs.readFile(rejected.path);
+    await fs.rename(rejected.path, rejected.path + '.preserved');
+    await fs.writeFile(rejected.path, bytes);
+    await assert.rejects(f.resolve(), { code: 'SOURCE_CHANGED' });
+  });
+});
+
+test('native persistence wait preserves the initially inspected selection', async t => {
+  const f = await fixture(t, 'claude'); await f.append([f.spacer()]);
+  const reads = observeNativeReads(t, [f.source], async (_file, count) => {
+    if (count !== 1) return;
+    await f.append([f.nativeCall()]);
+    await withIntakeLock(f.store, tx => controlSelection(tx, { source: f.source, expectedHash: f.selected.hash,
+      request: { id: randomUUID(), operation: 'exclude', client: 'claude', sessionId: f.context.sessionId,
+        unitId: randomUUID(), expectedRevision: f.selected.state.revision }, authorize: async () => true }));
+  });
+  await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
+  assert.equal(reads.get(f.source.path), 1);
+});
+
+test('Codex incomplete nested pairs remain pending and never prove a call', async t => {
+  for (const present of ['inner', 'outer output', 'neither']) await t.test(present, async t => {
+    const f = await fixture(t), rows = nestedRows(f, { content: [], isError: false });
+    await f.append([f.spacer(), rows.outer, ...(present === 'inner' ? [rows.call] : present === 'outer output' ? [rows.output] : [])]);
+    const pending = await f.resolve(); assert.equal(pending.pending, true); assert.equal(isProcessingInvocation(pending), false);
+    await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation,
+      { skillPath: f.skillPath, settleMs: 0, requireCompleted: true }), unavailable);
+  });
 });

@@ -44,7 +44,12 @@ request identity from that native call; do not invent a request ID or selection.
 For only `review`, call its `processing_review` tool once. Native clients may prefix
 these tool names. Omit `collectionId` unless already known; the adapter must resolve
 exactly one existing registration. Do not read more files, packets or notes or
-synthesize in this source chat. Return only the tool's `statusText`. If the tool or
+synthesize in this source chat. If the tool returns `verification-required`, end
+that exec/tool call. In a separate exec/tool call, repeat the same tool and arguments
+with its returned `retryToken` once. This handshake does not start processing or
+approve a proposal. Do not retry inside the same exec or invent a token. Never
+repeat process/review to poll progress; use `processing_status` when requested.
+After a successful control call, return only the tool's `statusText`. If the tool or
 verified source binding is unavailable, report that limitation and stop; do not
 silently fall back to inline processing or invent selection metadata.
 
