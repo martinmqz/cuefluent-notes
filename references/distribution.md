@@ -144,10 +144,8 @@ Clone again when you next need to update.
   update to a version that discovers full plugins in its skills directory; a
   plain copied `SKILL.md` does not include the bundled runtime or hooks.
 
-The installer supports native Windows, macOS, and Linux. The automated installer
-checks use disposable user and checkout-lock directories and stub client commands; they verify package
-contents, settings preservation, conflicts, retries, and updates. Pinned-client
-registration checks and their limits are described in [verification](verification.md).
+The installer supports native Windows, macOS, and Linux. See
+[verification](verification.md) for general coverage and client integration limits.
 
 ## Build and inspect
 
@@ -363,10 +361,9 @@ codex plugin marketplace add /absolute/selected-marketplace-root
 codex plugin add cuefluent-notes@selected-local-catalog
 ```
 
-Disposable-client smoke checks exercise these commands with a local marketplace;
-see [verification scope](verification.md). The desktop plugin UI is another
-documented installation path. Restart or begin a fresh session
-after installation and verify the skill is available. For the hook variant,
+The desktop plugin UI is another documented installation path. See
+[verification scope](verification.md) for client integration limits. Restart or
+begin a fresh session after installation and verify the skill is available. For the hook variant,
 review and trust its current definition through `/hooks`; enabling a plugin does
 not itself establish hook trust. Follow the [Codex hooks reference](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
 

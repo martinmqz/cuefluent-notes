@@ -517,10 +517,8 @@ or silently claiming completion. No automatic carry retirement is implemented.
 
 ## Verification scope
 
-See [verification](verification.md) for automated coverage, pinned-client
-registration checks and the limits of that evidence. Synthetic reader fixtures
-and injected filesystem failures do not establish live conversation capture,
-client context delivery or durability under sudden power loss.
+See [verification](verification.md) for general coverage and product limits,
+including source completeness, client integration and power-loss durability.
 
 ## Private storage and explicit pruning
 

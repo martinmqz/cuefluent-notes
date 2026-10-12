@@ -82,7 +82,7 @@ Validate with `claude plugin validate --strict --json dist/release` and
 Use the Plugin Creator validator for the Codex package when that tooling is
 available. Test fresh-client installation against the prepared local catalog,
 including first-use setup and hook trust, before advertising a release. The
-[verification scope](verification.md) distinguishes automated checks from live tests.
+[verification scope](verification.md) describes general coverage and product limits.
 
 ## Publish the GitHub marketplace
 
