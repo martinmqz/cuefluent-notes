@@ -24,6 +24,8 @@ faithful alternate terminology without adding unsupported factual claims; see
 [evidence.md](evidence.md).
 
 Place one optional alias comment directly after the H2, before body content:
+keep other comments after it under the
+[provenance placement rules](authoring.md#durable-content-and-provenance).
 
 ```markdown
 ## Active authorization conflict

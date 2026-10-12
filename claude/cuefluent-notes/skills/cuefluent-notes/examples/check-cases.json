@@ -47,7 +47,7 @@
       "query": "standup update",
       "file": "standup.md",
       "heading": "Client conflict progress",
-      "expected": "The September 4 standup describes the September 3 fake-transport result, distinguishes its later recording date, and keeps the live check pending."
+      "expected": "The September 4 standup describes the September 3 fake-transport result; as of that standup, the live check was pending sandbox access, without a recorded owner or due date."
     },
     {
       "query": "yesterday client work",
@@ -57,13 +57,13 @@
     },
     {
       "query": "client review meeting",
-      "file": "meeting-summary.md",
+      "file": "client-review-integration-check.md",
       "heading": "Integration check before rollout decision",
-      "expected": "Rina reported the limited test result, Omar proposed the integration check, and the group agreed the check should precede a rollout decision."
+      "expected": "Rina reported the limited test result, Omar proposed the integration check, and the recorded agreement placed that check before a rollout decision. The full attendee list and individual participation in that agreement are not recorded."
     },
     {
       "query": "rollout readiness",
-      "file": "meeting-summary.md",
+      "file": "client-review-integration-check.md",
       "heading": "Integration check before rollout decision",
       "expected": "A live integration check was proposed, with no recorded completed run, owner, due date, or rollout approval."
     },
@@ -77,13 +77,13 @@
       "query": "client-conflict-04",
       "file": "task-summary.md",
       "heading": "Authorization conflict investigation",
-      "expected": "The test occurred on September 3 at 10:05 UTC and was recorded on September 4 at 08:00 UTC; live service behavior, repeated invocations, and deployment remain unverified."
+      "expected": "The test occurred on September 3 at 10:05 UTC; it did not test live service behavior, repeated invocations, or deployment."
     },
     {
       "query": "verification limits",
       "file": "knowledge-base.md",
       "heading": "Contract and client verification boundaries",
-      "expected": "The API contract, one client test, and documentation review establish different claims and do not certify the deployed client."
+      "expected": "The API contract and one fake-transport client test establish different claims; as of the September 4, 2026 review, the live check was pending and the deployed client was not certified."
     },
     {
       "query": "Atlas sprint 20.26 sandbox access",

@@ -36,9 +36,6 @@ On October 5, Rina reported that sandbox access was available. That updates the
 September 22 blocker from sprint 20.26; it does not move that earlier event
 into this sprint or establish that the integration check was complete.
 
-Sources: fictional [STANDUP-20.26](../references/evidence.md#standup-2026--first-sprint-record)
-and [STANDUP-20.27](../references/evidence.md#standup-2027--following-sprint-record).
-
 ## October 6 one-request integration result
 
 On October 6, Omar reported one live sandbox request for fixture `intent_demo_17`.
@@ -46,5 +43,3 @@ It returned `409`, the client reported `AuthorizationConflict`, and the trace
 showed no automatic retry for that invocation. This reported check covers one
 sandbox request; it does not establish repeated-call behavior, a charge outcome,
 production deployment or rollout approval.
-
-Source: fictional [STANDUP-20.27](../references/evidence.md#standup-2027--following-sprint-record).

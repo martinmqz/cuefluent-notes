@@ -344,14 +344,21 @@ outputs and parent directories must use the filesystem's canonical spelling.
 Windows batches conservatively refuse case-only collisions, including missing
 targets. macOS also refuses Unicode case and normalization collisions. These
 rules can reject distinct names on case-sensitive volumes; they do not claim to
-reproduce every filesystem's Unicode comparison table. Native Windows tests
-retain distinct dotless-i, long-s, micro-sign, and decomposed-accent names rather
-than treating JavaScript uppercasing as proof of an NTFS alias.
-Linux retains distinct case-sensitive names.
+reproduce every filesystem's Unicode comparison table. The direct safe writer's
+Windows comparison uses lowercase spelling without Unicode normalization; that
+comparison alone keeps composed/decomposed-accent variants distinct. JavaScript
+uppercasing alone does not prove that two names alias on NTFS. The direct writer's
+Linux comparison retains distinct case-sensitive names.
+
 Junctions and symlinks cannot redirect output parents. Device names, alternate
 data streams, and trailing-dot/space aliases are refused. See
 [Microsoft's filename rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
 and [Node's Windows permission limits](https://nodejs.org/docs/latest-v22.x/api/fs.html#fschmodpath-mode-callback).
+
+[Processing proposals](processing.md#proposal-and-approval) impose an additional
+rule on every platform: output paths must be unique after NFC normalization and
+lowercasing. A proposal containing both composed and decomposed spellings, or a
+case-only pair, is refused even where the direct writer would distinguish them.
 
 An interruption during staging may leave missing or partial stages. They remain
 listed by `inspect`; no directory scan or untracked content discovery is needed.

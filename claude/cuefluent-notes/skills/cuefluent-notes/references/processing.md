@@ -115,10 +115,11 @@ A new workset is not needed just because new batches need current consent.
 Before making another subject file, compare the relevant existing notes and prior
 associations. Consolidate related evidence across selected sessions and clients;
 several batches can support one note, and many captures can require no change.
-For each proposed section identify a durable fact, decision, explanation or
-meaningful open question. Keep useful review findings and verified tool results;
-leave scheduling chatter, acknowledgments and processing narration out of prose.
-This is an authoring judgment, not a keyword filter or a helper guarantee.
+Apply the [durable-content boundary](authoring.md#durable-content-and-provenance)
+to every proposed section. Keep supported findings and meaningful outcomes;
+leave scheduling chatter, acknowledgments, source bookkeeping and processing
+narration out of prose. This is an authoring judgment, not a keyword filter or a
+helper guarantee.
 
 Reconcile known corrections within the frozen workset before finalizing a subject
 draft. If relevant selected evidence remains unread, label coverage partial and
@@ -158,10 +159,12 @@ disposition. `skipped` is an explicit decision about those exact revisions, not 
 substitute for inspection. Processing cannot restore omitted bytes; an original
 session or other artifact needs a separately authorized, bounded selection.
 
-Routine source-checking details may use ordinary `<!-- source-review: ... -->`
-comments after any valid leading metadata block. Keep facts, attribution,
-meaningful dates and material limitations
-visible. `<!-- cuefluent ... -->` is reserved for the leading structured note
+Retain routine source-checking details only with hidden provenance: supported
+source metadata or ordinary `<!-- source-review: ... -->` comments after any
+valid leading metadata block. Keep facts, meaningful attribution, occurrence
+dates and material limitations visible under the
+[content boundary](authoring.md#durable-content-and-provenance).
+`<!-- cuefluent ... -->` is reserved for the leading structured note
 metadata; never use it for free-form review remarks. An invalid reserved block
 returns fixed guidance without its private contents. Use `prepare-note` for
 supported metadata or `check-notes` to locate errors; preserve existing malformed
@@ -179,9 +182,16 @@ identity; recommending a model does not switch it. Hooks invoke no model.
 Use existing status and hook notice diagnostics; distinguish a new failure from
 an unchanged code/scope already reported in this conversation. State the affected
 operation and supported next action without quoting raw evidence. Do not add
-polling, continuations or persistent suppression state. An unrecognized diagnostic
-stays unresolved; for example, `EVIDENCE_AFTER_CODEX_TERMINAL` requires a bounded
-native reproducer before any reader change, not dropping all late evidence.
+polling, continuations or persistent suppression state. Unrecognized diagnostics
+stay unresolved.
+
+`EVIDENCE_AFTER_CODEX_TERMINAL` is a known reader refusal with no supported repair
+command. Preserve the selected source and pending state; do not discard late
+evidence to make collection proceed. Ask the user to report the diagnostic and
+installed plugin and Codex versions in a
+[plugin issue](https://github.com/martinmqz/cuefluent-notes/issues).
+Do not attach raw session content or private settings unless the user separately
+authorizes sharing them.
 
 ## Proposal and approval
 
@@ -191,6 +201,11 @@ path, inspected `expectedHash` (null for new), absolute `contentPath`, and exact
 one or more proposed output paths; every output must have at least one input.
 The helper never maps every input to every note or creates one note per capture.
 Earlier associations are returned during preparation for the agent to consider.
+
+Output paths within a proposal must be unique after Unicode NFC normalization
+and lowercasing on every platform. Composed/decomposed spellings and case-only
+pairs are refused even on filesystems that can keep them distinct. The shared
+writer's [path checks](refresh.md#interrupted-writes-and-conflicts) also apply.
 
 The helper validates Markdown, preserves inspected output hashes, records root
 and parent identities, and copies exact proposal bytes into private storage.
@@ -288,6 +303,6 @@ marker cannot replace native proof. Preserve new human corrections and independe
 work alongside any echoes. The current
 native transport does not prove which active turn is performing processing, so
 operation IDs, cwd and owner sessions cannot exclude a whole turn or label mixed
-work records. Automatic invocation and native prompts require separate live
-transport verification. Fixtures verify deterministic helper behavior, not agent
-judgment, visual inspection, live client delivery or OS power-loss durability.
+work records. Hook notifications do not start processing. Helper success does
+not establish agent judgment, visual inspection, live client delivery or survival
+of sudden power loss. See [verification limits](verification.md).

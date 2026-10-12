@@ -33,12 +33,8 @@ America/Los_Angeles. At the September 22 standup, Rina reported that sandbox
 access was still pending and that the live integration check had not run. This is a
 reported blocker, not a finding about the deployed payment client.
 
-Source: fictional [STANDUP-20.26](../references/evidence.md#standup-2026--first-sprint-record).
-
 ## October 1 planned integration check
 
 On October 1, Omar proposed running the live check after access was available.
 The record supplies no owner, due date, completed run or rollout approval.
 Keep this proposal pending; later evidence belongs to its own occurrence date.
-
-Source: fictional [STANDUP-20.26](../references/evidence.md#standup-2026--first-sprint-record).

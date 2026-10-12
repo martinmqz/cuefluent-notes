@@ -127,9 +127,9 @@ and how each carried-forward fact remains supported before restructuring it.
 The two [fictional sprint examples](../examples/standups-sprint-20-26.md) and
 [following sprint](../examples/standups-sprint-20-27.md) show a shared series with
 separate evidence and visible dates. Their UUID-based IDs are fixed synthetic
-fixtures; never copy them to establish a real note or series. Their H1/H2 headings retain project, period
-and subject vocabulary because the recorded app baseline searches headings and
-aliases only.
+fixtures; never copy them to establish a real note or series. Their H1/H2 headings
+retain project, period and subject vocabulary because Cuefluent searches headings
+and aliases only.
 
 This authoring contract does not implement current-sprint ranking, automatic
 series expansion or historical search across files. When answering from explicitly

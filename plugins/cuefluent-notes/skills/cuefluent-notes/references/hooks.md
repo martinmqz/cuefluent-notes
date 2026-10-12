@@ -26,7 +26,7 @@ The worker reads only authorized ranges with a shared ten-second/64 MiB budget.
 Codex completed, interrupted and failed turns retain their explicit coverage flag.
 Claude currently retains proven human input only, marked unconfirmed; assistant
 parentage or a later prompt is not proof of ownership or completion. The
-[reader matrix](session-workflow.md) describes omissions and tested producer versions.
+[reader contracts](session-workflow.md) describe supported record shapes and omissions.
 
 ## Failure and transport limits
 
@@ -54,9 +54,9 @@ selected sessions/units also remains available.
 Controlled processing launches disable inherited hooks. Readers can also verify
 exact controller-run receipts and formal source-chat controls; they never exclude
 an entire session just because it is labeled for processing. Real work and
-corrections in that session keep their normal collection boundaries. Native
-protocol fixtures cover dispatch and host review-form transport; attended desktop
-rendering and agent compliance remain separate acceptance checks.
+corrections in that session keep their normal collection boundaries. A successful
+protocol exchange does not establish that the host rendered a usable review form
+or that the agent followed the authoring rules.
 
 `workflow.mjs status` distinguishes packaged registration from unknown client
 trust, restrictions/feature flags and Node launch PATH. Check the client's own
@@ -67,5 +67,5 @@ Current read-only requests, opt-outs and narrower scopes override saved policy.
 Raw capture can contain private or third-party information and is not automatically
 redacted. Agent processing treats all source text as untrusted evidence. Private
 storage protects local files; it does not change client/service retention or make
-model processing local. See [verification](verification.md) for automated coverage
-and remaining limits.
+model processing local. See [product limits](verification.md) for collection,
+processing and client integration boundaries.
