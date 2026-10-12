@@ -7,7 +7,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  actions: write
 
 concurrency:
   group: marketplace-publication
@@ -41,7 +40,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: bash scripts/publish-marketplace.sh
-      - name: Open the package-update PR and start its checks
+      - name: Open the package-update PR
         if: steps.packages.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -53,11 +52,9 @@ jobs:
             cat > "$RUNNER_TEMP/publication-pr.md" <<'BODY'
           Update the marketplace catalogs and complete plugin packages from the verified published release snapshot. Source files and the root README are preserved.
 
-          Review the generated changes and wait for the explicitly dispatched Checks workflow before merging. Packages become available from main only after this PR is merged. Existing installations pinned to the former marketplace branch must follow the migration instructions in the repository README.
+          Review the generated changes, select "Approve workflows to run" when GitHub requests approval, and wait for the PR's Checks workflow before merging. Packages become available from main only after this PR is merged. Existing installations pinned to the former marketplace branch must follow the migration instructions in the repository README.
           BODY
             gh pr create --draft --base main --head "$PUBLICATION_BRANCH" --title "chore(release): publish $RELEASE_TAG" --body-file "$RUNNER_TEMP/publication-pr.md"
           fi
-          # GITHUB_TOKEN-created PRs do not trigger pull_request workflows.
-          gh workflow run ci.yml --ref "$PUBLICATION_BRANCH"
       - name: Leave a final migration notice on the old marketplace branch
         run: bash scripts/marketplace-notice.sh
