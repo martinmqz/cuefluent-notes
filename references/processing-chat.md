@@ -133,10 +133,12 @@ Save uses the existing exact-proposal writer. Skip handles only those revisions;
 Cancel releases an unapplied operation; Later, declining or closing the form leaves
 it pending. No filesystem lock spans the decision. Changes to note contents,
 proposals, inputs or policy preserve a conflict and require fresh review. The form
-requires MCP `2025-11-25` string-default support. A host negotiating an older
-protocol or lacking form support leaves the proposal pending. An exact review
-exceeding the 256 KiB form limit is refused without truncation; use the supported explicit
-proposal and save commands from an uncaptured context instead.
+requires MCP `2025-11-25` string-default support. The server offers that protocol
+even if the host initially requests an older version. Hosts unable to accept it
+must use the explicit CLI workflow; hosts lacking form support leave the proposal
+pending. An exact review exceeding the 256 KiB form limit is refused without
+truncation; use the supported explicit proposal and save commands from an
+uncaptured context instead.
 
 The preview field displays the proposal; it is not an editor. Note-content lines
 are prefixed with `│ `, and control characters and backslashes are visibly escaped

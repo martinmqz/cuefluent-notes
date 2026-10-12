@@ -192,6 +192,7 @@ async function duplexReview(t, { capability = { elicitation: { form: {} } }, pro
   t.after(async () => { await end().catch(() => {}); });
   send({ ...initialize, params: { ...initialize.params, protocolVersion, capabilities: capability } });
   await wait(row => row.id === 0);
+  send({ jsonrpc: '2.0', method: 'notifications/initialized' });
   send(tool('processing_review', { collectionId: 'example' }, meta ?? (client === 'claude' ? claudeMeta() : codexMeta())));
   return { calls, rows, send, sendRaw: bytes => input.write(bytes), wait, end, running };
 }
@@ -251,20 +252,32 @@ test('missing or URL-only form capability leaves the proposal untouched', async 
   });
 });
 
-test('protocols without string defaults refuse native review but preserve status access', async t => {
+test('clients offering an older protocol can accept the supported revision and review', async t => {
   for (const protocolVersion of ['2025-06-18', '2024-11-05']) for (const elicitation of [{}, { form: {} }]) {
     await t.test(`${protocolVersion}/${JSON.stringify(elicitation)}`, async t => {
+      let decisions = 0;
       const h = await duplexReview(t, { protocolVersion, capability: { elicitation },
         getStatus: async () => ({ status: 'awaiting-review', nextAction: 'review' }),
-        review: async () => { assert.fail('unsupported form must not be emitted'); } });
-      assert.equal(h.rows[0].result.protocolVersion, protocolVersion);
+        review: async ({ elicit }) => {
+          const result = await elicit({ message: 'Exact synthetic proposal' });
+          assert.equal(result.content.decision, 'later'); decisions++;
+          return { status: 'awaiting-review', nextAction: 'review' };
+        } });
+      assert.equal(h.rows[0].result.protocolVersion, '2025-11-25');
+      const form = await h.wait(row => row.method === 'elicitation/create');
+      h.send({ jsonrpc: '2.0', id: form.id, result: withReviewPreview(form, { action: 'accept', content: { decision: 'later' } }) });
       const result = view(await h.wait(row => row.id === 1));
-      assert.equal(result.status, 'awaiting-review'); assert.deepEqual(result.diagnostics, ['PROCESSING_REVIEW_UNSUPPORTED']);
-      assert(!h.rows.some(row => row.method === 'elicitation/create'));
+      assert.equal(result.status, 'awaiting-review'); assert.deepEqual(result.diagnostics, []); assert.equal(decisions, 1);
       h.send({ ...tool('processing_status', { collectionId: 'example' }), id: 2 });
       assert.equal(view(await h.wait(row => row.id === 2)).status, 'awaiting-review'); await h.end();
     });
   }
+});
+
+test('a client declining the supported protocol can disconnect without starting work', async () => {
+  const h = await server([{ ...initialize, params: { ...initialize.params, protocolVersion: '2024-11-05' } }]);
+  assert.equal(h.rows.length, 1); assert.equal(h.rows[0].result.protocolVersion, '2025-11-25');
+  assert.equal(h.calls.length, 0);
 });
 
 test('host line-ending normalization preserves decisions while lost or changed text is refused', async t => {

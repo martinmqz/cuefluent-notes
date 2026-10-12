@@ -225,9 +225,13 @@ claim successful capture-exclusion bookkeeping.
 `processing_review` sends the exact proposal through the correlated native host
 form; an unsupported or closed form preserves the pending proposal. A model's
 tool arguments cannot substitute for that host response.
-Native form review requires the negotiated MCP `2025-11-25` schema; older protocols
-retain status and processing access but return `PROCESSING_REVIEW_UNSUPPORTED`
-for review. The form uses a short header, a required `changes` string containing
+The control server supports MCP `2025-11-25`, including the string defaults needed
+by native review. It offers this version even when the client's initial request
+names an older one. Clients unable to accept it cannot use this MCP server and
+must use the explicit CLI commands; clients accepting it without form capability receive
+`PROCESSING_REVIEW_UNSUPPORTED` for review. See
+[MCP version negotiation](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#version-negotiation).
+The form uses a short header, a required `changes` string containing
 the complete readable preview as its default, and a required `decision` enum (`save`, `skip`,
 `cancel`, `later`) without a default. An accepted host response must echo the
 unchanged preview plus the chosen decision, allowing LF/CRLF/CR line-ending

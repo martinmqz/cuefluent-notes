@@ -5,6 +5,10 @@ import { CLIENTS, canonicalJSON, digest, choice, fail, id, keys, list, nativeId,
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
+// The review contract requires string defaults. Offer this supported revision
+// even when a client's initial preference is older; hosts confirm support by
+// continuing initialization with the offered revision.
+const PROTOCOL_VERSION = '2025-11-25';
 // Hosts can encode one character as six ASCII bytes (\\uXXXX), including each
 // UTF-16 surrogate. This fixed framing bound also admits a delayed echo after
 // its form closes. Ordinary requests retain INPUT_BYTES after classification.
@@ -186,11 +190,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
         const elicitation = caps.elicitation;
         formSupported = object(elicitation) && (Object.keys(elicitation).length === 0 || object(elicitation.form));
         initialized = true;
-        const protocolVersion = ['2025-11-25', '2025-06-18', '2024-11-05'].includes(row.params.protocolVersion) ? row.params.protocolVersion : '2025-11-25';
-        // String defaults carrying the review preview are part of this revision.
-        // Older hosts can use status/processing and the explicit review commands.
-        if (protocolVersion !== '2025-11-25') formSupported = false;
-        result = { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'cuefluent_control', version: '1.0.0' } };
+        result = { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'cuefluent_control', version: '1.0.0' } };
       } else {
         if (!initialized) fail('PROCESSING_CONTROL_PROTOCOL');
         if (row.method === 'ping') result = {};
