@@ -7,12 +7,15 @@ are not part of this repository or its automation.
 
 ## Public repository hygiene
 
-Keep real notes, capture configuration and credentials outside this repository.
-Keep implementation plans, review notes, detailed test evidence and machine-specific
-paths in ignored `.local/`; exclude them from commits and package inputs. Commit
-only synthetic examples. Before making a repository
-public, inspect its Git and pull-request history as well as retained Actions logs
-and artifacts; deleting a file from the current branch does not remove history.
+Keep real user notes, captured session evidence, private capture configuration,
+secrets and credentials outside this repository, including ignored directories.
+Keep implementation plans, review notes, synthetic-test results, dated validation
+logs, internal process history and machine-specific paths in ignored `.local/`;
+exclude them from commits and package inputs. Authorized installed-plugin checks
+do not permit copying real captured content into `.local/`. Commit only synthetic
+examples. Before making a repository public, inspect its Git and pull-request
+history as well as retained Actions logs and artifacts; deleting a file from the
+current branch does not remove history.
 
 Require pull requests and passing CI on `main`, prevent force pushes and branch
 deletion, and enable secret scanning and push protection when GitHub supports

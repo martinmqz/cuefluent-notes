@@ -192,6 +192,11 @@ one or more proposed output paths; every output must have at least one input.
 The helper never maps every input to every note or creates one note per capture.
 Earlier associations are returned during preparation for the agent to consider.
 
+Output paths within a proposal must be unique after Unicode NFC normalization
+and lowercasing on every platform. Composed/decomposed spellings and case-only
+pairs are refused even on filesystems that can keep them distinct. The shared
+writer's [path checks](refresh.md#interrupted-writes-and-conflicts) also apply.
+
 The helper validates Markdown, preserves inspected output hashes, records root
 and parent identities, and copies exact proposal bytes into private storage.
 An immutable intent makes interrupted staging resumable with the same content.

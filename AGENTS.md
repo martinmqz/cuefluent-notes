@@ -55,8 +55,13 @@ and check its frontmatter against the affected repository paths.
   the repository. Use synthetic fixtures and disposable test locations by default;
   test a user's installed plugin or capture settings only when explicitly
   authorized.
-- Keep plans, review notes, evidence, and machine-specific paths out of source
-  control. Keep secrets and credentials out of source, tests, logs, and evidence.
+- Keep implementation plans, review notes, synthetic-test results, dated validation
+  logs, internal process history and machine-specific paths in ignored `.local/`,
+  never in committed documentation or installed packages. This does not permit
+  real user notes, captured session evidence or private capture configuration in
+  the checkout, even during authorized installed-plugin checks.
+- Keep secrets and credentials outside the repository, including ignored paths;
+  never include them in source, tests, logs or evidence.
 - Development and build work does not authorize installation, hook trust,
   capture configuration changes, merging, publication, or visibility changes.
   Perform those actions only within the user's explicit authorization.

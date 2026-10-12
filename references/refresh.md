@@ -344,11 +344,16 @@ outputs and parent directories must use the filesystem's canonical spelling.
 Windows batches conservatively refuse case-only collisions, including missing
 targets. macOS also refuses Unicode case and normalization collisions. These
 rules can reject distinct names on case-sensitive volumes; they do not claim to
-reproduce every filesystem's Unicode comparison table. Windows name comparison
-uses lowercase spelling without Unicode normalization; dotless-i, long-s,
-micro-sign and composed/decomposed-accent variants remain distinct. JavaScript
-uppercasing alone does not prove that two names alias on NTFS.
-Linux retains distinct case-sensitive names.
+reproduce every filesystem's Unicode comparison table. The direct safe writer's
+Windows comparison uses lowercase spelling without Unicode normalization; that
+comparison alone keeps composed/decomposed-accent variants distinct. JavaScript
+uppercasing alone does not prove that two names alias on NTFS. The direct writer's
+Linux comparison retains distinct case-sensitive names.
+
+[Processing proposals](processing.md#proposal-and-approval) impose an additional
+rule on every platform: output paths must be unique after NFC normalization and
+lowercasing. A proposal containing both composed and decomposed spellings, or a
+case-only pair, is refused even where the direct writer would distinguish them.
 Junctions and symlinks cannot redirect output parents. Device names, alternate
 data streams, and trailing-dot/space aliases are refused. See
 [Microsoft's filename rules](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)

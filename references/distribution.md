@@ -362,9 +362,10 @@ codex plugin add cuefluent-notes@selected-local-catalog
 
 The desktop plugin UI is another documented installation path. See
 [verification scope](verification.md) for client integration limits. Restart or
-begin a fresh session after installation and verify the skill is available. For the hook variant,
-review and trust its current definition through `/hooks`; enabling a plugin does
-not itself establish hook trust. Follow the [Codex hooks reference](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+begin a fresh session after installation and verify the skill is available. For
+the hook variant, review and trust its current definition through `/hooks`;
+enabling a plugin does not itself establish hook trust. Follow the
+[Codex hooks reference](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
 
 ## Opt in, update, or disable
 

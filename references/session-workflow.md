@@ -325,8 +325,9 @@ allowlist. Supported input is uncompressed JSONL with `legacy` history without
 ordinals or `paginated` history with native rollout ordinals. Compatible record
 shapes are accepted across client version strings, including prereleases.
 `reader.headerClientVersion` retains the bounded, nonempty version string from
-the session header. It does not identify the client that emitted each later record after an update; readers never scan before the selected floor
-to infer that. Existing captures with `reader.clientVersion` have the same
+the session header. It does not identify the client that emitted each later record
+after an update; readers never scan before the selected floor to infer that.
+Existing captures with `reader.clientVersion` have the same
 header-only meaning and remain readable without rewriting their bytes.
 Malformed version metadata reports `INVALID_SESSION_CLIENT_VERSION`, separately
 from configuration errors.
@@ -420,11 +421,16 @@ capture or create storage.
 
 The Claude reader accepts ordinary root transcript records with the native
 identities and structure described below, independently of an exact client
-version. Public hook documentation establishes native hook identities, but does
-not establish a transcript flush fence. A duration record, assistant `stop_reason`,
-next human prompt, Stop hook or quiet EOF cannot prove finality or causal
-assistant ownership. Matching version metadata does not establish support for
-every record shape produced by that client.
+version. The [hook input contract](https://code.claude.com/docs/en/hooks#common-input-fields)
+warns that transcript writes are asynchronous and can lag a hook invocation;
+it does not establish a transcript flush fence. A user interrupt also bypasses
+the normal [Stop event](https://code.claude.com/docs/en/hooks#stop). Cancellation
+can therefore leave partial work, and a batch of human prompts followed by
+assistant/tool records does not identify which prompt caused each response.
+Parent links establish transcript ancestry, not that causal mapping. A duration
+record, assistant `stop_reason`, next human prompt, Stop hook or quiet EOF cannot
+prove finality or causal assistant ownership. Matching version metadata does not
+establish support for every record shape produced by that client.
 
 The initial supported evidence is **proven human input only**, including supplied
 text and attachment references. Native `promptId` identifies the logical prompt;
@@ -795,6 +801,14 @@ bounded collection-unavailable diagnostic. Version metadata is not a substitute.
 Check the client's actual hook controls rather than assuming a feature flag or
 trust state.
 
+If a per-turn hook lacks `turn_id` (Codex) or `prompt_id` (Claude), or the client
+cannot register the required events or command form, upgrade the client to a
+release providing those capabilities and start a fresh session. Check the
+required fields again; an upgrade alone does not prove compatibility. If the
+capabilities remain unavailable, automatic collection is unsupported there;
+use explicit CLI selection only for sources the reader accepts. Do not invent
+identities or relax validation to enable collection.
+
 Codex's [session configuration](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/mod.rs)
 uses the selected local environment shell with non-login execution arguments.
 The [runner](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/hooks/src/engine/command_runner.rs)
@@ -802,15 +816,15 @@ falls back to COMSPEC/cmd on Windows and SHELL/sh on POSIX only when no explicit
 shell was configured. The replacement Codex command puts fixed JavaScript in the
 shell and reads paths from environment data after parsing. Claude uses its
 supported direct-exec `node` plus argument array, avoiding its shell-string
-executor. The Codex bootstrap supports sh-compatible shells, including Git Bash,
-Command Prompt, Windows PowerShell and PowerShell 7.
+executor. The Codex bootstrap supports POSIX `sh`, Git Bash, Command Prompt,
+Windows PowerShell and PowerShell 7. This is not a guarantee for other shells.
 
 Hooks emit no usable `contextRef` and do not start automatic processing. Explicit
 processing-chat entry instead verifies a native MCP call against selected source
 records. Protocol exchanges and client registration do not establish native
-review rendering, physical user approval or hook delivery. Explicit CLI client/session/unit selection remains available. A hook
-identity is descriptive metadata, never authority inferred from cwd, notification
-order or UUID order.
+review rendering, physical user approval or hook delivery. Explicit CLI
+client/session/unit selection remains available. A hook identity is descriptive
+metadata, never authority inferred from cwd, notification order or UUID order.
 
 ### Blocked intake and explicit recovery
 

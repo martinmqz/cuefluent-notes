@@ -79,13 +79,14 @@ processing chat's verified exclusion remains independent. Unverified attribution
 leaves exclusions disabled, and inline processing in a captured chat can still
 create more captures.
 
-Protocol exchanges and client registration do not establish Desktop hook delivery,
-native review-form usability or physical user approval. Controller status does not yet report the resolved model. The complete
-fresh Windows Desktop/CLI workflow and Cuefluent rendering/search remain unverified.
+Synthetic tests do not establish Desktop hook delivery, native review-form
+rendering, physical approval or the complete desktop workflow. Controller status
+does not yet report the resolved model. Fresh Windows Desktop/CLI acceptance on a
+clean account and Cuefluent rendering/search remain unverified.
 
 Reader rebuild, automatic lock reclamation and a desktop Node override remain
 deferred. Pruning and abandoned-lock recovery require explicit commands. Existing
 Windows package stores retain their documented limits on additions; see
 [Windows storage selection](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.2/references/setup.md#windows-storage-selection).
 The [verification scope](https://github.com/martinmqz/cuefluent-notes/blob/v0.13.2/references/verification.md)
-describes general coverage and product limits.
+distinguishes automated coverage from live-client acceptance.
