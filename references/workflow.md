@@ -90,9 +90,8 @@ contractions or acronym expansions.
 Bare labels such as `meeting-`, `call-` or `sync-` do not supply a meaningful
 identity; use them only as part of a source-established name or series label.
 If no meeting identity is supplied, use the evidenced meeting purpose, such as
-`meetings/client-review-integration-check.md` or `meetings/release-planning.md`,
-rather than inventing a name. An individual occurrence may include its actual
-date when needed to distinguish it; retain
+`meetings/release-planning.md`, rather than inventing a name. An individual
+occurrence may include its actual date when needed to distinguish it; retain
 established series/period boundaries for recurring meetings.
 
 Keep the meeting identity in the visible title and relevant H1/H2 vocabulary or
