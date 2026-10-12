@@ -206,7 +206,9 @@ question** or mandatory metadata field. Follow [note placement](references/workf
 Inspect relevant filenames/headings at the root and known category folders, then
 read plausible candidates. Resolve competing targets and case variants; do not
 traverse symlinks/junctions, create folders during inspection, or move existing
-notes automatically. Preserve explicit flat organization. For new meeting notes,
+notes automatically. Preserve explicit flat organization. Use descriptive subject
+filenames for every note type; add project context only when needed to distinguish
+the subject, and do not invent dates. For new meeting notes,
 start the filename with the known meeting or series identity, then a useful subject;
 keep that identity in the visible title too. Follow the
 [meeting naming rules](references/workflow.md#meeting-identity-and-filenames),

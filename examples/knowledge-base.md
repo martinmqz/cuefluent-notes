@@ -7,7 +7,7 @@
 The API contract and the client test answer different questions:
 
 - **API contract:** `POST /v2/payment-intents` returns `409` when an active
-  authorization exists. PAY-101 does not establish whether a charge occurred,
+  authorization exists. The contract does not establish whether a charge occurred,
   whether duplicate charges are prevented, or what the caller should do next.
 - **Client observation:** on September 3, 2026 at 10:05 UTC,
   `client-conflict-04` mapped a fake-transport `409` to `AuthorizationConflict`,
@@ -17,8 +17,10 @@ The API contract and the client test answer different questions:
 
 ### Unresolved integration gap
 
-The live integration check is pending; the available evidence does not certify
-the deployed client. The help-text discrepancy in TASK-12 remains undated and
-unresolved; its first occurrence must not be inferred from a later review date.
+As of the September 4, 2026 documentation review at 13:00 UTC, the live integration
+check was pending, and the available evidence did not certify the deployed
+client. The help-text discrepancy in the client investigation remained undated
+and unresolved at that review. Neither its first occurrence nor its current
+status can be inferred from that review date.
 
 <!-- source-review: The September 3 test result was recorded on September 4 at 08:00 UTC. The documentation review on September 4, 2026 at 13:00 UTC retained these boundaries and the pending live check. Fictional sources PAY-101, TASK-12 and DOC-5; ../references/evidence.md#pay-101--feature-record, #task-12--client-investigation-record and #doc-5--client-documentation-review-record. -->

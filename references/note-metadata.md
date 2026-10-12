@@ -169,7 +169,9 @@ individual source references and period boundaries. A label alone, such as
 not be guessed from a filename or title.
 
 Metadata remains in copied or shared Markdown. Prefer opaque portable source
-references over private machine paths. Missing sources remain explicit gaps;
+references over private machine paths; apply the
+[provenance privacy rules](authoring.md#durable-content-and-provenance) to hidden
+fields too. Missing sources remain explicit gaps;
 metadata never expands collection consent or authorizes automatic discovery.
 Future app retrieval may use periods and series relationships, but current
 headings and aliases remain necessary for supported search behavior.

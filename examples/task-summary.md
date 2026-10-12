@@ -1,4 +1,4 @@
-# Synthetic Atlas payment client task TASK-12
+# Synthetic Atlas payment client task
 
 ## Authorization conflict investigation
 
@@ -14,8 +14,9 @@ the following bounded results:
 
 ### Remaining work
 
-The live integration check is pending sandbox access. No result, owner, or due
-date is recorded. An undated note says the help text still describes automatic
+As of the September 4, 2026 recording, the live integration check was pending
+sandbox access. No result, owner, or due date is recorded. An undated note says
+the help text still describes automatic
 retries; when that wording appeared or was noticed, and whether it has since been
 corrected, are unknown.
 

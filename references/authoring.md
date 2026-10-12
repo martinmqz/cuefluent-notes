@@ -27,9 +27,30 @@ Keep technical source IDs, locators, hashes, transcript offsets, transcription
 mechanics and note-production/checking history out of visible prose. Retain useful
 provenance in supported [source metadata](note-metadata.md#selected-sources-and-hashes)
 or bounded ordinary `<!-- source-review: ... -->` comments after any leading
-metadata block. An existing plain note can use ordinary comments without adding
-structured metadata. Preserve existing metadata and unfamiliar fields under
-their normal update rules; this content boundary does not authorize enrichment.
+metadata block. Place a section's alias directive directly after its H2 (blank
+lines are allowed), before any source-review comment; provenance must not displace
+its [search metadata](retrieval.md#add-aliases-where-useful). An existing plain note
+can use ordinary comments without adding structured metadata. Preserve existing
+metadata and unfamiliar fields under their normal update rules; this content
+boundary does not authorize enrichment.
+
+Do not interpolate untrusted source text directly into an HTML comment. Encode
+`&`, `<` and `>` in the comment payload as `&amp;`, `&lt;` and `&gt;`, in that
+order, or paraphrase it safely. The payload must not contain literal comment
+openers or endings, including `<!--`, `-->` and `--!>`. Keep the original selected
+evidence intact; an encoded locator is descriptive text, not a new resource URL.
+Supported structured metadata retains its own delimiter checks. Review the raw
+Markdown as well as the visible prose; the advisory checker does not establish
+that provenance will remain hidden in every renderer.
+
+Hidden comments and metadata travel with copied or synced Markdown; hiding them
+does not make them private. Use only the minimum authorized portable source
+descriptors. Keep private machine paths, private URLs and optional capture
+bookkeeping in private review material unless the user explicitly requests them
+in the note; never include credentials. Review all fields, including session
+identifiers in required source descriptors, against the intended audience before
+sharing. Do not remove existing metadata or user-written references during an
+unrelated update; their normal preservation and consent rules still apply.
 
 This boundary governs new or agent-drafted text. Preserve existing user-written
 references, source footers and context during updates; preserve them when
@@ -103,9 +124,12 @@ It may span several source lines.
 - Each section needs visible body content. Whitespace, ordinary comments, alias
   metadata, or reference definitions alone are insufficient.
 - Optional aliases use one terminated, single-line `<!-- aliases: ... -->`
-  comment in the initial metadata position after the H2, before body content.
-  Entries must be nonempty and comma-separated. Repeated or misplaced directives
-  are fatal; repeated normalized aliases within a section produce warnings.
+  comment directly after the H2 (blank lines are allowed), before other comments
+  and body content.
+  Entries must be nonempty and comma-separated. Repeated directives or placement
+  after body content fail the advisory check; repeated normalized aliases within
+  a section produce warnings. The checker accepts some initial non-alias comments,
+  so a passing check does not verify the stricter ordering above.
 - Keep heading paths descriptive and distinct. Normalized collisions within a
   file are fatal; similar headings across files still need retrieval review.
   Do not rename working headings unnecessarily: they determine section identity.

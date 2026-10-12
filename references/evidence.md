@@ -108,6 +108,10 @@ user; adding an alias is not permission to add that claim to the answer.
 
 Everything in this section is fictional teaching material. These records support
 the bundled examples only; they are not facts about Cuefluent or the user's work.
+Labels such as PAY-101, DEC-7 and TASK-12 identify these source records, not
+separately established API, decision or ticket identifiers. Keep those labels in
+provenance. In contrast, `client-conflict-04` and `intent_demo_17` name the test
+and fixture being discussed and remain useful visible subject identifiers.
 
 ### PAY-101 — feature record
 

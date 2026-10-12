@@ -71,24 +71,28 @@ not a reason to create it during inspection. An occupied or unsafe path is a
 conflict, not permission to invent another folder or file.
 
 Use descriptive filenames such as `knowledge-base/cache-expiry.md`, without
-generic type or plugin-name prefixes. Include project context when needed to
+generic type or plugin-name prefixes. Include project context only when needed to
 distinguish the subject. A continuing note uses a stable name and dated sections;
-do not make a file per turn.
+do not make a file per turn. Do not invent dates or use a generation/recording
+date in place of an unknown occurrence date.
 
 ### Meeting identity and filenames
 
-For a new meeting note, begin the filename with its known meeting name, type or
-series identity, followed by a useful subject, project or agreed period. A
+For a new meeting note, begin the filename with its source-established meeting
+name, acronym or recurring-series identity, followed by a useful subject or
+agreed period; add project context only when needed to distinguish it. A
 fictional client review about an Atlas integration check can use
 `meetings/client-review-integration-check.md`. If the source calls the
 meeting MDR, use `meetings/mdr-<subject>.md`; do not replace MDR with only the
 story/project title. Preserve evidenced, established acronyms, but do not invent
 contractions or acronym expansions.
 
-This meaningful meeting identity is different from a generic `meeting-` prefix.
+Bare labels such as `meeting-`, `call-` or `sync-` do not supply a meaningful
+identity; use them only as part of a source-established name or series label.
 If no meeting identity is supplied, use the evidenced meeting purpose, such as
-`meetings/release-planning.md`, rather than inventing a name. An individual
-occurrence may include its actual date when needed to distinguish it; retain
+`meetings/client-review-integration-check.md` or `meetings/release-planning.md`,
+rather than inventing a name. An individual occurrence may include its actual
+date when needed to distinguish it; retain
 established series/period boundaries for recurring meetings.
 
 Keep the meeting identity in the visible title and relevant H1/H2 vocabulary or
