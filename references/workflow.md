@@ -255,6 +255,6 @@ which evidence drift or manual-edit conflicts remain, and any partial update or
 recovery state. Later corrections require current evidence and a fresh read;
 unchanged fingerprints alone do not prove that a source remains current.
 
-Let the user judge whether the resulting content and organization serve the
-requested purpose. Structural checks alone do not establish usefulness; report
-the selected source coverage, factual gaps and retrieval limits with the result.
+Let the user judge whether the content and organization serve the requested
+purpose. Distinguish actual user feedback from structural or synthetic checks;
+those checks alone do not establish usefulness.

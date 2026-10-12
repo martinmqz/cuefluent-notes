@@ -1,9 +1,7 @@
-# Product capabilities and limitations
+# Product limits
 
 This page describes the boundaries of the installed plugin. Use the linked
 contracts for supported commands, formats, permissions and recovery procedures.
-
-## Product limits
 
 - Hooks do not start automatic Markdown processing or supply a usable processing
   `contextRef`. Processing requires an explicit request. See

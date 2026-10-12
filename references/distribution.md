@@ -25,10 +25,10 @@ collection or processing permission or notes destinations. Keep only one active 
 remove a previous standalone or source-installer registration before switching.
 The catalogs and packages coexist with development source on `main`. The
 published package version is recorded in root `release.json` and can lag the
-source version during development. Updating the source does not update an installed
-plugin; follow the update procedure for its original installation method.
-Existing registrations that
-select the former branch need the [one-time migration](../README.md#switch-an-older-marketplace-registration-to-main).
+source version during development. Updating the source does not update an
+installed plugin; follow the update procedure for its original installation
+method. Registrations selecting the former branch need the
+[one-time migration](../README.md#switch-an-older-marketplace-registration-to-main).
 
 Release assets also provide separate manual ZIPs without hook registration.
 Extract one and use the client-specific local installation instructions below;
@@ -68,9 +68,10 @@ Use full drive paths such as `C:\Users\Ada\Documents\Notes` or an explicit
 UNC share; drive-relative paths such as `C:Notes`, device namespaces, reserved
 device filenames, alternate streams, and trailing-dot/space aliases are refused.
 Windows private settings and state require a local NTFS or ReFS volume; finished
-notes can use separately selected document locations. Network-share durability
-and cloud-sync behavior are not guaranteed. First-use setup requires hard-link
-support.
+notes can use separately selected document locations. ReFS storage behavior,
+including first-use hard-link support and durability, remains unverified.
+Network-share durability and cloud-sync behavior are not guaranteed. First-use
+setup requires hard-link support.
 
 The [README quickstart](../README.md#install-in-codex-or-claude-code) uses
 `npm run install:codex` or `npm run install:claude` from a Git clone. These
@@ -148,14 +149,14 @@ Clone again when you next need to update.
   plain copied `SKILL.md` does not include the bundled runtime or hooks.
 
 The installer supports native Windows, macOS, and Linux. See
-[verification](verification.md) for product and client integration limits.
+[product limits](verification.md) for product and client integration limits.
 
 ## Package layout
 
 Each client package contains:
 
 ```text
-cuefluent-notes/             # Codex package root
+cuefluent-notes/               # Codex package root
   .codex-plugin/plugin.json
   .mcp.json
   README.md
@@ -172,13 +173,13 @@ cuefluent-notes/             # Codex package root
     package-lock.json
     node_modules/
   hooks/hooks.json             # hook variant only
-cuefluent-notes/             # Claude package root
+cuefluent-notes/               # Claude package root
   .claude-plugin/plugin.json
   .mcp.json
   README.md
   LICENSE.md
   package-inventory.json
-  skills/cuefluent-notes/       # same complete skill and runtime
+  skills/cuefluent-notes/      # same complete skill and runtime
   hooks/hooks.json             # hook variant only
 ```
 
@@ -357,10 +358,11 @@ or switching to the manual variant also removes background collection ingress.
 Direct user-selected saves remain available with a chosen destination/writer.
 Never save real settings or evidence inside the plugin or public repository.
 
-For manual-package upgrades, extract the new release's package into a fresh
-directory and review the package and changes. Update the one installed variant
-through that client's supported process; other installation methods keep their
-own update procedures.
+If you installed from a release ZIP, extract the new release's package into a
+fresh directory and review the package and changes. This applies to both
+hook-enabled and manual variants. Update the one installed variant through that
+client's supported process; other installation methods keep their own update
+procedures.
 Keep user notes, private policy, and update state outside the replaceable package.
 Changed Codex hook definitions need renewed trust; validate reload behavior for
 each host rather than assuming both update the same way. Both variants also
@@ -370,7 +372,7 @@ loading the plugin. Only an explicit processing request launches or resumes the
 restricted agent session. Follow the [coordinated upgrade](setup.md#existing-settings)
 and [processing chat](processing-chat.md) guidance before resuming shared storage.
 
-## Compatibility and verification status
+## Compatibility limits
 
 The replacement has its own workflow configuration and no legacy migration or
 mixed-version support. Keep unfinished old journals with the v0.7.1 reference
@@ -383,7 +385,7 @@ version-2 authored plans can create inspected immediate type folders. See
 
 Node 22+ is required. The fixed Codex shell bootstrap reads the plugin root as
 environment data; Claude uses direct executable/argument invocation. See
-[verification](verification.md) for product and client integration limits.
+[product limits](verification.md) for product and client integration limits.
 
 `workflow.mjs status` reports packaged hook integrity, the current Node version,
 and the unverified transport. Host hook trust, restrictions/feature flags and

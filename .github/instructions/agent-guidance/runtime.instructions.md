@@ -33,11 +33,11 @@ implementation and canonical product reference before changing behavior.
   pages with finite cumulative allocation. Preserve full hashes and native
   identity metadata, fresh permission checks around cached bytes, and exact
   cursor/root publication. `EVIDENCE_AFTER_CODEX_TERMINAL` requires a bounded
-  native reproducer before any reader change; never drop late evidence to pass.
-  Claude pause freezes automatic inspection at its saved
-  EOF; suspension is not finality. Schema-2 captures are immutable revisions;
-  activate heads only with fresh selection and expected hashes. Claude ordinary
-  assistant parentage does not prove prompt ownership.
+  native reproducer before any reader change. Never discard late evidence to
+  make tests pass or collection advance. Claude pause freezes automatic
+  inspection at its saved EOF; suspension is not finality. Schema-2 captures
+  are immutable revisions; activate heads only with fresh selection and expected
+  hashes. Claude ordinary assistant parentage does not prove prompt ownership.
 - `scripts/workflow-storage.mjs`, `scripts/storage-platform.mjs`, and
   `scripts/capture-maintenance.mjs`: current private-storage capabilities and
   explicit whole-unit pruning. Preserve exact tombstones and processing evidence;

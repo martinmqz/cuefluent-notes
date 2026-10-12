@@ -244,7 +244,6 @@ Use Node 22 or later. From this repository:
 
 ```sh
 npm ci --ignore-scripts
-npm run check:examples
 node scripts/check-notes.mjs /absolute/private-notes/project.md
 ```
 
@@ -253,6 +252,10 @@ and source mappings in selected private locations. See [retrieval](references/re
 for checker commands and [refresh](references/refresh.md) for write plans.
 
 ## Standalone plugin packages
+
+Download the ZIP for your client and chosen variant from the
+[release assets](https://github.com/martinmqz/cuefluent-notes/releases), then
+extract it and follow the [package installation guide](references/distribution.md).
 
 Codex and Claude packages contain the full skill, product guides, examples,
 helpers, runtime dependencies and license notices. Packaged helpers require
@@ -291,11 +294,12 @@ shared local profile directory; existing settings are preserved. See
 [Windows storage selection](references/setup.md#windows-storage-selection) for
 Desktop/CLI selection, package-store limits and profile checks.
 
-## Verification
+## Product limits
 
 See [product limits](references/verification.md) for source completeness,
-processing feedback, client integration and Cuefluent app behavior. Publication status is on the
-[releases page](https://github.com/martinmqz/cuefluent-notes/releases).
+processing feedback, client integration and Cuefluent app behavior. The
+[releases page](https://github.com/martinmqz/cuefluent-notes/releases) lists
+published packages.
 
 ## License
 

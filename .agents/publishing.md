@@ -118,7 +118,8 @@ Validate with `claude plugin validate --strict --json dist/release` and
 Use the Plugin Creator validator for the Codex package when that tooling is
 available. Test fresh-client installation against the prepared local catalog,
 including first-use setup and hook trust, before advertising a release. The
-[product limits](../references/verification.md) describe the installed workflow boundaries.
+[product limits](../references/verification.md) describe the installed
+workflow boundaries.
 
 ## CI evidence limits
 
