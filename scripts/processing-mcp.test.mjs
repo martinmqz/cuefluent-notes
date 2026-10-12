@@ -102,7 +102,12 @@ async function harness(t, f, overrides = {}) {
       reject: error => { clearTimeout(timer); ready.reject(error); } });
     return ready.promise;
   };
-  h.answer = (form, result) => input.write(`${JSON.stringify({ jsonrpc: '2.0', id: form.id, result })}\n`);
+  h.answer = (form, result) => {
+    if (result.action === 'accept' && result.content && !Object.hasOwn(result.content, 'changes')) {
+      result = { ...result, content: { changes: form.params.requestedSchema.properties.changes.default, ...result.content } };
+    }
+    input.write(`${JSON.stringify({ jsonrpc: '2.0', id: form.id, result })}\n`);
+  };
   h.notify = row => input.write(JSON.stringify(row) + '\n');
   h.end = () => input.end();
   h.whenClosed = () => { const ready = deferred(); h.closing.push(ready); return ready.promise; };
@@ -378,8 +383,8 @@ test('source review requires a correlated host action and saves the exact engine
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   const nextForm = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
   const form = await nextForm;
-  assert(form.params.message.includes('PRIVATE-SYNTHETIC-PROPOSAL'));
-  assert(form.params.message.includes((await inspectProcessing(f.capability, f.operationId)).proposalHash));
+  assert(form.params.requestedSchema.properties.changes.default.includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+  assert(form.params.requestedSchema.properties.changes.default.includes((await inspectProcessing(f.capability, f.operationId)).proposalHash));
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   h.answer(form, { action: 'accept', content: { decision: 'save' } });
   const result = body(await review);
@@ -390,6 +395,29 @@ test('source review requires a correlated host action and saves the exact engine
   h.script = async call => { assert.deepEqual((await call('processing_pending', {})).pending, []); };
   const closed = h.whenClosed(); body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID(), selection: selectedInput(f) }));
   await closed; assert.equal(h.creates, 1); assert.equal(h.dispatches, 2);
+});
+
+test('editing the native preview refuses Save and preserves the exact proposal for fresh review', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+  const before = await inspectProcessing(f.capability, f.operationId);
+  const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  const form = await next;
+  h.answer(form, { action: 'accept', content: {
+    changes: form.params.requestedSchema.properties.changes.default + '\nUser edit', decision: 'save'
+  } });
+  assert.equal((await review).error.message, 'PROCESSING_REVIEW_PREVIEW_CHANGED');
+  const after = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(after.state, 'awaiting-review'); assert.equal(after.outcome, null);
+  assert.equal(after.claimHash, before.claimHash); assert.equal(after.proposalHash, before.proposalHash);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  const retry = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
+  const fresh = await retry;
+  assert.equal(fresh.params.requestedSchema.properties.changes.default, form.params.requestedSchema.properties.changes.default);
+  h.answer(fresh, { action: 'accept', content: { decision: 'skip' } });
+  assert.equal(body(await result).status, 'idle');
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'skipped');
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
 });
 
 test('formal review replay preserves its exact completed result without another host form or write', async t => {
@@ -734,7 +762,7 @@ test('actual source binding, engine proposal, native review and collection prese
     assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
     const next = h.nextForm(), review = h.call('processing_review', {});
     const form = await next;
-    assert(form.params.message.includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+    assert(form.params.requestedSchema.properties.changes.default.includes('PRIVATE-SYNTHETIC-PROPOSAL'));
     h.answer(form, { action: 'accept', content: { decision: 'save' } });
     await parent.finish(await review);
     if (mixed) genuine.push(await parent.work('Correction: SDK 606 is now verified.'));

@@ -118,7 +118,12 @@ uncaptured context for material that cannot fit this channel.
 Invoke the same skill with `review`. Its
 `cuefluent_control.processing_review` call requests a native host form displaying
 the exact proposal, original note contents, paths, new directories, input identities
-and known evidence limits. The form offers Save, Skip, Cancel or Later. Draft bytes
+and known evidence limits. Read the full preview in the scrollable **Proposed
+changes** field, then advance to **Proposal action**. Choose **Save exact proposal**,
+**Skip these captures without saving**, **Cancel operation; keep captures pending**
+or **Later; keep proposal pending**. No action is selected by default. The host's
+own **Skip** or dismiss control is not the proposal's Skip action; it leaves the
+proposal pending. Draft bytes
 travel through that host-control channel; they are not returned as model tool
 output to the source chat. A host response is distinct from a model tool argument;
 it does not establish that a person physically clicked rather than a host policy
@@ -131,6 +136,10 @@ proposals, inputs or policy preserve a conflict and require fresh review. A host
 without form support leaves the proposal pending. An exact review exceeding the
 256 KiB form limit is refused without truncation; use the supported explicit
 proposal and save commands from an uncaptured context instead.
+
+The preview field displays the proposal; it is not an editor. Changed preview
+text is refused with `PROCESSING_REVIEW_PREVIEW_CHANGED`, leaving the exact
+proposal pending. Reopen review to restore the preview.
 
 For a factual correction, choose Later and provide the correction in the ordinary
 work chat. Capture it through the existing selected-source workflow before using

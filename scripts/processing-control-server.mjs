@@ -12,7 +12,7 @@ const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROC
   'PROCESSING_CHAT_HOST_UNAVAILABLE', 'PROCESSING_CHAT_SESSION_UNAVAILABLE', 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
   'PROCESSING_CHAT_CONFLICT', 'PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED',
   'WORKFLOW_POLICY_CHANGED', 'PROCESSING_APPROVAL_REQUIRED', 'PROCESSING_SELECTION_CHANGED',
-  'PROCESSING_REVIEW_UNSUPPORTED', 'PROCESSING_REVIEW_TOO_LARGE', 'PROCESSING_REVIEW_LIMIT', 'PROCESSING_REVIEW_INTERRUPTED',
+  'PROCESSING_REVIEW_UNSUPPORTED', 'PROCESSING_REVIEW_TOO_LARGE', 'PROCESSING_REVIEW_LIMIT', 'PROCESSING_REVIEW_INTERRUPTED', 'PROCESSING_REVIEW_PREVIEW_CHANGED',
   'PROCESSING_CHAT_REVIEW_UNRESOLVED', 'PROCESSING_CHAT_POLICY_CHANGED', 'PROCESSING_CHAT_STATE_CHANGED',
   'PROCESSING_EXCLUSION_UNVERIFIED', 'PROCESSING_OPERATION_OUTCOME_UNKNOWN',
   'PROCESSING_CLIENT_FAILED', 'PROCESSING_CLIENT_INTERRUPTED', 'PROCESSING_CLIENT_UNAVAILABLE', 'INTAKE_BLOCKED']);
@@ -151,14 +151,18 @@ export async function runProcessingControlServer({ client, input = process.stdin
       keys(row.result, ['action'], ['content']);
       choice(row.result.action, ['accept', 'decline', 'cancel']);
       if (row.result.action === 'accept') {
-        keys(row.result.content, ['decision']);
+        keys(row.result.content, ['changes', 'decision']);
+        if (row.result.content.changes !== form.preview) fail('PROCESSING_REVIEW_PREVIEW_CHANGED');
         choice(row.result.content.decision, ['save', 'skip', 'cancel', 'later']);
         form.resolve(Object.freeze({ action: 'accept', content: Object.freeze({ decision: row.result.content.decision }) }));
       } else {
         if (row.result.content !== undefined && row.result.content !== null) fail('PROCESSING_CONTROL_PROTOCOL');
         form.resolve(Object.freeze({ action: row.result.action }));
       }
-    } catch { form.reject(Object.assign(new Error('PROCESSING_REVIEW_INTERRUPTED'), { code: 'PROCESSING_REVIEW_INTERRUPTED' })); }
+    } catch (error) {
+      const code = error.code === 'PROCESSING_REVIEW_PREVIEW_CHANGED' ? error.code : 'PROCESSING_REVIEW_INTERRUPTED';
+      form.reject(Object.assign(new Error(code), { code }));
+    }
   };
   const processRequest = async (row, request) => {
     const rpcId = row.id;
@@ -229,15 +233,25 @@ export async function runProcessingControlServer({ client, input = process.stdin
             if (elicited) fail('PROCESSING_CONTROL_PROTOCOL');
             elicited = true;
             const formId = `cuefluent-review-${randomUUID()}`;
-            const message = { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form', message: proposal.message,
-              requestedSchema: { type: 'object', properties: { decision: { type: 'string', title: 'Proposal decision',
-                description: 'Save this exact proposal, skip it, cancel this operation, or leave it for later.',
-                enum: ['save', 'skip', 'cancel', 'later'] } }, required: ['decision'] } } };
+            // Desktop renders message/description in a fixed header. Keep them
+            // short; the full preview belongs in its scrollable text control.
+            // "changes" sorts before "decision" in the canonical wire JSON.
+            const message = { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form',
+              message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.',
+              requestedSchema: { type: 'object', properties: {
+                changes: { type: 'string', title: 'Proposed changes',
+                  description: 'Read the full preview, then go to the next field. For corrections, choose Later and provide them in your work chat; do not edit this preview.',
+                  default: proposal.message },
+                decision: { type: 'string', title: 'Proposal action',
+                  description: 'Choose an action below. Only Save writes notes.',
+                  enum: ['save', 'skip', 'cancel', 'later'],
+                  enumNames: ['Save exact proposal', 'Skip these captures without saving', 'Cancel operation; keep captures pending', 'Later; keep proposal pending'] }
+              }, required: ['changes', 'decision'] } } };
             if (Buffer.byteLength(canonicalJSON(message)) + 1 > FORM_BYTES) fail('PROCESSING_REVIEW_TOO_LARGE');
             let resolve, reject;
             const response = new Promise((a, b) => { resolve = a; reject = b; });
             response.catch(() => {});
-            forms.set(formId, { requestId: rpcId, resolve, reject });
+            forms.set(formId, { requestId: rpcId, preview: proposal.message, resolve, reject });
             try { await reply(message, FORM_BYTES); return await response; }
             finally { forms.delete(formId); }
           };
@@ -273,6 +287,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
     try { row = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line)); }
     catch { fail('PROCESSING_CONTROL_PROTOCOL'); }
     if (!object(row)) fail('PROCESSING_CONTROL_PROTOCOL');
+    // A correlated form response echoes its bounded preview. Ordinary calls
+    // retain the smaller request budget even while a form is open.
+    if (line.length > INPUT_BYTES && (Object.hasOwn(row, 'method') || !forms.has(row.id))) fail('PROCESSING_CONTROL_INPUT_LIMIT');
     if (!Object.hasOwn(row, 'method')) { hostResponse(row); return; }
     keys(row, ['jsonrpc', 'method'], ['id', 'params']);
     if (row.jsonrpc !== '2.0' || typeof row.method !== 'string') fail('PROCESSING_CONTROL_PROTOCOL');
@@ -306,7 +323,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     for await (const chunk of input) {
       const bytes = Buffer.from(chunk); let start = 0, end;
       while ((end = bytes.indexOf(10, start)) >= 0) {
-        if (pending.length + end - start > INPUT_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
+        if (pending.length + end - start > (forms.size ? FORM_BYTES : INPUT_BYTES)) fail('PROCESSING_CONTROL_INPUT_LIMIT');
         const line = Buffer.concat([pending, bytes.subarray(start, end)]); pending = Buffer.alloc(0); start = end + 1;
         if (line.length) {
           try { await processLine(line); }
@@ -316,7 +333,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
           }
         }
       }
-      if (pending.length + bytes.length - start > INPUT_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
+      if (pending.length + bytes.length - start > (forms.size ? FORM_BYTES : INPUT_BYTES)) fail('PROCESSING_CONTROL_INPUT_LIMIT');
       pending = Buffer.concat([pending, bytes.subarray(start)]);
     }
     if (pending.length) fail('PROCESSING_CONTROL_PROTOCOL');

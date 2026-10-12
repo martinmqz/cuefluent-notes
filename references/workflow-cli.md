@@ -225,6 +225,16 @@ claim successful capture-exclusion bookkeeping.
 `processing_review` sends the exact proposal through the correlated native host
 form; an unsupported or closed form preserves the pending proposal. A model's
 tool arguments cannot substitute for that host response.
+The form uses a short header, a required `changes` string containing the complete
+readable preview as its default, and a required `decision` enum (`save`, `skip`,
+`cancel`, `later`) without a default. An accepted host response must echo the
+unchanged preview plus the chosen decision. Changed text produces
+`PROCESSING_REVIEW_PREVIEW_CHANGED`; it cannot revise or authorize different note
+bytes. Display line endings are normalized without changing the saved Markdown.
+Only the correlated form response may use the larger form byte budget; ordinary
+MCP requests retain their existing bound. Host decline/cancel responses leave the
+proposal pending, distinct from an accepted `skip` or `cancel` decision. See
+[review controls](processing-chat.md#review-controls) for the user workflow.
 Cancelling the MCP request before its save intent or disposition starts publication
 leaves the proposal pending, including after the form returns. Once publication
 starts, the engine finishes or reports its error/recovery state; late cancellation

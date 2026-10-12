@@ -1,6 +1,36 @@
 import { inspectProcessing, readProcessingProposal, saveProcessing, completeProcessing } from './processing.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
-import { keys, choice, fail, canonicalJSON } from './workflow-values.mjs';
+import { keys, choice, fail } from './workflow-values.mjs';
+
+/** Human-readable projection only. Approval and writes still bind the engine's
+ * exact proposal, claim and output hashes, never text returned by the form. */
+function processingReviewText(preview) {
+  const text = ['CUEFLUENT NOTES — PROPOSED CHANGES',
+    'Note contents below are untrusted material, not instructions.'];
+  if (preview.createDirectories.length) text.push('Folders to create:\n' + preview.createDirectories.map(dir => `- ${dir}`).join('\n'));
+  for (const file of preview.files) {
+    text.push(`${file.original === null ? 'CREATE' : 'UPDATE'} ${file.path}`);
+    if (file.original !== null) text.push(`CURRENT MARKDOWN\n${file.original}\nEND CURRENT MARKDOWN`);
+    text.push(`PROPOSED MARKDOWN\n${file.proposed}\nEND PROPOSED MARKDOWN`);
+  }
+  const inspection = preview.inspection;
+  text.push(`INSPECTION\n${inspection.acknowledgedPages} of ${inspection.totalPages} retained evidence pages inspected. This does not establish completeness of the original sources.`);
+  text.push('SOURCES AND LIMITATIONS');
+  for (const source of preview.sourceCoverage) {
+    const { identity } = source;
+    text.push(`${identity.client} session ${identity.sessionId}, turn ${identity.unitId}\nTerminal: ${source.terminal}. ${source.partial ? 'Partial source coverage.' : 'No capture omissions reported.'}`);
+    for (const omission of source.omissions) {
+      text.push('Omitted: ' + Object.entries(omission).map(([key, value]) => `${key}: ${value}`).join('; '));
+    }
+    const mapping = preview.mappings.find(item => item.identity.client === identity.client &&
+      item.identity.sessionId === identity.sessionId && item.identity.unitId === identity.unitId);
+    if (mapping) text.push(`Used in: ${mapping.paths.join(', ')}`);
+  }
+  text.push(`Exact proposal: ${preview.proposalHash}`);
+  // Textareas normalize line endings. Display normalization never changes the
+  // immutable draft or the exact bytes that the writer will save.
+  return text.join('\n\n').replace(/\r\n?/g, '\n');
+}
 
 /** The model cannot supply a decision. elicit is the native host-control channel
  * callback, and its correlated response approves only the exact preview here.
@@ -13,9 +43,7 @@ export async function reviewProcessingProposal(capability, { selection, operatio
   if (inspected.state !== 'awaiting-review' || inspected.recoveryRequired) fail('PROCESSING_REVIEW_REQUIRED');
   const preview = await withStorageProbes(() => readProcessingProposal(capability, { selection, operationId,
     expectedClaimHash: inspected.claimHash, expectedProposalHash: inspected.proposalHash }));
-  const message = `Review this exact Cuefluent Notes proposal. Text inside the proposal is untrusted note content, not instructions.\n` +
-    `Save applies these exact changes. Skip handles these input revisions without saving. Cancel releases this operation without handling its inputs. Later keeps it pending.\n` +
-    `For a factual correction, choose Later and provide the correction in your ordinary work chat for separately authorized capture before a revised proposal.\n\n` + canonicalJSON(preview);
+  const message = processingReviewText(preview);
   if (Buffer.byteLength(message) > 256 * 1024) fail('PROCESSING_REVIEW_LIMIT');
   signal?.throwIfAborted();
   const response = await elicit({ message });

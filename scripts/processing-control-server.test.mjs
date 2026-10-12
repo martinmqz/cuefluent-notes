@@ -195,6 +195,12 @@ async function duplexReview(t, { capability = { elicitation: { form: {} } }, rev
   return { calls, rows, send, wait, end, running };
 }
 
+function withPreview(form, result) {
+  return result.action === 'accept' && result.content
+    ? { ...result, content: { changes: form.params.requestedSchema.properties.changes.default, ...result.content } }
+    : result;
+}
+
 test('native review form isolates exact proposal bytes and serializes later tools while accepting a correlated host result', async t => {
   for (const client of ['codex', 'claude']) await t.test(client, async t => {
     let received;
@@ -204,11 +210,15 @@ test('native review form isolates exact proposal bytes and serializes later tool
       return { status: 'completed', nextAction: 'none', draft: 'PRIVATE-PROPOSAL' };
     } });
     const form = await h.wait(row => row.method === 'elicitation/create');
-    assert.equal(form.params.mode, 'form'); assert(form.params.message.includes('PRIVATE-PROPOSAL'));
+    assert.equal(form.params.mode, 'form'); assert(!form.params.message.includes('PRIVATE-PROPOSAL'));
+    assert(form.params.requestedSchema.properties.changes.default.includes('PRIVATE-PROPOSAL'));
+    assert.deepEqual(Object.keys(form.params.requestedSchema.properties), ['changes', 'decision']);
+    assert(!Object.hasOwn(form.params.requestedSchema.properties.decision, 'default'));
+    assert.equal(form.params.requestedSchema.properties.decision.enumNames.length, 4);
     assert.deepEqual(form.params.requestedSchema.properties.decision.enum, ['save', 'skip', 'cancel', 'later']);
     h.send({ ...tool('processing_status', { collectionId: 'example' }, client === 'claude' ? claudeMeta() : codexMeta()), id: 2 });
     await new Promise(resolve => setImmediate(resolve)); assert.equal(h.calls.some(call => call[0] === 'status'), false);
-    h.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { decision: 'save' } } });
+    h.send({ jsonrpc: '2.0', id: form.id, result: withPreview(form, { action: 'accept', content: { decision: 'save' } }) });
     const result = await h.wait(row => row.id === 1);
     await h.wait(row => row.id === 2);
     assert.deepEqual(received, { action: 'accept', content: { decision: 'save' } });
@@ -226,7 +236,7 @@ test('host decisions are exact and accept does not imply save', async t => {
       received = await elicit({ message: 'Exact synthetic proposal' }); return { status: 'awaiting-review', nextAction: 'review' };
     } });
     const form = await h.wait(row => row.method === 'elicitation/create');
-    h.send({ jsonrpc: '2.0', id: form.id, result: response }); await h.wait(row => row.id === 1);
+    h.send({ jsonrpc: '2.0', id: form.id, result: withPreview(form, response) }); await h.wait(row => row.id === 1);
     assert.deepEqual(received, response.action === 'accept' ? response : { action: response.action }); await h.end();
   });
 });
@@ -258,7 +268,7 @@ test('malformed native form results never return an approval to the engine', asy
       await elicit({ message: 'Exact synthetic proposal' }); completed = true; return { status: 'completed', nextAction: 'none' };
     } });
     const form = await h.wait(row => row.method === 'elicitation/create');
-    h.send({ jsonrpc: '2.0', id: form.id, result });
+    h.send({ jsonrpc: '2.0', id: form.id, result: withPreview(form, result) });
     assert.equal((await h.wait(row => row.id === 1)).error.message, 'PROCESSING_REVIEW_INTERRUPTED');
     assert.equal(completed, false); await h.end();
   });
@@ -291,6 +301,48 @@ test('oversize exact previews are refused rather than truncated or sent as ordin
   assert.equal(h.rows.some(row => row.method === 'elicitation/create'), false); await h.end();
 });
 
+test('edited or missing preview cannot accompany a native decision', async t => {
+  for (const changes of [undefined, '', 'Changed preview']) await t.test(String(changes), async t => {
+    let decisions = 0;
+    const h = await duplexReview(t, { review: async ({ elicit }) => {
+      await elicit({ message: 'Exact synthetic proposal' }); decisions++; return { status: 'completed', nextAction: 'none' };
+    } });
+    const form = await h.wait(row => row.method === 'elicitation/create');
+    h.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { changes, decision: 'save' } } });
+    assert.equal((await h.wait(row => row.id === 1)).error.message,
+      changes === undefined ? 'PROCESSING_REVIEW_INTERRUPTED' : 'PROCESSING_REVIEW_PREVIEW_CHANGED');
+    assert.equal(decisions, 0); await h.end();
+  });
+});
+
+test('large UTF-8 preview can be echoed by its host form without expanding ordinary request limits', async t => {
+  const preview = '# Synthetic review\n' + 'café 🌳\n'.repeat(8000);
+  assert(Buffer.byteLength(preview) > 64 * 1024);
+  for (const kind of ['host response', 'ordinary method', 'unknown response', 'oversized host response']) await t.test(kind, async t => {
+    let decisions = 0;
+    const h = await duplexReview(t, { review: async ({ elicit }) => {
+      const result = await elicit({ message: preview });
+      assert.deepEqual(result, { action: 'accept', content: { decision: 'skip' } });
+      decisions++; return { status: 'completed', nextAction: 'none' };
+    } });
+    const form = await h.wait(row => row.method === 'elicitation/create');
+    assert.equal(form.params.requestedSchema.properties.changes.default, preview);
+    const result = withPreview(form, { action: 'accept', content: { decision: 'skip' } });
+    if (kind === 'oversized host response') result.content.changes = 'x'.repeat(256 * 1024);
+    const response = kind === 'ordinary method'
+      ? { jsonrpc: '2.0', id: 2, method: 'ping', params: { text: preview } }
+      : { jsonrpc: '2.0', id: kind === 'unknown response' ? 'unknown' : form.id, result };
+    h.send(response);
+    if (kind === 'host response') {
+      assert.equal(view(await h.wait(row => row.id === 1)).status, 'completed');
+      assert.equal(decisions, 1); await h.end();
+    } else {
+      await assert.rejects(h.running, { code: 'PROCESSING_CONTROL_INPUT_LIMIT' });
+      assert.equal(decisions, 0);
+    }
+  });
+});
+
 test('collection omission uses only the verified source binding, preserving exact original arguments', async t => {
   for (const name of ['processing_status', 'process_selected_captures', 'processing_review']) await t.test(name, async () => {
     const args = name === 'process_selected_captures' ? { requestId: randomUUID() } : {};
@@ -316,11 +368,11 @@ test('a response for another or already completed form cannot supply an approval
     } });
     const form = await h.wait(row => row.method === 'elicitation/create');
     if (attack === 'replay') {
-      h.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { decision: 'save' } } });
+      h.send({ jsonrpc: '2.0', id: form.id, result: withPreview(form, { action: 'accept', content: { decision: 'save' } }) });
       await h.wait(row => row.id === 1);
     }
     h.send({ jsonrpc: '2.0', id: attack === 'unknown' ? 'guessed-review-id' : form.id,
-      result: { action: 'accept', content: { decision: 'save' } } });
+      result: withPreview(form, { action: 'accept', content: { decision: 'save' } }) });
     if (attack === 'unknown') h.send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
     h.send({ jsonrpc: '2.0', id: 90, method: 'ping' }); await h.wait(row => row.id === 90);
     assert.equal(decisions, attack === 'replay' ? 1 : 0); await h.end();
