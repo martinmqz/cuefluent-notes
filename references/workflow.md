@@ -70,11 +70,35 @@ writing; root fallback does not bypass that ambiguity. A missing category is
 not a reason to create it during inspection. An occupied or unsafe path is a
 conflict, not permission to invent another folder or file.
 
-Use descriptive subject filenames such as `meetings/release-planning.md` or
-`knowledge-base/cache-expiry.md`, without automatic type or plugin-name prefixes.
-Include project context only when needed to distinguish the subject. An individual
-meeting may use its actual occurrence date to distinguish it; a continuing note
-uses a stable name and dated sections. Do not invent dates or make a file per turn.
+Use descriptive filenames such as `knowledge-base/cache-expiry.md`, without
+generic type or plugin-name prefixes. Include project context only when needed to
+distinguish the subject. A continuing note uses a stable name and dated sections;
+do not make a file per turn. Do not invent dates or use a generation/recording
+date in place of an unknown occurrence date.
+
+### Meeting identity and filenames
+
+For a new meeting note, begin the filename with its source-established meeting
+name, acronym or recurring-series identity, followed by a useful subject or
+agreed period; add project context only when needed to distinguish it. A
+fictional client review about an Atlas integration check can use
+`meetings/client-review-integration-check.md`. If the source calls the
+meeting MDR, use `meetings/mdr-<subject>.md`; do not replace MDR with only the
+story/project title. Preserve evidenced, established acronyms, but do not invent
+contractions or acronym expansions.
+
+Bare labels such as `meeting-`, `call-` or `sync-` do not supply a meaningful
+identity; use them only as part of a source-established name or series label.
+If no meeting identity is supplied, use the evidenced meeting purpose, such as
+`meetings/release-planning.md`, rather than inventing a name. An individual
+occurrence may include its actual date when needed to distinguish it; retain
+established series/period boundaries for recurring meetings.
+
+Keep the meeting identity in the visible title and relevant H1/H2 vocabulary or
+faithful aliases as well: filenames do not supply search terms. Explicit
+destinations and suitable existing notes still take precedence. Do not rename an
+existing note automatically to apply this convention; an authorized rename must
+preserve its identity, references and shared writer ownership.
 
 Recurring material can use [related-note series](note-series.md) with natural
 boundaries, such as a separate standup log for each sprint. When the user or an
@@ -104,7 +128,8 @@ legacy migration or mixed-version reader requirement.
 `notesDir` is the collection root, not a requirement that every note be a direct
 child on a by-type route. Flat routes inspect and keep notes directly at the root;
 create no subfolders unless the user explicitly selects another path. With by-type
-placement, a meeting path is `meetings/<subject>.md` relative to that root; the shared writer state still covers the whole collection. If the
+placement, a new meeting path follows the [meeting identity convention](#meeting-identity-and-filenames)
+relative to that root; the shared writer state still covers the whole collection. If the
 user requests type folders while the route is flat, follow the
 [organization update](setup.md#existing-settings) before persistent capture.
 
@@ -131,9 +156,10 @@ associations to avoid duplicating already saved information.
 ## Inspect evidence and useful originals
 
 Follow [evidence.md](evidence.md) to identify supported facts, attributed
-statements, inferences, unknowns, and conflicts. Retain source locators in the
-document or appropriate private review material so important claims can be
-checked. Code, decisions, reports, and tests establish different kinds of facts;
+statements, inferences, unknowns, and conflicts. Retain recoverable source locators
+with hidden provenance or appropriate private review material, following the
+[content boundary](authoring.md#durable-content-and-provenance). Code, decisions,
+reports, and tests establish different kinds of facts;
 do not turn historical status, plans, or a reported observation into a claim
 about present production behavior.
 
