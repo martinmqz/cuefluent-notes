@@ -62,10 +62,10 @@ without duplicate plugin registrations. A source-only checkout reports the
 marketplace checks as skipped; a partially present marketplace fails. Source-install
 checks use the checkout layout, including repo-scoped catalogs when present.
 Marketplace checks verify the installed identity, release version and cached
-checker/workflow helpers. They use local
-catalogs; remote Git
-authentication, GitHub PR creation/CI dispatch and protected-branch merging still
-require separate checks.
+checker/workflow helpers. They use local catalogs; remote Git authentication,
+GitHub PR creation, [maintainer approval](publishing.md#publish-the-github-marketplace)
+of a bot-created PR's approval-required Checks run, and protected-branch merging
+still require separate checks.
 
 These versions pin reproducible registration tests; they are not runtime reader
 requirements. Synthetic fixtures also vary release, prerelease and build version
