@@ -47,7 +47,7 @@
       "query": "standup update",
       "file": "standup.md",
       "heading": "Client conflict progress",
-      "expected": "The September 4 standup describes the September 3 fake-transport result, distinguishes its later recording date, and keeps the live check pending."
+      "expected": "The September 4 standup describes the September 3 fake-transport result, retains its later recording date as hidden provenance, and keeps the live check pending."
     },
     {
       "query": "yesterday client work",
@@ -57,13 +57,13 @@
     },
     {
       "query": "client review meeting",
-      "file": "meeting-summary.md",
+      "file": "client-review-integration-check.md",
       "heading": "Integration check before rollout decision",
       "expected": "Rina reported the limited test result, Omar proposed the integration check, and the group agreed the check should precede a rollout decision."
     },
     {
       "query": "rollout readiness",
-      "file": "meeting-summary.md",
+      "file": "client-review-integration-check.md",
       "heading": "Integration check before rollout decision",
       "expected": "A live integration check was proposed, with no recorded completed run, owner, due date, or rollout approval."
     },
@@ -77,7 +77,7 @@
       "query": "client-conflict-04",
       "file": "task-summary.md",
       "heading": "Authorization conflict investigation",
-      "expected": "The test occurred on September 3 at 10:05 UTC and was recorded on September 4 at 08:00 UTC; live service behavior, repeated invocations, and deployment remain unverified."
+      "expected": "The test occurred on September 3 at 10:05 UTC; live service behavior, repeated invocations, and deployment remain unverified. Its later recording time is retained as hidden provenance."
     },
     {
       "query": "verification limits",

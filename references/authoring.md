@@ -7,6 +7,50 @@ This guide describes the supported authoring contract.
 Update the guide deliberately when separately supplied compatibility evidence
 changes; do not discover rules by reading or running the app during note work.
 
+## Durable content and provenance
+
+The visible content you author should answer a useful question about the subject:
+facts, decisions, rationale, explanations, procedures, actions or meaningful open
+questions. Keep the context needed to understand those answers. A domain procedure
+can be durable knowledge; the process of extracting, checking or writing this
+note is provenance rather than subject content.
+
+For a meeting, preserve its known identity, meaningful occurrence date,
+discussion outcomes, decisions, rationale, action owners and unresolved matters.
+Summarize the useful knowledge rather than reproducing the transcript. Keep who
+reported or decided something and any uncertainty that changes its meaning
+visible; a reported result must not become an independently verified fact.
+
+Keep identifiers that name the subject, such as a ticket, task, test or decision,
+visible when useful. Distinguish them from technical capture/source IDs and hashes.
+Keep technical source IDs, locators, hashes, transcript offsets, transcription
+mechanics and note-production/checking history out of visible prose. Retain useful
+provenance in supported [source metadata](note-metadata.md#selected-sources-and-hashes)
+or bounded ordinary `<!-- source-review: ... -->` comments after any leading
+metadata block. An existing plain note can use ordinary comments without adding
+structured metadata. Preserve existing metadata and unfamiliar fields under
+their normal update rules; this content boundary does not authorize enrichment.
+
+This boundary governs new or agent-drafted text. Preserve existing user-written
+references, source footers and context during updates; preserve them when
+authorship is unclear. Moving or hiding them requires a user-requested cleanup.
+Do not turn an unrelated update into a content migration or discard recoverable
+provenance.
+
+Full transcripts and raw tool logs stay in the selected source or private
+evidence. Retain useful excerpts only when needed to explain the durable
+knowledge; do not copy complete dumps into the body, metadata or comments.
+Do not create duplicate source documents just to populate provenance.
+Explicit requests for a transcript or audit document retain their requested
+purpose and consent boundaries; they do not change ordinary knowledge notes.
+
+Keep material evidence gaps visible alongside affected claims. Routine details
+about how a transcript was supplied or checked belong with provenance; missing
+evidence that prevents a conclusion belongs with that conclusion. Before
+proposing a save, read the visible text you drafted on its own and remove
+extraction logs, processing narration and source bookkeeping that do not serve
+the note's subject.
+
 ## Start with existing Markdown
 
 Review the selected original notes before proposing a rewrite. Cuefluent
@@ -106,9 +150,11 @@ copy them only when that is part of the requested document preparation.
 
 Same-document fragments and footnotes support in-app navigation. Safe HTTP(S)
 and mailto links support deliberate activation subject to app controls. Local
-file and relative links remain non-opening references. Preserve evidence links
-and locators; do not promise that every source reference can be opened in-app.
-Detailed source-to-entry mappings can remain in private review material.
+file and relative links remain non-opening references. Preserve useful subject
+links and recoverable provenance under the [content boundary](#durable-content-and-provenance),
+including existing user-written references. Do not promise that every source
+reference can be opened in-app. Detailed source-to-entry mappings can remain in
+private review material.
 
 Search uses only H2 headings, H1 heading paths, and explicit aliases.
 Body text, H3–H6, table cells, code, link labels, image descriptions, and footnotes

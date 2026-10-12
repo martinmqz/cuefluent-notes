@@ -2,8 +2,10 @@
 
 An optional HTML comment stores descriptive Cuefluent metadata in the Markdown
 source without displaying it in ordinary rendered Markdown. Keep summaries,
-decisions, findings, action items, source attribution and meaningful occurrence
-dates in visible sections. Metadata does not replace the useful document.
+decisions, findings, action items, meaningful attribution and occurrence dates
+in visible sections. Technical source/transcription details belong with hidden
+provenance under the [content boundary](authoring.md#durable-content-and-provenance).
+Metadata does not replace the useful document or conceal material uncertainty.
 
 The standalone checker supports this contract. Cuefluent searches headings and
 aliases only: these fields do not establish

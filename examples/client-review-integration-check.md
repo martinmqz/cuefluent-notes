@@ -1,4 +1,4 @@
-# Synthetic Atlas client review — 2026-09-04
+# Synthetic client review — Atlas client — 2026-09-04
 
 ## Integration check before rollout decision
 
@@ -12,7 +12,8 @@ retry during its one invocation. This is a report of the test's limited result,
 not evidence of a live integration run.
 
 Omar proposed running the live integration check after sandbox access becomes
-available. The group agreed that this check should precede a rollout decision.
+available. The recorded agreement was that this check should precede a rollout
+decision; no rollout approval was recorded.
 
 | Open item | Recorded status |
 | --- | --- |
@@ -20,6 +21,4 @@ available. The group agreed that this check should precede a rollout decision.
 | Owner and due date | Not recorded |
 | Rollout decision | No approval recorded |
 
-The record names two speakers but does not supply a complete attendee list.
-
-Source: fictional [MEET-3](../references/evidence.md#meet-3--client-review-meeting-record).
+<!-- source-review: Fictional source MEET-3, ../references/evidence.md#meet-3--client-review-meeting-record. It names two speakers but supplies no complete attendee roster. -->

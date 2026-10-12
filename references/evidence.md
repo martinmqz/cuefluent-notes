@@ -50,13 +50,16 @@ establishes production deployment, operational outcomes, or business rationale
 absent from the source. A completed historical task does not prove current
 behavior, and a proposal is not an implemented feature.
 
-For each section, keep enough source context to re-find the supporting material:
-file and heading or line range, record ID, version/date when material, or a stable
-URL. Review the actual passage. A locator alone does not substantiate a claim.
-Keep private mappings and review records outside the distributable repository.
-Use ordinary Markdown source references when useful; do not invent metadata
-that Cuefluent must recognize. A new authored note needs no duplicate source
-document when its evidence is the authorized work itself.
+For each section, retain a recoverable locator in hidden source metadata,
+source-review comments or appropriate private review material: file and heading
+or line range, record ID, source revision, or stable URL. Review the actual
+passage; a locator alone does not substantiate a claim or authorize reading more
+sources. Keep private mappings and review records outside the distributable
+repository. Follow the [content boundary](authoring.md#durable-content-and-provenance):
+technical provenance stays hidden, while meaningful attribution and material
+qualifications stay with the fact. Useful subject links can remain visible;
+do not invent metadata that Cuefluent must recognize. A new authored note needs
+no duplicate source document when its evidence is the authorized work itself.
 
 ## Dates, reports, and verification
 
@@ -64,7 +67,9 @@ Preserve the occurrence date of a meaningful finding, decision, or change in the
 useful document itself. Include timezone context when a timed event matters. A
 last-updated timestamp is not evidence of when the work happened. If an event is
 recorded later, distinguish its occurrence date from its recording date. Keep
-unknown timing unknown rather than assigning it to the current day.
+source recording-time bookkeeping with hidden provenance unless that timing is
+itself material to the subject; do not substitute it for the visible event date.
+Keep unknown timing unknown rather than assigning it to the current day.
 
 A standup about yesterday requires evidence from yesterday. Keep completed work
 separate from planned next steps and current blockers; do not move older findings
@@ -77,8 +82,8 @@ For verification, state the behavior exercised, the conditions, the result, and
 what remains unverified. A passing count alone cannot explain what is known.
 For example, a single fake-transport test can establish how one response was
 handled in that test; it cannot establish live service behavior or production
-deployment. Keep identifiers and source locators alongside enough explanation
-to understand the finding.
+deployment. Keep subject identifiers and enough explanation to understand the
+finding visible; retain its source locators with hidden provenance.
 
 Before delivery, compare facts and scope sentence by sentence with the evidence.
 Check identifiers, conditions, exceptions, chronology, status, rationale, and
@@ -193,7 +198,7 @@ not a required output bundle, a raw activity log, or a chain of converted copies
 | [Feature behavior](../examples/feature-behavior.md) | PAY-101, PAY-102 | API documentation |
 | [Decision](../examples/decision.md) | DEC-7 | Recorded decision and rationale |
 | [Standup](../examples/standup.md) | TASK-12 | September 4 update about September 3 work |
-| [Meeting summary](../examples/meeting-summary.md) | MEET-3 | Reports, agreement, and open action |
+| [Meeting summary](../examples/client-review-integration-check.md) | MEET-3 | Reports, agreement, and open action |
 | [Task summary](../examples/task-summary.md) | TASK-12 | Findings, progress, and remaining work |
 | [Knowledge base](../examples/knowledge-base.md) | PAY-101, TASK-12, DOC-5 | Explain contract and verification boundaries |
 | [Sprint 20.26 standups](../examples/standups-sprint-20-26.md) | STANDUP-20.26 | First member of a related-note series, with dated reports and a pending action |

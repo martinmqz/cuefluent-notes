@@ -8,7 +8,7 @@ export const SOURCE_FILES = Object.freeze([
   'references/note-metadata.md', 'references/note-series.md',
   'examples/workflow.json',
   'examples/feature-behavior.md', 'examples/decision.md', 'examples/search-vocabulary.md',
-  'examples/standup.md', 'examples/meeting-summary.md', 'examples/task-summary.md',
+  'examples/standup.md', 'examples/client-review-integration-check.md', 'examples/task-summary.md',
   'examples/knowledge-base.md', 'examples/check-cases.json',
   'examples/standups-sprint-20-26.md', 'examples/standups-sprint-20-27.md',
   'scripts/check-notes.mjs', 'scripts/safe-update.mjs', 'scripts/writer-protocol.mjs', 'scripts/workflow-values.mjs', 'scripts/runtime-paths.mjs', 'scripts/file-io.mjs',
