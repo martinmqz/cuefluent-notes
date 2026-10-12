@@ -312,16 +312,9 @@ Desktop/CLI selection, package-store limits and profile checks.
 
 ## Verification
 
-Verification covers synthetic readers, consent boundaries, private storage,
-writer conflicts/recovery and detached packages. CI uses Node 22 on native
-Windows, Linux and macOS, including Windows shells and a standard-user ACL check.
-See [verification scope](references/verification.md) for automated coverage,
-pinned-client registration tests and remaining limits. Historical live-model
-checks for v0.7.1 do not certify this replacement. Isolated native protocol
-fixtures exercise explicit processing dispatch, restricted tools and review-form
-transport. They do not establish attended desktop rendering, sidebar visibility,
-agent synthesis quality, automatic processing from hook notices, desktop launch
-PATH or Cuefluent loading/ranking. Publication status is on the
+See [verification scope](references/verification.md) for general automated coverage
+and product limits, including source completeness, processing feedback, client
+integration and Cuefluent app behavior. Publication status is on the
 [releases page](https://github.com/martinmqz/cuefluent-notes/releases).
 
 ## License

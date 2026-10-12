@@ -144,10 +144,8 @@ Clone again when you next need to update.
   update to a version that discovers full plugins in its skills directory; a
   plain copied `SKILL.md` does not include the bundled runtime or hooks.
 
-The installer supports native Windows, macOS, and Linux. The automated installer
-checks use disposable user and checkout-lock directories and stub client commands; they verify package
-contents, settings preservation, conflicts, retries, and updates. Pinned-client
-registration checks and their limits are described in [verification](verification.md).
+The installer supports native Windows, macOS, and Linux. See
+[verification](verification.md) for general coverage and client integration limits.
 
 ## Build and inspect
 
@@ -323,10 +321,9 @@ For normal installation, use the [README quickstart](../README.md#install-in-cod
 The commands below are for fitting a separately built package into another
 existing catalog.
 
-The pinned Codex `0.156.1` CLI does not provide a `--plugin-dir` or plugin
-validation command. Do not treat a folder build as a live Codex load test.
 Persistent setup uses a marketplace selected by the user; the builder does not
-create a personal marketplace or change a catalog.
+create a personal marketplace or change a catalog. A folder build alone does not
+establish that Codex can load the plugin.
 
 For an authorized local marketplace, place the chosen Codex package at
 `<marketplace-root>/plugins/cuefluent-notes` and add the following entry to that
@@ -356,19 +353,19 @@ The path is relative to the marketplace root. `selected-local-catalog` is an
 example name; use the user's actual catalog identity. Official documentation
 describes [local marketplaces and registration](https://developers.openai.com/plugins/build/plugins#add-a-marketplace-from-the-cli).
 
-The reviewed CLI exposes these persistent setup commands:
+For a Codex CLI that provides the documented `plugin` commands, register with:
 
 ```sh
 codex plugin marketplace add /absolute/selected-marketplace-root
 codex plugin add cuefluent-notes@selected-local-catalog
 ```
 
-Disposable-client smoke checks exercise these commands with a local marketplace;
-see [verification scope](verification.md). The desktop plugin UI is another
-documented installation path. Restart or begin a fresh session
-after installation and verify the skill is available. For the hook variant,
-review and trust its current definition through `/hooks`; enabling a plugin does
-not itself establish hook trust. Follow the [Codex hooks reference](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+The desktop plugin UI is another documented installation path. See
+[verification scope](verification.md) for client integration limits. Restart or
+begin a fresh session after installation and verify the skill is available. For
+the hook variant, review and trust its current definition through `/hooks`;
+enabling a plugin does not itself establish hook trust. Follow the
+[Codex hooks reference](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
 
 ## Opt in, update, or disable
 
@@ -407,11 +404,8 @@ version-2 authored plans can create inspected immediate type folders. See
 [safe updates](refresh.md).
 
 Node 22+ is required. The fixed Codex shell bootstrap reads the plugin root as
-environment data; Claude uses direct executable/argument invocation. Native tests
-cover Command Prompt, Windows PowerShell, PowerShell 7 and Git Bash. Client
-registration checks use pinned Codex 0.156.1 and Claude Code 2.1.280 in disposable
-profiles without auth or model calls. See [verification](verification.md) for
-automated coverage and the remaining live-client limits.
+environment data; Claude uses direct executable/argument invocation. See
+[verification](verification.md) for general coverage and client integration limits.
 
 `workflow.mjs status` reports packaged hook integrity, the current Node version,
 and the unverified transport. Host hook trust, restrictions/feature flags and

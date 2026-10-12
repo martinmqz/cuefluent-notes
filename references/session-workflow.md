@@ -321,24 +321,25 @@ cannot provide directory fsync, so sudden power-loss durability is weaker.
 
 Selected-range extraction and preview use the same parser. Compatibility is
 checked from native record structure, identity and boundaries, not a client-version
-allowlist. The fixtures originate from Codex **0.156.1**, uncompressed JSONL,
-`legacy` history without ordinals and `paginated` history with native rollout
-ordinals. The same shapes are accepted with other client version strings, including
-prereleases. `reader.headerClientVersion` retains the bounded, nonempty version
-string from the session header. It does not identify the client that emitted
-each later record after an update; readers never scan before the selected floor
-to infer that. Existing captures with `reader.clientVersion` have the same
+allowlist. Supported input is uncompressed JSONL with `legacy` history without
+ordinals or `paginated` history with native rollout ordinals. Compatible record
+shapes are accepted across client version strings, including prereleases.
+`reader.headerClientVersion` retains the bounded, nonempty version string from
+the session header. It does not identify the client that emitted each later record
+after an update; readers never scan before the selected floor to infer that.
+Existing captures with `reader.clientVersion` have the same
 header-only meaning and remain readable without rewriting their bytes.
 Malformed version metadata reports `INVALID_SESSION_CLIENT_VERSION`, separately
 from configuration errors.
 Compressed files, missing native sequence, unsupported record types/content and uncertain
-ownership report diagnostics. This is not a claim of live-client validation or
-support for every format produced by that client. Missing/replaced sources stay
+ownership report diagnostics. Matching version metadata does not establish
+support for every Codex record shape. Missing/replaced sources stay
 unresolved; the reader does not search another session or follow history-base
 files. Forked/inherited sources are refused. A registered project need not still
 exist when its stored canonical spelling matches the source header.
 
-The format was checked against the official `rust-v0.156.1` source:
+The supported format and persisted terminal fence follow the official Codex
+source implementation at `rust-v0.156.1`:
 [wire envelopes](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/history/src/rollout_payload.rs),
 [persistence policy](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/rollout/src/policy.rs),
 [ordered writer](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/rollout/src/recorder.rs),
@@ -418,15 +419,18 @@ capture or create storage.
 
 ## Claude reader contract
 
-The Claude reader accepts the ordinary root transcript shapes verified against
-Claude Code **2.1.280**, including when another client version emits those shapes.
-It validates native identity and record structure instead of an exact client version.
-Public hook documentation establishes native hook identities, but does
-not establish a transcript flush fence. Read-only inspection of Anthropic's
-published 2.1.280 package found asynchronous transcript writes, cancellation and
-batched prompts. A duration record, assistant `stop_reason`, next human prompt,
-Stop hook, or quiet EOF cannot prove finality or causal assistant ownership.
-These are format constraints, not a claim that every live client version is verified.
+The Claude reader accepts ordinary root transcript records with the native
+identities and structure described below, independently of an exact client
+version. The [hook input contract](https://code.claude.com/docs/en/hooks#common-input-fields)
+warns that transcript writes are asynchronous and can lag a hook invocation;
+it does not establish a transcript flush fence. A user interrupt also bypasses
+the normal [Stop event](https://code.claude.com/docs/en/hooks#stop). Cancellation
+can therefore leave partial work, and a batch of human prompts followed by
+assistant/tool records does not identify which prompt caused each response.
+Parent links establish transcript ancestry, not that causal mapping. A duration
+record, assistant `stop_reason`, next human prompt, Stop hook or quiet EOF cannot
+prove finality or causal assistant ownership. Matching version metadata does not
+establish support for every record shape produced by that client.
 
 The initial supported evidence is **proven human input only**, including supplied
 text and attachment references. Native `promptId` identifies the logical prompt;
@@ -453,7 +457,7 @@ excluded. Selected human prose is not filtered by instruction-like words.
 Classification uses the documented native types, ownership fields and known
 injection flags. Neither reader validates every optional field: a future producer
 that changes human/injected-message semantics under a known type needs a reader
-update. Version-label fixtures do not establish compatibility with such changes.
+update. Matching version metadata does not establish compatibility with such changes.
 Repeated exact record UUIDs are deduplicated; a changed mirror is a conflict.
 Claude source ranges retain each full native record hash. Replaying a partially
 advanced scope checks that exact record and byte range against the active head,
@@ -517,10 +521,8 @@ or silently claiming completion. No automatic carry retirement is implemented.
 
 ## Verification scope
 
-See [verification](verification.md) for automated coverage, pinned-client
-registration checks and the limits of that evidence. Synthetic reader fixtures
-and injected filesystem failures do not establish live conversation capture,
-client context delivery or durability under sudden power loss.
+See [verification](verification.md) for general coverage and product limits,
+including source completeness, client integration and power-loss durability.
 
 ## Private storage and explicit pruning
 
@@ -652,14 +654,6 @@ processing inputs or proof of successful publication. Consent withdrawal does
 not itself authorize deleting evidence. Status distinguishes
 retained units/revisions/bytes, tombstoned units, pending work and blocked
 operations; bounded or unfamiliar inventories are marked incomplete.
-
-Local macOS fixtures exercise modes, extended ACL refusal, capability invalidation,
-prune eligibility, stale plans, derived dependencies and recovery fault points.
-Windows tests are platform-gated. A dedicated step in the existing Windows CI
-job creates a disposable standard-user account outside ordinary `npm test`,
-verifies its actual non-admin token and Restricted policy, exercises private
-root/child ACLs, and cleans up. Native Windows results must be reported separately;
-these fixtures do not establish live client capture or power-loss durability.
 
 ## Automatic collection integration
 
@@ -797,13 +791,23 @@ machine-wide PATH change or execution-policy override is performed.
 
 ### Client contracts and transport limits
 
-The supported contracts follow [Codex hooks](https://learn.chatgpt.com/docs/hooks)
-and [Claude Code hooks](https://code.claude.com/docs/en/hooks),
-with pinned producer artifacts. Codex 0.156.1 provides `turn_id`,
-Interrupt and `PLUGIN_ROOT`; its documentation describes UserPromptSubmit
-additional context and enabled-by-default hooks. Older feature-flag behavior
-must not be assumed for every installed version. Claude documents `prompt_id`
-from 2.1.196, StopFailure, and direct executable `command` plus `args`.
+The client contracts are described by [Codex hooks](https://learn.chatgpt.com/docs/hooks)
+and [Claude Code hooks](https://code.claude.com/docs/en/hooks). Codex handlers use
+`turn_id`, Interrupt and `PLUGIN_ROOT`; Claude handlers use `prompt_id`,
+StopFailure, and direct executable `command` plus `args`. The installed client
+must provide the required events and identity fields. The helper refuses missing
+or invalid required IDs with `UNSUPPORTED_NATIVE_IDENTITY`; the hook emits a
+bounded collection-unavailable diagnostic. Version metadata is not a substitute.
+Check the client's actual hook controls rather than assuming a feature flag or
+trust state.
+
+If a per-turn hook lacks `turn_id` (Codex) or `prompt_id` (Claude), or the client
+cannot register the required events or command form, upgrade the client to a
+release providing those capabilities and start a fresh session. Check the
+required fields again; an upgrade alone does not prove compatibility. If the
+capabilities remain unavailable, automatic collection is unsupported there;
+use explicit CLI selection only for sources the reader accepts. Do not invent
+identities or relax validation to enable collection.
 
 Codex's [session configuration](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/mod.rs)
 uses the selected local environment shell with non-login execution arguments.
@@ -812,15 +816,13 @@ falls back to COMSPEC/cmd on Windows and SHELL/sh on POSIX only when no explicit
 shell was configured. The replacement Codex command puts fixed JavaScript in the
 shell and reads paths from environment data after parsing. Claude uses its
 supported direct-exec `node` plus argument array, avoiding its shell-string
-executor. The native shell fixture matrix includes sh, cmd, Windows PowerShell,
-PowerShell 7 and Git Bash where available; local skips are explicit.
+executor. The Codex bootstrap supports POSIX `sh`, Git Bash, Command Prompt,
+Windows PowerShell and PowerShell 7. This is not a guarantee for other shells.
 
-These hook checks do **not** prove live hook-to-agent current-turn context binding
-or native prompt rendering. Hooks emit no usable `contextRef` and do not start
-automatic processing. Explicit processing-chat entry instead verifies a native
-MCP call against selected source records; its restricted client protocol and
-review-form transport have separate synthetic acceptance fixtures. Those fixtures
-do not prove attended desktop behavior or automatic hook delivery. Explicit CLI
+Hooks emit no usable `contextRef` and do not start automatic processing. Explicit
+processing-chat entry instead verifies a native MCP call against selected source
+records. Protocol exchanges and client registration do not establish native
+review rendering, physical user approval or hook delivery. Explicit CLI
 client/session/unit selection remains available. A hook identity is descriptive
 metadata, never authority inferred from cwd, notification order or UUID order.
 

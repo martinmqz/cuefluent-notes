@@ -31,8 +31,11 @@ implementation and canonical product reference before changing behavior.
   come from trusted readers; they are not user JSON commands.
 - `scripts/session-jsonl.mjs`, `scripts/capture-evidence.mjs`,
   `scripts/codex-reader.mjs`, and `scripts/claude-reader.mjs`: bounded native
-  session reads and selected capture extraction. Keep the verified client-format
-  matrix in the session reference. `scripts/reader-checkpoint.mjs` bounds
+  session reads and selected capture extraction. Keep supported record formats
+  and required native identities in the session reference. Shared executable
+  format coverage belongs in the synthetic fixtures in `scripts/codex-reader.test.mjs`
+  and `scripts/claude-reader.test.mjs`; keep run-specific matrices and validation
+  history in ignored `.local/`. `scripts/reader-checkpoint.mjs` bounds
   metadata-only incremental carry; `scripts/reader-pages.mjs` persists authenticated
   pages with finite cumulative allocation. Preserve full hashes and native
   identity metadata, fresh permission checks around cached bytes, and exact

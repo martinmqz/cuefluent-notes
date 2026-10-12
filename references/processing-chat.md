@@ -249,6 +249,6 @@ resolution, not lookup by title. See the [CLI schemas](workflow-cli.md#processin
 
 The explicit CLI processing commands remain available for standalone agent use.
 Run manual synthesis in a context outside automatic collection when avoiding
-feedback is necessary. Automatic processing from hook notifications, transparent
-exclusion of arbitrary natural-language turns and live desktop integration are
-not established by native protocol fixtures.
+feedback is necessary. Automatic processing from hook notifications and transparent
+exclusion of arbitrary natural-language turns are unsupported. Successful CLI/MCP
+transport does not establish desktop sidebar visibility or review-form usability.

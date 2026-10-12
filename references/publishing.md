@@ -7,10 +7,15 @@ are not part of this repository or its automation.
 
 ## Public repository hygiene
 
-Keep real notes, capture configuration, credentials, and private planning outside
-this repository. Commit only synthetic examples. Before making a repository
-public, inspect its Git and pull-request history as well as retained Actions logs
-and artifacts; deleting a file from the current branch does not remove history.
+Keep real user notes, captured session evidence, private capture configuration,
+secrets and credentials outside this repository, including ignored directories.
+Keep implementation plans, review notes, synthetic-test results, dated validation
+logs, internal process history and machine-specific paths in ignored `.local/`;
+exclude them from commits and package inputs. Authorized installed-plugin checks
+do not permit copying real captured content into `.local/`. Commit only synthetic
+examples. Before making a repository public, inspect its Git and pull-request
+history as well as retained Actions logs and artifacts; deleting a file from the
+current branch does not remove history.
 
 Require pull requests and passing CI on `main`, prevent force pushes and branch
 deletion, and enable secret scanning and push protection when GitHub supports
@@ -82,7 +87,7 @@ Validate with `claude plugin validate --strict --json dist/release` and
 Use the Plugin Creator validator for the Codex package when that tooling is
 available. Test fresh-client installation against the prepared local catalog,
 including first-use setup and hook trust, before advertising a release. The
-[verification scope](verification.md) distinguishes automated checks from live tests.
+[verification scope](verification.md) describes general coverage and product limits.
 
 ## Publish the GitHub marketplace
 

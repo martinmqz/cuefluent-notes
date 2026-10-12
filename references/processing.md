@@ -192,6 +192,11 @@ one or more proposed output paths; every output must have at least one input.
 The helper never maps every input to every note or creates one note per capture.
 Earlier associations are returned during preparation for the agent to consider.
 
+Output paths within a proposal must be unique after Unicode NFC normalization
+and lowercasing on every platform. Composed/decomposed spellings and case-only
+pairs are refused even on filesystems that can keep them distinct. The shared
+writer's [path checks](refresh.md#interrupted-writes-and-conflicts) also apply.
+
 The helper validates Markdown, preserves inspected output hashes, records root
 and parent identities, and copies exact proposal bytes into private storage.
 An immutable intent makes interrupted staging resumable with the same content.
@@ -288,6 +293,6 @@ marker cannot replace native proof. Preserve new human corrections and independe
 work alongside any echoes. The current
 native transport does not prove which active turn is performing processing, so
 operation IDs, cwd and owner sessions cannot exclude a whole turn or label mixed
-work records. Automatic invocation and native prompts require separate live
-transport verification. Fixtures verify deterministic helper behavior, not agent
-judgment, visual inspection, live client delivery or OS power-loss durability.
+work records. Hook notifications do not start processing. Helper success does
+not establish agent judgment, visual inspection, live client delivery or survival
+of sudden power loss. See [verification limits](verification.md).
