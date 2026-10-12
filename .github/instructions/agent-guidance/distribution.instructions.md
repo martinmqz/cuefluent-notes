@@ -1,5 +1,5 @@
 ---
-applyTo: "package*.json,packaging/**,.github/workflows/**,.agents/plugins/**,.claude-plugin/**,plugins/**,claude/**,release.json,README.md,LICENSE.md,.gitignore,.gitattributes,scripts/*package*.mjs,scripts/release*.mjs,scripts/install*.mjs,scripts/marketplace*,scripts/publish-marketplace*,scripts/published-marketplace*.mjs,scripts/check-release-source.sh,scripts/plugin-manifest*.mjs,scripts/client-fixture/package*.json,scripts/client-smoke*.mjs,scripts/smoke-environment*.mjs,references/distribution.md,references/publishing.md,references/verification.md"
+applyTo: "package*.json,packaging/**,.github/workflows/**,.agents/plugins/**,.claude-plugin/**,plugins/**,claude/**,release.json,README.md,LICENSE.md,.gitignore,.gitattributes,scripts/*package*.mjs,scripts/release*.mjs,scripts/install*.mjs,scripts/marketplace*,scripts/publish-marketplace*,scripts/published-marketplace*.mjs,scripts/check-release-source.sh,scripts/plugin-manifest*.mjs,scripts/client-fixture/package*.json,scripts/client-smoke*.mjs,scripts/smoke-environment*.mjs,references/distribution.md,.agents/publishing.md,references/verification.md"
 ---
 
 <!-- agent-guidance-sync:generated:v1 source=".agents/rules/distribution.md" target=".github/instructions/agent-guidance/distribution.instructions.md" -->
@@ -11,14 +11,14 @@ applyTo: "package*.json,packaging/**,.github/workflows/**,.agents/plugins/**,.cl
 `scripts/check-release-source.sh`, `packaging/`, and `.github/workflows/` implement
 installation, packages, releases, and CI.
 Follow [distribution](/references/distribution.md) and
-[publishing](/references/publishing.md), together with the shared boundaries in
+[publishing](/.agents/publishing.md), together with the shared boundaries in
 the root [repository guidance](/AGENTS.md).
 
 ## Package and release boundaries
 
 - `scripts/marketplace-layout.mjs` defines generated-package paths on `main`.
   Publish changed product content as a new version only when authorized. See the
-  [publication boundary](/references/publishing.md#publish-the-github-marketplace).
+  [publication boundary](/.agents/publishing.md#publish-the-github-marketplace).
 - For version changes, align `package.json`, `package-lock.json`, and both client
   plugin templates. Update release notes and release links for that version.
   Distinguish the development source version from the published marketplace

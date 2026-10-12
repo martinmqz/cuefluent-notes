@@ -1,27 +1,7 @@
-# Verification scope
+# Product capabilities and limitations
 
-This page describes general coverage and the limits of the plugin's guarantees.
-
-## Automated coverage
-
-The source suite covers session readers, consent boundaries, private storage,
-processing state, conflict detection, recovery, note metadata and package integrity
-using synthetic inputs. CI runs on native Windows, Linux and macOS and compares
-release archive checksums. The [Checks workflow](https://github.com/martinmqz/cuefluent-notes/blob/main/.github/workflows/ci.yml)
-defines the current jobs.
-
-The `client-smoke` job skips tag refs. It checks disposable client registration
-using separately built packages and, when present, the committed marketplace;
-it does not validate the exact draft-release ZIPs. It covers neither remote
-authentication nor maintainer approval of a bot-created PR's Checks run. Release
-assets still need their own [inspection](publishing.md#build-and-inspect-a-release).
-A skipped platform or shell check provides no verification for that platform or
-shell; report skips separately from passing checks.
-
-Automated checks, package consistency and client registration do not establish
-hook delivery, model behavior, host review rendering or Cuefluent app behavior.
-Supported source formats are defined by the [reader contracts](session-workflow.md),
-not by a matching client version string.
+This page describes the boundaries of the installed plugin. Use the linked
+contracts for supported commands, formats, permissions and recovery procedures.
 
 ## Product limits
 

@@ -240,50 +240,31 @@ not infer facts, merge competing edits, or make a collection-wide transaction.
 
 ## Run from the source checkout
 
-Use Node 22 or later, Git and Bash, plus `unzip` and `tar` for the release extraction
-tests. From this repository:
+Use Node 22 or later. From this repository:
 
 ```sh
 npm ci --ignore-scripts
-npm test
 npm run check:examples
 node scripts/check-notes.mjs /absolute/private-notes/project.md
 ```
 
-The tests and examples use synthetic material. Keep real query cases, proposals,
+The examples use fictional material. Keep real query cases, proposals,
 and source mappings in selected private locations. See [retrieval](references/retrieval.md)
 for checker commands and [refresh](references/refresh.md) for write plans.
 
-## Build a standalone plugin package
+## Standalone plugin packages
 
-The builder produces separate Codex and Claude plugin directories:
+Codex and Claude packages contain the full skill, product guides, examples,
+helpers, runtime dependencies and license notices. Packaged helpers require
+Node 22+, with no npm install or development checkout at runtime. See
+[package layout and installation](references/distribution.md#package-layout).
 
-```sh
-npm run package
-npm run package -- --hooks
-```
+Choose one variant per client. Manual packages register no hooks; hook-enabled
+packages provide collection ingress that still requires separate consent and
+client trust. Both variants use the same plugin identity.
 
-The first command builds `dist/manual`; the second builds `dist/hooks`.
-Each contains `codex/cuefluent-notes` and `claude/cuefluent-notes`, with the full
-skill, guides, examples, helpers, and runtime dependencies. The default manual
-variant registers no hooks. Select one variant per client because both use the
-same plugin identity. Existing output directories are not overwritten; use
-`--out /absolute/fresh-package-output` for another build.
-
-Packaged helpers require Node 22+, but no npm install or development checkout at
-runtime. See [distribution](references/distribution.md) for layout, validation,
-client-specific loading and installation, and supported-platform limits.
-Building packages does not install, trust, publish, or register a marketplace.
-
-To prepare marketplace catalogs, four versioned plugin ZIPs, a marketplace
-snapshot, and SHA-256 checksums:
-
-```sh
-npm run release:build
-```
-
-This creates a fresh `dist/release`. See the [publisher guide](references/publishing.md)
-for release automation, first publication, and public-directory submission materials.
+Repository maintainers can use the
+[build and publishing guide](https://github.com/martinmqz/cuefluent-notes/blob/main/.agents/publishing.md).
 
 ## Optional session collection
 
@@ -312,9 +293,8 @@ Desktop/CLI selection, package-store limits and profile checks.
 
 ## Verification
 
-See [verification scope](references/verification.md) for general automated coverage
-and product limits, including source completeness, processing feedback, client
-integration and Cuefluent app behavior. Publication status is on the
+See [product limits](references/verification.md) for source completeness,
+processing feedback, client integration and Cuefluent app behavior. Publication status is on the
 [releases page](https://github.com/martinmqz/cuefluent-notes/releases).
 
 ## License

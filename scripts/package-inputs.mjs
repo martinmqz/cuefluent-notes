@@ -3,7 +3,7 @@ export const SOURCE_FILES = Object.freeze([
   'SKILL.md', 'README.md', 'LICENSE.md',
   'references/workflow.md', 'references/authoring.md', 'references/evidence.md',
   'references/retrieval.md', 'references/refresh.md', 'references/hooks.md', 'references/distribution.md',
-  'references/verification.md', 'references/publishing.md',
+  'references/verification.md',
   'references/setup.md', 'references/session-workflow.md', 'references/processing.md', 'references/processing-chat.md', 'references/workflow-cli.md',
   'references/note-metadata.md', 'references/note-series.md',
   'examples/workflow.json',

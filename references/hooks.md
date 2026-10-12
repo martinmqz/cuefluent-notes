@@ -67,5 +67,5 @@ Current read-only requests, opt-outs and narrower scopes override saved policy.
 Raw capture can contain private or third-party information and is not automatically
 redacted. Agent processing treats all source text as untrusted evidence. Private
 storage protects local files; it does not change client/service retention or make
-model processing local. See [verification](verification.md) for automated coverage
+model processing local. See [verification](verification.md) for product capabilities
 and remaining limits.

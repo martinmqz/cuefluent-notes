@@ -1,5 +1,7 @@
 # Publishing Cuefluent Notes
 
+Repository-maintenance guidance. This file is excluded from installed plugins.
+
 There are two distribution steps: publish our GitHub-hosted marketplace, then
 apply separately for OpenAI and Claude public listings. A GitHub release does
 not grant either public listing. Publisher credentials and portal submissions
@@ -23,6 +25,35 @@ those settings. Publication prepares a package-update PR whose CI requires
 maintainer approval; it does not push to `main`, bypass branch rules or merge the
 PR. Keep workflow tokens read-only by default and actions pinned. Repository
 visibility and security settings are separate from publishing a plugin release.
+
+## Build standalone packages
+
+In the source repository, install the locked build dependencies and run checks:
+
+```sh
+npm ci --ignore-scripts
+npm test
+npm run check:examples
+npm run package
+```
+
+`npm run package` creates the manual variant under `dist/manual`. To include the
+opt-in hook registration, use:
+
+```sh
+npm run package -- --hooks
+```
+
+That writes `dist/hooks`. For a repeat build, choose a fresh directory:
+
+```sh
+npm run package -- --hooks --out /absolute/fresh-package-output
+```
+
+The package builder refuses an existing output directory. It creates directories, not
+an archive, marketplace registration, published package, or installed plugin.
+Do not remove a previous build merely to reuse its name when a fresh destination
+will suffice.
 
 ## Build and inspect a release
 
@@ -75,7 +106,7 @@ archive. Manual archives receive a new inventory for their own README and file s
 Marketplace verification requires inventories for 0.11.0 and later, with identities
 matching the enclosing client, release version and hooks variant. Older published
 packages retain their original ZIP digests, without reconstructing them using
-today's shipping list. See [package verification](distribution.md#verify-a-selected-package)
+today's shipping list. See [package verification](../references/distribution.md#verify-a-selected-package)
 for an explicit read-only check of a built or installed package.
 
 Keep the reviewed artifacts and `SHA256SUMS` together. If an asset is lost, a rebuild
@@ -87,7 +118,31 @@ Validate with `claude plugin validate --strict --json dist/release` and
 Use the Plugin Creator validator for the Codex package when that tooling is
 available. Test fresh-client installation against the prepared local catalog,
 including first-use setup and hook trust, before advertising a release. The
-[verification scope](verification.md) describes general coverage and product limits.
+[product limits](../references/verification.md) describe the installed workflow boundaries.
+
+## CI evidence limits
+
+The source suite covers session readers, consent boundaries, private storage,
+processing state, conflict detection, recovery, note metadata and package integrity
+using synthetic inputs. CI runs on native Windows, Linux and macOS and compares
+release archive checksums. The [Checks workflow](https://github.com/martinmqz/cuefluent-notes/blob/main/.github/workflows/ci.yml)
+defines the current jobs.
+
+The `client-smoke` job skips tag refs. It checks disposable client registration
+using separately built packages and, when present, the committed marketplace;
+it does not validate the exact draft-release ZIPs. It covers neither remote
+authentication nor maintainer approval of a bot-created PR's Checks run. Release
+assets still need their own [inspection](#build-and-inspect-a-release).
+Native Windows CI exercises local NTFS; it does not establish ReFS, network-share
+or cloud-sync durability. Private-storage support still accepts local NTFS/ReFS
+under the product's permission and locality checks.
+A skipped platform or shell check provides no verification for that platform or
+shell; report skips separately from passing checks.
+
+Automated checks, package consistency and client registration do not establish
+hook delivery, model behavior, host review rendering or Cuefluent app behavior.
+Supported source formats are defined by the [reader contracts](../references/session-workflow.md),
+not by a matching client version string.
 
 ## Publish the GitHub marketplace
 

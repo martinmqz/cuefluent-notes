@@ -8,7 +8,9 @@ applyTo: "SKILL.md,references/**,examples/**,scripts/check-notes*.mjs,scripts/ch
 
 `SKILL.md`, `references/`, and `examples/` contain installed product guidance,
 compatibility limits, and synthetic examples. Keep detailed user workflows here
-and repository-maintenance instructions in the root guidance and canonical rules.
+and repository-maintenance instructions in the root guidance, canonical rules and
+[build/publishing guide](/.agents/publishing.md). Do not ship those maintainer
+instructions in installed product references.
 Link to existing canonical explanations rather than duplicating behavior across
 references.
 

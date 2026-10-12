@@ -5,8 +5,8 @@ source without displaying it in ordinary rendered Markdown. Keep summaries,
 decisions, findings, action items, source attribution and meaningful occurrence
 dates in visible sections. Metadata does not replace the useful document.
 
-The standalone checker supports this contract. The recorded app compatibility
-baseline still searches headings and aliases only: these fields do not establish
+The standalone checker supports this contract. Cuefluent searches headings and
+aliases only: these fields do not establish
 app ingestion, identity, ranking, series expansion or recursive discovery. See
 [authoring](authoring.md) and [retrieval](retrieval.md).
 

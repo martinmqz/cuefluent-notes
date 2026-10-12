@@ -180,8 +180,9 @@ Use existing status and hook notice diagnostics; distinguish a new failure from
 an unchanged code/scope already reported in this conversation. State the affected
 operation and supported next action without quoting raw evidence. Do not add
 polling, continuations or persistent suppression state. An unrecognized diagnostic
-stays unresolved; for example, `EVIDENCE_AFTER_CODEX_TERMINAL` requires a bounded
-native reproducer before any reader change, not dropping all late evidence.
+stays unresolved. For example, if `EVIDENCE_AFTER_CODEX_TERMINAL` is reported,
+preserve the selected source and pending state for inspection; do not discard
+late evidence to make collection proceed.
 
 ## Proposal and approval
 
