@@ -26,7 +26,7 @@ paths:
   - scripts/client-smoke*.mjs
   - scripts/smoke-environment*.mjs
   - references/distribution.md
-  - references/publishing.md
+  - .agents/publishing.md
   - references/verification.md
 ---
 # Distribution and releases
@@ -36,14 +36,14 @@ paths:
 `scripts/check-release-source.sh`, `packaging/`, and `.github/workflows/` implement
 installation, packages, releases, and CI.
 Follow [distribution](/references/distribution.md) and
-[publishing](/references/publishing.md), together with the shared boundaries in
+[publishing](/.agents/publishing.md), together with the shared boundaries in
 the root [repository guidance](/AGENTS.md).
 
 ## Package and release boundaries
 
 - `scripts/marketplace-layout.mjs` defines generated-package paths on `main`.
   Publish changed product content as a new version only when authorized. See the
-  [publication boundary](/references/publishing.md#publish-the-github-marketplace).
+  [publication boundary](/.agents/publishing.md#publish-the-github-marketplace).
 - For version changes, align `package.json`, `package-lock.json`, and both client
   plugin templates. Update release notes and release links for that version.
   Distinguish the development source version from the published marketplace

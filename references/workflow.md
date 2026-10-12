@@ -255,7 +255,6 @@ which evidence drift or manual-edit conflicts remain, and any partial update or
 recovery state. Later corrections require current evidence and a fresh read;
 unchanged fingerprints alone do not prove that a source remains current.
 
-For the initial pilot, let the user judge whether the resulting content and
-organization are useful. Valid Markdown and passing synthetic cases establish
-only part of that result. Do not claim pilot acceptance merely because structural
-checks passed; distinguish actual user feedback from synthetic verification.
+Let the user judge whether the content and organization serve the requested
+purpose. Distinguish actual user feedback from structural or synthetic checks;
+those checks alone do not establish usefulness.

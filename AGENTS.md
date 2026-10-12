@@ -50,7 +50,9 @@ and check its frontmatter against the affected repository paths.
 - Keep both client packages self-contained, including runtime dependencies and
   license notices. Change `SOURCE_FILES` in `scripts/package-inputs.mjs` only for intended
   shipped content. Exclude repository guidance, development tools, tests, and
-  private planning from installed packages.
+  private planning from installed packages. Keep `references/` focused on installed
+  product workflows, command/format contracts, compatibility and limitations;
+  repository build/publication/CI guidance belongs outside that folder.
 - Keep real user notes, private evidence, and private capture configuration outside
   the repository. Use synthetic fixtures and disposable test locations by default;
   test a user's installed plugin or capture settings only when explicitly
@@ -97,7 +99,8 @@ skipped for tag releases.
 
 Report what was actually verified. Emitted hook context and package validation do
 not prove live client behavior, native prompt rendering, or Cuefluent search
-ranking. Keep coverage and evidence limits in
+ranking. Keep CI coverage and evidence limits in the
+[maintainer guide](/.agents/publishing.md#ci-evidence-limits), and product limits in
 [verification](/references/verification.md). Check CI for the current PR revision;
 separate local results, pending checks, and checks from an earlier commit.
 
@@ -121,7 +124,7 @@ separate local results, pending checks, and checks from an earlier commit.
   duplicating detailed rules across files.
 - Edit source templates rather than generated `dist/` or marketplace content.
   Preserve immutable published versions and checksums; follow
-  [publishing](/references/publishing.md) for release changes.
+  [publishing](/.agents/publishing.md) for release changes.
 
 ## Maintaining this guidance
 

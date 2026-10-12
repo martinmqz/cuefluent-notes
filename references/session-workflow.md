@@ -1,8 +1,7 @@
 # Session workflow contracts
 
-These contracts describe the session workflow shipped by the current source
-builder. It replaces the v0.7.1 capture runtime without importing its policy.
-Publication is a separate step; the v0.7.1 tag retains the prior implementation.
+These contracts describe selected session collection and Markdown processing.
+Legacy capture policy and session state are not imported into this workflow.
 
 ## Consent and routing
 
@@ -15,7 +14,7 @@ ongoing collection. Installation, hook trust, or an old policy enables neither.
 
 The new configuration has `format: "cuefluent-workflow"`, `schemaVersion: 1`,
 `collections`, and `routes`. Legacy migration and mixed-version operation are
-outside this replacement's scope; obsolete runtime code has been removed. The override is
+unsupported. The override is
 `CUEFLUENT_WORKFLOW_CONFIG`; otherwise settings use
 `<local user profile>\.cuefluent-notes\workflow.json` for fresh Windows setups and
 `~/.config/cuefluent-notes/workflow.json` on macOS/Linux.
@@ -519,9 +518,9 @@ Long scopes can still reach explicit live or allocation limits. The worker repor
 the capacity diagnostic rather than evicting identity evidence, resetting the floor,
 or silently claiming completion. No automatic carry retirement is implemented.
 
-## Verification scope
+## Compatibility limits
 
-See [verification](verification.md) for general coverage and product limits,
+See [product limits](verification.md) for client and platform boundaries,
 including source completeness, client integration and power-loss durability.
 
 ## Private storage and explicit pruning

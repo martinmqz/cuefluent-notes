@@ -62,7 +62,8 @@ test('both clients use captured inputs even when source changes after the first 
 
 test('package exclusions remove seeded unwanted files while retaining runtime files and licenses', async t => {
   const { root, source } = await fixture(t);
-  const unwanted = ['private-review.md', 'node_modules/yaml/test/private.js', 'node_modules/yaml/.DS_Store', 'node_modules/yaml/seed.test.js'];
+  const unwanted = ['private-review.md', 'references/publishing.md', '.agents/publishing.md',
+    'node_modules/yaml/test/private.js', 'node_modules/yaml/.DS_Store', 'node_modules/yaml/seed.test.js'];
   for (const name of unwanted) { await fs.mkdir(path.dirname(path.join(source, name)), { recursive: true }); await fs.writeFile(path.join(source, name), 'SYNTHETIC_EXCLUDED_SENTINEL'); }
   // A dependency's own paths/URLs can coincidentally contain the checkout spelling.
   const dependency = path.join(source, 'node_modules/yaml/package.json');

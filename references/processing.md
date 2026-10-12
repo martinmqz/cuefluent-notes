@@ -179,9 +179,16 @@ identity; recommending a model does not switch it. Hooks invoke no model.
 Use existing status and hook notice diagnostics; distinguish a new failure from
 an unchanged code/scope already reported in this conversation. State the affected
 operation and supported next action without quoting raw evidence. Do not add
-polling, continuations or persistent suppression state. An unrecognized diagnostic
-stays unresolved; for example, `EVIDENCE_AFTER_CODEX_TERMINAL` requires a bounded
-native reproducer before any reader change, not dropping all late evidence.
+polling, continuations or persistent suppression state. Unrecognized diagnostics
+stay unresolved.
+
+`EVIDENCE_AFTER_CODEX_TERMINAL` is a known reader refusal with no supported repair
+command. Preserve the selected source and pending state; do not discard late
+evidence to make collection proceed. Ask the user to report the diagnostic and
+installed plugin and Codex versions in a
+[plugin issue](https://github.com/martinmqz/cuefluent-notes/issues).
+Do not attach raw session content or private settings unless the user separately
+authorizes sharing them.
 
 ## Proposal and approval
 

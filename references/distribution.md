@@ -1,7 +1,7 @@
-# Packaging and client setup
+# Packages and client setup
 
-The builder creates standalone directories for Codex and Claude Code.
-Both contain the same skill and local runtime, with host-specific manifests.
+Codex and Claude Code packages contain the same skill and local runtime, with
+host-specific manifests.
 The deterministic helpers have no runtime dependency on this source checkout, npm,
 Cuefluent, its app packages, or a network service. Node 22 or later must be
 available to the client.
@@ -25,9 +25,10 @@ collection or processing permission or notes destinations. Keep only one active 
 remove a previous standalone or source-installer registration before switching.
 The catalogs and packages coexist with development source on `main`. The
 published package version is recorded in root `release.json` and can lag the
-source version during development. See the [publication boundary](publishing.md#publish-the-github-marketplace)
-for managed paths and the reviewed release process. Existing registrations that
-select the former branch need the [one-time migration](../README.md#switch-an-older-marketplace-registration-to-main).
+source version during development. Updating the source does not update an
+installed plugin; follow the update procedure for its original installation
+method. Registrations selecting the former branch need the
+[one-time migration](../README.md#switch-an-older-marketplace-registration-to-main).
 
 Release assets also provide separate manual ZIPs without hook registration.
 Extract one and use the client-specific local installation instructions below;
@@ -66,8 +67,11 @@ on Windows. See [private storage](session-workflow.md#private-storage-and-explic
 Use full drive paths such as `C:\Users\Ada\Documents\Notes` or an explicit
 UNC share; drive-relative paths such as `C:Notes`, device namespaces, reserved
 device filenames, alternate streams, and trailing-dot/space aliases are refused.
-Native CI verifies local NTFS; network-share durability and cloud-sync behavior
-have not been verified. First-use setup requires hard-link support.
+Windows private settings and state require a local NTFS or ReFS volume; finished
+notes can use separately selected document locations. ReFS storage behavior,
+including first-use hard-link support and durability, remains unverified.
+Network-share durability and cloud-sync behavior are not guaranteed. First-use
+setup requires hard-link support.
 
 The [README quickstart](../README.md#install-in-codex-or-claude-code) uses
 `npm run install:codex` or `npm run install:claude` from a Git clone. These
@@ -145,41 +149,14 @@ Clone again when you next need to update.
   plain copied `SKILL.md` does not include the bundled runtime or hooks.
 
 The installer supports native Windows, macOS, and Linux. See
-[verification](verification.md) for general coverage and client integration limits.
+[product limits](verification.md) for product and client integration limits.
 
-## Build and inspect
+## Package layout
 
-In the source repository, install the locked build dependencies and run checks:
-
-```sh
-npm ci --ignore-scripts
-npm test
-npm run check:examples
-npm run package
-```
-
-`npm run package` creates the manual variant under `dist/manual`. To include the
-opt-in hook registration, use:
-
-```sh
-npm run package -- --hooks
-```
-
-That writes `dist/hooks`. For a repeat build, choose a fresh directory:
-
-```sh
-npm run package -- --hooks --out /absolute/fresh-package-output
-```
-
-The package builder refuses an existing output directory. It creates directories, not
-an archive, marketplace registration, published package, or installed plugin.
-Do not remove a previous build merely to reuse its name when a fresh destination
-will suffice.
-
-Each output contains:
+Each client package contains:
 
 ```text
-codex/cuefluent-notes/
+cuefluent-notes/               # Codex package root
   .codex-plugin/plugin.json
   .mcp.json
   README.md
@@ -196,21 +173,20 @@ codex/cuefluent-notes/
     package-lock.json
     node_modules/
   hooks/hooks.json             # hook variant only
-claude/cuefluent-notes/
+cuefluent-notes/               # Claude package root
   .claude-plugin/plugin.json
   .mcp.json
   README.md
   LICENSE.md
   package-inventory.json
-  skills/cuefluent-notes/       # same complete skill and runtime
+  skills/cuefluent-notes/      # same complete skill and runtime
   hooks/hooks.json             # hook variant only
 ```
 
 The package includes the [project license](../LICENSE.md), the runtime dependency
 closure and its separate license notices.
-Tests and the package builder are source-development tools; use the source
-checkout to change or test the implementation. The source README lives inside
-the packaged skill so its relative reference links remain usable.
+The README lives inside the packaged skill so its relative reference links
+remain usable.
 
 ## Verify a selected package
 
@@ -287,17 +263,17 @@ write into an unspecified destination.
 
 ## Claude Code loading and persistent setup
 
-Validate a built Claude package without starting an agent session:
+Validate an extracted Claude package without starting an agent session:
 
 ```sh
-claude plugin validate --strict --json /absolute/output/claude/cuefluent-notes
+claude plugin validate --strict --json /absolute/extracted/cuefluent-notes
 ```
 
-For an explicitly authorized temporary host test, `--plugin-dir` loads the
+For explicitly requested temporary use, `--plugin-dir` loads the
 package for that session rather than installing it permanently:
 
 ```sh
-claude --plugin-dir /absolute/output/claude/cuefluent-notes
+claude --plugin-dir /absolute/extracted/cuefluent-notes
 ```
 
 The plugin skill name is `/cuefluent-notes:cuefluent-notes`; ordinary requests
@@ -307,8 +283,9 @@ namespacing in [Create plugins](https://code.claude.com/docs/en/plugins#test-you
 For persistent personal use, place the complete chosen Claude plugin at
 `~/.claude/skills/cuefluent-notes`, including its `.claude-plugin/plugin.json` and
 nested skill/runtime. It loads as `cuefluent-notes@skills-dir` in the next session
-without a marketplace. This is a user-level installation and is not performed
-by the builder. See [Skills-directory plugins](https://code.claude.com/docs/en/plugins-reference#skills-directory-plugins).
+without a marketplace. Extracting the package elsewhere does not place it in that
+skills directory.
+See [Skills-directory plugins](https://code.claude.com/docs/en/plugins-reference#skills-directory-plugins).
 
 Review the exact hook command and workspace trust when opting into hooks.
 After plugin changes, use `/reload-plugins` or restart as supported by the
@@ -318,12 +295,12 @@ private capture policy remains outside the plugin directory.
 ## Codex persistent setup
 
 For normal installation, use the [README quickstart](../README.md#install-in-codex-or-claude-code).
-The commands below are for fitting a separately built package into another
+The commands below are for fitting an extracted Codex package into another
 existing catalog.
 
-Persistent setup uses a marketplace selected by the user; the builder does not
-create a personal marketplace or change a catalog. A folder build alone does not
-establish that Codex can load the plugin.
+Persistent setup uses a marketplace selected by the user. Copying or extracting
+a package does not register it, create a personal marketplace or change a catalog.
+Complete the selected client's registration before expecting it to load.
 
 For an authorized local marketplace, place the chosen Codex package at
 `<marketplace-root>/plugins/cuefluent-notes` and add the following entry to that
@@ -381,8 +358,11 @@ or switching to the manual variant also removes background collection ingress.
 Direct user-selected saves remain available with a chosen destination/writer.
 Never save real settings or evidence inside the plugin or public repository.
 
-For upgrades, rebuild into a fresh directory, review the package and changes,
-then update the one installed variant through that client's supported process.
+If you installed from a release ZIP, extract the new release's package into a
+fresh directory and review the package and changes. This applies to both
+hook-enabled and manual variants. Update the one installed variant through that
+client's supported process; other installation methods keep their own update
+procedures.
 Keep user notes, private policy, and update state outside the replaceable package.
 Changed Codex hook definitions need renewed trust; validate reload behavior for
 each host rather than assuming both update the same way. Both variants also
@@ -392,7 +372,7 @@ loading the plugin. Only an explicit processing request launches or resumes the
 restricted agent session. Follow the [coordinated upgrade](setup.md#existing-settings)
 and [processing chat](processing-chat.md) guidance before resuming shared storage.
 
-## Compatibility and verification status
+## Compatibility limits
 
 The replacement has its own workflow configuration and no legacy migration or
 mixed-version support. Keep unfinished old journals with the v0.7.1 reference
@@ -405,7 +385,7 @@ version-2 authored plans can create inspected immediate type folders. See
 
 Node 22+ is required. The fixed Codex shell bootstrap reads the plugin root as
 environment data; Claude uses direct executable/argument invocation. See
-[verification](verification.md) for general coverage and client integration limits.
+[product limits](verification.md) for product and client integration limits.
 
 `workflow.mjs status` reports packaged hook integrity, the current Node version,
 and the unverified transport. Host hook trust, restrictions/feature flags and
