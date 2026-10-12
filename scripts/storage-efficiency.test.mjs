@@ -14,12 +14,19 @@ import { validateWorkflowConfig } from './workflow-config.mjs';
 
 test('directory child churn retries privacy verification but repeated churn stays bounded', async t => withStorageProbes(async () => {
   const f = await storageFixture(t), root = f.collection.intakeStateDir, lstat = fs.lstat;
+  // Keep mtime after creation: backdating it can also move birthtime on APFS.
+  let fixtureTime = Date.now() + 60_000;
   for (const continuous of [false, true]) {
     let count = 0;
     fs.lstat = async (file, ...args) => {
       if (file === root && ++count >= 2 && (continuous || count === 2)) {
         const child = path.join(root, 'concurrent-child');
         await fs.mkdir(child, { mode: 0o700 }); await fs.rmdir(child);
+        // A create/remove pair need not yield a distinct directory timestamp on
+        // every filesystem. Advance this fixture's version explicitly so the
+        // retry assertion does not depend on native timestamp update timing.
+        const changed = new Date(fixtureTime += 1000);
+        await fs.utimes(root, changed, changed);
       }
       return lstat(file, ...args);
     };

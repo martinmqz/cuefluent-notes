@@ -5,6 +5,14 @@ import { CLIENTS, canonicalJSON, digest, choice, fail, id, keys, list, nativeId,
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
+// The review contract requires string defaults. Offer this supported revision
+// even when a client's initial preference is older; hosts confirm support by
+// continuing initialization with the offered revision.
+const PROTOCOL_VERSION = '2025-11-25';
+// Hosts can encode one character as six ASCII bytes (\\uXXXX), including each
+// UTF-16 surrogate. This fixed framing bound also admits a delayed echo after
+// its form closes. Ordinary requests retain INPUT_BYTES after classification.
+const FRAME_BYTES = 6 * FORM_BYTES;
 const STATES = ['missing', 'creating', 'busy', 'idle', 'awaiting-review', 'blocked', 'completed'];
 const ACTIONS = ['inspect', 'resume', 'review', 'wait', 'none'];
 const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CONTROL_FAILED',
@@ -12,7 +20,7 @@ const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROC
   'PROCESSING_CHAT_HOST_UNAVAILABLE', 'PROCESSING_CHAT_SESSION_UNAVAILABLE', 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
   'PROCESSING_CHAT_CONFLICT', 'PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED',
   'WORKFLOW_POLICY_CHANGED', 'PROCESSING_APPROVAL_REQUIRED', 'PROCESSING_SELECTION_CHANGED',
-  'PROCESSING_REVIEW_UNSUPPORTED', 'PROCESSING_REVIEW_TOO_LARGE', 'PROCESSING_REVIEW_LIMIT', 'PROCESSING_REVIEW_INTERRUPTED',
+  'PROCESSING_REVIEW_UNSUPPORTED', 'PROCESSING_REVIEW_TOO_LARGE', 'PROCESSING_REVIEW_LIMIT', 'PROCESSING_REVIEW_INTERRUPTED', 'PROCESSING_REVIEW_PREVIEW_CHANGED',
   'PROCESSING_CHAT_REVIEW_UNRESOLVED', 'PROCESSING_CHAT_POLICY_CHANGED', 'PROCESSING_CHAT_STATE_CHANGED',
   'PROCESSING_EXCLUSION_UNVERIFIED', 'PROCESSING_OPERATION_OUTCOME_UNKNOWN',
   'PROCESSING_CLIENT_FAILED', 'PROCESSING_CLIENT_INTERRUPTED', 'PROCESSING_CLIENT_UNAVAILABLE', 'INTAKE_BLOCKED']);
@@ -151,14 +159,21 @@ export async function runProcessingControlServer({ client, input = process.stdin
       keys(row.result, ['action'], ['content']);
       choice(row.result.action, ['accept', 'decline', 'cancel']);
       if (row.result.action === 'accept') {
-        keys(row.result.content, ['decision']);
+        keys(row.result.content, ['changes', 'decision']);
+        if (typeof row.result.content.changes !== 'string') fail('PROCESSING_REVIEW_INTERRUPTED');
+        const changes = row.result.content.changes.replace(/\r\n?/g, '\n');
+        if (Buffer.byteLength(changes) > FORM_BYTES) fail('PROCESSING_REVIEW_TOO_LARGE');
+        if (changes !== form.preview.replace(/\r\n?/g, '\n')) fail('PROCESSING_REVIEW_PREVIEW_CHANGED');
         choice(row.result.content.decision, ['save', 'skip', 'cancel', 'later']);
         form.resolve(Object.freeze({ action: 'accept', content: Object.freeze({ decision: row.result.content.decision }) }));
       } else {
         if (row.result.content !== undefined && row.result.content !== null) fail('PROCESSING_CONTROL_PROTOCOL');
         form.resolve(Object.freeze({ action: row.result.action }));
       }
-    } catch { form.reject(Object.assign(new Error('PROCESSING_REVIEW_INTERRUPTED'), { code: 'PROCESSING_REVIEW_INTERRUPTED' })); }
+    } catch (error) {
+      const code = ['PROCESSING_REVIEW_PREVIEW_CHANGED', 'PROCESSING_REVIEW_TOO_LARGE'].includes(error.code) ? error.code : 'PROCESSING_REVIEW_INTERRUPTED';
+      form.reject(Object.assign(new Error(code), { code }));
+    }
   };
   const processRequest = async (row, request) => {
     const rpcId = row.id;
@@ -175,9 +190,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
         const elicitation = caps.elicitation;
         formSupported = object(elicitation) && (Object.keys(elicitation).length === 0 || object(elicitation.form));
         initialized = true;
-        const protocolVersion = ['2025-11-25', '2025-06-18', '2024-11-05'].includes(row.params.protocolVersion) ? row.params.protocolVersion : '2025-11-25';
-        if (protocolVersion === '2024-11-05') formSupported = false;
-        result = { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'cuefluent_control', version: '1.0.0' } };
+        result = { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'cuefluent_control', version: '1.0.0' } };
       } else {
         if (!initialized) fail('PROCESSING_CONTROL_PROTOCOL');
         if (row.method === 'ping') result = {};
@@ -229,15 +242,25 @@ export async function runProcessingControlServer({ client, input = process.stdin
             if (elicited) fail('PROCESSING_CONTROL_PROTOCOL');
             elicited = true;
             const formId = `cuefluent-review-${randomUUID()}`;
-            const message = { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form', message: proposal.message,
-              requestedSchema: { type: 'object', properties: { decision: { type: 'string', title: 'Proposal decision',
-                description: 'Save this exact proposal, skip it, cancel this operation, or leave it for later.',
-                enum: ['save', 'skip', 'cancel', 'later'] } }, required: ['decision'] } } };
+            // Desktop renders message/description in a fixed header. Keep them
+            // short; the full preview belongs in its scrollable text control.
+            // "changes" sorts before "decision" in the canonical wire JSON.
+            const message = { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form',
+              message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.',
+              requestedSchema: { type: 'object', properties: {
+                changes: { type: 'string', title: 'Proposed changes',
+                  description: 'Read the full preview, then go to the next field. For corrections, choose Later and provide them in your work chat; do not edit this preview.',
+                  default: proposal.message },
+                decision: { type: 'string', title: 'Proposal action',
+                  description: 'Save writes the exact proposal. Skip handles these captures without saving. Cancel releases the operation and keeps captures pending. Later keeps the proposal pending.',
+                  enum: ['save', 'skip', 'cancel', 'later'],
+                  enumNames: ['Save exact proposal', 'Skip these captures without saving', 'Cancel operation; keep captures pending', 'Later; keep proposal pending'] }
+              }, required: ['changes', 'decision'] } } };
             if (Buffer.byteLength(canonicalJSON(message)) + 1 > FORM_BYTES) fail('PROCESSING_REVIEW_TOO_LARGE');
             let resolve, reject;
             const response = new Promise((a, b) => { resolve = a; reject = b; });
             response.catch(() => {});
-            forms.set(formId, { requestId: rpcId, resolve, reject });
+            forms.set(formId, { requestId: rpcId, preview: proposal.message, resolve, reject });
             try { await reply(message, FORM_BYTES); return await response; }
             finally { forms.delete(formId); }
           };
@@ -273,6 +296,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
     try { row = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line)); }
     catch { fail('PROCESSING_CONTROL_PROTOCOL'); }
     if (!object(row)) fail('PROCESSING_CONTROL_PROTOCOL');
+    // Host responses may echo a preview even after cancellation or completion.
+    // Unknown IDs are ignored; only a live form can return a decision.
+    if (line.length > INPUT_BYTES && Object.hasOwn(row, 'method')) fail('PROCESSING_CONTROL_INPUT_LIMIT');
     if (!Object.hasOwn(row, 'method')) { hostResponse(row); return; }
     keys(row, ['jsonrpc', 'method'], ['id', 'params']);
     if (row.jsonrpc !== '2.0' || typeof row.method !== 'string') fail('PROCESSING_CONTROL_PROTOCOL');
@@ -306,7 +332,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     for await (const chunk of input) {
       const bytes = Buffer.from(chunk); let start = 0, end;
       while ((end = bytes.indexOf(10, start)) >= 0) {
-        if (pending.length + end - start > INPUT_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
+        if (pending.length + end - start > FRAME_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
         const line = Buffer.concat([pending, bytes.subarray(start, end)]); pending = Buffer.alloc(0); start = end + 1;
         if (line.length) {
           try { await processLine(line); }
@@ -316,7 +342,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
           }
         }
       }
-      if (pending.length + bytes.length - start > INPUT_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
+      if (pending.length + bytes.length - start > FRAME_BYTES) fail('PROCESSING_CONTROL_INPUT_LIMIT');
       pending = Buffer.concat([pending, bytes.subarray(start)]);
     }
     if (pending.length) fail('PROCESSING_CONTROL_PROTOCOL');
