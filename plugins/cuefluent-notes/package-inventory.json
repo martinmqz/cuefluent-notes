@@ -2,14 +2,14 @@
   "format": "cuefluent-package",
   "schemaVersion": 1,
   "name": "cuefluent-notes",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "client": "codex",
   "variant": "hooks",
   "files": [
     {
       "path": ".codex-plugin/plugin.json",
       "bytes": 1075,
-      "sha256": "49ffcf82e31cf12fcb9e32feb68677e9e3dc84dd3480d2a3176799a520766cf5"
+      "sha256": "19205471f17d2633bd909cec4d181a0d6c085599d333839b32f19ec8bc2998b5"
     },
     {
       "path": ".mcp.json",
@@ -24,7 +24,7 @@
     {
       "path": "README.md",
       "bytes": 1105,
-      "sha256": "98fc3126f8fe3448205dd55afa6fbb95bd21b3f635181d18788075b949a15647"
+      "sha256": "8e1af7a2546197ed49ef468fb12b90086d83bf02173b7e3212ec7968896d834f"
     },
     {
       "path": "hooks/hooks.json",
@@ -43,8 +43,8 @@
     },
     {
       "path": "skills/cuefluent-notes/SKILL.md",
-      "bytes": 16470,
-      "sha256": "56a5282750b1b506134c48d425f4a71586b743ab200df155105d042bc61d99b2"
+      "bytes": 16878,
+      "sha256": "5b3a478d623d955cf26f9a159833967ff6e02fd9b95ba19c25921dd2828e0a74"
     },
     {
       "path": "skills/cuefluent-notes/examples/check-cases.json",
@@ -1829,12 +1829,12 @@
     {
       "path": "skills/cuefluent-notes/package-lock.json",
       "bytes": 4438,
-      "sha256": "a4dab4b9ece9d4a110dc53b96591040987781f5ce79c011c8bcfd11214edc04d"
+      "sha256": "be0240ca4da417e6b7869f5b69abc7efc5a72e1802a429d9d70600f6f69c8d6c"
     },
     {
       "path": "skills/cuefluent-notes/package.json",
       "bytes": 388,
-      "sha256": "2bb2208aaa634d104a13387b29da0c8b9a2a1e254094ec38d53bb96b54c2fa0e"
+      "sha256": "255767611bf879e9d349326d89c3f420e17e161de8f99855f923ce2ba4c07337"
     },
     {
       "path": "skills/cuefluent-notes/references/authoring.md",
@@ -1868,8 +1868,8 @@
     },
     {
       "path": "skills/cuefluent-notes/references/processing-chat.md",
-      "bytes": 13501,
-      "sha256": "bd293fea18ec379a664ab840e1efbb59c5348159f2df30dd064b140290243644"
+      "bytes": 15646,
+      "sha256": "dd45297c7a5d77409508583fc6452c75bec49a64ca4e6d5d8bad82dff49f90f4"
     },
     {
       "path": "skills/cuefluent-notes/references/processing.md",
@@ -1903,13 +1903,13 @@
     },
     {
       "path": "skills/cuefluent-notes/references/verification.md",
-      "bytes": 10123,
-      "sha256": "d0ce6439b7172d96ea8bb060074b6da39b29848561bede83aa8c6c50ac512560"
+      "bytes": 10222,
+      "sha256": "8a3ecd3734791e7322ed3f84474a039bc2af74bbf05224ef8c8a1c91aaa0591a"
     },
     {
       "path": "skills/cuefluent-notes/references/workflow-cli.md",
-      "bytes": 46877,
-      "sha256": "744454301b0a1b3a7a57d570ec4ccd48a40fa0acc899fa37be7f4466a7da966e"
+      "bytes": 47552,
+      "sha256": "399427aa02be6e1eb1cbd686f57b47c2763f9c121c9cc389f9e89b7ba1a04825"
     },
     {
       "path": "skills/cuefluent-notes/references/workflow.md",
@@ -2093,8 +2093,8 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-control-server.mjs",
-      "bytes": 20150,
-      "sha256": "ff312f9f35ec9ad5a60bfd509514d752a82dd3fa7110626b6831df11ded60883"
+      "bytes": 23114,
+      "sha256": "92e85aa2769f1d8ff751d0eb29cc2074b4371205c403581ed257537151ffabec"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-controller.mjs",
@@ -2118,8 +2118,8 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-execution-proof.mjs",
-      "bytes": 17279,
-      "sha256": "d4c1a079a6827396440f8f77bda7c4ab4d945dae3514a90a3219c04195b280ec"
+      "bytes": 18809,
+      "sha256": "d9124f15a4d6f74a484871577757165630939505aed89806f42ddeeca95a1afc"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-execution-receipts.mjs",
@@ -2138,13 +2138,13 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-mcp.mjs",
-      "bytes": 17882,
-      "sha256": "aee6f649fb01a01e656dc681ae8c5460793c58627a4d6ee92c702085ce90535a"
+      "bytes": 18319,
+      "sha256": "cae56744498ab504a2e209c3daa8e666c3f6da444d10316bac54f9003976a7a3"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-native-invocation.mjs",
-      "bytes": 9880,
-      "sha256": "337f17ec09203caeb6154446c6b823aba557a64138d38e53d9a35bce75a7be05"
+      "bytes": 16140,
+      "sha256": "c51204e7c3bfc38f018851f034587b92cf58962c30a23936dcc5c9dfb8390ca7"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-packet.mjs",
