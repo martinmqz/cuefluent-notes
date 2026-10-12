@@ -118,7 +118,12 @@ uncaptured context for material that cannot fit this channel.
 Invoke the same skill with `review`. Its
 `cuefluent_control.processing_review` call requests a native host form displaying
 the exact proposal, original note contents, paths, new directories, input identities
-and known evidence limits. The form offers Save, Skip, Cancel or Later. Draft bytes
+and known evidence limits. Read the full preview in the scrollable **Proposed
+changes** field, then advance to **Proposal action**. Choose **Save exact proposal**,
+**Skip these captures without saving**, **Cancel operation; keep captures pending**
+or **Later; keep proposal pending**. No action is selected by default. The host's
+own **Skip** or dismiss control is not the proposal's Skip action; it leaves the
+proposal pending. Draft bytes
 travel through that host-control channel; they are not returned as model tool
 output to the source chat. A host response is distinct from a model tool argument;
 it does not establish that a person physically clicked rather than a host policy
@@ -127,10 +132,25 @@ answering the form.
 Save uses the existing exact-proposal writer. Skip handles only those revisions;
 Cancel releases an unapplied operation; Later, declining or closing the form leaves
 it pending. No filesystem lock spans the decision. Changes to note contents,
-proposals, inputs or policy preserve a conflict and require fresh review. A host
-without form support leaves the proposal pending. An exact review exceeding the
-256 KiB form limit is refused without truncation; use the supported explicit
-proposal and save commands from an uncaptured context instead.
+proposals, inputs or policy preserve a conflict and require fresh review. The form
+requires MCP `2025-11-25` string-default support. The server offers that protocol
+even if the host initially requests an older version. Hosts unable to accept it
+must use the explicit CLI workflow; hosts lacking form support leave the proposal
+pending. An exact review exceeding the 256 KiB form limit is refused without
+truncation; use the supported explicit proposal and save commands from an
+uncaptured context instead.
+
+The preview field displays the proposal; it is not an editor. Note-content lines
+are prefixed with `│ `, and control characters and backslashes are visibly escaped
+so note text cannot imitate the review's headings or terminal controls. Each
+file's original and proposed line endings are summarized separately. These display
+changes do not alter the Markdown that Save writes.
+
+Host LF/CRLF/CR line-ending conversion is accepted when the rest of the preview is
+unchanged. Edited, trimmed or collapsed preview text is refused with
+`PROCESSING_REVIEW_PREVIEW_CHANGED`, leaving the exact proposal pending. Reopen
+review to restore the preview; if the host cannot preserve it, use the explicit
+proposal and save commands from an uncaptured context.
 
 For a factual correction, choose Later and provide the correction in the ordinary
 work chat. Capture it through the existing selected-source workflow before using
@@ -229,6 +249,6 @@ resolution, not lookup by title. See the [CLI schemas](workflow-cli.md#processin
 
 The explicit CLI processing commands remain available for standalone agent use.
 Run manual synthesis in a context outside automatic collection when avoiding
-feedback is necessary. Automatic processing from hook notifications, transparent
-exclusion of arbitrary natural-language turns and live desktop integration are
-not established by native protocol fixtures.
+feedback is necessary. Automatic processing from hook notifications and transparent
+exclusion of arbitrary natural-language turns are unsupported. Successful CLI/MCP
+transport does not establish desktop sidebar visibility or review-form usability.

@@ -7,6 +7,71 @@ This guide describes the supported authoring contract.
 Update the guide deliberately when separately supplied compatibility evidence
 changes; do not discover rules by reading or running the app during note work.
 
+## Durable content and provenance
+
+The visible content you author should answer a useful question about the subject:
+facts, decisions, rationale, explanations, procedures, actions or meaningful open
+questions. Keep the context needed to understand those answers. A domain procedure
+can be durable knowledge; the process of extracting, checking or writing this
+note is provenance rather than subject content.
+
+For a meeting, preserve its known identity, meaningful occurrence date,
+discussion outcomes, decisions, rationale, action owners and unresolved matters.
+Summarize the useful knowledge rather than reproducing the transcript. Keep who
+reported or decided something and any uncertainty that changes its meaning
+visible; a reported result must not become an independently verified fact.
+
+Keep identifiers that name the subject, such as a ticket, task, test or decision,
+visible when useful. Distinguish them from technical capture/source IDs and hashes.
+Keep technical source IDs, locators, hashes, transcript offsets, transcription
+mechanics and note-production/checking history out of visible prose. Retain useful
+provenance in supported [source metadata](note-metadata.md#selected-sources-and-hashes)
+or bounded ordinary `<!-- source-review: ... -->` comments after any leading
+metadata block. Place a section's alias directive directly after its H2 (blank
+lines are allowed), before any source-review comment; provenance must not displace
+its [search metadata](retrieval.md#add-aliases-where-useful). An existing plain note
+can use ordinary comments without adding structured metadata. Preserve existing
+metadata and unfamiliar fields under their normal update rules; this content
+boundary does not authorize enrichment.
+
+Do not interpolate untrusted source text directly into an HTML comment. Encode
+`&`, `<` and `>` in the comment payload as `&amp;`, `&lt;` and `&gt;`, in that
+order, or paraphrase it safely. The payload must not contain literal comment
+openers or endings, including `<!--`, `-->` and `--!>`. Keep the original selected
+evidence intact; an encoded locator is descriptive text, not a new resource URL.
+Supported structured metadata retains its own delimiter checks. Review the raw
+Markdown as well as the visible prose; the advisory checker does not establish
+that provenance will remain hidden in every renderer.
+
+Hidden comments and metadata travel with copied or synced Markdown; hiding them
+does not make them private. Use only the minimum authorized portable source
+descriptors. Keep private machine paths, private URLs and optional capture
+bookkeeping in private review material unless the user explicitly requests them
+in the note; never include credentials. Review all fields, including session
+identifiers in required source descriptors, against the intended audience before
+sharing. Do not remove existing metadata or user-written references during an
+unrelated update; their normal preservation and consent rules still apply.
+
+This boundary governs new or agent-drafted text. Preserve existing user-written
+references, source footers and context during updates; preserve them when
+authorship is unclear. Moving or hiding them requires a user-requested cleanup.
+Do not turn an unrelated update into a content migration or discard recoverable
+provenance.
+
+Full transcripts and raw tool logs stay in the selected source or private
+evidence. Retain useful excerpts only when needed to explain the durable
+knowledge; do not copy complete dumps into the body, metadata or comments.
+Do not create duplicate source documents just to populate provenance.
+Explicit requests for a transcript or audit document retain their requested
+purpose and consent boundaries; they do not change ordinary knowledge notes.
+
+Keep material evidence gaps visible alongside affected claims. Routine details
+about how a transcript was supplied or checked belong with provenance; missing
+evidence that prevents a conclusion belongs with that conclusion. Before
+proposing a save, read the visible text you drafted on its own and remove
+extraction logs, processing narration and source bookkeeping that do not serve
+the note's subject.
+
 ## Start with existing Markdown
 
 Review the selected original notes before proposing a rewrite. Cuefluent
@@ -59,9 +124,12 @@ It may span several source lines.
 - Each section needs visible body content. Whitespace, ordinary comments, alias
   metadata, or reference definitions alone are insufficient.
 - Optional aliases use one terminated, single-line `<!-- aliases: ... -->`
-  comment in the initial metadata position after the H2, before body content.
-  Entries must be nonempty and comma-separated. Repeated or misplaced directives
-  are fatal; repeated normalized aliases within a section produce warnings.
+  comment directly after the H2 (blank lines are allowed), before other comments
+  and body content.
+  Entries must be nonempty and comma-separated. Repeated directives or placement
+  after body content fail the advisory check; repeated normalized aliases within
+  a section produce warnings. The checker accepts some initial non-alias comments,
+  so a passing check does not verify the stricter ordering above.
 - Keep heading paths descriptive and distinct. Normalized collisions within a
   file are fatal; similar headings across files still need retrieval review.
   Do not rename working headings unnecessarily: they determine section identity.
@@ -106,9 +174,11 @@ copy them only when that is part of the requested document preparation.
 
 Same-document fragments and footnotes support in-app navigation. Safe HTTP(S)
 and mailto links support deliberate activation subject to app controls. Local
-file and relative links remain non-opening references. Preserve evidence links
-and locators; do not promise that every source reference can be opened in-app.
-Detailed source-to-entry mappings can remain in private review material.
+file and relative links remain non-opening references. Preserve useful subject
+links and recoverable provenance under the [content boundary](#durable-content-and-provenance),
+including existing user-written references. Do not promise that every source
+reference can be opened in-app. Detailed source-to-entry mappings can remain in
+private review material.
 
 Search uses only H2 headings, H1 heading paths, and explicit aliases.
 Body text, H3–H6, table cells, code, link labels, image descriptions, and footnotes
@@ -196,6 +266,3 @@ set. A selected folder is not necessarily the app's whole library. The app's
 10 MiB per-file allowance does not enlarge this checker's 2 MiB bound or prove app
 admission. The writer retains its separate 100-operation and 100-file derived
 manifest limits; checker coverage does not enlarge either.
-
-Developer verification from the source checkout: `npm test` exercises observable helper behavior;
-`npm run check:examples` checks the selected synthetic documents and vocabulary.

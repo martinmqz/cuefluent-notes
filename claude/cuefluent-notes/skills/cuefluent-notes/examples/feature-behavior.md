@@ -14,7 +14,7 @@ POST /v2/payment-intents
 The source does not establish whether a charge occurred, whether duplicate
 charges are prevented, or what the caller should do next.
 
-- Synthetic source: [PAY-101 feature record](../references/evidence.md#pay-101--feature-record).
+<!-- source-review: Fictional source PAY-101, ../references/evidence.md#pay-101--feature-record. -->
 
 ## Request rate limit
 
@@ -30,4 +30,4 @@ This fictional API documents the following rate-limit behavior:
 
 The source gives no rationale for the request threshold or retry interval.
 
-- Synthetic source: [PAY-102 rate-limit record](../references/evidence.md#pay-102--rate-limit-record).
+<!-- source-review: Fictional source PAY-102, ../references/evidence.md#pay-102--rate-limit-record. -->
