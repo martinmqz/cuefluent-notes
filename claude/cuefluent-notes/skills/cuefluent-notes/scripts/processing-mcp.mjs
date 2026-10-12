@@ -8,7 +8,7 @@ import { openWorkflowIntake, withIntakeLock } from './intake-io.mjs';
 import { readSelection } from './intake-store.mjs';
 import { processingSourceDirectory } from './collection-ingress.mjs';
 import { recordProcessingControlDispatch, createProcessingControlResolver } from './processing-control-receipts.mjs';
-import { resolveProcessingInvocation, isProcessingInvocation } from './processing-native-invocation.mjs';
+import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessingInvocation } from './processing-native-invocation.mjs';
 import { runProcessingControlServer } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
@@ -47,7 +47,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   const jobs = new Map(), owners = new WeakMap(), committedReviews = new WeakMap(), replayed = new WeakMap();
   const openController = dependencies.openController ?? openProcessingController;
   const resolveInvocation = dependencies.resolveInvocation ?? resolveProcessingInvocation;
-  async function resolveSource(context, invocation) {
+  async function resolveSource(context, invocation, { signal, requireCompleted } = {}) {
     const selectedConfig = configPath ?? await workflowConfigPath();
     const snapshot = await readWorkflowSnapshot(selectedConfig);
     if (!snapshot.config) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
@@ -71,12 +71,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       const options = { configPath: selectedConfig, collectionId: collection.id, expectedConfigHash: snapshot.hash };
       const capability = await verifyWorkflowStorage(options);
       let source;
-      try { source = await withStorageProbes(() => resolveInvocation(capability, context, invocation, { skillPath })); }
+      try { source = await withStorageProbes(() => resolveInvocation(capability, context, invocation, { skillPath, signal, requireCompleted })); }
       catch (error) {
         if (requested === undefined && error.code === 'PROCESSING_CONTROL_SOURCE_UNVERIFIED') continue;
         throw error;
       }
-      if (!isProcessingInvocation(source) && !dependencies.resolveInvocation) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+      if (!isProcessingInvocation(source) && !isPendingProcessingInvocation(source) && !dependencies.resolveInvocation) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
       const resolved = Object.freeze({ ...source, collectionId: collection.id });
       owners.set(resolved, { capability, options }); matches.push(resolved);
     }
@@ -123,7 +123,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     signal?.throwIfAborted();
     const { options, capability } = selected(source), key = keyFor(options);
     const requestId = nativeRequestId(source, client);
-    if (source.nativeSkill && selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) {
+    if ((source.nativeSkill || source.controlExclusionUnsupported) && selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) {
       fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     }
     await withStorageProbes(() => assertWorkflowStorage(capability, selection ?? source.selection, 'explicitProcess'));
@@ -230,7 +230,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         // separate call; redelivery cannot rewrite immutable proof or dispatch.
         return;
       }
-      if (!source.nativeSkill || !source.unitId || source.captureActive === false) { release(); return; }
+      if ((!source.nativeSkill && !source.controlExclusionUnsupported) || !source.unitId || source.captureActive === false) {
+        release();
+        return;
+      }
       // Explicit processing consent is independent of automatic collection.
       // With collection disabled there is no parent capture to exclude; do not
       // make an optional exclusion receipt a prerequisite for processing.
@@ -239,6 +242,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error;
         await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
         release(); return;
+      }
+      if (source.controlExclusionUnsupported) {
+        release();
+        return { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
       }
       const store = await withStorageProbes(() => openWorkflowIntake(capability, source.selection, 'collect'));
       const authorize = async () => { signal?.throwIfAborted(); await assertWorkflowStorage(capability, source.selection, 'collect'); signal?.throwIfAborted(); return true; };

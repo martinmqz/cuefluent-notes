@@ -24,7 +24,7 @@ Use the existing skill with the exact argument `process`: select Cuefluent Notes
 in Codex and enter `process`, or use `/cuefluent-notes:cuefluent-notes process` in
 Claude. Loading the skill, setup, status and direct saves do not start a processing
 session. In a configured source chat the skill calls
-`cuefluent_control.process_selected_captures` once. The source adapter verifies
+`cuefluent_control.process_selected_captures`. The source adapter verifies
 native call metadata against that selected session's actual call record. If the
 collection is omitted, bounded existing registration metadata must identify exactly
 one collection. It never selects a recent session by project path.
@@ -32,10 +32,28 @@ Unprepared collections with no matching registration are skipped. A registered
 candidate with unsafe storage still fails closed; explicitly select a healthy
 collection when implicit discovery cannot complete. Claude can rebind a stale
 MCP launch session ID after `/clear` only by finding the exact native tool-use ID
-in one already registered, authorized source. This fallback is bounded to 128
-registration entries and 32 source reads of at most 2 MiB each. Exceeding those
-limits reports `PROCESSING_SOURCE_DISCOVERY_LIMIT`; reconnect the MCP server in
+in one already registered, authorized source. Discovery and source reads have
+finite entry, byte and attempt limits. Exceeding them reports `PROCESSING_SOURCE_DISCOVERY_LIMIT`; reconnect the MCP server in
 the intended session instead of guessing a source.
+
+The adapter briefly retries missing native records in the selected source because
+client persistence can lag tool dispatch. Claude's registered-source fallback
+runs once after that wait, or immediately if the launch session is unavailable.
+Stopped captures, over-limit tails and changed selections cannot supply a binding,
+but do not block another registered session from proving the exact call. A matching
+call with invalid arguments, tool identity or duplicate records is refused without
+retrying or substituting another session. Storage and source-identity failures
+still stop verification.
+A Codex code-mode call needs a separate verification handshake:
+`verification-required` returns an opaque `retryToken` without delivering evidence,
+starting processing or opening a review. End the current exec, then repeat the
+same tool and arguments with that token in a new exec. The adapter checks the
+original completed native MCP event, arguments, exact challenge response and
+unchanged source selection. Tokens are short-lived, single-use and local to the
+connection; they grant no authority themselves. An expired, cancelled, changed or
+unverified request stops without dispatch. No JavaScript text is treated as proof.
+The retry can briefly wait for the original inner event and outer result to finish
+persisting. It never dispatches from a partial pair or retries the processing run.
 
 Pausing collection preserves the registered source for independently authorized
 processing, status and review. Verifying a new native control does not resume
@@ -77,7 +95,12 @@ with its original scope. It does not prevent listing the other pending work.
 Redelivery of an exact verified formal call returns its original admitted response
 without dispatching again, reopening a review form or rewriting its receipt. That
 response can still say `busy` after completion; use `processing_status` to read
-current progress.
+current progress. A `busy` result with no busy diagnostic acknowledges the
+accepted run; it does not mean the request was rejected as another run.
+Keep the source client and its MCP host open until processing reaches a review or
+terminal state. A one-shot client that terminates the host after admission can
+interrupt the run; use the existing status and recovery controls rather than
+assuming the background work completed.
 
 A native request cancellation received while admission is pending releases that
 admission without starting the model turn or returning a response. Once admission
@@ -92,7 +115,7 @@ uncaptured context for material that cannot fit this channel.
 
 ## Review controls
 
-Invoke the same skill with `review`. Its single
+Invoke the same skill with `review`. Its
 `cuefluent_control.processing_review` call requests a native host form displaying
 the exact proposal, original note contents, paths, new directories, input identities
 and known evidence limits. The form offers Save, Skip, Cancel or Later. Draft bytes
@@ -122,8 +145,14 @@ Dedicated processing starts with inherited collection hooks disabled. Completed
 restricted runs can also seal exact native record ranges for subsequent selected
 collection. The reader revalidates those bytes, identities and current permission;
 a session title, stored role or matching text alone grants no exclusion. Codex
-proof covers the completed restricted unit. Claude proof covers its exact controller
+proof covers the completed restricted unit, including native code-mode cells
+whose inner tool events are restricted to the engine contract. Claude proof covers its exact controller
 input; ordinary assistant/tool parentage still does not establish Claude ownership.
+
+The Codex code-mode handshake currently leaves its small source control turn
+collectible and reports `PROCESSING_EXCLUSION_UNVERIFIED` for formal controls.
+This does not disable the restricted processing chat's verified exclusion, and it
+never hides genuine work or corrections in the source chat.
 
 In the source chat, only a verified formal skill control, actual controller call and
 receipt can exclude processing control input. Claude also checks the exact
