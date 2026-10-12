@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { CLIENTS, canonicalJSON, choice, fail, id, keys, list, nativeId, object, string, unique } from './workflow-values.mjs';
+import { CLIENTS, canonicalJSON, digest, choice, fail, id, keys, list, nativeId, object, string, unique } from './workflow-values.mjs';
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
@@ -26,20 +26,21 @@ const ERRORS = new Set([...DIAGNOSTICS, 'PROCESSING_CONTROL_PROTOCOL', 'PROCESSI
   'PROCESSING_CONTROL_RECEIPT_CONFLICT', 'WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_OPERATION_COMPLETE',
   'PROCESSING_STATE_CHANGED', 'PROCESSING_CONTROL_SOURCE_DISCOVERY_INCOMPLETE']);
 const uuidSchema = { type: 'string', pattern: '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' };
+const retrySchema = { ...uuidSchema, description: 'Opaque token returned for native verification. End the current exec, then repeat the same tool and arguments with this token. Never invent one.' };
 const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
 const selectionSchema = { type: 'object', additionalProperties: false, required: ['client', 'sessionId', 'cwd'],
   properties: { client: { type: 'string', enum: CLIENTS }, sessionId: uuidSchema,
     cwd: { type: 'string', minLength: 1, maxLength: 4096 }, unitId: uuidSchema } };
 const TOOLS = [
   { name: 'processing_status', description: 'Read bounded processing-chat status for the selected collection. Returns no evidence or drafts.',
-    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema } },
+    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
   { name: 'process_selected_captures', description: 'Request the existing Cuefluent Notes skill processing workflow in its reusable excluded chat. Requires verified native source context and existing consent. Returns only status; never approves or saves a proposal.',
     inputSchema: { type: 'object', additionalProperties: false,
-      properties: { collectionId: collectionSchema, requestId: uuidSchema, selection: selectionSchema } },
+      properties: { collectionId: collectionSchema, retryToken: retrySchema, requestId: uuidSchema, selection: selectionSchema } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
   { name: 'processing_review', description: 'Open native review controls for the exact outstanding proposal. Drafts stay in the host form; only a native host response can save, skip, or cancel. Tool arguments never authorize an outcome.',
-    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema } },
+    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } }
 ];
 
@@ -70,11 +71,12 @@ function nativeContext(client, meta, env) {
 
 function argumentsFor(name, args) {
   try {
-    if (['processing_status', 'processing_review'].includes(name)) keys(args, [], ['collectionId']);
-    else if (name === 'process_selected_captures') keys(args, [], ['requestId', 'collectionId', 'selection']);
+    if (['processing_status', 'processing_review'].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
+    else if (name === 'process_selected_captures') keys(args, [], ['requestId', 'collectionId', 'selection', 'retryToken']);
     else fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
     if (args.collectionId !== undefined) id(args.collectionId);
     if (args.requestId !== undefined) nativeId(args.requestId);
+    if (args.retryToken !== undefined) nativeId(args.retryToken);
     const result = args.collectionId === undefined ? {} : { collectionId: args.collectionId };
     if (args.requestId !== undefined) result.requestId = args.requestId;
     if (args.selection !== undefined) {
@@ -126,7 +128,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
   const launchEnv = { CLAUDE_CODE_SESSION_ID: env.CLAUDE_CODE_SESSION_ID };
   let initialized = false, pending = Buffer.alloc(0), queue = Promise.resolve(), queued = 0, closed = false;
   let formSupported = false, clientCapabilities = Object.freeze({});
-  const requests = new Map(), forms = new Map();
+  const requests = new Map(), forms = new Map(), handshakes = new Map();
   const reply = async (value, limit = OUTPUT_BYTES) => {
     const bytes = Buffer.from(`${canonicalJSON(value)}\n`);
     if (bytes.length > limit) fail(limit === FORM_BYTES ? 'PROCESSING_REVIEW_TOO_LARGE' : 'PROCESSING_CONTROL_OUTPUT_INVALID');
@@ -185,7 +187,34 @@ export async function runProcessingControlServer({ client, input = process.stdin
           const args = argumentsFor(row.params.name, row.params.arguments ?? {});
           const context = nativeContext(client, row.params._meta, launchEnv);
           const invocation = Object.freeze({ tool: row.params.name, arguments: args });
-          const source = await resolveSource(context, invocation);
+          const retryToken = row.params.arguments?.retryToken;
+          // Tokens are connection-local challenges, never authority. A retry must
+          // verify the *original* completed native call and its exact response.
+          // Each challenge is single-use, short-lived and bound to this turn.
+          for (const [token, pending] of handshakes) if (pending.expires <= performance.now()) handshakes.delete(token);
+          let prior;
+          if (retryToken !== undefined) {
+            prior = handshakes.get(retryToken); handshakes.delete(retryToken);
+            if (!prior || context.client !== prior.context.client || context.sessionId !== prior.context.sessionId ||
+                context.unitId !== prior.context.unitId || context.toolCallId === prior.context.toolCallId ||
+                context.itemId === prior.context.itemId || canonicalJSON(invocation) !== canonicalJSON(prior.invocation)) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+          }
+          const source = await resolveSource(prior?.context ?? context, invocation, { signal });
+          signal.throwIfAborted();
+          if (source?.pending === true) {
+            if (prior || handshakes.size >= QUEUED_REQUESTS) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+            const retryToken = randomUUID();
+            const pendingResult = { content: [{ type: 'text', text: canonicalJSON({ interfaceVersion: 1,
+              status: 'verification-required', retryToken,
+              instruction: 'No processing or review has started. End this exec/tool call. In a new exec/tool call, repeat the same tool and arguments with retryToken. Do not retry inside this exec.' }) }], isError: false };
+            handshakes.set(retryToken, { context, invocation, source, resultHash: digest(canonicalJSON(pendingResult)), expires: performance.now() + 60_000 });
+            commitResponse(); await reply({ jsonrpc: '2.0', id: rpcId, result: pendingResult }); return;
+          }
+          if (prior && (!source || source.handshakeResultHash !== prior.resultHash ||
+              source.configHash !== prior.source.configHash || source.outerRecordHash !== prior.source.outerRecordHash ||
+              source.selectionHash !== prior.source.selectionHash || source.collectionId !== prior.source.collectionId ||
+              canonicalJSON(source.source) !== canonicalJSON(prior.source.source) ||
+              canonicalJSON(source.selection) !== canonicalJSON(prior.source.selection))) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
           signal.throwIfAborted();
           if (!source || typeof source !== 'object') fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
           const collectionId = args.collectionId ?? source.collectionId;
@@ -293,6 +322,6 @@ export async function runProcessingControlServer({ client, input = process.stdin
     if (pending.length) fail('PROCESSING_CONTROL_PROTOCOL');
   } finally {
     closed = true; rejectForms('PROCESSING_REVIEW_INTERRUPTED');
-    await queue;
+    try { await queue; } finally { handshakes.clear(); }
   }
 }

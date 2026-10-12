@@ -63,7 +63,7 @@ async function fixture(t, client = 'codex', { register = true, midRecord = false
       isSidechain: false, parentUuid: preBoundary.uuid, promptId: unitId, message: { role: 'user', content: '/cuefluent-notes process' } };
   return { ...f, source, context, invocation, skillPath, boundary, selected, store, nativeSkill, nativeCall, spacer,
     append: rows => fs.appendFile(source.path, rows.map(line).join('')),
-    resolve: (ctx = context, call = invocation) => resolveProcessingInvocation(f.capability, ctx, call, { skillPath }) };
+    resolve: (ctx = context, call = invocation) => resolveProcessingInvocation(f.capability, ctx, call, { skillPath, settleMs: 0 }) };
 }
 
 test('Codex typed native invocation binds the selected call and exact native skill input without writes', async t => {
@@ -382,4 +382,106 @@ test('processing hook floors exclude earlier calls and stale policy bindings can
   const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(config) });
   await assert.rejects(resolveProcessingInvocation(capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
   assert.equal(value.snapshot.eofByte, Buffer.byteLength(await fs.readFile(f.source.path)) - Buffer.byteLength(line(f.nativeCall())));
+});
+
+test('delayed Claude native persistence can settle without granting authority to a missing call', async t => {
+  const f = await fixture(t, 'claude'); await f.append([f.spacer()]);
+  const before = await fs.readFile(f.options.configPath);
+  let appended;
+  const timer = setTimeout(() => { appended = f.append([f.nativeCall()]); }, 80);
+  t.after(() => clearTimeout(timer));
+  const result = await resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath });
+  await appended;
+  assert.equal(isProcessingInvocation(result), true);
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  await assert.rejects(resolveProcessingInvocation(f.capability, { ...f.context, toolCallId: 'missing' }, f.invocation,
+    { skillPath: f.skillPath, settleMs: 30 }), unavailable);
+});
+test('native persistence waits are cancelled before dispatch and keep invalid calls refused', async t => {
+  const f = await fixture(t, 'claude'); await f.append([f.spacer()]);
+  const abort = new AbortController();
+  const pending = resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath, signal: abort.signal });
+  abort.abort(); await assert.rejects(pending, { name: 'AbortError' });
+  const call = f.nativeCall(); call.message.content[0].input = { altered: true }; await f.append([call]);
+  await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
+});
+
+function nestedRows(f, result) {
+  f.context.toolCallId = `exec-${randomUUID()}`; f.context.itemId = `ctc_${randomUUID()}`;
+  const outer = { timestamp: stamp, ordinal: 4, type: 'response_item', payload: { type: 'custom_tool_call',
+    id: f.context.itemId, call_id: 'outer', name: 'exec', input: 'Model-written code is not parsed for authority.',
+    internal_chat_message_metadata_passthrough: { turn_id: f.context.unitId } } };
+  const call = { timestamp: stamp, ordinal: 5, type: 'event_msg', payload: { type: 'item_completed',
+    thread_id: f.context.sessionId, turn_id: f.context.unitId, item: { type: 'McpToolCall', id: f.context.toolCallId,
+      server: 'cuefluent_control', tool: f.invocation.tool, arguments: f.invocation.arguments, status: 'completed', result } } };
+  const output = { timestamp: stamp, ordinal: 6, type: 'response_item', metadata: { client_authored: false }, payload: {
+    type: 'custom_tool_call_output', call_id: 'outer', output: 'Synthetic wrapper output', internal_chat_message_metadata_passthrough: { turn_id: f.context.unitId } } };
+  return { outer, call, output };
+}
+test('Codex outer exec can request a handshake but only a completed exact inner call proves invocation', async t => {
+  const f = await fixture(t), result = { content: [{ type: 'text', text: 'Synthetic challenge' }], isError: false };
+  const rows = nestedRows(f, result); await f.append([f.spacer(), f.nativeSkill(), rows.outer]);
+  const pending = await f.resolve(); assert.equal(pending.pending, true); assert.equal(isProcessingInvocation(pending), false);
+  await f.append([rows.call, rows.output]);
+  const bound = await f.resolve(); assert.equal(isProcessingInvocation(bound), true);
+  assert.equal(bound.handshakeResultHash, digest(canonicalJSON(result))); assert.equal(bound.nativeSkill, false);
+  assert.equal(bound.controlExclusionUnsupported, true);
+});
+test('Codex nested binding rejects forged metadata, arguments, duplicate calls and incomplete native results', async t => {
+  for (const [name, change] of Object.entries({
+    arguments: r => { r.call.payload.item.arguments = {}; },
+    server: r => { r.call.payload.item.server = 'other'; },
+    thread: r => { r.call.payload.thread_id = randomUUID(); },
+    turn: r => { r.call.payload.turn_id = randomUUID(); },
+    failure: r => { r.call.payload.item.status = 'failed'; },
+    output: r => { r.output.metadata.client_authored = true; },
+    missing: r => { r.output.payload.call_id = 'other'; },
+  })) await t.test(name, async t => {
+    const f = await fixture(t), rows = nestedRows(f, { content: [], isError: false }); change(rows);
+    await f.append([f.spacer(), rows.outer, rows.call, rows.output]); await assert.rejects(f.resolve(), unavailable);
+  });
+});
+
+test('MCP handshake verifies native bytes end to end and refuses source replacement between calls', async t => {
+  const { PassThrough, Writable } = await import('node:stream');
+  const { runProcessingControlServer } = await import('./processing-control-server.mjs');
+  for (const altered of [false, true]) await t.test(altered ? 'replaced source' : 'verified retry', async t => {
+    const f = await fixture(t), r = nestedRows(f, null);
+    await f.append([f.spacer(), r.outer]);
+    const input = new PassThrough(), received = new Map(), waiting = new Map(); let calls = 0;
+    const output = new Writable({ write(bytes, _e, done) {
+      for (const line of bytes.toString().trim().split('\n')) {
+        const row = JSON.parse(line); received.set(row.id, row); waiting.get(row.id)?.(row);
+      }
+      done();
+    } });
+    const send = (id, params, method = 'tools/call') => input.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    const wait = id => received.get(id) ?? new Promise(resolve => waiting.set(id, resolve));
+    const metadata = { callId: f.context.toolCallId, itemId: f.context.itemId,
+      'x-codex-turn-metadata': { thread_id: f.context.sessionId, session_id: f.context.sessionId, turn_id: f.context.unitId } };
+    // Use an actual exposed tool, with the real native resolver and storage guard.
+    f.invocation.tool = 'process_selected_captures'; r.call.payload.item.tool = f.invocation.tool;
+    const server = runProcessingControlServer({ client: 'codex', input, output,
+      resolveSource: async (context, invocation, { signal }) => ({ ...await resolveProcessingInvocation(f.capability, context, invocation,
+        { skillPath: f.skillPath, signal, settleMs: 0 }), collectionId: f.collection.id }),
+      getStatus: async () => { throw new Error('Unexpected status'); },
+      requestProcessing: async () => { calls++; return { status: 'busy', nextAction: 'wait' }; }
+    });
+    send(0, { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } }, 'initialize'); await wait(0);
+    send(1, { name: f.invocation.tool, arguments: f.invocation.arguments, _meta: metadata });
+    const first = await wait(1); assert.equal(calls, 0);
+    const retryToken = JSON.parse(first.result.content[0].text).retryToken;
+    r.call.payload.item.result = first.result; await f.append([r.call, r.output]);
+    if (altered) {
+      const bytes = await fs.readFile(f.source.path); await fs.rename(f.source.path, f.source.path + '.preserved');
+      await fs.writeFile(f.source.path, bytes);
+    }
+    send(2, { name: f.invocation.tool, arguments: { ...f.invocation.arguments, retryToken },
+      _meta: { ...metadata, callId: `exec-${randomUUID()}`, itemId: 'ctc_second' } });
+    const second = await wait(2);
+    assert.equal(calls, altered ? 0 : 1);
+    if (!altered) assert.equal(JSON.parse(second.result.content[0].text).status, 'busy');
+    else assert.ok(second.error);
+    input.end(); await server;
+  });
 });

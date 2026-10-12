@@ -186,12 +186,20 @@ The installed `cuefluent_control` MCP server exposes three strict tools:
 
 | Tool | Arguments |
 | --- | --- |
-| `processing_status` | `{collectionId?}` |
-| `process_selected_captures` | `{collectionId?, selection?, requestId?}` |
-| `processing_review` | `{collectionId?}` |
+| `processing_status` | `{collectionId?, retryToken?}` |
+| `process_selected_captures` | `{collectionId?, selection?, requestId?, retryToken?}` |
+| `processing_review` | `{collectionId?, retryToken?}` |
 
 The MCP `arguments` member may be omitted or null for an empty argument object;
 other non-object values are rejected. Native source verification still applies.
+A code-mode call can first return `{interfaceVersion: 1, status:
+"verification-required", retryToken, instruction}`. This is a challenge only,
+not processing status or admission. Complete that exec, then repeat the same tool
+and arguments with the UUID `retryToken` in a new exec. The connection retains the
+original request for at most one minute and verifies its completed native call and
+response before any work. A token cannot change arguments, turn, source or policy,
+is consumed on its first retry, and does not survive reconnects. A failed retry
+requires a fresh explicit invocation; it must not fall back to inline processing.
 
 Native metadata must bind the actual call to an already registered source: an
 active or paused selection, explicit capture scopes, or a processing-only hook
