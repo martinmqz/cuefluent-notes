@@ -435,7 +435,6 @@ test('Codex nested binding rejects forged metadata, arguments, duplicate calls a
     turn: r => { r.call.payload.turn_id = randomUUID(); },
     failure: r => { r.call.payload.item.status = 'failed'; },
     output: r => { r.output.metadata.client_authored = true; },
-    missing: r => { r.output.payload.call_id = 'other'; },
   })) await t.test(name, async t => {
     const f = await fixture(t), rows = nestedRows(f, { content: [], isError: false }); change(rows);
     await f.append([f.spacer(), rows.outer, rows.call, rows.output]); await assert.rejects(f.resolve(), unavailable);
@@ -445,7 +444,8 @@ test('Codex nested binding rejects forged metadata, arguments, duplicate calls a
 test('MCP handshake verifies native bytes end to end and refuses source replacement between calls', async t => {
   const { PassThrough, Writable } = await import('node:stream');
   const { runProcessingControlServer } = await import('./processing-control-server.mjs');
-  for (const altered of [false, true]) await t.test(altered ? 'replaced source' : 'verified retry', async t => {
+  for (const variant of ['verified retry', 'replaced source', 'late pair', 'late output', 'never persisted']) await t.test(variant, async t => {
+    const altered = variant === 'replaced source';
     const f = await fixture(t), r = nestedRows(f, null);
     await f.append([f.spacer(), r.outer]);
     const input = new PassThrough(), received = new Map(), waiting = new Map(); let calls = 0;
@@ -462,8 +462,8 @@ test('MCP handshake verifies native bytes end to end and refuses source replacem
     // Use an actual exposed tool, with the real native resolver and storage guard.
     f.invocation.tool = 'process_selected_captures'; r.call.payload.item.tool = f.invocation.tool;
     const server = runProcessingControlServer({ client: 'codex', input, output,
-      resolveSource: async (context, invocation, { signal }) => ({ ...await resolveProcessingInvocation(f.capability, context, invocation,
-        { skillPath: f.skillPath, signal, settleMs: 0 }), collectionId: f.collection.id }),
+      resolveSource: async (context, invocation, { signal, requireCompleted }) => ({ ...await resolveProcessingInvocation(f.capability, context, invocation,
+        { skillPath: f.skillPath, signal, requireCompleted, settleMs: variant.startsWith('late') ? 1000 : 0 }), collectionId: f.collection.id }),
       getStatus: async () => { throw new Error('Unexpected status'); },
       requestProcessing: async () => { calls++; return { status: 'busy', nextAction: 'wait' }; }
     });
@@ -471,7 +471,12 @@ test('MCP handshake verifies native bytes end to end and refuses source replacem
     send(1, { name: f.invocation.tool, arguments: f.invocation.arguments, _meta: metadata });
     const first = await wait(1); assert.equal(calls, 0);
     const retryToken = JSON.parse(first.result.content[0].text).retryToken;
-    r.call.payload.item.result = first.result; await f.append([r.call, r.output]);
+    r.call.payload.item.result = first.result;
+    if (variant === 'late output') await f.append([r.call]);
+    else if (!variant.startsWith('late') && variant !== 'never persisted') await f.append([r.call, r.output]);
+    if (variant.startsWith('late')) observeNativeReads(t, [f.source], async (_file, count) => {
+      if (count === 1) await f.append(variant === 'late pair' ? [r.call, r.output] : [r.output]);
+    });
     if (altered) {
       const bytes = await fs.readFile(f.source.path); await fs.rename(f.source.path, f.source.path + '.preserved');
       await fs.writeFile(f.source.path, bytes);
@@ -479,9 +484,104 @@ test('MCP handshake verifies native bytes end to end and refuses source replacem
     send(2, { name: f.invocation.tool, arguments: { ...f.invocation.arguments, retryToken },
       _meta: { ...metadata, callId: `exec-${randomUUID()}`, itemId: 'ctc_second' } });
     const second = await wait(2);
-    assert.equal(calls, altered ? 0 : 1);
-    if (!altered) assert.equal(JSON.parse(second.result.content[0].text).status, 'busy');
+    assert.equal(calls, altered || variant === 'never persisted' ? 0 : 1);
+    if (!altered && variant !== 'never persisted') assert.equal(JSON.parse(second.result.content[0].text).status, 'busy');
     else assert.ok(second.error);
     input.end(); await server;
+  });
+});
+
+// More than a full tail per source reproduces cumulative-budget exhaustion.
+const largeClaudeTail = () => Array.from({ length: 17 }, () => line({ type: 'system', content: 'x'.repeat(128 * 1024) })).join('');
+async function registeredClaudeCandidates(f, count, { matchLast = false } = {}) {
+  const first = (await fs.readFile(f.source.path, 'utf8')).split('\n').slice(0, 2).map(JSON.parse);
+  const candidates = [];
+  for (let i = 0; i < count; i++) {
+    const sessionId = randomUUID(), rows = first.map(row => ({ ...row, sessionId }));
+    const prefix = rows.map(line).join(''), source = { ...f.source, sessionId, path: path.join(f.project, `${sessionId}.jsonl`) };
+    const call = f.nativeCall(); call.sessionId = sessionId;
+    await fs.writeFile(source.path, prefix + largeClaudeTail() + (matchLast && i === count - 1 ? line(call) : ''));
+    source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
+    const boundary = { ...f.boundary, sourceIdentity: source.fileIdentity, eofByte: Buffer.byteLength(prefix),
+      record: { id: rows[1].uuid, startByte: Buffer.byteLength(line(rows[0])), endByte: Buffer.byteLength(prefix), hash: digest(line(rows[1])) } };
+    candidates.push({ source, boundary });
+  }
+  for (const { source, boundary } of candidates) {
+    const store = await openWorkflowIntake(f.capability, { client: 'claude', sessionId: source.sessionId, cwd: f.project }, 'collect');
+    await withIntakeLock(store, tx => controlSelection(tx, { source, boundary, expectedHash: null,
+      request: { id: randomUUID(), operation: 'start', client: 'claude', sessionId: source.sessionId,
+        unitId: boundary.unitId, expectedRevision: 0 }, authorize: async () => true }));
+  }
+  return candidates.map(item => item.source);
+}
+
+// Append only after the native reader closes its first fixed snapshot. This
+// deterministically exercises a missing record without wall-clock races.
+function observeNativeReads(t, sources, afterRead = async () => {}) {
+  const original = fs.open, reads = new Map(sources.map(source => [source.path, 0]));
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    const handle = await original.call(this, file, ...args);
+    if (reads.has(file) && typeof args[0] === 'number') {
+      reads.set(file, reads.get(file) + 1);
+      const close = handle.close.bind(handle), count = reads.get(file);
+      handle.close = async () => { await close(); await afterRead(file, count); };
+    }
+    return handle;
+  });
+  return reads;
+}
+
+test('Claude settles the primary tail without opening or scanning registered fallback sources', async t => {
+  const f = await fixture(t, 'claude'); await fs.appendFile(f.source.path, largeClaudeTail());
+  const candidates = await registeredClaudeCandidates(f, 20);
+  const reads = observeNativeReads(t, [f.source, ...candidates], async (file, count) => {
+    if (file === f.source.path && count === 1) await f.append([f.nativeCall()]);
+  });
+  t.mock.method(fs, 'opendir', async () => assert.fail('primary settling must not scan fallback directories'));
+  const result = await resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath });
+  assert.equal(result.callId, f.context.toolCallId); assert.equal(reads.get(f.source.path), 2);
+  for (const candidate of candidates) assert.equal(reads.get(candidate.path), 0);
+});
+
+test('Claude fallback can read every full-sized candidate once after the bounded primary wait', async t => {
+  const f = await fixture(t, 'claude'); await fs.appendFile(f.source.path, largeClaudeTail());
+  const candidates = await registeredClaudeCandidates(f, 32, { matchLast: true });
+  const reads = observeNativeReads(t, [f.source, ...candidates]);
+  const result = await resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath });
+  assert.equal(result.selection.sessionId, candidates.at(-1).sessionId);
+  assert.ok(reads.get(f.source.path) >= 1 && reads.get(f.source.path) <= 5);
+  for (const candidate of candidates) assert.equal(reads.get(candidate.path), 1);
+});
+
+test('a definitive Claude mismatch is not retried or hidden by a fallback match', async t => {
+  const f = await fixture(t, 'claude');
+  const bad = f.nativeCall(); bad.message.content[0].input = { changed: true }; await f.append([bad]);
+  const candidates = await registeredClaudeCandidates(f, 1, { matchLast: true });
+  const reads = observeNativeReads(t, [f.source, ...candidates]);
+  t.mock.method(fs, 'opendir', async () => assert.fail('definitive refusal must not scan'));
+  await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
+  assert.equal(reads.get(f.source.path), 1); assert.equal(reads.get(candidates[0].path), 0);
+});
+
+test('native persistence wait preserves the initially inspected selection', async t => {
+  const f = await fixture(t, 'claude'); await f.append([f.spacer()]);
+  const reads = observeNativeReads(t, [f.source], async (_file, count) => {
+    if (count !== 1) return;
+    await f.append([f.nativeCall()]);
+    await withIntakeLock(f.store, tx => controlSelection(tx, { source: f.source, expectedHash: f.selected.hash,
+      request: { id: randomUUID(), operation: 'exclude', client: 'claude', sessionId: f.context.sessionId,
+        unitId: randomUUID(), expectedRevision: f.selected.state.revision }, authorize: async () => true }));
+  });
+  await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation, { skillPath: f.skillPath }), unavailable);
+  assert.equal(reads.get(f.source.path), 1);
+});
+
+test('Codex incomplete nested pairs remain pending and never prove a call', async t => {
+  for (const present of ['inner', 'outer output', 'neither']) await t.test(present, async t => {
+    const f = await fixture(t), rows = nestedRows(f, { content: [], isError: false });
+    await f.append([f.spacer(), rows.outer, ...(present === 'inner' ? [rows.call] : present === 'outer output' ? [rows.output] : [])]);
+    const pending = await f.resolve(); assert.equal(pending.pending, true); assert.equal(isProcessingInvocation(pending), false);
+    await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation,
+      { skillPath: f.skillPath, settleMs: 0, requireCompleted: true }), unavailable);
   });
 });

@@ -229,20 +229,23 @@ test('formal processing cannot replace its verified source selection with model 
 });
 
 test('formal processing existing evidence remains available with collection disabled', async t => {
-  const f = await processingFixture(t), config = JSON.parse(await fs.readFile(f.options.configPath, 'utf8'));
-  config.routes[0].collection.enabled = false;
-  const bytes = JSON.stringify(config); await fs.writeFile(f.options.configPath, bytes);
-  f.options.expectedConfigHash = digest(bytes);
-  f.capability = await verifyWorkflowStorage(f.options);
-  f.store = await openWorkflowIntake(f.capability);
-  const h = await harness(t, f); h.nativeSkill = true;
-  const closed = h.whenClosed();
-  const result = await h.call('process_selected_captures', { collectionId: f.collection.id });
-  assert.equal(result.error, undefined);
-  await closed;
-  assert.equal(h.dispatches, 1);
-  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'idle');
-  await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+  for (const nested of [false, true]) await t.test(nested ? 'code mode' : 'direct', async t => {
+    const f = await processingFixture(t), config = JSON.parse(await fs.readFile(f.options.configPath, 'utf8'));
+    config.routes[0].collection.enabled = false;
+    const bytes = JSON.stringify(config); await fs.writeFile(f.options.configPath, bytes);
+    f.options.expectedConfigHash = digest(bytes);
+    f.capability = await verifyWorkflowStorage(f.options);
+    f.store = await openWorkflowIntake(f.capability);
+    const h = await harness(t, f); h.nativeSkill = !nested; h.controlExclusionUnsupported = nested;
+    const closed = h.whenClosed();
+    const result = await h.call('process_selected_captures', { collectionId: f.collection.id });
+    assert.equal(result.error, undefined);
+    assert.deepEqual(body(result).diagnostics, []);
+    await closed;
+    assert.equal(h.dispatches, 1);
+    assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'idle');
+    await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
+  });
 });
 
 test('read-only status and unconfigured collection lookup dispatch no model and write no configuration', async t => {

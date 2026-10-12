@@ -36,8 +36,10 @@ in one already registered, authorized source. Discovery and source reads have
 finite entry, byte and attempt limits. Exceeding them reports `PROCESSING_SOURCE_DISCOVERY_LIMIT`; reconnect the MCP server in
 the intended session instead of guessing a source.
 
-The adapter briefly retries missing native records because client persistence can
-lag tool dispatch. A Codex code-mode call needs a separate verification handshake:
+The adapter briefly retries missing native records in the selected source because
+client persistence can lag tool dispatch. Claude's registered-source fallback
+runs once after that wait; definitive mismatches are refused without retrying.
+A Codex code-mode call needs a separate verification handshake:
 `verification-required` returns an opaque `retryToken` without delivering evidence,
 starting processing or opening a review. End the current exec, then repeat the
 same tool and arguments with that token in a new exec. The adapter checks the
@@ -45,6 +47,8 @@ original completed native MCP event, arguments, exact challenge response and
 unchanged source selection. Tokens are short-lived, single-use and local to the
 connection; they grant no authority themselves. An expired, cancelled, changed or
 unverified request stops without dispatch. No JavaScript text is treated as proof.
+The retry can briefly wait for the original inner event and outer result to finish
+persisting. It never dispatches from a partial pair or retries the processing run.
 
 Pausing collection preserves the registered source for independently authorized
 processing, status and review. Verifying a new native control does not resume

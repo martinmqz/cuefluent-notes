@@ -14,7 +14,12 @@ import { claudeRegistrationHeader } from './claude-reader.mjs';
 import { loadClaudeProcessingSkill, findClaudeProcessingControlInput } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, fail, object, isNativeId } from './workflow-values.mjs';
 
-const MAX_PREFIX = 2 * 1024 * 1024;
+const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
+// A bounded primary wait plus one complete fallback pass, never a scan per retry.
+const MAX_READS = SETTLE_ATTEMPTS + FALLBACK_SOURCES;
+class MissingNativeInvocation extends Error {
+  constructor() { super('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); this.code = this.message; }
+}
 const bindings = new WeakSet(), pendingBindings = new WeakSet();
 export const isPendingProcessingInvocation = value => object(value) && pendingBindings.has(value);
 export const isProcessingInvocation = value => object(value) && bindings.has(value);
@@ -35,16 +40,19 @@ function codexNestedCall(records, context, invocation, argsHash) {
     r.value.payload.type === 'custom_tool_call_output');
   const calls = records.filter(r => r.value.type === 'event_msg' && r.value.payload?.type === 'item_completed' &&
     r.value.payload.item?.id === context.toolCallId);
-  if (!calls.length && !outputs.length) return { pending: true, callId: context.toolCallId, tool: `mcp__cuefluent_control.${invocation.tool}`, outerItemId: p.id, outerRecordHash: record.hash };
-  if (calls.length !== 1 || outputs.length !== 1 || records.some(r => r.startByte > record.startByte &&
-      r.startByte < outputs[0].startByte && r.value.type === 'response_item' && r.value.payload?.type === 'custom_tool_call')) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
-  const event = calls[0], e = event.value.payload, item = e.item, output = outputs[0];
-  if (event.startByte <= record.startByte || output.startByte <= event.startByte ||
-      output.value.payload.internal_chat_message_metadata_passthrough?.turn_id !== context.unitId ||
-      output.value.metadata?.client_authored !== false || e.thread_id !== context.sessionId || e.turn_id !== context.unitId ||
+  if (calls.length > 1 || outputs.length > 1) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  const event = calls[0], e = event?.value.payload, item = e?.item, output = outputs[0];
+  // Validate every present record immediately; only absence may settle.
+  if (event && (event.startByte <= record.startByte || e.thread_id !== context.sessionId || e.turn_id !== context.unitId ||
       item.type !== 'McpToolCall' || item.server !== 'cuefluent_control' || item.tool !== invocation.tool ||
       item.status !== 'completed' || !object(item.result) || item.result.isError === true ||
-      digest(canonicalJSON(item.arguments)) !== argsHash) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+      digest(canonicalJSON(item.arguments)) !== argsHash)) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  if (output && (output.startByte <= record.startByte ||
+      output.value.payload.internal_chat_message_metadata_passthrough?.turn_id !== context.unitId ||
+      output.value.metadata?.client_authored !== false || records.some(r => r.startByte > record.startByte &&
+        r.startByte < output.startByte && r.value.type === 'response_item' && r.value.payload?.type === 'custom_tool_call'))) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  if (!event || !output) return { pending: true, callId: context.toolCallId, tool: `mcp__cuefluent_control.${invocation.tool}`, outerItemId: p.id, outerRecordHash: record.hash };
+  if (output.startByte <= event.startByte) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   // The handshake is verified below against our exact first response as well.
   return { callId: item.id, tool: `mcp__${item.server}.${item.tool}`, outerItemId: p.id, outerRecordHash: record.hash,
     handshakeResultHash: digest(canonicalJSON(item.result)) };
@@ -55,11 +63,10 @@ function codexNestedCall(records, context, invocation, argsHash) {
  * Pausing collection preserves this binding for independently authorized
  * processing; it does not reopen or extend any collection interval.
  */
-async function resolveBoundInvocation(capability, context, invocation, { skillPath, skillCommand, signal, readBudget, pins }) {
+async function resolveBoundInvocation(capability, context, invocation, { skillPath, skillCommand, signal, readBudget, configHash, settleMs, requireCompleted }) {
   signal?.throwIfAborted();
   const store = await openWorkflowIntake(capability);
   const identity = { client: context.client, sessionId: context.sessionId };
-  const { configHash } = await workflowProcessingContext(capability);
   const selected = await readSelection(store, identity);
   if (selected.state?.safetyStop) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   const intervals = selected.state ? currentIntervals(selected.state) : [];
@@ -71,7 +78,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   }
   if (!floor) {
     const name = processingSourcePath(identity, configHash), snapshot = await intakeSnapshot(store, 'state', name, { maxBytes: 16384 });
-    if (!snapshot.bytes) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    if (!snapshot.bytes) throw new MissingNativeInvocation();
     const value = validateProcessingSource(intakeJSON(snapshot), identity, configHash, snapshot.bytes);
     source = { ...identity, path: value.snapshot.path, fileIdentity: value.snapshot.fileIdentity, projectRoot: value.cwd };
     // Collection stays off. Only the explicit MCP request may inspect this
@@ -84,15 +91,45 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     processingBinding = { name, hash: snapshot.hash };
   }
   const selection = { client: context.client, sessionId: context.sessionId, cwd: source.projectRoot, unitId: null };
-  await assertWorkflowStorage(capability, selection, 'explicitProcess');
+  const guard = async () => {
+    signal?.throwIfAborted();
+    await assertWorkflowStorage(capability, selection, 'explicitProcess');
+    if ((await readSelection(store, identity)).hash !== selected.hash || (processingBinding &&
+        (await intakeSnapshot(store, 'state', processingBinding.name, { maxBytes: 16384 })).hash !== processingBinding.hash)) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    signal?.throwIfAborted();
+  };
+  const deadline = performance.now() + settleMs;
+  let found;
+  for (let attempt = 0; ; attempt++) {
+    await guard();
+    try {
+      found = await readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget });
+      if (requireCompleted && found.call.pending) throw new MissingNativeInvocation();
+      break;
+    } catch (error) {
+      const remaining = deadline - performance.now();
+      if (!(error instanceof MissingNativeInvocation) || remaining <= 0 || attempt === SETTLE_ATTEMPTS - 1) throw error;
+      await delay(Math.min(50 * 2 ** attempt, remaining), undefined, { signal });
+    }
+  }
+  await guard();
+  const { call, unitId, nativeSkill, nested, controlInput, argsHash } = found;
+  const result = Object.freeze({ source: Object.freeze(structuredClone(source)), selection: Object.freeze(selection),
+    configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill: nested ? false : nativeSkill,
+    controlExclusionUnsupported: Boolean(nested && nativeSkill), unitId, argsHash, ...call,
+    ...(controlInput ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand'].map(key => [key, controlInput[key]])) : {}) });
+  if (call.pending) pendingBindings.add(result);
+  else bindings.add(result);
+  return result;
+}
+
+// Re-read only the selected source tail while persistence catches up. Source
+// identity and the immutable floor remain pinned by resolveBoundInvocation.
+async function readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget }) {
   const endByte = Number((await fs.lstat(source.path, { bigint: true })).size);
   const from = Math.max(floor.eofByte, endByte - MAX_PREFIX);
-  const pin = canonicalJSON({ source, selectedHash: selected.hash, floor, processingBinding });
-  const previousPin = pins.get(source.sessionId);
-  if (previousPin !== undefined && previousPin !== pin) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
-  pins.set(source.sessionId, pin);
   readBudget.bytes += endByte - from;
-  if (++readBudget.reads > 64 || readBudget.bytes > 64 * 1024 * 1024) fail('PROCESSING_SOURCE_DISCOVERY_LIMIT');
+  if (++readBudget.reads > MAX_READS || readBudget.bytes > MAX_READS * MAX_PREFIX) fail('PROCESSING_SOURCE_DISCOVERY_LIMIT');
   const read = await readSessionRange({ source, from, endByte,
     startsMidRecord: from === floor.eofByte ? floor.startsMidRecord : true,
     maxBytes: MAX_PREFIX, maxRecords: 4096,
@@ -133,36 +170,21 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   }
   if (call && nested) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   call ??= nested;
-  if (!call) {
-    const error = Object.assign(new Error('PROCESSING_CONTROL_SOURCE_UNVERIFIED'), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
-    readBudget.pending = true; throw error;
-  }
+  if (!call) throw new MissingNativeInvocation();
   let controlInput = null;
   if (context.client === 'claude') {
     const skill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control: invocation.tool === 'processing_review' ? 'review' : 'process' });
     controlInput = findClaudeProcessingControlInput(read.records, { source, ...call, argsHash, skill });
     if (controlInput) { nativeSkill = true; unitId = controlInput.unitId; }
   }
-  signal?.throwIfAborted();
-  await assertWorkflowStorage(capability, selection, 'explicitProcess');
-  if ((await readSelection(store, identity)).hash !== selected.hash || (processingBinding &&
-      (await intakeSnapshot(store, 'state', processingBinding.name, { maxBytes: 16384 })).hash !== processingBinding.hash)) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
-  const result = Object.freeze({ source: Object.freeze(structuredClone(source)), selection: Object.freeze(selection),
-    configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill: nested ? false : nativeSkill,
-    controlExclusionUnsupported: Boolean(nested && nativeSkill), unitId, argsHash, ...call,
-    ...(controlInput ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand'].map(key => [key, controlInput[key]])) : {}) });
-  if (call.pending) pendingBindings.add(result);
-  else bindings.add(result);
-  return result;
+  return { call, unitId, nativeSkill, nested, controlInput, argsHash };
 }
 
 /** Claude may keep its MCP process across /clear. The launch UUID is a hint;
  * a fallback binds only the exact native tool-use ID in already registered,
  * authorized sources. No client archive discovery, cwd/latest guess or new grant.
  */
-async function resolveInvocationOnce(capability, context, invocation, options) {
-  try { return await resolveBoundInvocation(capability, context, invocation, options); }
-  catch (error) { if (context.client !== 'claude' || error.code !== 'PROCESSING_CONTROL_SOURCE_UNVERIFIED') throw error; }
+async function resolveClaudeFallback(capability, context, invocation, options) {
   const store = await openWorkflowIntake(capability);
   const matches = [], seen = new Set([context.sessionId]); let entries = 0, inspected = 0;
   for (const [name, directories] of [['sessions/claude', false], [processingSourceDirectory('claude'), true]]) {
@@ -176,10 +198,10 @@ async function resolveInvocationOnce(capability, context, invocation, options) {
       if (directories ? !entry.isDirectory() : !entry.isFile()) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
       if (seen.has(sessionId)) continue;
       seen.add(sessionId);
-      if (++inspected > 32) fail('PROCESSING_SOURCE_DISCOVERY_LIMIT');
+      if (++inspected > FALLBACK_SOURCES) fail('PROCESSING_SOURCE_DISCOVERY_LIMIT');
       try { matches.push(await resolveBoundInvocation(capability, { ...context, sessionId }, invocation, options)); }
       catch (error) {
-        if (!['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'WORKFLOW_NOT_AUTHORIZED', 'ENOENT'].includes(error.code)) throw error;
+        if (!(error instanceof MissingNativeInvocation) && !['WORKFLOW_NOT_AUTHORIZED', 'ENOENT'].includes(error.code)) throw error;
       }
     }
   }
@@ -191,17 +213,12 @@ async function resolveInvocationOnce(capability, context, invocation, options) {
  * unchanged source/selection, a shared finite read budget and cancellation.
  * No sleep, source scan or write is performed by hook ingress.
  */
-export async function resolveProcessingInvocation(capability, context, invocation, { settleMs = 1000, signal, ...options } = {}) {
-  if (!Number.isSafeInteger(settleMs) || settleMs < 0 || settleMs > 1000) fail('INVALID_PROCESSING_CLIENT');
-  const readBudget = { reads: 0, bytes: 0, pending: false }, pins = new Map();
-  const deadline = performance.now() + settleMs;
-  for (let attempt = 0; ; attempt++) {
-    signal?.throwIfAborted(); readBudget.pending = false;
-    try { return await resolveInvocationOnce(capability, context, invocation, { ...options, signal, readBudget, pins }); }
-    catch (error) {
-      const remaining = deadline - performance.now();
-      if (error.code !== 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' || !readBudget.pending || remaining <= 0 || attempt === 4) throw error;
-      await delay(Math.min(50 * 2 ** attempt, remaining), undefined, { signal });
-    }
-  }
+export async function resolveProcessingInvocation(capability, context, invocation, { settleMs = 1000, signal, requireCompleted = false, ...options } = {}) {
+  if (!Number.isSafeInteger(settleMs) || settleMs < 0 || settleMs > 1000 || typeof requireCompleted !== 'boolean') fail('PROCESSING_CONTROL_INVALID_REQUEST');
+  signal?.throwIfAborted();
+  const { configHash } = await workflowProcessingContext(capability);
+  const boundOptions = { ...options, signal, requireCompleted, configHash, readBudget: { reads: 0, bytes: 0 } };
+  try { return await resolveBoundInvocation(capability, context, invocation, { ...boundOptions, settleMs }); }
+  catch (error) { if (context.client !== 'claude' || !(error instanceof MissingNativeInvocation)) throw error; }
+  return resolveClaudeFallback(capability, context, invocation, { ...boundOptions, settleMs: 0 });
 }

@@ -47,7 +47,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   const jobs = new Map(), owners = new WeakMap(), committedReviews = new WeakMap(), replayed = new WeakMap();
   const openController = dependencies.openController ?? openProcessingController;
   const resolveInvocation = dependencies.resolveInvocation ?? resolveProcessingInvocation;
-  async function resolveSource(context, invocation, { signal } = {}) {
+  async function resolveSource(context, invocation, { signal, requireCompleted } = {}) {
     const selectedConfig = configPath ?? await workflowConfigPath();
     const snapshot = await readWorkflowSnapshot(selectedConfig);
     if (!snapshot.config) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
@@ -71,7 +71,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       const options = { configPath: selectedConfig, collectionId: collection.id, expectedConfigHash: snapshot.hash };
       const capability = await verifyWorkflowStorage(options);
       let source;
-      try { source = await withStorageProbes(() => resolveInvocation(capability, context, invocation, { skillPath, signal })); }
+      try { source = await withStorageProbes(() => resolveInvocation(capability, context, invocation, { skillPath, signal, requireCompleted })); }
       catch (error) {
         if (requested === undefined && error.code === 'PROCESSING_CONTROL_SOURCE_UNVERIFIED') continue;
         throw error;
@@ -230,10 +230,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         // separate call; redelivery cannot rewrite immutable proof or dispatch.
         return;
       }
-      if (!source.nativeSkill || !source.unitId || source.captureActive === false) {
+      if ((!source.nativeSkill && !source.controlExclusionUnsupported) || !source.unitId || source.captureActive === false) {
         release();
-        if (source.controlExclusionUnsupported && source.captureActive !== false) return { ...view,
-          diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
         return;
       }
       // Explicit processing consent is independent of automatic collection.
@@ -244,6 +242,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error;
         await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
         release(); return;
+      }
+      if (source.controlExclusionUnsupported) {
+        release();
+        return { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
       }
       const store = await withStorageProbes(() => openWorkflowIntake(capability, source.selection, 'collect'));
       const authorize = async () => { signal?.throwIfAborted(); await assertWorkflowStorage(capability, source.selection, 'collect'); signal?.throwIfAborted(); return true; };

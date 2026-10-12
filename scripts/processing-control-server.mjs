@@ -199,7 +199,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
                 context.unitId !== prior.context.unitId || context.toolCallId === prior.context.toolCallId ||
                 context.itemId === prior.context.itemId || canonicalJSON(invocation) !== canonicalJSON(prior.invocation)) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
           }
-          const source = await resolveSource(prior?.context ?? context, invocation, { signal });
+          const source = await resolveSource(prior?.context ?? context, invocation, { signal, requireCompleted: Boolean(prior) });
           signal.throwIfAborted();
           if (source?.pending === true) {
             if (prior || handshakes.size >= QUEUED_REQUESTS) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
@@ -210,7 +210,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
             handshakes.set(retryToken, { context, invocation, source, resultHash: digest(canonicalJSON(pendingResult)), expires: performance.now() + 60_000 });
             commitResponse(); await reply({ jsonrpc: '2.0', id: rpcId, result: pendingResult }); return;
           }
-          if (prior && (!source || source.handshakeResultHash !== prior.resultHash ||
+          if (prior && (prior.expires <= performance.now() || !source || source.handshakeResultHash !== prior.resultHash ||
               source.configHash !== prior.source.configHash || source.outerRecordHash !== prior.source.outerRecordHash ||
               source.selectionHash !== prior.source.selectionHash || source.collectionId !== prior.source.collectionId ||
               canonicalJSON(source.source) !== canonicalJSON(prior.source.source) ||
