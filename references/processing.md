@@ -184,8 +184,8 @@ stay unresolved.
 
 `EVIDENCE_AFTER_CODEX_TERMINAL` is a known reader refusal with no supported repair
 command. Preserve the selected source and pending state; do not discard late
-evidence to make collection proceed. Report the diagnostic and installed plugin
-and Codex versions in a
+evidence to make collection proceed. Ask the user to report the diagnostic and
+installed plugin and Codex versions in a
 [plugin issue](https://github.com/martinmqz/cuefluent-notes/issues).
 Do not attach raw session content or private settings unless the user separately
 authorizes sharing them.
