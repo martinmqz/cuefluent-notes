@@ -61,17 +61,13 @@ function boundedStructure(settings) {
 
 export function validateClaudeRestrictedSettings(settings) {
   if (!object(settings) || settings.disableAllHooks !== true ||
-      Object.keys(settings).some(key => !['disableAllHooks', 'model', 'modelOverrides', 'availableModels', 'effortLevel'].includes(key))) {
+      Object.keys(settings).some(key => !['disableAllHooks', 'model', 'modelOverrides', 'availableModels'].includes(key))) {
     fail('PROCESSING_CLIENT_SETTINGS_INVALID');
   }
   const result = { disableAllHooks: true };
   if (settings.model !== undefined) {
     result.model = value(settings.model);
     if (!result.model.trim()) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
-  }
-  if (settings.effortLevel !== undefined) {
-    if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(settings.effortLevel)) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
-    result.effortLevel = settings.effortLevel;
   }
   if (settings.modelOverrides !== undefined) {
     if (!object(settings.modelOverrides) || Object.keys(settings.modelOverrides).length > 128) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
@@ -161,10 +157,12 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
   }
   // Keep a profile model as a settings preference, not an environment override
   // that would outrank managed policy. Native precedence resolves the result.
+  // A user-level effortLevel has legacy model-specific semantics that differ
+  // from launch-level settings. Do not promote it or restore structured effort
+  // preferences; explicit CLAUDE_CODE_EFFORT_LEVEL remains native environment.
   const settings = validateClaudeRestrictedSettings({ disableAllHooks: true,
     ...(source.model !== undefined ? { model: source.model } : {}),
     ...(source.modelOverrides !== undefined ? { modelOverrides: source.modelOverrides } : {}),
-    ...(source.availableModels !== undefined ? { availableModels: source.availableModels } : {}),
-    ...(source.effortLevel !== undefined ? { effortLevel: source.effortLevel } : {}) });
+    ...(source.availableModels !== undefined ? { availableModels: source.availableModels } : {}) });
   return { env: selected, settings };
 }

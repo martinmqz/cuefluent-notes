@@ -109,7 +109,8 @@ async function providerSettings(f) {
   const settings = { env: { CLAUDE_CODE_USE_FOUNDRY: '1', ANTHROPIC_FOUNDRY_RESOURCE: 'synthetic-resource',
     ANTHROPIC_FOUNDRY_API_KEY: 'synthetic-profile-credential', PATH: 'synthetic-forbidden-path',
     NODE_OPTIONS: '--require synthetic-forbidden-loader', CUEFLUENT_ENGINE_TOKEN: 'synthetic-forbidden-authority' },
-    model: 'synthetic-model', effortLevel: 'xhigh', modelOverrides: { 'synthetic-model': 'synthetic-deployment' },
+    model: 'synthetic-model', effortLevel: 'xhigh', modelSettings: { 'synthetic-model': { effortLevel: 'low' } },
+    modelOverrides: { 'synthetic-model': 'synthetic-deployment' },
     availableModels: ['synthetic-model'],
     hooks: { SessionStart: 'synthetic-forbidden-hook' }, enabledPlugins: { 'synthetic@plugin': true } };
   const file = path.join(f.profile, 'settings.json');
@@ -128,7 +129,7 @@ function assertProviderLaunch(f, index = 0) {
   assert.notEqual(options.env.CUEFLUENT_ENGINE_TOKEN, 'synthetic-forbidden-authority');
   assert.equal(args[args.indexOf('--setting-sources') + 1], '');
   assert.deepEqual(JSON.parse(args[args.indexOf('--settings') + 1]), {
-    disableAllHooks: true, model: 'synthetic-model', modelOverrides: { 'synthetic-model': 'synthetic-deployment' }, availableModels: ['synthetic-model'], effortLevel: 'xhigh' });
+    disableAllHooks: true, model: 'synthetic-model', modelOverrides: { 'synthetic-model': 'synthetic-deployment' }, availableModels: ['synthetic-model'] });
   assert.equal(args[args.indexOf('--tools') + 1], '');
   assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
   for (const flag of ['--restricted', '--strict-mcp-config', '--disable-slash-commands', '--no-chrome']) assert(args.includes(flag));

@@ -29,18 +29,26 @@ over inherited shell values, as native user settings do. A verified Claude chat
 handoff preserves values already supplied by its host environment, using the
 user profile only for missing values. This keeps exported project account,
 endpoint and model selections intact. Supported profile model preferences,
-mappings, allowlists and effort settings are passed as restricted settings;
+mappings and allowlists are passed as restricted settings;
 native managed policy and environment-model precedence remain in force.
+
+Stored structured effort preferences (`effortLevel` and `modelSettings`) are not
+restored. Their user-profile semantics differ from launch-level settings, so the
+processor does not translate them into a global effort override. To select effort
+for restricted processing, supply `CLAUDE_CODE_EFFORT_LEVEL` through the host
+environment or the supported user-profile `env` settings. Otherwise the native
+client resolves effort without those stored preferences; see its
+[effort configuration](https://code.claude.com/docs/en/model-config#adjust-effort-level).
 
 Authentication values remain in process memory and environment, never command
 arguments, proposal receipts or plugin diagnostics. A missing user settings file
 retains the inherited environment. The processor does not discover project
-settings, restore Claude's credential-helper command settings, restore unrelated profile settings,
-or modify authentication. Project-specific configuration must already be supplied
-through the calling host's environment; project-specific structured settings are
-not read. Hooks, plugins, slash commands and arbitrary
-tools remain disabled; native runtime verification still requires the sole selected
-engine and its exact tool set.
+settings, restore Claude's credential-helper command settings, restore unrelated
+profile settings, or modify authentication. Project-specific configuration must
+already be supplied through the calling host's environment; project-specific
+structured settings are not read. Hooks, plugins, slash commands and arbitrary
+tools remain disabled; native runtime verification still requires the sole
+selected engine and its exact tool set.
 
 The inherited `CLAUDE_CONFIG_DIR` stays unset when unset, and keeps its exact
 spelling when set. Changing it can change native credential-store selection even

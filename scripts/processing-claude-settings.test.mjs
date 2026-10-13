@@ -59,7 +59,7 @@ test('user env precedence matches native settings and only explicit model prefer
   assert.equal(result.env.CLAUDE_CODE_USE_FOUNDRY, '1');
   assert.equal(result.env.ANTHROPIC_FOUNDRY_API_KEY, 'synthetic-profile-key');
   assert.equal(Object.hasOwn(result.env, 'ANTHROPIC_MODEL'), false);
-  assert.deepEqual(result.settings, { disableAllHooks: true, model: 'synthetic-profile-model', modelOverrides: { 'synthetic-model': 'synthetic-deployment' }, availableModels: ['synthetic-model'], effortLevel: 'xhigh' });
+  assert.deepEqual(result.settings, { disableAllHooks: true, model: 'synthetic-profile-model', modelOverrides: { 'synthetic-model': 'synthetic-deployment' }, availableModels: ['synthetic-model'] });
   f.env.ANTHROPIC_MODEL = 'synthetic-explicit-model';
   result = await resolveClaudeLaunchSettings(f.env);
   assert.equal(result.env.ANTHROPIC_MODEL, 'synthetic-explicit-model');
@@ -93,7 +93,6 @@ for (const [label, text] of [
   ['unpaired surrogate credential', '{"env":{"ANTHROPIC_API_KEY":"\\ud800"}}'],
   ['invalid model', '{"model":false}'], ['invalid overrides', '{"modelOverrides":{"synthetic":false}}'],
   ['invalid model allowlist', '{"availableModels":[false]}'],
-  ['unknown effort', '{"effortLevel":"synthetic-unknown"}'],
 ]) test(`${label} fails with a safe diagnostic and unchanged settings`, async t => {
   const f = await fixture(t, text), bytes = await fs.readFile(f.file);
   await assert.rejects(resolveClaudeLaunchSettings(f.env), error => error.code === 'PROCESSING_CLIENT_SETTINGS_INVALID' &&
@@ -123,11 +122,28 @@ test('directories and unavailable profiles cannot silently fall back to another 
 test('restricted settings accept only model controls and disabled hooks', () => {
   for (const settings of [null, { disableAllHooks: false }, { disableAllHooks: true, env: {} },
     { disableAllHooks: true, hooks: {} }, { disableAllHooks: true, enabledPlugins: {} },
-    { disableAllHooks: true, apiKeyHelper: 'synthetic-command' }]) {
+    { disableAllHooks: true, apiKeyHelper: 'synthetic-command' }, { disableAllHooks: true, effortLevel: 'xhigh' },
+    { disableAllHooks: true, modelSettings: { synthetic: { effortLevel: 'low' } } }]) {
     assert.throws(() => validateClaudeRestrictedSettings(settings), { code: 'PROCESSING_CLIENT_SETTINGS_INVALID' });
   }
   assert.throws(() => validateClaudeRestrictedSettings({ disableAllHooks: true,
     modelOverrides: { synthetic: 'x'.repeat(16 * 1024) } }), { code: 'PROCESSING_CLIENT_SETTINGS_LIMIT' });
+});
+
+test('stored effort preferences are not promoted into global launch overrides and explicit native env remains supported', async t => {
+  const f = await fixture(t, JSON.stringify({ model: 'claude-opus-5-5', effortLevel: 'xhigh',
+    modelSettings: { 'claude-opus-5-5': { effortLevel: 'low' } } }));
+  const bytes = await fs.readFile(f.file);
+  let result = await resolveClaudeLaunchSettings(f.env);
+  assert.deepEqual(result.settings, { disableAllHooks: true, model: 'claude-opus-5-5' });
+  assert.equal(Object.hasOwn(result.env, 'CLAUDE_CODE_EFFORT_LEVEL'), false);
+  assert((await fs.readFile(f.file)).equals(bytes));
+  await fs.writeFile(f.file, JSON.stringify({ effortLevel: 'xhigh', modelSettings: { synthetic: { effortLevel: 'low' } },
+    env: { CLAUDE_CODE_EFFORT_LEVEL: 'medium' } }));
+  result = await resolveClaudeLaunchSettings(f.env);
+  assert.deepEqual(result.settings, { disableAllHooks: true });
+  assert.equal(result.env.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
+  assert.equal(JSON.parse(await fs.readFile(f.file, 'utf8')).env.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
 });
 
 test('unknown enabled provider switches are refused instead of silently selecting first-party', async t => {
