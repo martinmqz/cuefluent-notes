@@ -24,7 +24,7 @@ async function withLaunchFixture(t, run, nativeRun = success) {
     const environment = { CLAUDE_CONFIG_DIR: profile, CLAUDE_CODE_SESSION_ID: f.identity.sessionId,
       CLAUDECODE: '1', 'CUEFLUENT_TEST(x86)': 'synthetic inherited value' };
     const clearedProviderKeys = ['CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_FOUNDRY_RESOURCE', 'ANTHROPIC_FOUNDRY_API_KEY',
-      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL'];
+      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_SKIP_VERTEX_AUTH'];
     const previous = Object.fromEntries([...Object.keys(environment), ...clearedProviderKeys].map(key => [key, process.env[key]]));
     defer(() => {
       for (const [key, value] of Object.entries(previous)) {
@@ -211,6 +211,57 @@ test('MCP dispatch preserves project host account, endpoint and model over user-
   await admit(rpc, f); await rpc.close(); f.assertLaunch();
   for (const [key, value] of Object.entries(source)) assert.equal(f.nativeCalls[0].options.env[key], value);
   assert.equal(f.nativeCalls[0].options.env.CLAUDE_CODE_SKIP_VERTEX_AUTH, '1');
+}));
+
+test('CLI dispatch inside a Claude host preserves project account and endpoint over user-profile defaults', async t => withLaunchFixture(t, async f => {
+  process.env.AWS_PROFILE = 'synthetic-project-account'; process.env.ANTHROPIC_BASE_URL = 'https://project.example.invalid';
+  await fs.writeFile(path.join(f.profile, 'settings.json'), JSON.stringify({ env: { AWS_PROFILE: 'synthetic-user-account',
+    ANTHROPIC_BASE_URL: 'https://user.example.invalid' } }));
+  const result = await executeWorkflow('processing-chat-run', { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: { client: 'claude', requestId: randomUUID(),
+      selection: f.selection, expectedChatHash: null } }, { configPath: f.options.configPath });
+  assert.equal(result.state, 'idle'); f.assertLaunch();
+  assert.equal(f.nativeCalls[0].options.env.AWS_PROFILE, 'synthetic-project-account');
+  assert.equal(f.nativeCalls[0].options.env.ANTHROPIC_BASE_URL, 'https://project.example.invalid');
+}));
+
+test('verified host-mode reuse keeps inherited credentials after profile rotation until its host env is refreshed', async t => withLaunchFixture(t, async f => {
+  const file = path.join(f.profile, 'settings.json');
+  await fs.writeFile(file, JSON.stringify({ env: { ANTHROPIC_FOUNDRY_API_KEY: 'synthetic-original-key' } }));
+  const env = { ...process.env, ANTHROPIC_FOUNDRY_API_KEY: 'synthetic-original-key' };
+  const controller = await openProcessingController({ ...f.options, client: 'claude' }, { env, preferHostEnvironment: true });
+  f.defer(() => controller.close());
+  const first = await controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null });
+  await fs.writeFile(file, JSON.stringify({ env: { ANTHROPIC_FOUNDRY_API_KEY: 'synthetic-rotated-key' } }));
+  const second = await controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: first.chatHash });
+  assert.equal(second.chat.sessionId, first.chat.sessionId);
+  assert.equal(f.nativeCalls[1].options.env.ANTHROPIC_FOUNDRY_API_KEY, 'synthetic-original-key');
+  env.ANTHROPIC_FOUNDRY_API_KEY = 'synthetic-rotated-key';
+  await controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: second.chatHash });
+  assert.equal(f.nativeCalls[2].options.env.ANTHROPIC_FOUNDRY_API_KEY, 'synthetic-rotated-key');
+}));
+
+test('missing native profile returns safe CLI and MCP diagnostics without replacing the processing registry', async t => withLaunchFixture(t, async f => {
+  const initial = await executeWorkflow('processing-chat-run', { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: { client: 'claude', requestId: randomUUID(),
+      selection: f.selection, expectedChatHash: null } }, { configPath: f.options.configPath });
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const filenames = await fs.readdir(directory), before = await fs.readFile(path.join(directory, filenames[0]));
+  await fs.rm(f.profile, { recursive: true });
+  for (const [command, args] of [
+    ['processing-chat-status', { client: 'claude' }],
+    ['processing-chat-run', { client: 'claude', requestId: randomUUID(), selection: f.selection, expectedChatHash: initial.chatHash }],
+  ]) await assert.rejects(executeWorkflow(command, { collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash, args },
+    { configPath: f.options.configPath }), error => error.code === 'PROCESSING_CLIENT_SETTINGS_UNAVAILABLE' &&
+    error.message === error.code && error.cause === undefined);
+  const rpc = processingRpc(f); f.defer(() => rpc.close());
+  await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-11-25',
+    capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
+  const refused = await rpc.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'processing_status',
+    arguments: { collectionId: f.collection.id }, _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
+  assert.equal(refused.error.message, 'PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
+  assert((await fs.readFile(path.join(directory, filenames[0]))).equals(before));
+  assert.equal(f.nativeCalls.length, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 }));
 
 test('MCP exposes a safe profile-settings refusal without dispatch or lost state', async t => withLaunchFixture(t, async f => {

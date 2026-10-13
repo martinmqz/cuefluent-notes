@@ -8,10 +8,11 @@ Cuefluent does not need to be installed or running.
 
 This path requires the matching native client executable on PATH and its normal
 authentication. The native client resolves the model under the restricted
-processing launch settings. Persistent status does not yet report the resolved model. It
-does not supply a model override, install a client, select a provider, change
-authentication or run on a schedule. A desktop
-installation alone does not establish that its CLI is available. Native protocol
+processing launch settings, including the supported Claude preferences described
+below. Persistent status does not yet report the resolved model. The plugin does
+not choose a provider or model independently of that configuration, install a
+client, change authentication or run on a schedule. A desktop installation alone
+does not establish that its CLI is available. Native protocol
 support is checked at runtime; unsupported clients fail without inline processing.
 Desktop sidebar visibility and navigation require separate live verification.
 Status, review and registry recovery read the local client profile and stored
@@ -24,13 +25,35 @@ Restricted Claude processing retains its existing native authentication and
 supported provider, deployment and connection environment settings. Before each
 eligible run, including session reuse, it reads the selected user profile's
 `settings.json` (`~/.claude/settings.json`, or the profile chosen by
-`CLAUDE_CONFIG_DIR`). A standalone CLI launch applies supported user `env` values
-over inherited shell values, as native user settings do. A verified Claude chat
-handoff preserves values already supplied by its host environment, using the
-user profile only for missing values. This keeps exported project account,
+`CLAUDE_CONFIG_DIR`). A CLI launch outside Claude applies supported user `env`
+values over inherited shell values, as native user settings do. A verified Claude
+chat handoff, or a CLI launched from Claude with its native `CLAUDECODE` nesting
+hint, preserves values already supplied by the host environment, using the user
+profile only for missing values. The hint changes environment precedence only;
+it supplies no session identity or permission. This keeps exported project account,
 endpoint and model selections intact. Supported profile model preferences,
 mappings and allowlists are passed as restricted settings;
 native managed policy and environment-model precedence remain in force.
+
+The user file is reread before each eligible run, but an inherited host value
+still wins. The plugin cannot tell whether that value came from the old user
+settings or an intentional project override. Rotating a profile credential does
+not replace an inherited credential in a running MCP server. Restart the source
+client and reconnect its plugin MCP server so the updated host environment reaches
+the next request; do not discard the processing registry or captures. An ordinary
+CLI launch without a host override picks up the new profile value on its next run.
+
+The projection restores supported first-party/gateway, Foundry, Bedrock/Mantle
+and Vertex environment settings. Connection controls include uppercase and
+lowercase proxy variables, `API_TIMEOUT_MS`, certificate settings, and native
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS` and `MAX_THINKING_TOKENS` tuning. Unrelated keys
+and feature toggles are ignored, without interpreting every `CLAUDE_CODE_USE_*`
+name as a provider. The known unsupported provider selectors
+`CLAUDE_CODE_USE_ANTHROPIC_AWS` and `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` are
+refused when enabled in the user file. Other unrecognized file environment keys
+are not restored; use the standalone workflow when the native setup depends on
+them. Execution controls such as file-based `PATH`, `NODE_OPTIONS` and engine
+authorization are never restored.
 
 Stored structured effort preferences (`effortLevel` and `modelSettings`) are not
 restored. Their user-profile semantics differ from launch-level settings, so the
@@ -68,7 +91,10 @@ provider switch. The native provider SDK still owns its ordinary authentication;
 the plugin neither reads credential stores nor starts sign-in commands. Use the
 [standalone workflow](processing.md) from an uncaptured chat whose
 normal authentication works. Status and existing-proposal review remain available
-without reading these launch settings. A previously interrupted or unknown run
+without reading these launch settings, but opening their registry still requires
+a resolvable native profile directory. A missing or inaccessible profile reports
+`PROCESSING_CLIENT_SETTINGS_UNAVAILABLE` without selecting a replacement namespace.
+A previously interrupted or unknown run
 still needs the [existing recovery controls](workflow-cli.md#processing-chat-controls).
 
 Provider setup belongs to the native client; see its

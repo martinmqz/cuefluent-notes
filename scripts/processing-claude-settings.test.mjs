@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { resolveClaudeLaunchSettings, validateClaudeRestrictedSettings } from './processing-claude-settings.mjs';
+import { resolveClaudeLaunchSettings, validateClaudeRestrictedSettings, claudeProfileLocator, resolveClaudeProfile } from './processing-claude-settings.mjs';
 
 async function fixture(t, content = '{}') {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-provider-fixture-')));
@@ -35,7 +35,10 @@ for (const [name, env] of [
   ['first-party and gateway', { ANTHROPIC_API_KEY: 'synthetic-api-key', ANTHROPIC_AUTH_TOKEN: 'synthetic-token',
     CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-oauth', ANTHROPIC_BASE_URL: 'https://example.invalid', ANTHROPIC_CUSTOM_HEADERS: 'Synthetic: header' }],
   ['deployment and network', { ANTHROPIC_DEFAULT_OPUS_MODEL: 'synthetic-opus-deployment', ANTHROPIC_DEFAULT_SONNET_MODEL: 'synthetic-sonnet-deployment',
-    HTTPS_PROXY: 'https://example.invalid', NODE_EXTRA_CA_CERTS: 'synthetic-certificate-locator', CLAUDE_CODE_CLIENT_KEY_PASSPHRASE: 'synthetic-passphrase' }]
+    HTTPS_PROXY: 'https://example.invalid', NODE_EXTRA_CA_CERTS: 'synthetic-certificate-locator', CLAUDE_CODE_CLIENT_KEY_PASSPHRASE: 'synthetic-passphrase',
+    API_TIMEOUT_MS: '600000', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096', MAX_THINKING_TOKENS: '1024' }],
+  ['POSIX lowercase proxies', { http_proxy: 'https://http.example.invalid', https_proxy: 'https://https.example.invalid',
+    all_proxy: 'https://all.example.invalid', no_proxy: 'localhost' }]
 ]) test(`${name} user env is restored without loading profile hooks or unrelated execution controls`, async t => {
   const f = await fixture(t, JSON.stringify({ env: { ...env, PATH: 'unsafe-profile-path', NODE_OPTIONS: '--require synthetic-unsafe-loader',
     CUEFLUENT_ENGINE_TOKEN: 'unsafe-profile-engine-token', CLAUDE_CONFIG_DIR: 'unsafe-profile', CLAUDECODE: 'unsafe-parent',
@@ -43,7 +46,7 @@ for (const [name, env] of [
     hooks: { SessionStart: 'synthetic-forbidden-hook' }, enabledPlugins: { 'synthetic@plugin': true },
     permissions: { defaultMode: 'bypassPermissions' } }));
   const bytes = await fs.readFile(f.file), original = { ...f.env };
-  const result = await resolveClaudeLaunchSettings(f.env);
+  const result = await resolveClaudeLaunchSettings(f.env, { platform: name === 'POSIX lowercase proxies' ? 'linux' : process.platform });
   assert.deepEqual(result.env, { ...f.env, ...env });
   assert.deepEqual(result.settings, { disableAllHooks: true });
   assert.deepEqual(f.env, original); assert((await fs.readFile(f.file)).equals(bytes));
@@ -89,9 +92,9 @@ for (const [label, text] of [
   ['duplicate env names', '{"env":{"CLAUDE_CODE_USE_FOUNDRY":"1","CLAUDE_CODE_USE_FOUNDRY":"0"}}'],
   ['duplicate root env', '{"env":{},"env":{"ANTHROPIC_API_KEY":"synthetic-private-key"}}'],
   ['non-object settings', '[]'], ['non-object env', '{"env":[]}'], ['non-string env value', '{"env":{"ANTHROPIC_API_KEY":123}}'],
-  ['invalid ignored env value', '{"env":{"NODE_OPTIONS":123}}'], ['NUL credential', '{"env":{"ANTHROPIC_API_KEY":"x\\u0000y"}}'],
+  ['NUL credential', '{"env":{"ANTHROPIC_API_KEY":"x\\u0000y"}}'],
   ['unpaired surrogate credential', '{"env":{"ANTHROPIC_API_KEY":"\\ud800"}}'],
-  ['invalid model', '{"model":false}'], ['invalid overrides', '{"modelOverrides":{"synthetic":false}}'],
+  ['invalid model', '{"model":false}'], ['null model', '{"model":null}'], ['invalid overrides', '{"modelOverrides":{"synthetic":false}}'],
   ['invalid model allowlist', '{"availableModels":[false]}'],
 ]) test(`${label} fails with a safe diagnostic and unchanged settings`, async t => {
   const f = await fixture(t, text), bytes = await fs.readFile(f.file);
@@ -146,16 +149,32 @@ test('stored effort preferences are not promoted into global launch overrides an
   assert.equal(JSON.parse(await fs.readFile(f.file, 'utf8')).env.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
 });
 
-test('unknown enabled provider switches are refused instead of silently selecting first-party', async t => {
+test('known unsupported providers are refused while feature toggles are ignored', async t => {
   const f = await fixture(t);
   for (const input of ['1', 'true', 'YES', ' on ']) {
-    await fs.writeFile(f.file, JSON.stringify({ env: { CLAUDE_CODE_USE_SYNTHETIC_FUTURE_PROVIDER: input } }));
-    await assert.rejects(resolveClaudeLaunchSettings(f.env), { code: 'PROCESSING_CLIENT_SETTINGS_UNSUPPORTED' });
+    for (const provider of ['CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD']) {
+      await fs.writeFile(f.file, JSON.stringify({ env: { [provider]: input } }));
+      await assert.rejects(resolveClaudeLaunchSettings(f.env), { code: 'PROCESSING_CLIENT_SETTINGS_UNSUPPORTED' });
+    }
   }
   for (const input of ['', '0', 'false', 'False', 'no', 'off', 'OFF', 'disabled']) {
-    await fs.writeFile(f.file, JSON.stringify({ env: { CLAUDE_CODE_USE_SYNTHETIC_FUTURE_PROVIDER: input } }));
+    await fs.writeFile(f.file, JSON.stringify({ env: { CLAUDE_CODE_USE_ANTHROPIC_AWS: input } }));
     assert.deepEqual((await resolveClaudeLaunchSettings(f.env)).env, f.env);
   }
+  const bytes = JSON.stringify({ env: { CLAUDE_CODE_USE_POWERSHELL_TOOL: '1', CLAUDE_CODE_USE_SYNTHETIC_FEATURE: 'true',
+    BASH_DEFAULT_TIMEOUT_MS: 600000, NODE_OPTIONS: { ignored: true }, PATH: null, ANTHROPIC_API_KEY: 'synthetic-permitted-key' } });
+  await fs.writeFile(f.file, bytes);
+  const result = await resolveClaudeLaunchSettings(f.env);
+  assert.deepEqual(result.env, { ...f.env, ANTHROPIC_API_KEY: 'synthetic-permitted-key' });
+  assert.equal(await fs.readFile(f.file, 'utf8'), bytes);
+});
+
+test('profile lookup keeps native casing/spelling and emits only a safe unavailable code', async t => {
+  const f = await fixture(t);
+  assert.equal(claudeProfileLocator({ claude_config_dir: f.root }, 'win32'), f.root);
+  assert.equal(await resolveClaudeProfile(f.env), f.root);
+  await assert.rejects(resolveClaudeProfile({ CLAUDE_CONFIG_DIR: path.join(f.root, 'missing-private-profile') }), error =>
+    error.code === 'PROCESSING_CLIENT_SETTINGS_UNAVAILABLE' && error.message === error.code && error.cause === undefined);
 });
 
 test('Windows profile env casing replaces inherited aliases and refuses ambiguous settings aliases', async t => {
@@ -216,6 +235,16 @@ test('verified source-host env overrides profile defaults while bare CLI keeps n
   const windows = await resolveClaudeLaunchSettings({ ...f.env, aws_profile: 'synthetic-lowercase-source' },
     { platform: 'win32', preferHostEnvironment: true });
   assert.equal(windows.env.aws_profile, 'synthetic-lowercase-source'); assert.equal(Object.hasOwn(windows.env, 'AWS_PROFILE'), false);
+});
+
+test('POSIX proxy aliases cannot replace an exported host proxy in host mode', async t => {
+  const f = await fixture(t, JSON.stringify({ env: { https_proxy: 'https://user.example.invalid',
+    NO_PROXY: 'user.example.invalid' } }));
+  const env = { ...f.env, HTTPS_PROXY: 'https://host.example.invalid', no_proxy: 'host.example.invalid' };
+  const host = await resolveClaudeLaunchSettings(env, { platform: 'linux', preferHostEnvironment: true });
+  assert.deepEqual(host.env, env);
+  const cli = await resolveClaudeLaunchSettings(env, { platform: 'linux' });
+  assert.equal(cli.env.https_proxy, 'https://user.example.invalid'); assert.equal(cli.env.NO_PROXY, 'user.example.invalid');
 });
 
 test('settings file replacement at its existing canonical path is refused', async t => {

@@ -1,5 +1,3 @@
-import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
@@ -11,7 +9,7 @@ import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
 import { openCodexProcessingClient, codexProcessingProfile } from './processing-client-codex.mjs';
 import { createClaudeProcessingClient } from './processing-client-claude.mjs';
-import { resolveClaudeLaunchSettings } from './processing-claude-settings.mjs';
+import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment } from './processing-claude-settings.mjs';
 import { inspectProcessing } from './processing.mjs';
 import { processingExecutionCallbacks } from './processing-execution-receipts.mjs';
 import { reconcileCompletedProcessingExecution } from './processing-chat-recovery.mjs';
@@ -57,10 +55,10 @@ export async function openProcessingController(context, dependencies = {}) {
   const options = { configPath: context.configPath, collectionId: context.collectionId, expectedConfigHash: context.expectedConfigHash };
   const capability = await verifyWorkflowStorage(options);
   const collection = await withStorageProbes(() => assertWorkflowStorage(capability));
-  const claudeProfile = client === 'claude' ? await fs.realpath(env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude')) : null;
+  const claudeProfile = client === 'claude' ? await resolveClaudeProfile(env) : null;
   const execution = dependencies.beforeExecution && dependencies.afterExecution && dependencies.guardExecution
     ? dependencies : processingExecutionCallbacks({ capability,
-      claudeConfigDir: claudeProfile ?? env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude') });
+      claudeConfigDir: claudeProfile });
   const cwd = collection.intakeStateDir;
   const hostId = dependencies.hostId ?? digest(canonicalJSON({ storage: collection.intakeStateDir }));
   let tools = null, nativeSession = null, verified = false, nativeResult = null, running = false, closed = false;
@@ -108,7 +106,7 @@ export async function openProcessingController(context, dependencies = {}) {
         // A reused session gets a fresh environment without restoring unrelated
         // profile behavior, modifying settings or putting credentials in argv.
         const launch = await resolveClaudeLaunchSettings(env, { expectedProfile: claudeProfile,
-          preferHostEnvironment: dependencies.preferHostEnvironment === true });
+          preferHostEnvironment: dependencies.preferHostEnvironment ?? claudeHostEnvironment(env) });
         bridge ??= await (dependencies.openBridge ?? openProcessingEngineBridge)({ toolNames: declared.map(tool => tool.name),
           declarations: declared, call: engineCall });
         transport = (dependencies.createClaude ?? createClaudeProcessingClient)({ executable: dependencies.claudeExecutable ?? 'claude',
@@ -139,9 +137,7 @@ export async function openProcessingController(context, dependencies = {}) {
   async function guardRole() {
     if (!running || !requestSelection || !current) fail('PROCESSING_CHAT_NOT_RUNNING');
     if (client === 'claude') {
-      try {
-        if (await fs.realpath(env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude')) !== claudeProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
-      } catch { fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE'); }
+      if (await resolveClaudeProfile(env) !== claudeProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
     }
     await withStorageProbes(() => assertWorkflowStorage(capability, requestSelection, 'explicitProcess'));
     const fresh = await state.read();

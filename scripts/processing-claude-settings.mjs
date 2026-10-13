@@ -32,14 +32,49 @@ const ENVIRONMENT = new Set([
   'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
   'CLAUDE_CODE_EFFORT_LEVEL',
+  'API_TIMEOUT_MS', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS',
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'CLAUDE_CODE_CLIENT_CERT', 'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
   'CLAUDE_CODE_PROXY_RESOLVES_HOSTS'
 ]);
+// These are known provider selectors, not arbitrary feature toggles sharing a
+// CLAUDE_CODE_USE_ prefix. Their provider configuration is not restored here.
+const UNSUPPORTED_PROVIDERS = new Set(['CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD']);
 const permitted = name => ENVIRONMENT.has(name) || /^VERTEX_REGION_CLAUDE_[A-Z0-9_]{1,64}$/.test(name);
 const enabled = input => ['1', 'true', 'yes', 'on'].includes(input.toLowerCase().trim());
-const environmentKey = (env, name, platform) => platform === 'win32'
-  ? Object.keys(env).sort().find(key => key.toUpperCase() === name) : Object.hasOwn(env, name) ? name : undefined;
+function environmentIndex(env, platform) {
+  const result = new Map();
+  const names = Object.keys(env);
+  if (platform === 'win32') names.sort();
+  for (const name of names) {
+    const canonical = platform === 'win32' ? name.toUpperCase() : name;
+    if (!result.has(canonical)) result.set(canonical, []);
+    result.get(canonical).push(name);
+  }
+  return result;
+}
+export function claudeProfileLocator(env = process.env, platform = process.platform) {
+  const key = environmentIndex(env, platform).get('CLAUDE_CONFIG_DIR')?.[0];
+  const requested = (key === undefined ? undefined : env[key]) ?? path.join(os.homedir(), '.claude');
+  try { string(requested, 4096); if (!path.isAbsolute(requested)) throw new Error(); }
+  catch { fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE'); }
+  return requested;
+}
+export async function resolveClaudeProfile(env = process.env) {
+  try {
+    const profile = await fs.realpath(claudeProfileLocator(env));
+    if (!(await fs.lstat(profile)).isDirectory()) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
+    return profile;
+  }
+  catch { fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE'); }
+}
+export function claudeHostEnvironment(env = process.env, platform = process.platform) {
+  const key = environmentIndex(env, platform).get('CLAUDECODE')?.[0];
+  // A native nesting hint affects env precedence only. It is never session
+  // identity, source attribution or permission to collect/process evidence.
+  return key !== undefined && typeof env[key] === 'string' && env[key].length > 0;
+}
 const value = input => {
   try { return string(input, 32768, { empty: true }); }
   catch { fail('PROCESSING_CLIENT_SETTINGS_INVALID'); }
@@ -92,13 +127,11 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
   if (typeof preferHostEnvironment !== 'boolean') fail('PROCESSING_CLIENT_SETTINGS_INVALID');
   let file, bytes, profile;
   try {
-    const requested = env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude');
-    string(requested, 4096);
-    if (!path.isAbsolute(requested)) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
+    const requested = claudeProfileLocator(env, platform);
     profile = await fs.realpath(requested);
     if (expectedProfile !== undefined && profile !== expectedProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
     const profileBefore = await fs.lstat(profile, { bigint: true });
-    if (!profileBefore.isDirectory() || profileBefore.isSymbolicLink()) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
+    if (!profileBefore.isDirectory()) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
     const entry = path.join(profile, 'settings.json');
     const entryBefore = await lstatOrNull(entry, { bigint: true });
     if (!entryBefore) {
@@ -135,22 +168,26 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
   // Preserve the native locator exactly: its presence and spelling affect
   // global configuration and credential-store names, even for the same folder.
   const selected = { ...env };
+  const inherited = environmentIndex(env, platform);
+  const hasHostValue = name => inherited.has(name) || (platform !== 'win32' && /^(HTTP|HTTPS|ALL|NO)_PROXY$/i.test(name) &&
+    (inherited.has(name.toLowerCase()) || inherited.has(name.toUpperCase())));
   if (source.env !== undefined) {
     if (!object(source.env) || Object.keys(source.env).length > 256) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
     const seen = new Set();
     for (const [name, entry] of Object.entries(source.env)) {
-      const checked = value(entry);
       const canonical = platform === 'win32' ? name.toUpperCase() : name;
-      if (permitted(canonical) && seen.has(canonical)) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
+      if (!permitted(canonical) && !UNSUPPORTED_PROVIDERS.has(canonical)) continue;
+      const checked = value(entry);
+      if (seen.has(canonical)) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
       seen.add(canonical);
-      if (/^CLAUDE_CODE_USE_/.test(canonical) && !permitted(canonical) && enabled(checked)) {
+      if (UNSUPPORTED_PROVIDERS.has(canonical) && enabled(checked)) {
         fail('PROCESSING_CLIENT_SETTINGS_UNSUPPORTED');
       }
       if (permitted(canonical)) {
         // Verified native handoff keeps the source host's effective project
         // environment. Bare CLI launches use native user-over-shell precedence.
-        if (preferHostEnvironment && environmentKey(env, canonical, platform) !== undefined) continue;
-        if (platform === 'win32') for (const old of Object.keys(selected)) if (old.toUpperCase() === canonical) delete selected[old];
+        if (preferHostEnvironment && hasHostValue(canonical)) continue;
+        if (platform === 'win32') for (const old of inherited.get(canonical) ?? []) delete selected[old];
         selected[canonical] = checked;
       }
     }
@@ -161,8 +198,6 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
   // from launch-level settings. Do not promote it or restore structured effort
   // preferences; explicit CLAUDE_CODE_EFFORT_LEVEL remains native environment.
   const settings = validateClaudeRestrictedSettings({ disableAllHooks: true,
-    ...(source.model !== undefined ? { model: source.model } : {}),
-    ...(source.modelOverrides !== undefined ? { modelOverrides: source.modelOverrides } : {}),
-    ...(source.availableModels !== undefined ? { availableModels: source.availableModels } : {}) });
+    model: source.model, modelOverrides: source.modelOverrides, availableModels: source.availableModels });
   return { env: selected, settings };
 }

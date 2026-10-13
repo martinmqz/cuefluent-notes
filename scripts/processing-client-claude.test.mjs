@@ -213,11 +213,14 @@ test('an error after OS spawn and input submission remains genuinely ambiguous',
 });
 
 test('controlled Claude launch removes the inherited nested-session sentinel without altering host environment', async () => {
-  const h = harness(success), env = { PATH: 'synthetic-path', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'parent-native-session', ANTHROPIC_API_KEY: 'synthetic-credential' };
+  const h = harness(success), env = { PATH: 'synthetic-path', CLAUDECODE: '1', claudecode: 'synthetic-lowercase-sentinel',
+    CLAUDE_CODE_SESSION_ID: 'parent-native-session', ANTHROPIC_API_KEY: 'synthetic-credential' };
   const client = createClaudeProcessingClient({ executable: 'claude', cwd, engine: { command: process.execPath, args: [] },
     allowedTools: TOOLS, spawn: h.spawn, env });
   await client.run(request());
   assert.equal(env.CLAUDECODE, '1'); assert.equal(Object.hasOwn(h.calls[0].options.env, 'CLAUDECODE'), false);
+  assert.equal(env.claudecode, 'synthetic-lowercase-sentinel');
+  assert.equal(h.calls[0].options.env.claudecode, process.platform === 'win32' ? undefined : env.claudecode);
   assert.equal(h.calls[0].options.env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_CODE_SESSION_ID);
   assert.equal(h.calls[0].options.env.ANTHROPIC_API_KEY, env.ANTHROPIC_API_KEY);
   assert.equal(h.calls[0].options.env.PATH, env.PATH);

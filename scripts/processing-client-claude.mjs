@@ -59,7 +59,9 @@ export function createClaudeProcessingClient(options, { env: baseEnv = process.e
   const settings = validateClaudeRestrictedSettings(options.settings === undefined ? { disableAllHooks: true } : options.settings);
   // This explicitly requested native controller owns a separate restricted run.
   // Do not inherit the enclosing Claude session's nested-launch sentinel.
-  delete env.CLAUDECODE;
+  for (const name of Object.keys(env)) {
+    if (name === 'CLAUDECODE' || (process.platform === 'win32' && name.toUpperCase() === 'CLAUDECODE')) delete env[name];
+  }
   const server = { command: engine.command, args: [...engine.args] };
   const mcp = JSON.stringify({ mcpServers: { [SERVER]: server } });
   if (Buffer.byteLength(mcp) > 128 * 1024) fail('INVALID_PROCESSING_CLIENT');
