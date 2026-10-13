@@ -171,7 +171,13 @@ reused for retries of that exact request. A duplicate never dispatches again.
 settings hash for explicit reauthorization. `nativeStatus` distinguishes a completed,
 failed or interrupted native run; null means no terminal is available for the
 current state. `operationId` points to authoritative engine
-status. `chat` identifies the native session, while `desktopVisibility` remains
+status. For an idle chat with a recorded operation, status also returns
+`operationState`, `operationOutcome` and `recoveryRequired` from a metadata-only
+engine inspection; a completed native turn does not imply completed engine work.
+When that inspection is unavailable, `operationState` is `unknown`, both outcome
+and recovery fields are null, and `OPERATION_OUTCOME_UNKNOWN` calls for inspection.
+These fields concern the latest recorded operation, not a collection inventory.
+`chat` identifies the native session, while `desktopVisibility` remains
 `unverified`. Neither `idle` nor a native completed turn means a note was saved.
 Busy or blocked state must not be bypassed with another binding or writer.
 `processing-chat-abandon` archives the exact binding and returns blocked status
@@ -239,6 +245,13 @@ storage-safety diagnostics and recovery.
 Outputs are versioned bounded status with `statusText`, `status`, `requestId`,
 `collectionId`, `chat`, `nextAction` and diagnostic codes. They contain no evidence
 or draft text. Tool arguments accept no approval or source-proof object.
+New responses also include `statusDetail`: `accepted`, `already-processing`,
+`processing`, `preparing`, `draft-ready`, `unfinished`, `inactive`, `missing`,
+`blocked` or `completed`. Admission, a competing request and a read-only progress
+snapshot remain distinct even when their stored execution state is `busy`.
+An idle native session with unfinished engine work reports `unfinished`, with
+`resume` or `inspect` as the next action. `inactive` does not mean an empty backlog.
+Legacy response receipts omit this field and replay their original text unchanged.
 If the engine disposition committed but registry or receipt bookkeeping failed,
 the response is `completed` with `nextAction: "inspect"` and a bounded diagnostic.
 Inspect the existing operation; do not repeat its save. That response does not

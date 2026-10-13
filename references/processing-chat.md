@@ -226,9 +226,19 @@ with its original scope. It does not prevent listing the other pending work.
 
 Redelivery of an exact verified formal call returns its original admitted response
 without dispatching again, reopening a review form or rewriting its receipt. That
-response can still say `busy` after completion; use `processing_status` to read
-current progress. A `busy` result with no busy diagnostic acknowledges the
-accepted run; it does not mean the request was rejected as another run.
+response can still describe admission after completion; use `processing_status`
+to read current progress. New responses distinguish **Processing request accepted**
+from **Already processing; no additional run was started**. A status read reports
+**Processing is in progress** while the native run remains busy. Acceptance does
+not prove that the model has started reading evidence or completed a note.
+Older stored replies retain their original `busy` wording on exact replay.
+If the native run stopped but its engine operation remains unfinished, status
+reports **Processing stopped with unfinished work** and a resume or inspection
+action. This snapshot covers the chat's latest recorded operation, not every claim
+in the collection. A different source scope, unknown outcome or recovery requirement
+calls for inspection rather than a resume from the current source chat.
+**No processing run is active** describes execution only; it does not
+assert that the collection has no pending captures or that notes were saved.
 Keep the source client and its MCP host open until processing reaches a review or
 terminal state. A one-shot client that terminates the host after admission can
 interrupt the run; use the existing status and recovery controls rather than

@@ -157,7 +157,36 @@ export async function openProcessingController(context, dependencies = {}) {
     return !ownerIsGone(owner, await (dependencies.probeProcess ?? probeProcess)(owner.pid));
   }
   return Object.freeze({
-    async status() { return publicState(await state.read()); },
+    async status({ inspectOperation = true, selection = null } = {}) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const view = await state.read(), result = publicState(view);
+        // A terminal native turn does not complete its claimed engine operation.
+        // Read only metadata, and never describe an unfinished claim as complete.
+        if (inspectOperation && result.state === 'idle' && result.operationId !== null) {
+          try {
+            const operation = await withStorageProbes(() => dependencies.inspectOperation
+              ? dependencies.inspectOperation(result.operationId) : inspectProcessing(capability, result.operationId));
+            result.operationState = operation.state;
+            result.operationOutcome = operation.outcome;
+            result.recoveryRequired = operation.recoveryRequired;
+            if (selection !== null) {
+              const old = operation.selection;
+              result.resumeSupported = Boolean(old && old.client === selection.client && old.sessionId === selection.sessionId &&
+                old.cwd === selection.cwd && (!selection.unitId || old.unitId === selection.unitId) &&
+                operation.inputs.every(input => selectionIncludesIdentity(selection, input.identity)));
+            }
+          } catch {
+            // Keep the native snapshot useful without treating unavailable engine
+            // metadata as either completion or permission to resume.
+            Object.assign(result, { operationState: 'unknown', operationOutcome: null, recoveryRequired: null });
+            result.diagnostics = [...new Set([...result.diagnostics, 'OPERATION_OUTCOME_UNKNOWN'])];
+          }
+          if ((await state.read()).hash !== view.hash) continue;
+        }
+        return result;
+      }
+      fail('PROCESSING_CHAT_STATE_CHANGED');
+    },
     async reauthorize(args) {
       keys(args, ['expectedChatHash', 'previousPolicyHash']); hash(args.expectedChatHash); hash(args.previousPolicyHash);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
@@ -333,6 +362,8 @@ export async function openProcessingController(context, dependencies = {}) {
           outcome: inspectionUnknown ? 'needs-inspection' : review ? 'awaiting-review' : 'idle', nativeRun: nativeResult, diagnostics,
           ...(lastOperationId !== null ? { operationId: lastOperationId } : {}) });
         return { ...publicState(current), operationId: lastOperationId, nativeStatus: result.status,
+          ...(operation ? { operationState: operation.state, operationOutcome: operation.outcome,
+            recoveryRequired: operation.recoveryRequired } : {}),
           model: typeof result.model === 'string' ? result.model : null };
       } catch (error) {
         if (started && current && ['creating', 'busy'].includes(current.state)) {

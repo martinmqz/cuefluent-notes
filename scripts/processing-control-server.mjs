@@ -15,6 +15,20 @@ const PROTOCOL_VERSION = '2025-11-25';
 const FRAME_BYTES = 6 * FORM_BYTES;
 const STATES = ['missing', 'creating', 'busy', 'idle', 'awaiting-review', 'blocked', 'completed'];
 const ACTIONS = ['inspect', 'resume', 'review', 'wait', 'none'];
+// The optional detail distinguishes a request outcome from a state snapshot.
+// Absence retains the original projection for immutable response receipts.
+const STATUS_DETAILS = Object.freeze({
+  accepted: { states: ['busy'], text: 'Processing request accepted.' },
+  'already-processing': { states: ['creating', 'busy'], text: 'Already processing; no additional run was started.' },
+  processing: { states: ['busy'], text: 'Processing is in progress.' },
+  preparing: { states: ['creating'], text: 'Preparing the processing session.' },
+  'draft-ready': { states: ['awaiting-review'], text: 'Draft ready for review.' },
+  unfinished: { states: ['idle'], text: 'Processing stopped with unfinished work.' },
+  inactive: { states: ['idle'], text: 'No processing run is active.' },
+  missing: { states: ['missing'], text: 'No processing session has been started.' },
+  blocked: { states: ['blocked'], text: 'Processing needs attention.' },
+  completed: { states: ['completed'], text: 'Processing operation completed.' },
+});
 const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CONTROL_FAILED',
   'PROCESSING_CHAT_BUSY', 'PROCESSING_CHAT_BLOCKED', 'PROCESSING_CHAT_MISSING', 'PROCESSING_CHAT_BINDING_CHANGED',
   'PROCESSING_CHAT_HOST_UNAVAILABLE', 'PROCESSING_CHAT_SESSION_UNAVAILABLE', 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
@@ -124,6 +138,13 @@ export function processingControlStatusView(value, args) {
     list(value.diagnostics ?? [], 8); unique(value.diagnostics ?? []);
     for (const diagnostic of value.diagnostics ?? []) {
       choice(diagnostic, DIAGNOSTICS); result.diagnostics.push(diagnostic);
+    }
+    if (value.statusDetail !== undefined) {
+      choice(value.statusDetail, Object.keys(STATUS_DETAILS));
+      const detail = STATUS_DETAILS[value.statusDetail];
+      choice(result.status, detail.states);
+      result.statusDetail = value.statusDetail;
+      result.statusText = `Cuefluent: ${detail.text}`;
     }
     if (result.diagnostics.length) result.statusText += ` ${result.diagnostics.join(', ')}. Next action: ${result.nextAction}.`;
     return result;

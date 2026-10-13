@@ -25,13 +25,24 @@ const diagnostic = Object.freeze({ CREATION_NOT_DISPATCHED: 'PROCESSING_CLIENT_U
   OPERATION_OUTCOME_UNKNOWN: 'PROCESSING_OPERATION_OUTCOME_UNKNOWN',
   PROCESSING_RECOVERY_REQUIRED: 'PROCESSING_RECOVERY_REQUIRED',
   PROCESSING_EXCLUSION_UNVERIFIED: 'PROCESSING_EXCLUSION_UNVERIFIED' });
-const viewOf = value => ({ status: value.state, requestId: value.requestId,
+const unfinished = value => value.state === 'idle' && value.operationState !== undefined &&
+  (value.operationState !== 'completed' || value.recoveryRequired);
+const statusDetailOf = value => unfinished(value) ? 'unfinished' : ({
+  missing: 'missing', creating: 'preparing', busy: 'processing', idle: 'inactive',
+  'awaiting-review': 'draft-ready', blocked: 'blocked', completed: 'completed',
+})[value.state];
+const viewOf = value => ({ status: value.state, statusDetail: statusDetailOf(value), requestId: value.requestId,
   chat: value.chat, nextAction: value.state === 'awaiting-review' ? 'review' : value.state === 'busy' ? 'wait'
-    : value.state === 'blocked' ? 'inspect' : ['failed', 'interrupted'].includes(value.nativeStatus) ? 'resume' : 'none', diagnostics: [...new Set([
+    : value.state === 'blocked' || value.recoveryRequired || (unfinished(value) && value.resumeSupported === false) ||
+      ['unknown', 'missing', 'conflicted', 'blocked', 'recovery-required', 'awaiting-review'].includes(value.operationState) ? 'inspect'
+      : unfinished(value) || ['failed', 'interrupted'].includes(value.nativeStatus) ? 'resume' : 'none', diagnostics: [...new Set([
       ...(value.diagnostics ?? []).map(code => diagnostic[code] ?? 'PROCESSING_CHAT_BLOCKED'),
       ...(value.policyState === 'changed' ? ['WORKFLOW_POLICY_CHANGED'] : []),
       ...(value.nativeStatus === 'failed' ? ['PROCESSING_CLIENT_FAILED'] : value.nativeStatus === 'interrupted' ? ['PROCESSING_CLIENT_INTERRUPTED'] : []),
     ])] });
+const alreadyProcessing = view => ({ ...view,
+  ...(['creating', 'busy'].includes(view.status) ? { statusDetail: 'already-processing' } : {}),
+  diagnostics: [...new Set(['PROCESSING_CHAT_BUSY', ...view.diagnostics])].slice(0, 8) });
 // Native call identity, not a model-chosen UUID, owns dispatch idempotence. A
 // redelivery of the same call replays; a new human invocation remains new work.
 function nativeRequestId(source, client) {
@@ -159,9 +170,20 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   async function getStatus({ source }) {
     const { options } = selected(source), key = keyFor(options);
     const job = jobs.get(key);
-    if (job) return viewOf(await job.controller.status());
+    if (job) return viewOf(await job.controller.status({ selection: source.selection }));
     const controller = await openController({ ...options, client }, { env });
-    try { return viewOf(await controller.status()); } finally { await controller.close(); }
+    try { return viewOf(await controller.status({ selection: source.selection })); } finally { await controller.close(); }
+  }
+  async function activeJob(key, source, signal) {
+    const job = jobs.get(key);
+    if (!job) return null;
+    const status = await job.controller.status({ selection: source.selection });
+    if (['creating', 'busy'].includes(status.state)) return alreadyProcessing(viewOf(status));
+    // Native execution is terminal; wait for its owned cleanup before admitting
+    // another request. A terminal snapshot is not an active processing refusal.
+    await job.promise;
+    signal?.throwIfAborted();
+    return null;
   }
   async function requestProcessing({ source, selection, signal }) {
     signal?.throwIfAborted();
@@ -174,10 +196,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const replay = await replayControl(source);
     signal?.throwIfAborted();
     if (replay) return replay;
-    const existing = jobs.get(key);
-    if (existing) {
-      return { ...viewOf(await existing.controller.status()), diagnostics: ['PROCESSING_CHAT_BUSY'] };
-    }
+    const existing = await activeJob(key, source, signal);
+    if (existing) return existing;
     let announce, rejectAdmission, releaseDispatch, rejectDispatch;
     const admission = new Promise((resolve, reject) => { announce = resolve; rejectAdmission = reject; });
     const dispatched = new Promise((resolve, reject) => { releaseDispatch = resolve; rejectDispatch = reject; });
@@ -190,22 +210,22 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         signal?.throwIfAborted();
         await dependencies.execution?.beforeExecution?.(context);
         signal?.throwIfAborted();
-        announce(viewOf(await controller.status()));
+        announce({ ...viewOf(await controller.status({ inspectOperation: false })), statusDetail: 'accepted' });
         // The source receipt shares intake state with engine preparation. Finish
         // publishing admission before any native input can start engine work.
         await dispatched;
       },
     });
     let current;
-    try { signal?.throwIfAborted(); current = await controller.status(); signal?.throwIfAborted(); }
+    try { signal?.throwIfAborted(); current = await controller.status({ inspectOperation: false }); signal?.throwIfAborted(); }
     catch (error) { await controller.close(); throw error; }
     const cancel = () => { rejectDispatch(signal.reason); rejectAdmission(signal.reason); };
     signal?.addEventListener('abort', cancel, { once: true });
     const job = { controller, promise: null, requestId, releaseDispatch, rejectDispatch }; jobs.set(key, job);
     job.promise = controller.run({ requestId, selection: selection ?? source.selection, expectedChatHash: current.chatHash })
       .then(result => {
-        const view = viewOf(result);
-        if (result.state === 'busy' && result.requestId !== requestId) view.diagnostics = [...new Set(['PROCESSING_CHAT_BUSY', ...view.diagnostics])];
+        const view = ['creating', 'busy'].includes(result.state) && result.requestId !== requestId
+          ? alreadyProcessing(viewOf(result)) : viewOf(result);
         announce(view); return view;
       })
       .catch(error => { rejectAdmission(error); return { status: 'blocked', requestId, chat: null, nextAction: 'inspect',
@@ -225,11 +245,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const replay = await replayControl(source);
     signal?.throwIfAborted();
     if (replay) return replay;
-    if (jobs.has(key)) return { ...viewOf(await jobs.get(key).controller.status()), diagnostics: ['PROCESSING_CHAT_BUSY'] };
+    const existing = await activeJob(key, source, signal);
+    if (existing) return existing;
     const controller = await openController({ ...options, client }, { env });
     let response;
     try {
-      const status = await controller.status();
+      const status = await controller.status({ selection: source.selection });
       if (status.state !== 'awaiting-review') response = viewOf(status);
       else {
         const context = await controller.reviewContext({ expectedChatHash: status.chatHash, requestId: status.requestId });
@@ -237,14 +258,14 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         // This internal marker exists only after an authoritative engine result;
         // serialized tool arguments and pending/failed saves cannot create it.
         if (result.status !== 'awaiting-review') {
-          committedReviews.set(source, { status: 'completed', requestId: status.requestId, chat: status.chat,
+          committedReviews.set(source, { status: 'completed', statusDetail: 'completed', requestId: status.requestId, chat: status.chat,
             nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'] });
           try {
             response = viewOf(await controller.finishReview({ expectedChatHash: status.chatHash,
               requestId: status.requestId, operationId: context.operationId }));
           } catch { response = committedReviews.get(source); }
         } else {
-          response = viewOf(await controller.status());
+          response = viewOf(await controller.status({ selection: source.selection }));
         }
       }
     } finally {

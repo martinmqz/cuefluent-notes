@@ -68,7 +68,8 @@ async function harness(t, f, overrides = {}) {
     },
     async openController(context, options) {
       h.opens++;
-      const controller = await openProcessingController(context, { ...options, openCodex, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host') });
+      const controller = await openProcessingController(context, { ...options, openCodex, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host'),
+        inspectOperation: operationId => h.inspectOperation ? h.inspectOperation(operationId) : inspectProcessing(f.capability, operationId) });
       let closed = false;
       return { ...controller, async run(args) { const job = controller.run(args); h.jobs.push(job); return job; },
         async finishReview(args) {
@@ -78,6 +79,7 @@ async function harness(t, f, overrides = {}) {
           return controller.finishReview(args);
         },
         async close() {
+          await h.beforeClose?.();
           await controller.close();
           if (!closed) { closed = true; h.closes++; h.closing.shift()?.resolve(); }
           if (h.closeFailure) throw h.closeFailure;
@@ -122,12 +124,18 @@ test('MCP admission returns while native processing is pending, and shutdown wai
   const requestId = randomUUID();
   const admitted = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(admitted.status, 'busy'); assert.notEqual(admitted.requestId, requestId);
+  assert.equal(admitted.statusDetail, 'accepted');
+  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted.');
   h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'busy'); assert.equal(status.chat.sessionId, admitted.chat.sessionId);
+  assert.equal(status.statusDetail, 'processing');
+  assert.equal(status.statusText, 'Cuefluent: Processing is in progress.');
   const duplicate = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(duplicate.status, 'busy'); assert.deepEqual(duplicate.diagnostics, ['PROCESSING_CHAT_BUSY']);
   assert.equal(duplicate.requestId, admitted.requestId);
+  assert.equal(duplicate.statusDetail, 'already-processing');
+  assert.match(duplicate.statusText, /Already processing; no additional run was started/);
   assert.match(duplicate.statusText, /PROCESSING_CHAT_BUSY/);
   h.end(); let ended = false; h.server.then(() => { ended = true; });
   await new Promise(resolve => setImmediate(resolve));
@@ -137,6 +145,82 @@ test('MCP admission returns while native processing is pending, and shutdown wai
   assert.equal(h.opens, 1); assert.equal(h.creates, 1); assert.equal(h.dispatches, 1); assert.equal(h.closes, 1);
   assert(!JSON.stringify(h.responses).includes('PRIVATE SYNTHETIC DRAFT'));
   assert(!JSON.stringify(h.responses).includes(f.root));
+});
+
+test('status exposes unfinished evidence, incompatible source scope and conflicts without dispatching', async t => {
+  const f = await processingFixture(t), config = await fs.readFile(f.options.configPath), h = await harness(t, f);
+  h.script = async call => {
+    await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+  };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', { collectionId: f.collection.id });
+  await closed;
+  const before = await inspectProcessing(f.capability, f.operationId);
+  const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(status.status, 'idle');
+  assert.equal(status.statusDetail, 'unfinished');
+  assert.equal(status.statusText, 'Cuefluent: Processing stopped with unfinished work.');
+  assert.equal(status.nextAction, 'resume');
+  assert.equal(h.dispatches, 1);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), before);
+  assert.deepEqual(await fs.readFile(f.options.configPath), config);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  h.inspectOperation = async () => ({ ...before, recoveryRequired: true });
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).nextAction, 'inspect');
+  h.inspectOperation = async () => { throw new Error('private unreadable state'); };
+  const unknown = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(unknown.statusDetail, 'unfinished'); assert.equal(unknown.nextAction, 'inspect');
+  assert.deepEqual(unknown.diagnostics, ['PROCESSING_OPERATION_OUTCOME_UNKNOWN']);
+  h.inspectOperation = undefined;
+  const other = await processingFixture(t, { base: f }), otherHost = await harness(t, other);
+  const otherStatus = body(await otherHost.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(otherStatus.statusDetail, 'unfinished');
+  assert.equal(otherStatus.nextAction, 'inspect');
+  assert.equal(otherHost.dispatches, 0);
+  // A changed input requires inspection, not an ordinary resume suggestion.
+  const headFile = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
+  const head = JSON.parse(await fs.readFile(headFile, 'utf8'));
+  head.generation++; head.previousHash = f.published.headHash;
+  await fs.writeFile(headFile, canonicalJSON(head) + '\n');
+  const conflicted = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(conflicted.statusDetail, 'unfinished');
+  assert.equal(conflicted.nextAction, 'inspect');
+  assert.equal(h.dispatches, 1);
+});
+
+test('a completed unchanged operation is inactive without implying saved notes or an empty collection', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  await processingFixture(t, { base: f });
+  h.script = async call => {
+    let claim = await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+    for (let page = 0; page < claim.packet.pages.length; page++) {
+      const read = await call('processing_page', { operationId: f.operationId, expectedClaimHash: claim.claimHash, page });
+      claim = await call('processing_ack', { operationId: f.operationId, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
+    }
+    await call('processing_complete', { operationId: f.operationId, expectedClaimHash: claim.claimHash });
+  };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
+  const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(status.statusDetail, 'inactive'); assert.equal(status.nextAction, 'none');
+  assert.equal(status.statusText, 'Cuefluent: No processing run is active.');
+  assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('a request during terminal cleanup waits and then resumes the existing native session', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), gate = deferred(), entered = deferred();
+  h.release = gate.resolve;
+  h.beforeClose = async () => { entered.resolve(); await gate.promise; };
+  await h.call('process_selected_captures', { collectionId: f.collection.id });
+  await entered.promise;
+  let returned = false;
+  const next = h.call('process_selected_captures', { collectionId: f.collection.id }).then(value => { returned = true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(returned, false); assert.equal(h.dispatches, 1);
+  gate.resolve();
+  assert.equal(body(await next).statusDetail, 'accepted');
+  await Promise.all(h.jobs);
+  assert.equal(h.dispatches, 2); assert.equal(h.creates, 1);
 });
 
 test('cancellation during admission aborts the owned job without dispatch or response and leaves the chat reusable', async t => {
@@ -200,6 +284,26 @@ test('formal native-call replay preserves its original receipt after completion 
   assert.deepEqual(await fs.readFile(receiptFile), bytes);
 });
 
+test('legacy status receipts replay unchanged after clearer status details are introduced', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
+  await h.call('process_selected_captures', args); await closed;
+  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
+  const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
+  const legacy = receipt.dispatch.response;
+  delete legacy.statusDetail;
+  legacy.statusText = 'Cuefluent processing: busy.';
+  const result = { content: [{ type: 'text', text: canonicalJSON(legacy) }], isError: false };
+  receipt.dispatch.statusText = legacy.statusText;
+  receipt.dispatch.resultHash = digest(canonicalJSON(result));
+  const bytes = canonicalJSON(receipt) + '\n';
+  await fs.writeFile(file, bytes);
+  h.callId = 'call_1';
+  assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
+  assert.equal(h.dispatches, 1);
+  assert.equal(await fs.readFile(file, 'utf8'), bytes);
+});
+
 test('formal replay rejects a changed stored response without changing its receipt or dispatching', async t => {
   const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
   const args = { collectionId: f.collection.id }, closed = h.whenClosed();
@@ -207,6 +311,7 @@ test('formal replay rejects a changed stored response without changing its recei
   const receiptFile = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
   const receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8'));
   receipt.dispatch.response.status = 'completed';
+  receipt.dispatch.response.statusDetail = 'completed';
   const bytes = canonicalJSON(receipt) + '\n'; await fs.writeFile(receiptFile, bytes);
   h.callId = 'call_1';
   assert.equal((await h.call('process_selected_captures', args)).error.message, 'PROCESSING_CONTROL_FAILED');
@@ -289,7 +394,7 @@ test('verified native skill admission writes its exact parent control receipt be
   const receipt = JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
   assert.equal(receipt.dispatch.callId, 'call_1'); assert.equal(receipt.dispatch.unitId, f.identity.unitId);
   assert.equal(receipt.dispatch.argsHash, digest(canonicalJSON(args))); assert.equal(receipt.dispatch.resultHash, digest(canonicalJSON(row.result)));
-  assert.equal(receipt.dispatch.statusText, 'Cuefluent processing: busy.');
+  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted.');
   assert.equal(receipt.dispatch.sourcePath, f.source.path);
   gate.resolve();
 });
@@ -540,6 +645,7 @@ test('committed source Save stays successful when the chat registry requires lat
   assert.equal(row.error, undefined);
   const result = body(row);
   assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
+  assert.equal(result.statusDetail, 'completed');
   assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
   assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
@@ -561,6 +667,7 @@ test('committed source Save survives revoked receipt authorization without fabri
   assert.equal(row.error, undefined);
   const result = body(row);
   assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
+  assert.equal(result.statusDetail, 'completed');
   assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
   assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
@@ -580,6 +687,7 @@ test('controller close failure after source Save preserves its committed outcome
   assert.equal(row.error, undefined);
   const result = body(row);
   assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
+  assert.equal(result.statusDetail, 'completed');
   assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
   assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);

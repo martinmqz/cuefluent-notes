@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { processingFixture } from './test-support/processing-fixture.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { completeProcessing, inspectProcessing } from './processing.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
+import { codexProcessingProfile } from './processing-client-codex.mjs';
 
 const deferred = () => {
   let resolve, reject;
@@ -141,6 +145,62 @@ test('Codex controller reuses one chat across three requests and reopening; exac
   await assert.rejects(h.controller.run({ ...firstRequest, selection: { ...f.selection, unitId: randomUUID() } }), { code: 'PROCESSING_CHAT_REQUEST_CONFLICT' });
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   assert(!JSON.stringify(third).includes('Synthetic meeting')); assert(!JSON.stringify(third).includes(f.root));
+});
+
+test('status preserves an unknown engine outcome and retries a changed native snapshot without dispatching itself', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+  await h.controller.run(await h.request());
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  h.inspectOperation = async () => { throw Object.assign(new Error('private invalid operation bytes'), { code: 'INVALID_PROCESSING_CLAIM' }); };
+  const unknown = await h.controller.status();
+  assert.equal(unknown.state, 'idle'); assert.equal(unknown.operationState, 'unknown');
+  assert.equal(unknown.recoveryRequired, null);
+  assert.deepEqual(unknown.diagnostics, ['OPERATION_OUTCOME_UNKNOWN']);
+  assert(!JSON.stringify(unknown).includes('private invalid'));
+  assert.equal((await h.controller.status({ inspectOperation: false })).operationState, undefined);
+  assert.equal(h.dispatches.length, 1);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  h.inspectOperation = async () => {
+    h.inspectOperation = undefined;
+    h.script = async () => {};
+    await h.controller.run({ requestId: randomUUID(), selection: f.selection,
+      expectedChatHash: (await h.controller.status({ inspectOperation: false })).chatHash });
+    return claim;
+  };
+  const fresh = await h.controller.status();
+  assert.equal(fresh.operationId, null); assert.equal(fresh.operationState, undefined);
+  assert.equal(h.dispatches.length, 2);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+});
+
+test('status reports completed engine outcomes separately from native completion', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = unchanged(f);
+  await h.controller.run(await h.request());
+  const snapshot = await h.controller.status();
+  assert.equal(snapshot.state, 'idle'); assert.equal(snapshot.operationState, 'completed');
+  assert.equal(snapshot.operationOutcome, 'unchanged'); assert.equal(snapshot.recoveryRequired, false);
+  assert.equal(h.dispatches.length, 1);
+});
+
+test('CLI chat status exposes engine completion with only synthetic profile and storage', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  await h.controller.close();
+  h.env.CODEX_HOME = path.join(f.root, 'codex-profile'); await fs.mkdir(h.env.CODEX_HOME);
+  h.profileId = await codexProcessingProfile(h.env); h.dependencies.profileId = h.profileId;
+  h.controller = await h.open(); h.script = unchanged(f);
+  await h.controller.run(await h.request()); await h.controller.close();
+  const request = path.join(f.root, 'status-request.json');
+  await fs.writeFile(request, canonicalJSON({ collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: { client: 'codex' } }));
+  const { stdout } = await promisify(execFile)(process.execPath,
+    [fileURLToPath(new URL('./workflow.mjs', import.meta.url)), 'processing-chat-status', '--config', f.options.configPath, '--request', request],
+    { env: { ...process.env, ...h.env } });
+  const result = JSON.parse(stdout);
+  assert.equal(result.state, 'idle'); assert.equal(result.operationState, 'completed');
+  assert.equal(result.operationOutcome, 'unchanged'); assert.equal(result.recoveryRequired, false);
+  assert.equal(h.dispatches.length, 1); assert(!stdout.includes(f.root));
 });
 
 test('controller rejects a simultaneous request before the second native dispatch', async t => {
