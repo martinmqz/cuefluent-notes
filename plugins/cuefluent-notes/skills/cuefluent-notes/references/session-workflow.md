@@ -356,10 +356,18 @@ is the reader's fence. Hook notifications and quiet EOF are not such fences.
 Evidence appearing after that fence in the inspected snapshot is a conflict.
 
 Root session metadata must match both native IDs, source ownership,
-history mode and canonical project. A later `session_meta` may change the version
-label, but a history-mode change blocks at that record. Native `task_started`
-records establish full units. `turn_context` alone does not. Turn IDs on response metadata and completed
-items establish ownership, independently of native ordinal/lifecycle succession. Untagged
+history mode and canonical project. Supported root sources are `cli`, `vscode`,
+`exec` and `mcp`. The creation-origin field `thread_source` may be absent, null,
+`user` or `agent_created_thread`; an independently created app chat uses the same
+ownership checks as a user-created chat. This label grants no collection or
+processing permission. Parent-thread, agent-path, subagent-history, history-base
+and fork markers remain disqualifying, including on an otherwise accepted origin.
+Unknown origins are refused. A later `session_meta` must preserve root ownership
+and history mode; it may change the version label. Extraction blocks at incompatible
+metadata. Native invocation verification also rechecks resume metadata encountered
+within its existing bounded selected tail, without scanning older history.
+Native `task_started` records establish full units. `turn_context` alone does not.
+Turn IDs on response metadata and completed items establish ownership, independently of native ordinal/lifecycle succession. Untagged
 legacy events require one unambiguous open native unit. A matching command-unit
 boundary seen after the authorization floor can resolve a stored anchor; readers
 never scan before that floor to find it. A historical read does not backfill an
@@ -685,6 +693,16 @@ Registrations bind the relevant collection grant, not the whole settings file:
 processing settings, note destinations, disjoint routes and semantic reordering
 preserve collection progress. Fresh whole-configuration authorization still runs
 before reads and writes.
+
+When a registration already has an EOF snapshot or a saved registration floor,
+a compatible reader retries it under the original valid grant, file identity and
+frozen EOF. Eligible work accumulated after that floor can be retained; the first
+proven boundary is still excluded. A reader update does not import pre-floor
+history or replace that saved floor with the upgrade time. If the source was
+missing at registration and its header has never verified, there is no saved
+floor yet: the first successful verification uses the available authorized wake's
+EOF. Earlier work is not automatically retained. Stale grants, changed sources
+and paused selections keep their existing refusal and recovery rules.
 
 The configure helper assigns collection generations. Collection consent, source
 routing, raw/state locations, session selectors and overlapping route changes
