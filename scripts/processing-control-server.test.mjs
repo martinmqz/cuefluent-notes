@@ -41,6 +41,18 @@ test('source adapter exposes explicit versioned tools without save, approval or 
   assert.equal(result.calls.length, 0);
 });
 
+test('native source refusals identify only the exact Codex source, never a Claude fallback candidate', async () => {
+  for (const client of ['codex', 'claude']) for (const code of ['UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']) {
+    const result = await server([initialize, tool('processing_status', {}, client === 'codex' ? codexMeta() : claudeMeta())], {
+      client, env: { CLAUDE_CODE_SESSION_ID: sessionId },
+      resolveSource: async () => { throw Object.assign(new Error('Private source detail'), { code }); }
+    });
+    assert.deepEqual(result.rows[1].error, { code: -32600,
+      message: client === 'codex' ? code : 'PROCESSING_CONTROL_FAILED' });
+    assert.equal(result.calls.length, 0); assert(!JSON.stringify(result.rows).includes('Private source detail'));
+  }
+});
+
 test('Codex native identity is separate from explicit evidence selection', async () => {
   const requestId = randomUUID(), selected = { client: 'claude', sessionId: randomUUID(), cwd: path.resolve('other-project'), unitId: randomUUID() };
   const result = await server([initialize, tool('process_selected_captures', { collectionId: 'example', requestId, selection: selected })]);

@@ -215,6 +215,27 @@ session and call ID: redelivery replays, while another invocation is new even if
 the model repeats its optional `requestId` hint. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
+
+Source-binding failures use bounded MCP error codes. An exact Codex ingress
+registration with current collection authority but without a selection or
+processing-only binding reports `PROCESSING_CONTROL_REGISTRATION_UNVERIFIED`;
+ingress metadata supplies neither dispatch authority nor a worker outcome.
+For a session still selected for active collection, a stale registration grant
+reports `REGISTRATION_REQUIRES_REVIEW`. Old registrations do not request grant
+review when collection is off or the session is no longer selected; without a
+current binding the control reports `PROCESSING_CONTROL_SOURCE_UNVERIFIED`.
+Use a processing-only binding under existing processing policy or the standalone
+explicit workflow without enabling collection. Actual
+ownership, history or identity rejection for the invoking Codex source reports
+`UNSUPPORTED_SESSION_OWNERSHIP`, `UNSUPPORTED_CODEX_HISTORY` or
+`SOURCE_IDENTITY_MISMATCH`; Claude retains its generic refusal when discovery
+could have rejected a different registered candidate. An absent or otherwise
+unproven binding remains
+`PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These errors contain no source paths or
+evidence and do not change the command schemas. See the
+[processing entry guidance](processing-chat.md#entry-and-reuse) for precedence,
+storage-safety diagnostics and recovery.
+
 Outputs are versioned bounded status with `statusText`, `status`, `requestId`,
 `collectionId`, `chat`, `nextAction` and diagnostic codes. They contain no evidence
 or draft text. Tool arguments accept no approval or source-proof object.

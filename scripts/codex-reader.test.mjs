@@ -255,6 +255,43 @@ test('Codex requires bounded version metadata at registration and extraction', a
   }
 });
 
+test('independent agent-created roots register and read both native history shapes', async t => {
+  for (const mode of ['legacy', 'paginated']) for (const source of ['cli', 'vscode', 'exec', 'mcp']) {
+    const input = id => mode === 'legacy' ? evt('user_message', { message: 'Retained decision' }) : user(id, 'Retained decision');
+    const f = await fixture(t, [start(A), input(A), end(A),
+      { type: 'session_meta', payload: { cli_version: '0.200.0' } }, start(B), input(B), end(B)],
+    { mode, headerChanges: { source, thread_source: 'agent_created_thread' } });
+    const { fileIdentity: _, ...selected } = f.source;
+    await inspectSourceBoundary(selected, { verifyHeader: codexRegistrationHeader(selected) });
+    const result = await readCodexSelection(f.args);
+    assert.equal(result.blocked, null);
+    assert.deepEqual(result.candidates.map(item => item.capture.identity.unitId), [A, B]);
+    assert(result.candidates.every(item => item.capture.evidence[0].text === 'Retained decision'));
+  }
+});
+
+test('agent-created labels never override child, inherited or malformed ownership at registration or resume', async t => {
+  const changes = [
+    { id: C }, { session_id: C }, { parent_thread_id: C }, { agent_path: '/child' },
+    { subagent_history_start_ordinal: 0 }, { history_base: {} }, { forked_from_id: C }, { forked_from_ordinal_exclusive: 0 },
+    { source: { subagent: { thread_spawn: { parent_thread_id: C } } } },
+    ...['subagent', 'agent_forked_thread', 'automation', '', 1, {}, ['agent_created_thread']].map(thread_source => ({ thread_source })),
+  ];
+  for (const change of changes) {
+    const headerChanges = { thread_source: 'agent_created_thread', ...change };
+    const f = await fixture(t, ordinary(), { headerChanges });
+    const { fileIdentity: _, ...selected } = f.source;
+    await assert.rejects(inspectSourceBoundary(selected, { verifyHeader: codexRegistrationHeader(selected) }), { code: 'UNSUPPORTED_SESSION_OWNERSHIP' });
+    await assert.rejects(readCodexSelection(f.args), { code: 'UNSUPPORTED_SESSION_OWNERSHIP' });
+    const resumed = await fixture(t, [...ordinary(), { type: 'session_meta', payload: change }, start(B), user(B), end(B)],
+      { headerChanges: { thread_source: 'agent_created_thread' } });
+    const result = await readCodexSelection(resumed.args);
+    assert.deepEqual(result.candidates.map(item => item.capture.identity.unitId), [A]);
+    assert.equal(result.blocked.code, 'UNSUPPORTED_SESSION_OWNERSHIP');
+    assert.equal(result.blocked.offset, resumed.anchors[4].startByte);
+  }
+});
+
 test('resumed Codex sessions accept version changes but block history-mode or identity drift', async t => {
   for (const mode of ['legacy', 'paginated']) {
     const input = (id, text) => mode === 'legacy' ? evt('user_message', { message: text }) : user(id, text);
