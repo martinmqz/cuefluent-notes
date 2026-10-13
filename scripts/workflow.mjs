@@ -9,6 +9,7 @@ import { PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { generatedOutputCapabilities } from './workflow-context.mjs';
 import { createProcessingWorkset, prepareWorksetBatch, inspectProcessingWorkset, listProcessingWorksets } from './processing-workset.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
+import { selectProcessingShortcut, inspectProcessingShortcut } from './processing-shortcuts.mjs';
 import { pendingCollectionProcessing } from './processing-collection.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
   completeProcessing, inspectProcessing, recoverProcessing, readProcessingProposal } from './processing.mjs';
@@ -24,6 +25,8 @@ import { keys, id, hash, list, fail, canonicalJSON, safeErrorCode, isNativeId } 
 // Public request schemas expose selections and inspected hashes, never native
 // reader proofs, lock capabilities, callback code or hook-context authority.
 const commands = {
+  'processing-shortcut-select': { required: ['selection', 'requestId'], optional: ['scope', 'mode'], run: selectProcessingShortcut },
+  'processing-shortcut-status': { required: ['selection'], run: inspectProcessingShortcut },
   'capture-status': { required: ['selection'], optional: ['sourcePath', 'scopeId', 'includeReaderAllocation'], run: captureSelectionStatus },
   'capture-control': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation'], run: controlCapture },
   'capture-preview': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], run: previewExplicitCapture },

@@ -11,7 +11,10 @@ import { collectionGrantHash } from './collection-grant.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { recordProcessingControlDispatch, createProcessingControlResolver } from './processing-control-receipts.mjs';
 import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessingInvocation } from './processing-native-invocation.mjs';
-import { runProcessingControlServer } from './processing-control-server.mjs';
+import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingShortcut, beginProcessingShortcutControl, finishProcessingShortcutControl } from './processing-shortcuts.mjs';
+import { inspectProcessing } from './processing.mjs';
+import { pendingCollectionProcessing } from './processing-collection.mjs';
+import { runProcessingControlServer, processingControlStatusView } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { canonicalJSON, digest, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
@@ -22,7 +25,8 @@ const diagnostic = Object.freeze({ CREATION_NOT_DISPATCHED: 'PROCESSING_CLIENT_U
   DISPATCH_OUTCOME_UNKNOWN: 'PROCESSING_CHAT_OUTCOME_UNKNOWN', HOST_UNAVAILABLE: 'PROCESSING_CHAT_HOST_UNAVAILABLE',
   SESSION_UNAVAILABLE: 'PROCESSING_CHAT_SESSION_UNAVAILABLE', BINDING_CONFLICT: 'PROCESSING_CHAT_BINDING_CHANGED',
   PROCESSING_CHAT_RECONCILIATION_UNPROVEN: 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
-  OPERATION_OUTCOME_UNKNOWN: 'PROCESSING_OPERATION_OUTCOME_UNKNOWN',
+  OPERATION_OUTCOME_UNKNOWN: 'PROCESSING_OPERATION_OUTCOME_UNKNOWN', WORKSET_OUTCOME_UNKNOWN: 'WORKSET_OUTCOME_UNKNOWN',
+  PROCESSING_COLLECTION_BUSY: 'PROCESSING_COLLECTION_BUSY',
   PROCESSING_RECOVERY_REQUIRED: 'PROCESSING_RECOVERY_REQUIRED',
   PROCESSING_EXCLUSION_UNVERIFIED: 'PROCESSING_EXCLUSION_UNVERIFIED' });
 const unfinished = value => value.state === 'idle' && value.operationState !== undefined &&
@@ -49,6 +53,46 @@ function nativeRequestId(source, client) {
   const hash = digest(canonicalJSON({ domain: 'cuefluent-processing-dispatch-v1', client,
     sessionId: source.selection.sessionId, callId: source.callId }));
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
+const derivedRequestId = (id, index) => {
+  if (!index) return id;
+  const value = digest(canonicalJSON({ domain: 'cuefluent-shortcut-turn-v1', id, index }));
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20, 32)}`;
+};
+function blockedInventory(view, blockers) {
+  if (blockers.length && blockers.every(code => code === 'WORKFLOW_POLICY_CHANGED')) return { ...view, status: 'blocked',
+    statusDetail: 'blocked', nextAction: 'cancel', diagnostics: ['WORKFLOW_POLICY_CHANGED'] };
+  if (blockers.length && blockers.every(code => ['PROCESSING_HEAD_CHANGED', 'CAPTURE_PRUNED', 'PROCESSING_SELECTION_CHANGED', 'PROCESSING_INPUT_CLAIMED'].includes(code))) {
+    return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'cancel', diagnostics: ['PROCESSING_SELECTION_CHANGED'] };
+  }
+  if (blockers.length && blockers.every(code => code === 'INTAKE_BUSY')) return { ...view, status: 'busy',
+    statusDetail: 'intake-busy', nextAction: 'wait', diagnostics: ['INTAKE_BUSY'] };
+  return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect',
+    diagnostics: blockers.includes('PROCESSING_OPERATION_OWNER_UNVERIFIED') ? ['PROCESSING_OPERATION_OWNER_UNVERIFIED'] : ['PROCESSING_RECOVERY_REQUIRED'] };
+}
+function shortcutView(native, shortcut) {
+  const view = viewOf(native);
+  if (shortcut.scope) view.scope = shortcut.scope.kind;
+  if (shortcut.counts) view.progress = { ...shortcut.counts, incomplete: shortcut.incomplete };
+  if (['busy', 'creating', 'blocked'].includes(view.status)) return view;
+  if (shortcut.reviews?.length) return { ...view, status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+  if (shortcut.blockers?.length) return blockedInventory(view, shortcut.blockers);
+  if (shortcut.policyState === 'changed' && shortcut.phase !== 'cancelled' &&
+      (shortcut.phase === 'discovering' || shortcut.counts?.unattempted || shortcut.counts?.unfinishedOperations || shortcut.counts?.unavailable)) {
+    return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'cancel', diagnostics: ['WORKFLOW_POLICY_CHANGED'] };
+  }
+  if (view.nextAction === 'inspect' && unfinished(native)) return view;
+  if (shortcut.phase === 'discovering') return { ...view, status: native.state === 'missing' ? 'missing' : 'idle', statusDetail: 'discovery', nextAction: 'resume' };
+  if (shortcut.phase === 'cancelling') return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'cancel', diagnostics: ['PROCESSING_CANCELLATION_PENDING'] };
+  if (shortcut.reason === 'nothing-to-resume') return { ...view, status: native.state === 'missing' ? 'missing' : 'idle', statusDetail: 'nothing-to-resume', nextAction: 'none' };
+  if (shortcut.phase === 'cancelled') return { ...view, status: 'idle', statusDetail: 'cancelled', nextAction: 'none' };
+  if (shortcut.counts?.unavailable && !shortcut.nextRun && !shortcut.continuationNeeded) return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'cancel', diagnostics: ['PROCESSING_SELECTION_CHANGED'] };
+  if (shortcut.counts?.unfinishedOperations) return { ...view, status: 'idle', statusDetail: 'unfinished', nextAction: 'resume' };
+  if (shortcut.nextRun || shortcut.continuationNeeded) return { ...view, status: 'idle', statusDetail: 'continuation', nextAction: 'resume' };
+  if (shortcut.counts?.cancelled) return { ...view, status: 'idle', statusDetail: 'cancelled', nextAction: 'process' };
+  if (shortcut.phase === 'ready') return { ...view, status: native.state === 'missing' ? 'missing' : 'idle', statusDetail: shortcut.counts.selected ? 'selection-complete' : shortcut.incomplete ? 'discovery' : 'nothing-pending', nextAction: shortcut.incomplete ? 'process' : 'none' };
+  return view;
 }
 
 // Exact metadata locations only. Presence is a candidate hint, never a source
@@ -84,7 +128,7 @@ async function sourcePresence(collection, context, policyHash, capability = null
  */
 export async function runProcessingMcp({ client, configPath, input, output, env = process.env } = {}, dependencies = {}) {
   choice(client, CLIENTS);
-  const jobs = new Map(), owners = new WeakMap(), committedReviews = new WeakMap(), replayed = new WeakMap();
+  const jobs = new Map(), owners = new WeakMap(), committedReviews = new WeakMap(), replayed = new WeakMap(), controls = new WeakMap();
   const openController = dependencies.openController ?? openProcessingController;
   const resolveInvocation = dependencies.resolveInvocation ?? resolveProcessingInvocation;
   async function resolveSource(context, invocation, { signal, requireCompleted } = {}) {
@@ -168,76 +212,172 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     return receipt.response;
   }
   async function getStatus({ source }) {
-    const { options } = selected(source), key = keyFor(options);
-    const job = jobs.get(key);
-    if (job) return viewOf(await job.controller.status({ selection: source.selection }));
-    const controller = await openController({ ...options, client }, { env });
-    try { return viewOf(await controller.status({ selection: source.selection })); } finally { await controller.close(); }
+    const { options, capability } = selected(source), key = keyFor(options);
+    const replay = await replayControl(source); if (replay) return replay;
+    const job = jobs.get(key), controller = job?.controller ?? await openController({ ...options, client }, { env });
+    try {
+      let native = await controller.status({ selection: source.selection });
+      const peer = (await controller.collectionActivity()).find(item => !item.own);
+      if (peer && !['creating', 'busy', 'blocked'].includes(native.state)) native = {
+        state: peer.state, requestId: peer.requestId,
+        chat: peer.sessionId ? { client: peer.client, sessionId: peer.sessionId } : null,
+        diagnostics: ['PROCESSING_COLLECTION_BUSY'] };
+      const shortcut = await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection }));
+      const view = shortcutView(native, shortcut);
+      let inventory;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { inventory = await withStorageProbes(() => pendingCollectionProcessing(capability, { selection: source.selection })); break; }
+        catch (error) {
+          if (error.code !== 'PROCESSING_INVENTORY_CHANGED') throw error;
+          if (attempt) return { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_INVENTORY_INCOMPLETE'])].slice(0, 8) };
+        }
+      }
+      view.inventory = { pending: inventory.counts.unclaimedRevisions, claimed: inventory.counts.claimedRevisions,
+        blockedByClaim: inventory.counts.blockedByClaimRevisions, inspected: inventory.counts.inspectedHeads,
+        handled: inventory.counts.handledRevisions, incomplete: inventory.incomplete,
+        unfinishedOperations: inventory.operations.length,
+        awaitingReview: inventory.operations.filter(item => item.state === 'awaiting-review').length,
+        sourceCompleteness: inventory.sourceCompleteness };
+      if (inventory.blockers.length && !['creating', 'busy', 'blocked'].includes(view.status)) {
+        Object.assign(view, blockedInventory(view, inventory.blockers));
+      } else if (!['creating', 'busy', 'blocked'].includes(view.status) && inventory.operations.some(item => item.scopeMatch !== 'full')) {
+        Object.assign(view, { status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect', diagnostics: ['PROCESSING_SELECTION_CHANGED'] });
+      } else if (['missing', 'idle', 'completed'].includes(view.status) && inventory.operations.length && view.nextAction === 'none') {
+        Object.assign(view, { status: view.inventory.awaitingReview ? 'awaiting-review' : 'idle',
+          statusDetail: view.inventory.awaitingReview ? 'draft-ready' : 'unfinished', nextAction: view.inventory.awaitingReview ? 'review' : 'resume' });
+      } else if (['missing', 'idle'].includes(view.status) && view.nextAction === 'none' && (!shortcut.requestId || inventory.counts.unclaimedRevisions || inventory.incomplete)) {
+        Object.assign(view, { statusDetail: inventory.incomplete ? 'inventory-incomplete' : inventory.counts.unclaimedRevisions ? 'pending' : 'nothing-pending', nextAction: inventory.counts.unclaimedRevisions || inventory.incomplete ? 'process' : 'none' });
+      }
+      if (native.remainingRuns === 0 && view.nextAction === 'resume') Object.assign(view, { status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_HISTORY_FULL'] });
+      if (job?.sequence && !['creating', 'busy', 'blocked', 'awaiting-review'].includes(view.status)) return { ...view, status: 'busy', statusDetail: 'processing', nextAction: 'wait' };
+      return view;
+    } finally { if (!job) await controller.close(); }
   }
   async function activeJob(key, source, signal) {
     const job = jobs.get(key);
     if (!job) return null;
     const status = await job.controller.status({ selection: source.selection });
-    if (['creating', 'busy'].includes(status.state)) return alreadyProcessing(viewOf(status));
-    // Native execution is terminal; wait for its owned cleanup before admitting
-    // another request. A terminal snapshot is not an active processing refusal.
-    await job.promise;
-    signal?.throwIfAborted();
-    return null;
+    if (['creating', 'busy'].includes(status.state) || job.sequence) return alreadyProcessing(viewOf({ ...status, state: 'busy' }));
+    await job.promise; signal?.throwIfAborted(); return null;
   }
-  async function requestProcessing({ source, selection, signal }) {
+  async function requestProcessing({ source, selection, scope = 'collection', signal, mode = 'process' }) {
     signal?.throwIfAborted();
-    const { options, capability } = selected(source), key = keyFor(options);
-    const requestId = nativeRequestId(source, client);
-    if ((source.nativeSkill || source.controlExclusionUnsupported) && selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) {
-      fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
-    }
-    await withStorageProbes(() => assertWorkflowStorage(capability, selection ?? source.selection, 'explicitProcess'));
-    const replay = await replayControl(source);
-    signal?.throwIfAborted();
-    if (replay) return replay;
-    const existing = await activeJob(key, source, signal);
-    if (existing) return existing;
+    const { options, capability } = selected(source), key = keyFor(options), requestId = nativeRequestId(source, client);
+    if (selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
+    await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
+    const replay = await replayControl(source); if (replay) return replay;
+    const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, { selection: source.selection,
+      requestId, action: mode, argsHash: source.argsHash }));
+    controls.set(source, control); if (control.response) return control.response;
+    const existing = await activeJob(key, source, signal); if (existing) return existing;
     let announce, rejectAdmission, releaseDispatch, rejectDispatch;
     const admission = new Promise((resolve, reject) => { announce = resolve; rejectAdmission = reject; });
     const dispatched = new Promise((resolve, reject) => { releaseDispatch = resolve; rejectDispatch = reject; });
-    admission.catch(() => {});
-    dispatched.catch(() => {});
-    const controller = await openController({ ...options, client }, { env,
-      ...dependencies.execution,
+    admission.catch(() => {}); dispatched.catch(() => {});
+    let job;
+    const controller = await openController({ ...options, client }, { env, ...dependencies.execution,
       preferHostEnvironment: client === 'claude',
       beforeExecution: async context => {
-        signal?.throwIfAborted();
-        await dependencies.execution?.beforeExecution?.(context);
-        signal?.throwIfAborted();
-        announce({ ...viewOf(await controller.status({ inspectOperation: false })), statusDetail: 'accepted' });
-        // The source receipt shares intake state with engine preparation. Finish
-        // publishing admission before any native input can start engine work.
+        if (job.cancelRequested) fail('PROCESSING_CANCEL_UNVERIFIED');
+        signal?.throwIfAborted(); await dependencies.execution?.beforeExecution?.(context); signal?.throwIfAborted();
+        const value = shortcutView(await controller.status({ inspectOperation: false }), job.shortcut);
+        announce({ ...value, status: 'busy', statusDetail: 'accepted', nextAction: 'wait' });
         await dispatched;
       },
     });
-    let current;
-    try { signal?.throwIfAborted(); current = await controller.status({ inspectOperation: false }); signal?.throwIfAborted(); }
-    catch (error) { await controller.close(); throw error; }
-    const cancel = () => { rejectDispatch(signal.reason); rejectAdmission(signal.reason); };
+    let current, shortcut;
+    try {
+      signal?.throwIfAborted(); current = await controller.status({ selection: source.selection });
+      if (current.state === 'awaiting-review') {
+        const operation = await withStorageProbes(() => inspectProcessing(capability, current.operationId));
+        if (operation.state === 'completed' && operation.outcome && !operation.recoveryRequired) {
+          current = await controller.finishReview({ expectedChatHash: current.chatHash, requestId: current.requestId, operationId: current.operationId });
+        }
+      }
+      if (await controller.hasRequest(requestId)) { await controller.close(); return viewOf(current); }
+      const activity = await controller.collectionActivity(), competing = activity.find(item => !item.own);
+      if (competing) {
+        await controller.close();
+        const other = viewOf({ state: competing.state, requestId: competing.requestId,
+          chat: competing.sessionId ? { client: competing.client, sessionId: competing.sessionId } : null,
+          diagnostics: ['PROCESSING_COLLECTION_BUSY'] });
+        return ['creating', 'busy'].includes(other.status) ? alreadyProcessing(other) : other;
+      }
+      if (['creating', 'busy', 'blocked'].includes(current.state)) { await controller.close(); return alreadyProcessing(viewOf(current)); }
+      shortcut = await withStorageProbes(() => selectProcessingShortcut(capability, { selection: source.selection, requestId, scope, mode }, { canResumeOperation: id => controller.canResumeOperation(id) }));
+      if (!shortcut.nextRun) { await controller.close(); return shortcutView(current, shortcut); }
+      if (current.remainingRuns === 0) { await controller.close(); return { ...viewOf(current), status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_HISTORY_FULL'] }; }
+    } catch (error) { await controller.close(); throw error; }
+    const cancel = () => { if (!job?.admissionCommitted) { rejectDispatch(signal.reason); rejectAdmission(signal.reason); } };
     signal?.addEventListener('abort', cancel, { once: true });
-    const job = { controller, promise: null, requestId, releaseDispatch, rejectDispatch }; jobs.set(key, job);
-    job.promise = controller.run({ requestId, selection: selection ?? source.selection, expectedChatHash: current.chatHash })
-      .then(result => {
-        const view = ['creating', 'busy'].includes(result.state) && result.requestId !== requestId
-          ? alreadyProcessing(viewOf(result)) : viewOf(result);
-        announce(view); return view;
-      })
-      .catch(error => { rejectAdmission(error); return { status: 'blocked', requestId, chat: null, nextAction: 'inspect',
-        diagnostics: ['PROCESSING_CHAT_OUTCOME_UNKNOWN'] }; })
+    job = { controller, promise: null, requestId, releaseDispatch, rejectDispatch, shortcut, sequence: true, cancelRequested: false }; jobs.set(key, job);
+    job.promise = (async () => {
+      const started = performance.now();
+      let freshSelection = job.shortcut.requestId === requestId;
+      for (let turn = 0; turn < 8 && performance.now() - started < 45 * 60 * 1000; turn++) {
+        if (job.cancelRequested) break;
+        const before = canonicalJSON({ counts: job.shortcut.counts, worksets: job.shortcut.worksets.map(item => item.worksetHash),
+          operations: job.shortcut.operations.map(item => [item.operationId, item.claimHash, item.outcome]) });
+        current = await controller.status({ inspectOperation: false });
+        if (current.remainingRuns === 0) break;
+        const result = await controller.run({ requestId: derivedRequestId(requestId, turn), selection: source.selection,
+          expectedChatHash: current.chatHash, ...job.shortcut.nextRun });
+        if (job.cancelRequested || ['blocked', 'awaiting-review'].includes(result.state)) break;
+        job.shortcut = await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection }));
+        const after = canonicalJSON({ counts: job.shortcut.counts, worksets: job.shortcut.worksets.map(item => item.worksetHash),
+          operations: job.shortcut.operations.map(item => [item.operationId, item.claimHash, item.outcome]) });
+        if (before === after || job.shortcut.counts?.unfinishedOperations || ['failed', 'interrupted'].includes(result.nativeStatus)) break;
+        job.shortcut = await withStorageProbes(() => selectProcessingShortcut(capability, { selection: source.selection,
+          requestId: derivedRequestId(requestId, turn + 1), scope, mode: 'resume' }, { canResumeOperation: id => controller.canResumeOperation(id) }));
+        if (!job.shortcut.nextRun && mode === 'process' && !freshSelection && !job.shortcut.reviews?.length && !job.shortcut.blockers?.length && !job.shortcut.counts?.unavailable) {
+          job.shortcut = await withStorageProbes(() => selectProcessingShortcut(capability, { selection: source.selection, requestId, scope }, { canResumeOperation: id => controller.canResumeOperation(id) }));
+          freshSelection = true;
+        }
+        if (!job.shortcut.nextRun) break;
+      }
+      const terminal = await controller.status({ selection: source.selection });
+      const response = shortcutView(terminal, await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection })));
+      if (terminal.remainingRuns === 0 && response.nextAction === 'resume') Object.assign(response, { status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_HISTORY_FULL'] });
+      announce(response); return response;
+    })().catch(error => { rejectAdmission(error); return { status: 'blocked', requestId, chat: null, nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_OUTCOME_UNKNOWN'] }; })
       .finally(async () => {
-        signal?.removeEventListener('abort', cancel);
+        job.sequence = false; signal?.removeEventListener('abort', cancel);
         try { await controller.close(); } finally { if (jobs.get(key) === job) jobs.delete(key); }
       });
-    // Observe cleanup rejection immediately, even when the originating MCP call
-    // has already returned admission. Durable state remains the recovery source.
-    job.promise.catch(() => {});
-    return admission;
+    job.promise.catch(() => {}); return admission;
+  }
+  const requestResume = args => requestProcessing({ ...args, mode: 'resume' });
+  async function requestCancel({ source, signal }) {
+    const { capability, options } = selected(source), key = keyFor(options), requestId = nativeRequestId(source, client);
+    const replay = await replayControl(source); if (replay) return replay;
+    const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, { selection: source.selection,
+      requestId, action: 'cancel', argsHash: source.argsHash }));
+    controls.set(source, control); if (control.response) return control.response;
+    const job = jobs.get(key), controller = job?.controller ?? await openController({ ...options, client }, { env });
+    try {
+      if (job) job.cancelRequested = true;
+      let current = await controller.status({ selection: source.selection });
+      if (job) {
+        if (current.state === 'busy') await controller.stop({ expectedChatHash: current.chatHash, requestId: current.requestId });
+        await job.promise;
+        current = await controller.status({ selection: source.selection });
+      }
+      const assertStopped = async () => {
+        signal?.throwIfAborted();
+        if ((await controller.collectionActivity()).some(item => ['creating', 'busy', 'blocked'].includes(item.state))) fail('PROCESSING_CANCEL_UNVERIFIED');
+      };
+      await assertStopped();
+      let shortcut = await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection }));
+      if (!shortcut.checkpointHash) {
+        const inventory = await withStorageProbes(() => pendingCollectionProcessing(capability, { selection: source.selection, limit: 1 }));
+        if (inventory.operations.length || inventory.blockers.length) fail('PROCESSING_CANCEL_UNVERIFIED');
+      }
+      if (shortcut.requestId !== control.targetRequestId && control.targetRequestId !== null) fail('PROCESSING_SHORTCUT_CHANGED');
+      if (!shortcut.checkpointHash) return { ...viewOf(current), status: 'idle', statusDetail: 'nothing-to-resume', nextAction: 'none' };
+      const cancelled = await withStorageProbes(() => cancelProcessingShortcut(capability,
+        { selection: source.selection, expectedCheckpointHash: shortcut.checkpointHash }, { assertStopped, canResumeOperation: id => controller.canResumeOperation(id) }));
+      return shortcutView({ ...current, state: 'idle' }, cancelled);
+    } finally { if (!job) await controller.close(); }
   }
   async function requestReview({ source, elicit, signal, commitResponse }) {
     signal?.throwIfAborted();
@@ -250,23 +390,38 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const controller = await openController({ ...options, client }, { env });
     let response;
     try {
-      const status = await controller.status({ selection: source.selection });
-      if (status.state !== 'awaiting-review') response = viewOf(status);
+      let status = await controller.status({ selection: source.selection });
+      if (status.state === 'awaiting-review') {
+        const operation = await withStorageProbes(() => inspectProcessing(capability, status.operationId));
+        if (operation.state === 'completed' && operation.outcome && !operation.recoveryRequired) status = { ...status, state: 'idle' };
+      }
+      const inventory = await withStorageProbes(() => pendingCollectionProcessing(capability, { selection: source.selection, limit: 1 }));
+      if (inventory.blockers.length) return blockedInventory(viewOf(status), inventory.blockers);
+      const proposals = inventory.operations.filter(item => item.state === 'awaiting-review' && !item.recoveryRequired);
+      if (proposals.some(item => item.scopeMatch !== 'full')) fail('PROCESSING_SELECTION_CHANGED');
+      let proposal = proposals[0];
+      if (proposals.length > 1) {
+        const chosen = await elicit({ choices: proposals.map((item, index) => ({ operationId: item.operationId,
+          label: `Draft ${index + 1}: ${item.inputCount} captures; ${item.createdAt}` })) });
+        if (chosen.action !== 'accept') return { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+        proposal = proposals.find(item => item.operationId === chosen.content.operationId);
+        if (!proposal) fail('PROCESSING_REVIEW_INTERRUPTED');
+      }
+      if (!proposal) response = shortcutView(status, await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection })));
       else {
-        const context = await controller.reviewContext({ expectedChatHash: status.chatHash, requestId: status.requestId });
+        const context = { selection: proposal.selection, operationId: proposal.operationId };
         const result = await reviewProcessingProposal(capability, context, { elicit, signal, commitResponse });
-        // This internal marker exists only after an authoritative engine result;
-        // serialized tool arguments and pending/failed saves cannot create it.
         if (result.status !== 'awaiting-review') {
           committedReviews.set(source, { status: 'completed', statusDetail: 'completed', requestId: status.requestId, chat: status.chat,
             nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'] });
           try {
-            response = viewOf(await controller.finishReview({ expectedChatHash: status.chatHash,
-              requestId: status.requestId, operationId: context.operationId }));
+            const ownReview = status.state === 'awaiting-review' && status.operationId === proposal.operationId;
+            const next = ownReview ? await controller.finishReview({ expectedChatHash: status.chatHash,
+              requestId: status.requestId, operationId: proposal.operationId }) : status;
+            response = shortcutView(next, await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection })));
+            if (!ownReview && response.status === 'missing') response = { ...response, status: 'completed', statusDetail: 'completed' };
           } catch { response = committedReviews.get(source); }
-        } else {
-          response = viewOf(await controller.status({ selection: source.selection }));
-        }
+        } else response = { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
       }
     } finally {
       try { await controller.close(); }
@@ -279,13 +434,19 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   }
   async function beforeResponse({ source, context, invocation, view, result, signal, commitResponse }) {
     const { capability, options } = selected(source);
-    const job = invocation.tool === 'process_selected_captures' ? jobs.get(keyFor(options)) : null;
+    const job = ['process_selected_captures', 'processing_resume'].includes(invocation.tool) ? jobs.get(keyFor(options)) : null;
     const owned = job?.requestId === nativeRequestId(source, client) ? job : null;
-    const release = () => {
+    const commitAdmission = () => {
+      signal?.throwIfAborted(); commitResponse();
+      if (owned) owned.admissionCommitted = true;
+    };
+    const release = async (response = view) => {
       signal?.throwIfAborted();
+      const control = controls.get(source);
+      if (control && !control.response) await withStorageProbes(() => finishProcessingShortcutControl(capability, control, response, { beforePublish: commitAdmission }));
       // Admission is complete at this synchronous boundary. A later cancellation
       // of this MCP request cannot cancel the separate, already admitted run.
-      if (owned) { commitResponse(); owned.releaseDispatch(); }
+      if (owned) { commitAdmission(); owned.releaseDispatch(); }
     };
     try {
       signal?.throwIfAborted();
@@ -297,7 +458,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         return;
       }
       if ((!source.nativeSkill && !source.controlExclusionUnsupported) || !source.unitId || source.captureActive === false) {
-        release();
+        await release();
         return;
       }
       // Explicit processing consent is independent of automatic collection.
@@ -307,11 +468,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       catch (error) {
         if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error;
         await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
-        release(); return;
+        await release(); return;
       }
       if (source.controlExclusionUnsupported) {
-        release();
-        return { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+        const replacement = { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+        await release(processingControlStatusView(replacement, { collectionId: source.collectionId }));
+        return replacement;
       }
       const store = await withStorageProbes(() => openWorkflowIntake(capability, source.selection, 'collect'));
       const authorize = async () => { signal?.throwIfAborted(); await assertWorkflowStorage(capability, source.selection, 'collect'); signal?.throwIfAborted(); return true; };
@@ -323,19 +485,21 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           statusText: view.statusText, resultHash: digest(canonicalJSON(client === 'claude' ? result.content : result)), response: view,
           ...(client === 'claude' ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand']
             .map(key => [key, source[key]])) : {}) },
-      }, { authorize, beforePublish: commitResponse })));
-      release();
+      }, { authorize, beforePublish: commitAdmission })));
+      await release();
     } catch (error) {
       if (error.code === 'STALE_SELECTION' && !signal?.aborted) {
         // Collection progress is not processing consent. Preserve the inspected
         // hash and omit exclusion proof instead of refreshing it through a race.
         try {
           await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
-          release();
-          return { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+          const replacement = { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+          await release(processingControlStatusView(replacement, { collectionId: source.collectionId }));
+          return replacement;
         } catch (freshError) { error = freshError; }
       }
-      owned?.rejectDispatch(error);
+      if (owned?.admissionCommitted) owned.releaseDispatch();
+      else owned?.rejectDispatch(error);
       // Receipt/registry housekeeping cannot undo an engine disposition. A
       // failed receipt supplies no exclusion proof and is never retried here.
       if (invocation.tool === 'processing_review' && committedReviews.has(source)) return committedReviews.get(source);
@@ -343,7 +507,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     }
   }
   try {
-    await runProcessingControlServer({ client, input, output, env, resolveSource, getStatus, requestProcessing, requestReview, beforeResponse });
+    await runProcessingControlServer({ client, input, output, env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse });
   } finally {
     // No automatic dispatch retry, cancellation, claim cleanup or new source read.
     for (const job of jobs.values()) job.rejectDispatch(Object.assign(new Error('PROCESSING_CONTROL_FAILED'), { code: 'PROCESSING_CONTROL_FAILED' }));

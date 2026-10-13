@@ -100,16 +100,16 @@ function execute({ spawn, executable, args, cwd, env, prompt, sessionId, inputId
   timeoutMs, maxOutputBytes, onEvent, signal }) {
   return new Promise((resolve, reject) => {
     let child, initialized = null, result = null, terminalFailed = false, replayed = false, dispatched = false, settled = false, failure = null;
-    let buffered = Buffer.alloc(0), outputBytes = 0, timer, terminationTimer;
+    let buffered = Buffer.alloc(0), outputBytes = 0, timer, terminationTimer, stoppingForCancellation = false;
     const decoder = new TextDecoder('utf-8', { fatal: true });
-    const finish = error => {
+    const finish = (error, interrupted = false) => {
       if (settled) return;
       settled = true; clearTimeout(timer); clearTimeout(terminationTimer);
       signal?.removeEventListener('abort', abort);
       if (error) reject(error);
-      else resolve({ client: 'claude', sessionId, inputId, status: terminalFailed ? 'failed' : 'completed', model: initialized.model,
+      else resolve({ client: 'claude', sessionId, inputId, status: interrupted ? 'interrupted' : terminalFailed ? 'failed' : 'completed', model: initialized.model,
         clientVersion: initialized.claude_code_version, tools: [...allowed],
-        output: terminalFailed ? '' : result.result, desktopVisibility: 'unverified' });
+        output: interrupted || terminalFailed ? '' : result.result, desktopVisibility: 'unverified' });
     };
     const stop = code => {
       if (settled || failure) return;
@@ -117,7 +117,7 @@ function execute({ spawn, executable, args, cwd, env, prompt, sessionId, inputId
       try { child?.kill('SIGKILL'); } catch { /* Unknown outcome remains blocked. */ }
       terminationTimer = setTimeout(() => finish(failure), 1000);
     };
-    const abort = () => stop('PROCESSING_CLIENT_INTERRUPTED');
+    const abort = () => { if (!failure) stoppingForCancellation = true; stop('PROCESSING_CLIENT_INTERRUPTED'); };
     const emit = event => {
       if (!onEvent) return;
       // Keep engine mutations out of observational callbacks. An asynchronous
@@ -189,6 +189,12 @@ function execute({ spawn, executable, args, cwd, env, prompt, sessionId, inputId
       });
       child.stdin.on('error', () => stop('PROCESSING_CLIENT_INPUT_FAILED'));
       child.on('close', (code, nativeSignal) => {
+        // Only actual closure of this owned child, after restricted init and
+        // exact input acknowledgement, proves a requested interruption. A kill
+        // request or the termination timeout alone leaves the outcome unknown.
+        if (stoppingForCancellation && failure?.code === 'PROCESSING_CLIENT_INTERRUPTED' && initialized && replayed) {
+          finish(null, true); return;
+        }
         if (failure) { finish(failure); return; }
         if ((code !== 0 && !(terminalFailed && code === 1)) || nativeSignal || buffered.length || !initialized || !result || !replayed) {
           finish(nativeError('PROCESSING_CLIENT_OUTCOME_UNKNOWN', dispatched)); return;

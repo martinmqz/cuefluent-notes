@@ -11,7 +11,7 @@ import { processingSourceDirectory, processingSourcePath, validateProcessingSour
 import { readSessionRange } from './session-jsonl.mjs';
 import { verifyCodexHeader, codexRegistrationHeader } from './codex-reader.mjs';
 import { claudeRegistrationHeader } from './claude-reader.mjs';
-import { loadClaudeProcessingSkill, findClaudeProcessingControlInput } from './processing-control-proof.mjs';
+import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, claudeProcessingCommandKind, processingControlAction, PROCESSING_CONTROLS } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, fail, object, isNativeId } from './workflow-values.mjs';
 
 const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
@@ -159,7 +159,9 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
         const content = p.item.content;
         nativeSkill = Array.isArray(content) && content.length === 2 && content[0]?.type === 'skill' &&
           content[0].name === 'cuefluent-notes' && path.normalize(content[0].path ?? '') === path.normalize(skillPath) &&
-          content[1]?.type === 'text' && content[1].text === (invocation.tool === 'processing_review' ? 'review' : 'process');
+          content[1]?.type === 'text' && content[1].text === processingControlAction(invocation.tool, invocation.arguments);
+        if (Array.isArray(content) && content.length === 2 && content[0]?.type === 'skill' && content[0].name === 'cuefluent-notes' &&
+            path.normalize(content[0].path ?? '') === path.normalize(skillPath) && content[1]?.type === 'text' && PROCESSING_CONTROLS.includes(content[1]?.text) && content[1].text !== processingControlAction(invocation.tool, invocation.arguments)) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
       }
       if (row.type !== 'response_item' || p?.type !== 'function_call' || p.call_id !== context.toolCallId) continue;
       if (call || p.internal_chat_message_metadata_passthrough?.turn_id !== unitId ||
@@ -185,9 +187,17 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
   if (!call) throw new MissingNativeInvocation();
   let controlInput = null;
   if (context.client === 'claude') {
-    const skill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control: invocation.tool === 'processing_review' ? 'review' : 'process' });
+    const skill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control: processingControlAction(invocation.tool, invocation.arguments) });
     controlInput = findClaudeProcessingControlInput(read.records, { source, ...call, argsHash, skill });
     if (controlInput) { nativeSkill = true; unitId = controlInput.unitId; }
+    else {
+      const alternatives = new Set(read.records.map(({ value }) => claudeProcessingCommandKind(value, skillCommand)));
+      alternatives.delete(null); alternatives.delete(processingControlAction(invocation.tool, invocation.arguments));
+      for (const control of alternatives) {
+        const otherSkill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control });
+        if (findClaudeProcessingControlInput(read.records, { source, ...call, argsHash, skill: otherSkill, control })) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
+      }
+    }
   }
   return { call, unitId, nativeSkill, nested, controlInput, argsHash };
 }

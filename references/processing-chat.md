@@ -210,19 +210,41 @@ run arbitrary shell commands, browse, change settings, trust hooks or approve it
 own proposal. Inherited hooks, plugins and unrelated tools are disabled and checked
 before processing starts. Collection settings in the work project stay unchanged.
 
-The formal skill request selects retained captures from its invoking session,
-not every session or project in the collection. Each request resumes existing
-selected work and handles at most one bounded operation. It stops at a proposal,
-no-change result, a conflict or recovery requirement. Further requests reuse the same processing session. Busy requests
-do not dispatch duplicate work. An outstanding proposal must receive a disposition
-before another operation starts. Engine page acknowledgments and proposal hashes,
-not conversational recollection, determine the resume point.
-A repeated process request while review is outstanding returns `awaiting-review`
-without launching the client. A narrower unit-scoped operation in the selected
-session resumes with its original selection. An operation spanning other evidence
-is listed as a blocker with `resumeSupported: false` and
-`nextAction: inspect-with-original-selection`; inspect it through the explicit CLI
-with its original scope. It does not prevent listing the other pending work.
+### Shortcut scopes and continuation
+
+Use the [formal skill actions](../SKILL.md#formal-processing-controls) in either
+client. In Claude, append the action to `/cuefluent-notes:cuefluent-notes`; in
+Codex, select Cuefluent Notes and type the action. Plain `process` selects pending
+retained evidence across the existing collection, including configured repos and
+both clients. `process repo` uses the nearest verified Git checkout and excludes
+separate nested repositories. `process chat` selects the invoking native session.
+The invoking chat proves the request; it is not the default evidence boundary.
+These actions never create a new route or change collection settings.
+
+Selection begins with metadata, preserves exact head hashes, and resumes existing
+unfinished operations with a verified stopped native owner before admitting more
+evidence. A standalone claim without that proof stays preserved for explicit CLI
+handling; the shortcuts cannot infer that its agent has stopped. Processing handles bounded
+batches sequentially in the reusable isolated session. It stops for an exact
+proposal, an unfinished operation, a conflict, recovery, lack of progress or a
+run limit. A completed no-change operation allows another batch. Already handled
+revisions are not admitted again. A changed head is new evidence, not permission
+to replace an existing conflicted claim.
+
+`resume` keeps the saved evidence selection and inspection checkpoints. It does
+not add captures that arrived later, and reports a no-op when no unfinished work
+exists. A `process` request also resumes saved unfinished work first; it reports
+that selection's actual scope. A conflicting narrower request is refused rather
+than replacing it. After finishing prior work, `process` can select one fresh
+bounded portion in the requested scope within the same request limits. Invoke
+`process` again for later inventory portions. Discovery and selection limits are in the
+[shortcut command contract](workflow-cli.md#processing-shortcut-checkpoints).
+An incomplete inventory is never reported as an empty backlog.
+
+The checkpoint contains scope, frozen inputs and continuation pointers. Existing
+engine worksets, claims, acknowledgments, proposals and outcomes remain the
+source of truth. It supplies no independent save or completion authority. Each
+proposal still needs its exact native review decision.
 
 Redelivery of an exact verified formal call returns its original admitted response
 without dispatching again, reopening a review form or rewriting its receipt. That
@@ -234,9 +256,11 @@ not prove that the model has started reading evidence or completed a note.
 Older stored replies retain their original `busy` wording on exact replay.
 If the native run stopped but its engine operation remains unfinished, status
 reports **Processing stopped with unfinished work** and a resume or inspection
-action. This snapshot covers the chat's latest recorded operation, not every claim
-in the collection. A different source scope, unknown outcome or recovery requirement
-calls for inspection rather than a resume from the current source chat.
+action. Status also separates frozen-selection progress from the bounded
+collection inventory and lists the collection's unfinished operations and draft
+count. Inventory counts describe only the examined page; partial inventory and
+unknown source completeness remain explicit. An unknown outcome or recovery
+requirement calls for inspection, not a replacement operation.
 **No processing run is active** describes execution only; it does not
 assert that the collection has no pending captures or that notes were saved.
 Keep the source client and its MCP host open until processing reaches a review or
@@ -247,8 +271,18 @@ assuming the background work completed.
 A native request cancellation received while admission is pending releases that
 admission without starting the model turn or returning a response. Once admission
 has completed, cancelling that finished request does not cancel the separate run
-or undo a saved note; use current operation status and the explicit recovery or
-cancellation controls.
+or undo a saved note. The separate `cancel` action stops only native execution
+owned by this connected controller and waits for a verified terminal result
+before releasing unapplied claims. Unknown or externally owned execution reports
+`PROCESSING_CANCEL_UNVERIFIED`; preserve it for recovery. Cancellation is durable
+and resumable if interrupted; invoke `cancel` again to finish it. It never adopts
+unrelated standalone claims or drafts. It keeps captures pending, preserves saved notes,
+and leaves collection/processing preferences unchanged. A new `process` request
+can select those pending captures after cancellation completes. This also provides
+a fresh selection after a policy change or an unavailable frozen input, without
+rewriting the old claim hashes. Native history capacity requires guarded
+`processing-chat-rollover` before resuming; see the
+[shortcut command contract](workflow-cli.md#processing-shortcut-checkpoints).
 
 The restricted channel accepts at most 256 KiB of serialized engine output per
 tool result. A larger result returns `PROCESSING_ENGINE_OUTPUT_LIMIT` without
@@ -257,7 +291,8 @@ uncaptured context for material that cannot fit this channel.
 
 ## Review controls
 
-Invoke the same skill with `review`. Its
+Invoke the same skill with `review`. When several proposals are pending, first
+choose the draft in the native selector. Selecting it is not approval. Its
 `cuefluent_control.processing_review` call requests a native host form displaying
 the exact proposal, original note contents, paths, new directories, input identities
 and known evidence limits. Read the full preview in the scrollable **Proposed

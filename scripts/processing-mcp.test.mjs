@@ -8,6 +8,7 @@ import { PassThrough, Writable } from 'node:stream';
 import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
 import { withReviewPreview } from './test-support/processing-review.mjs';
 import { openProcessingController } from './processing-controller.mjs';
+import { processingControlAction } from './processing-control-proof.mjs';
 import { runProcessingMcp } from './processing-mcp.mjs';
 import { readSelection, controlSelection, readCaptureHead } from './intake-store.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
@@ -56,6 +57,7 @@ async function harness(t, f, overrides = {}) {
       await h.script((name, args) => options.onEngineTool({ tool: `cuefluent_${name}`, arguments: args }));
       return { ...request.session, unitId, status: 'completed', model: 'synthetic-model', output: 'PRIVATE SYNTHETIC DRAFT' };
     },
+    async interrupt() { h.interrupts = (h.interrupts ?? 0) + 1; await h.onInterrupt?.(); },
     async close() {}
   });
   const dependencies = {
@@ -68,10 +70,11 @@ async function harness(t, f, overrides = {}) {
     },
     async openController(context, options) {
       h.opens++;
-      const controller = await openProcessingController(context, { ...options, openCodex, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host'),
+      const controller = await openProcessingController(context, { ...options, openCodex, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host'), ...overrides.controllerIdentity,
         inspectOperation: operationId => h.inspectOperation ? h.inspectOperation(operationId) : inspectProcessing(f.capability, operationId) });
       let closed = false;
       return { ...controller, async run(args) { const job = controller.run(args); h.jobs.push(job); return job; },
+        async stop(args) { await h.beforeStop?.(); return controller.stop(args); },
         async finishReview(args) {
           h.finishReviewCalls = (h.finishReviewCalls ?? 0) + 1;
           await h.beforeFinishReview?.();
@@ -118,6 +121,14 @@ async function harness(t, f, overrides = {}) {
   return h;
 }
 
+async function prepareFromPending(call, f) {
+  const pending = await call('processing_pending', {});
+  const request = pending.nextPreparation;
+  assert(request, 'the engine must expose a bounded exact next batch');
+  f.operationId = request.operationId;
+  return call('processing_prepare', request);
+}
+
 test('MCP admission returns while native processing is pending, and shutdown waits for its owned finite job', async t => {
   const f = await processingFixture(t), h = await harness(t, f), gate = deferred(); h.release = gate.resolve;
   h.script = async call => { await gate.promise; await call('processing_pending', {}); };
@@ -125,12 +136,12 @@ test('MCP admission returns while native processing is pending, and shutdown wai
   const admitted = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(admitted.status, 'busy'); assert.notEqual(admitted.requestId, requestId);
   assert.equal(admitted.statusDetail, 'accepted');
-  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted.');
+  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted. Scope: collection.');
   h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'busy'); assert.equal(status.chat.sessionId, admitted.chat.sessionId);
   assert.equal(status.statusDetail, 'processing');
-  assert.equal(status.statusText, 'Cuefluent: Processing is in progress.');
+  assert.match(status.statusText, /^Cuefluent: Processing is in progress\. Scope: collection\. Inventory/);
   const duplicate = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(duplicate.status, 'busy'); assert.deepEqual(duplicate.diagnostics, ['PROCESSING_CHAT_BUSY']);
   assert.equal(duplicate.requestId, admitted.requestId);
@@ -150,7 +161,7 @@ test('MCP admission returns while native processing is pending, and shutdown wai
 test('status exposes unfinished evidence, incompatible source scope and conflicts without dispatching', async t => {
   const f = await processingFixture(t), config = await fs.readFile(f.options.configPath), h = await harness(t, f);
   h.script = async call => {
-    await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+    await prepareFromPending(call, f);
   };
   const closed = h.whenClosed();
   await h.call('process_selected_captures', { collectionId: f.collection.id });
@@ -159,7 +170,7 @@ test('status exposes unfinished evidence, incompatible source scope and conflict
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'idle');
   assert.equal(status.statusDetail, 'unfinished');
-  assert.equal(status.statusText, 'Cuefluent: Processing stopped with unfinished work.');
+  assert.match(status.statusText, /^Cuefluent: Processing stopped with unfinished work\. Scope: collection\. Inventory/);
   assert.equal(status.nextAction, 'resume');
   assert.equal(h.dispatches, 1);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), before);
@@ -175,16 +186,17 @@ test('status exposes unfinished evidence, incompatible source scope and conflict
   const other = await processingFixture(t, { base: f }), otherHost = await harness(t, other);
   const otherStatus = body(await otherHost.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(otherStatus.statusDetail, 'unfinished');
-  assert.equal(otherStatus.nextAction, 'inspect');
+  assert.equal(otherStatus.nextAction, 'resume');
   assert.equal(otherHost.dispatches, 0);
-  // A changed input requires inspection, not an ordinary resume suggestion.
+  // A changed input offers cancellation without refreshing the frozen claim.
   const headFile = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
   const head = JSON.parse(await fs.readFile(headFile, 'utf8'));
   head.generation++; head.previousHash = f.published.headHash;
   await fs.writeFile(headFile, canonicalJSON(head) + '\n');
   const conflicted = body(await h.call('processing_status', { collectionId: f.collection.id }));
-  assert.equal(conflicted.statusDetail, 'unfinished');
-  assert.equal(conflicted.nextAction, 'inspect');
+  assert.equal(conflicted.statusDetail, 'blocked');
+  assert.equal(conflicted.nextAction, 'cancel');
+  assert.deepEqual(conflicted.diagnostics, ['PROCESSING_SELECTION_CHANGED']);
   assert.equal(h.dispatches, 1);
 });
 
@@ -192,7 +204,7 @@ test('a completed unchanged operation is inactive without implying saved notes o
   const f = await processingFixture(t), h = await harness(t, f);
   await processingFixture(t, { base: f });
   h.script = async call => {
-    let claim = await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+    let claim = await prepareFromPending(call, f);
     for (let page = 0; page < claim.packet.pages.length; page++) {
       const read = await call('processing_page', { operationId: f.operationId, expectedClaimHash: claim.claimHash, page });
       claim = await call('processing_ack', { operationId: f.operationId, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
@@ -202,8 +214,9 @@ test('a completed unchanged operation is inactive without implying saved notes o
   const closed = h.whenClosed();
   await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
-  assert.equal(status.statusDetail, 'inactive'); assert.equal(status.nextAction, 'none');
-  assert.equal(status.statusText, 'Cuefluent: No processing run is active.');
+  assert.equal(status.statusDetail, 'selection-complete'); assert.equal(status.nextAction, 'none');
+  assert.match(status.statusText, /^Cuefluent: Selected captures have been handled\./);
+  assert.equal(status.inventory.pending, 0);
   assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
@@ -251,11 +264,10 @@ test('completed-request replay and status reuse durable state without another na
   await closed;
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'idle'); assert.equal(status.chat.sessionId, first.chat.sessionId);
-  const replayClosed = h.whenClosed();
   h.callId = 'call_1';
   const replay = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
-  await replayClosed;
-  assert.equal(replay.status, 'idle'); assert.equal(replay.chat.sessionId, first.chat.sessionId);
+  assert.equal(replay.status, 'busy');
+  assert.equal(replay.statusDetail, 'accepted'); assert.equal(replay.chat.sessionId, first.chat.sessionId);
   assert.equal(h.creates, 1); assert.equal(h.dispatches, 1); assert.equal(h.opens, h.closes);
   h.callId = undefined;
   const newClosed = h.whenClosed();
@@ -291,7 +303,7 @@ test('legacy status receipts replay unchanged after clearer status details are i
   const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
   const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
   const legacy = receipt.dispatch.response;
-  delete legacy.statusDetail;
+  delete legacy.statusDetail; delete legacy.scope; delete legacy.progress;
   legacy.statusText = 'Cuefluent processing: busy.';
   const result = { content: [{ type: 'text', text: canonicalJSON(legacy) }], isError: false };
   receipt.dispatch.statusText = legacy.statusText;
@@ -394,7 +406,7 @@ test('verified native skill admission writes its exact parent control receipt be
   const receipt = JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
   assert.equal(receipt.dispatch.callId, 'call_1'); assert.equal(receipt.dispatch.unitId, f.identity.unitId);
   assert.equal(receipt.dispatch.argsHash, digest(canonicalJSON(args))); assert.equal(receipt.dispatch.resultHash, digest(canonicalJSON(row.result)));
-  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted.');
+  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted. Scope: collection.');
   assert.equal(receipt.dispatch.sourcePath, f.source.path);
   gate.resolve();
 });
@@ -461,7 +473,7 @@ test('collection selection churn omits exclusion proof without aborting separate
 const draft = '# PRIVATE-SYNTHETIC-PROPOSAL\n\n## Decision\n\nKeep the rollout paused.\n';
 function proposeThroughTools(f, content = draft, expectedHash = null) {
   return async call => {
-    let claim = await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+    let claim = await prepareFromPending(call, f);
     for (let page = 0; page < claim.packet.pages.length; page++) {
       const read = await call('processing_page', { operationId: f.operationId, expectedClaimHash: claim.claimHash, page });
       claim = await call('processing_ack', { operationId: f.operationId, expectedClaimHash: read.claimHash,
@@ -499,7 +511,7 @@ test('source review requires a correlated host action and saves the exact engine
   assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
   h.script = async call => { assert.deepEqual((await call('processing_pending', {})).pending, []); };
   const closed = h.whenClosed(); body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID(), selection: selectedInput(f) }));
-  await closed; assert.equal(h.creates, 1); assert.equal(h.dispatches, 2);
+  await closed; assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
 });
 
 test('editing the native preview refuses Save and preserves the exact proposal for fresh review', async t => {
@@ -650,7 +662,7 @@ test('committed source Save stays successful when the chat registry requires lat
   assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
-  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'awaiting-review');
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'idle');
   assert.equal(h.finishReviewCalls, 1); assert.equal(h.dispatches, 1);
   assert(!JSON.stringify(row).includes('private registry detail'));
 });
@@ -674,7 +686,7 @@ test('committed source Save survives revoked receipt authorization without fabri
   await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
   await fs.writeFile(f.options.configPath, original);
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
-  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'awaiting-review');
+  assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'idle');
   assert.equal(h.finishReviewCalls, 1); assert.equal(h.dispatches, 1);
 });
 
@@ -797,7 +809,7 @@ async function nativeParent(t, f, h, { binding = 'active', headerChanges = {} } 
   }
   const controls = [], metadata = new Map();
   h.beforeCall = async (name, args, callNumber) => {
-    const unitId = randomUUID(), command = name === 'processing_review' ? 'review' : 'process';
+    const unitId = randomUUID(), command = processingControlAction(name, args ?? {});
     h.nativeIdentity = { client: 'codex', sessionId, unitId }; controls.push(unitId);
     metadata.set(callNumber, { unitId, name, args });
     await append([evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
@@ -862,7 +874,7 @@ test('collection-off native controls process and review manual backlog without e
     const args = explicit ? { collectionId: f.collection.id } : {};
     assert.equal(body(await h.call('processing_status', args)).status, 'missing');
     h.script = proposeThroughTools(f); const closed = h.whenClosed();
-    body(await h.call('process_selected_captures', { ...args, ...(binding === 'processing-only' ? { selection: selectedInput(f) } : {}) }));
+    body(await h.call('process_selected_captures', args));
     await closed;
     assert.equal(body(await h.call('processing_status', args)).status, 'awaiting-review');
     const next = h.nextForm(), review = h.call('processing_review', args);
@@ -1239,4 +1251,247 @@ test('a formal code-mode handshake dispatches but reports the unsealed source co
   const value = body(await h.call('process_selected_captures', { collectionId: f.collection.id }));
   assert.deepEqual(value.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
   await closed; assert.equal(h.dispatches, 1);
+});
+
+async function completeNextBatch(call, f) {
+  let claim = await prepareFromPending(call, f);
+  for (let page = 0; page < claim.packet.pages.length; page++) {
+    const read = await call('processing_page', { operationId: f.operationId, expectedClaimHash: claim.claimHash, page });
+    claim = await call('processing_ack', { operationId: f.operationId, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
+  }
+  await call('processing_complete', { operationId: f.operationId, expectedClaimHash: claim.claimHash });
+}
+
+test('process drafts across the collection in bounded batches using one reusable native session', async t => {
+  const f = await processingFixture(t);
+  for (let i = 0; i < 5; i++) await processingFixture(t, { base: f, client: i % 2 ? 'claude' : 'codex' });
+  const before = await fs.readFile(f.options.configPath), h = await harness(t, f);
+  h.script = call => completeNextBatch(call, f);
+  const closed = h.whenClosed(), accepted = body(await h.call('process_selected_captures', {}));
+  assert.equal(accepted.scope, 'collection'); assert.equal(accepted.statusDetail, 'accepted');
+  await closed;
+  const status = body(await h.call('processing_status', {}));
+  assert.equal(status.progress.handled, 6); assert.equal(status.progress.unattempted, 0);
+  assert.equal(status.inventory.pending, 0); assert.equal(status.inventory.sourceCompleteness, 'unknown');
+  assert.equal(h.dispatches, 2); assert.equal(h.creates, 1); assert.equal(h.resumes, 1);
+  const again = body(await h.call('process_selected_captures', {}));
+  assert.equal(again.statusDetail, 'nothing-pending'); assert.equal(h.dispatches, 2);
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('resume without unfinished work reports a no-op and starts no native session', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  const result = body(await h.call('processing_resume', {}));
+  assert.equal(result.statusDetail, 'nothing-to-resume'); assert.equal(h.dispatches, 0); assert.equal(h.creates, 0);
+  assert.equal(body(await h.call('processing_status', {})).inventory.pending, 1);
+});
+
+test('cancel waits for the owned native turn to end before releasing its exact claim', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), entered = deferred(), gate = deferred();
+  h.release = gate.resolve; h.onInterrupt = gate.resolve;
+  h.script = async call => { await prepareFromPending(call, f); entered.resolve(); await gate.promise; };
+  body(await h.call('process_selected_captures', {})); await entered.promise;
+  const before = await fs.readFile(f.options.configPath);
+  const cancelled = body(await h.call('processing_cancel', {}));
+  assert.equal(cancelled.statusDetail, 'cancelled'); assert.equal(h.interrupts, 1);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'cancelled');
+  assert.equal(body(await h.call('processing_status', {})).inventory.pending, 1);
+  assert.deepEqual(await fs.readFile(f.options.configPath), before);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  // Re-delivery of Cancel cannot affect a newer frozen processing selection.
+  h.script = async call => call('processing_pending', {});
+  const closed = h.whenClosed(); body(await h.call('process_selected_captures', {})); await closed;
+  h.callId = 'call_2';
+  assert.deepEqual(body(await h.call('processing_cancel', {})), cancelled);
+  assert.equal(h.interrupts, 1);
+});
+
+test('review selects one exact collection proposal before presenting its contents', async t => {
+  const f = await processingFixture(t), b = await processingFixture(t, { base: f, client: 'claude' });
+  await proposedClaim(f); await proposedClaim(b);
+  const h = await harness(t, f), choose = h.nextForm(), review = h.call('processing_review', {});
+  const selector = await choose;
+  const choices = selector.params.requestedSchema.properties.operationId.oneOf;
+  assert.equal(choices.length, 2); assert(choices.some(item => item.const === b.operationId));
+  const preview = h.nextForm(); h.answer(selector, { action: 'accept', content: { operationId: b.operationId } });
+  const form = await preview;
+  assert(form.params.requestedSchema.properties.changes.default.includes((await inspectProcessing(b.capability, b.operationId)).proposalHash));
+  h.answer(form, { action: 'accept', content: { decision: 'skip' } }); await review;
+  assert.equal((await inspectProcessing(b.capability, b.operationId)).outcome, 'skipped');
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+  assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('cancel from another controller refuses an unverified active owner and preserves its claim', async t => {
+  const f = await processingFixture(t), owner = await harness(t, f), gate = deferred(), entered = deferred();
+  owner.release = gate.resolve;
+  owner.script = async call => { await prepareFromPending(call, f); entered.resolve(); await gate.promise; };
+  body(await owner.call('process_selected_captures', {})); await entered.promise;
+  const before = await inspectProcessing(f.capability, f.operationId), outsider = await harness(t, f);
+  outsider.callId = 'cancel_from_other';
+  const result = await outsider.call('processing_cancel', {});
+  assert.equal(result.error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, before.claimHash);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, null);
+  assert.equal(outsider.dispatches, 0); gate.resolve();
+});
+
+test('status in another native host reports the existing collection run instead of a second idle processor', async t => {
+  const f = await processingFixture(t), owner = await harness(t, f), gate = deferred();
+  owner.release = gate.resolve; owner.script = async () => gate.promise;
+  const accepted = body(await owner.call('process_selected_captures', {}));
+  const other = await harness(t, f, { controllerIdentity: { hostId: digest('other-synthetic-host') } });
+  other.callId = 'status_from_other';
+  const status = body(await other.call('processing_status', {}));
+  assert.equal(status.status, 'busy'); assert.equal(status.statusDetail, 'processing');
+  assert.deepEqual(status.chat, accepted.chat); assert.equal(status.requestId, accepted.requestId);
+  assert(status.diagnostics.includes('PROCESSING_COLLECTION_BUSY'));
+  assert.equal(other.dispatches, 0); gate.resolve();
+});
+
+
+test('shortcut process and cancel preserve standalone claims and drafts without verified native ownership', async t => {
+  for (const proposed of [false, true]) await t.test(proposed ? 'draft' : 'claim', async t => {
+    const f = await processingFixture(t);
+    const { prepareProcessing } = await import('./processing.mjs');
+    const claim = proposed ? await proposedClaim(f) : await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+    const h = await harness(t, f);
+    const process = body(await h.call('process_selected_captures', { collectionId: f.collection.id }));
+    assert.equal(process.nextAction, proposed ? 'review' : 'inspect');
+    if (!proposed) assert.deepEqual(process.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    const cancelled = await h.call('processing_cancel', { collectionId: f.collection.id });
+    assert.equal(cancelled.error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
+    assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+});
+
+test('routine intake contention is reported as wait without inventing recovery', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  const lock = path.join(f.collection.intakeStateDir, '.intake-lock'); await fs.mkdir(lock, { mode: 0o700 });
+  try {
+    const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+    assert.equal(status.statusDetail, 'intake-busy'); assert.equal(status.nextAction, 'wait');
+    assert.deepEqual(status.diagnostics, ['INTAKE_BUSY']);
+    const review = body(await h.call('processing_review', { collectionId: f.collection.id }));
+    assert.equal(review.statusDetail, 'intake-busy'); assert.equal(h.forms.length, 0);
+  } finally { await fs.rmdir(lock); }
+});
+
+test('status preserves execution with explicit incomplete inventory after bounded concurrent-change retries', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  const pending = path.join(f.collection.intakeStateDir, 'pending.json');
+  const head = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
+  const open = fs.open.bind(fs); let reads = 0;
+  const mock = t.mock.method(fs, 'open', async (file, ...args) => {
+    if (file === head && ++reads % 2 === 1) await fs.writeFile(pending, reads < 3 ? '{}' : 'null', { mode: 0o600 });
+    return open(file, ...args);
+  });
+  try {
+    const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+    assert(status.diagnostics.includes('PROCESSING_INVENTORY_INCOMPLETE'));
+    assert.equal(status.inventory, undefined); assert.equal(h.dispatches, 0);
+  } finally { mock.mock.restore(); await fs.rm(pending, { force: true }); }
+});
+
+test('completed selection status suggests process when fresh retained evidence is available', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = call => completeNextBatch(call, f);
+  const closed = h.whenClosed(); await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
+  await processingFixture(t, { base: f, client: 'claude' });
+  const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(status.nextAction, 'process'); assert.equal(status.inventory.pending, 1); assert.equal(h.dispatches, 1);
+});
+
+test('committed capture admission still dispatches if secondary control publication fails', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const rename = fs.rename.bind(fs); let injected = false;
+  const mock = t.mock.method(fs, 'rename', async (from, to) => {
+    if (String(to).includes(`${path.sep}shortcut-controls${path.sep}`)) {
+      const value = JSON.parse(await fs.readFile(from));
+      if (value.response && !injected) { injected = true; throw Object.assign(new Error('synthetic publication failure'), { code: 'EIO' }); }
+    }
+    return rename(from, to);
+  });
+  const closed = h.whenClosed();
+  try {
+    const response = await h.call('process_selected_captures', { collectionId: f.collection.id });
+    assert.equal(response.error.message, 'PROCESSING_CONTROL_FAILED'); await closed;
+    assert.equal(injected, true); assert.equal(h.dispatches, 1);
+    mock.mock.restore(); h.callId = 'call_1';
+    assert.equal(body(await h.call('process_selected_captures', { collectionId: f.collection.id })).statusDetail, 'accepted');
+    assert.equal(h.dispatches, 1);
+  } finally { mock.mock.restore(); }
+});
+
+test('cancellation at durable shortcut response publication cannot revoke committed admission', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  const rename = fs.rename.bind(fs); let injected = false;
+  const mock = t.mock.method(fs, 'rename', async (from, to) => {
+    if (String(to).includes(`${path.sep}shortcut-controls${path.sep}`)) {
+      const value = JSON.parse(await fs.readFile(from));
+      if (value.response && !injected) {
+        injected = true; h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
+        await new Promise(resolve => setImmediate(resolve));
+      }
+    }
+    return rename(from, to);
+  });
+  const closed = h.whenClosed();
+  try {
+    const response = body(await h.call('process_selected_captures', { collectionId: f.collection.id }));
+    await closed; assert.equal(injected, true); assert.equal(response.statusDetail, 'accepted'); assert.equal(h.dispatches, 1);
+    mock.mock.restore(); h.callId = 'call_1';
+    assert.deepEqual(body(await h.call('process_selected_captures', { collectionId: f.collection.id })), response);
+  } finally { mock.mock.restore(); }
+});
+
+
+test('native history capacity is explicit before another shortcut turn can dispatch', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = call => completeNextBatch(call, f);
+  const closed = h.whenClosed(); await h.call('process_selected_captures', {}); await closed;
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const file = path.join(directory, (await fs.readdir(directory))[0]);
+  const value = JSON.parse(await fs.readFile(file));
+  value.runs = Array.from({ length: 128 }, (_, index) => {
+    const run = structuredClone(value.runs[0]);
+    run.request.requestId = randomUUID(); run.request.inputHash = digest(`synthetic history ${index}`);
+    run.native.runId = randomUUID(); run.native.inputId = randomUUID(); run.native.unitIds = [randomUUID()];
+    return run;
+  });
+  await fs.writeFile(file, canonicalJSON(value) + '\n');
+  await processingFixture(t, { base: f });
+  const result = body(await h.call('process_selected_captures', {}));
+  assert.equal(result.status, 'blocked'); assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_HISTORY_FULL']);
+  assert.equal(h.dispatches, 1);
+  const status = body(await h.call('processing_status', {}));
+  assert.deepEqual(status.diagnostics, ['PROCESSING_CHAT_HISTORY_FULL']); assert.equal(status.nextAction, 'inspect');
+});
+
+test('owned cancel tolerates operation-pin revision changes without targeting a different request', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), entered = deferred(), gate = deferred();
+  h.release = gate.resolve; h.onInterrupt = gate.resolve;
+  h.script = async call => { h.callEngine = call; entered.resolve(); await gate.promise; };
+  await h.call('process_selected_captures', {}); await entered.promise;
+  h.beforeStop = () => prepareFromPending(h.callEngine, f);
+  const result = body(await h.call('processing_cancel', {}));
+  assert.equal(result.statusDetail, 'cancelled'); assert.equal(h.interrupts, 1);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'cancelled');
+});
+
+
+test('unavailable frozen inputs offer safe cancellation instead of an endless inspect instruction', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  const closed = h.whenClosed(); await h.call('process_selected_captures', {}); await closed;
+  const head = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
+  const bytes = await fs.readFile(head); await fs.unlink(head);
+  const status = body(await h.call('processing_status', {}));
+  assert.equal(status.nextAction, 'cancel'); assert.equal(status.progress.unavailable, 1);
+  assert.equal(body(await h.call('processing_cancel', {})).statusDetail, 'cancelled');
+  await fs.writeFile(head, bytes, { mode: 0o600 });
+  const freshClosed = h.whenClosed();
+  assert.equal(body(await h.call('process_selected_captures', {})).statusDetail, 'accepted'); await freshClosed;
+  assert.equal(h.dispatches, 2);
 });

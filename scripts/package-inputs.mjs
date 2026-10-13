@@ -60,6 +60,7 @@ export const SOURCE_FILES = Object.freeze([
   'scripts/processing-page.mjs',
   'scripts/processing-proposal.mjs',
   'scripts/processing-state.mjs',
+  'scripts/processing-shortcuts.mjs',
   'scripts/processing-tool-contracts.mjs',
   'scripts/processing.mjs',
   'scripts/processing-workset.mjs',

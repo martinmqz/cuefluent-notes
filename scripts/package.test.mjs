@@ -50,7 +50,7 @@ async function checkController(pkg, directory) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const replies = result.stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.equal(replies[0].result.serverInfo.name, 'cuefluent_control');
-  assert.deepEqual(replies[1].result.tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_review']);
+  assert.deepEqual(replies[1].result.tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_resume', 'processing_cancel', 'processing_review']);
   await assert.rejects(fs.stat(profile), { code: 'ENOENT' }, 'Discovery must not create settings or start a native client.');
 }
 async function checkDocumentation(root, files) {

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
-import { createProcessingChatState } from './processing-chat-state.mjs';
+import { createProcessingChatState, MAX_PROCESSING_CHAT_RUNS } from './processing-chat-state.mjs';
 import { createProcessingEngineTools } from './processing-engine-tools.mjs';
 import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
@@ -34,6 +34,7 @@ If evidence is unavailable, a policy or hash changed, or recovery is required, s
 
 function publicState(view) {
   return { interfaceVersion: PROCESSING_CONTROLLER_INTERFACE_VERSION, state: view.state, chatHash: view.hash,
+    remainingRuns: MAX_PROCESSING_CHAT_RUNS - (view.registry?.runs.length ?? 0),
     generation: view.generation, policyState: view.policyState, policyHash: view.policyHash,
     nativeStatus: view.registry?.active || !view.registry?.runs.length ? null : view.registry.runs.at(-1).native.terminal ?? 'completed',
     chat: view.registry?.session ? { client: view.registry.namespace.client, sessionId: view.registry.session.sessionId } : null,
@@ -68,11 +69,12 @@ export async function openProcessingController(context, dependencies = {}) {
   let lastOperationId = null, requestSelection = null, recoveryVerify = null, requestWorksetId = null;
   const controllerId = randomUUID();
   let attemptedDispatch = false, abortProven = false, engineQueue = Promise.resolve();
+  let acceptingEngine = false, cancelRequested = false, turnAbort = null, turnReady = null, readyResolve = null, runSettled = null, settledResolve = null;
   const declared = processingToolDeclarations();
   const contractHash = digest(canonicalJSON(declared));
   async function engineCall(name, args) {
     const pending = engineQueue.then(async () => {
-    if (!running || !tools) fail('PROCESSING_CHAT_NOT_RUNNING');
+    if (!running || !tools || !acceptingEngine || cancelRequested) fail('PROCESSING_CHAT_NOT_RUNNING');
     await guardRole();
     const operationTool = tools.toolNames.includes(name) && name.startsWith('processing_') && name !== 'processing_pending';
     const pinsOperation = operationTool && !(requestWorksetId && name === 'processing_status');
@@ -173,6 +175,35 @@ export async function openProcessingController(context, dependencies = {}) {
   }
   return Object.freeze({
     async collectionActivity() { return state.collectionActivity(); },
+    async canResumeOperation(id) { return state.canResumeOperation(id); },
+    async hasRequest(id) { nativeId(id); return (await state.findRequest(id)) !== null; },
+    async stop(args) {
+      keys(args, ['expectedChatHash', 'requestId']); hash(args.expectedChatHash); nativeId(args.requestId);
+      const before = await state.read();
+      // The exact owned request survives harmless operation-pin hash changes.
+      if (!running || before.state !== 'busy' || before.registry.active.requestId !== args.requestId || requestId !== args.requestId) fail('PROCESSING_CANCEL_UNVERIFIED');
+      cancelRequested = true;
+      if (client === 'claude') turnAbort.abort();
+      else {
+        let timer;
+        try {
+          await Promise.race([turnReady, runSettled,
+            new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('PROCESSING_CANCEL_UNVERIFIED'), { code: 'PROCESSING_CANCEL_UNVERIFIED' })), 5000); })]);
+        } finally { clearTimeout(timer); }
+        if (running) await transport.interrupt();
+      }
+      // Acknowledgement of interrupt is not a native terminal. The bounded native
+      // transport and queued engine calls must actually settle before release.
+      let terminalTimer;
+      try {
+        await Promise.race([runSettled, new Promise((_, reject) => {
+          terminalTimer = setTimeout(() => reject(Object.assign(new Error('PROCESSING_CANCEL_UNVERIFIED'), { code: 'PROCESSING_CANCEL_UNVERIFIED' })), 10000);
+        })]);
+      } finally { clearTimeout(terminalTimer); }
+      const after = await state.read();
+      if (['creating', 'busy', 'blocked'].includes(after.state)) fail('PROCESSING_CANCEL_UNVERIFIED');
+      return publicState(after);
+    },
     async status({ inspectOperation = true, selection = null } = {}) {
       for (let attempt = 0; attempt < 2; attempt++) {
         const view = await state.read(), result = publicState(view);
@@ -312,6 +343,9 @@ export async function openProcessingController(context, dependencies = {}) {
       if (args.expectedChatHash !== null) hash(args.expectedChatHash);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
       running = true; liveControllers.add(controllerId); knownControllers.add(controllerId);
+      acceptingEngine = true; cancelRequested = false; turnAbort = new AbortController();
+      turnReady = new Promise(resolve => { readyResolve = resolve; });
+      runSettled = new Promise(resolve => { settledResolve = resolve; });
       let started = false, createdThisRun = false;
       try {
         const selection = await normalizeWorkflowSelection(args.selection);
@@ -394,18 +428,21 @@ export async function openProcessingController(context, dependencies = {}) {
         if (client === 'codex') {
           result = await transport.startTurn({ session: nativeSession, input: prompt, roleGuard: async native => {
             await guardRole(); await dependencies.onNativeBoundary?.({ ...native, requestId, inputId, inputHash });
+            if (native.phase === 'started') readyResolve();
           } });
           if (!['completed', 'interrupted', 'failed'].includes(result.status)) fail('PROCESSING_CLIENT_INTERRUPTED');
           nativeResult = { runId: result.unitId, inputId, unitIds: [result.unitId],
             ...(result.status !== 'completed' ? { terminal: result.status } : {}) };
         } else {
           result = await transport.run({ sessionId: nativeSession.sessionId, inputId, resume: current.registry.session.verification === 'verified',
-            prompt, beforeDispatch: guardRole });
+            prompt, beforeDispatch: guardRole, signal: turnAbort.signal });
           // inputId is a verified native user-record UUID, NOT Claude promptId.
           // The collector must independently map it before excluding any unit.
           nativeResult = { runId: inputId, inputId, unitIds: [], ...(result.status !== 'completed' ? { terminal: result.status } : {}) };
           verified = true;
         }
+        acceptingEngine = false;
+        await bridge?.idle?.(); await engineQueue;
         const diagnostics = [];
         try {
           if (result.status === 'interrupted') {
@@ -444,9 +481,12 @@ export async function openProcessingController(context, dependencies = {}) {
         throw Object.assign(error, { processingChat: current ? publicState(current) : null,
           code: safeErrorCode(error, 'PROCESSING_CLIENT_OUTCOME_UNKNOWN') });
       } finally {
+        acceptingEngine = false;
+        await engineQueue;
         running = false; liveControllers.delete(controllerId);
         if (current?.registry?.active?.owner?.controllerId !== controllerId && current?.registry?.creation?.owner?.controllerId !== controllerId) knownControllers.delete(controllerId);
         tools = null; requestSelection = null; requestWorksetId = null;
+        settledResolve?.();
       }
     },
     async close() {

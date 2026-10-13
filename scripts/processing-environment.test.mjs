@@ -9,6 +9,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { processingFixture } from './test-support/processing-fixture.mjs';
 import { executeWorkflow } from './workflow.mjs';
+import { canonicalJSON, digest } from './workflow-values.mjs';
 import { runProcessingMcp } from './processing-mcp.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { claudeHarness, success } from './test-support/claude-client.mjs';
@@ -69,7 +70,7 @@ function processingRpc(f, environment = {}) {
   return rpcClient(streams => runProcessingMcp({ client: 'claude', configPath: f.options.configPath, ...streams, ...environment }, {
     // Native source binding has separate coverage; retain the actual controller
     // and native transport while supplying only a synthetic source identity.
-    async resolveInvocation() { return { selection: f.selection, callId: 'synthetic-environment-call', nativeSkill: false }; }
+    async resolveInvocation(_capability, _context, invocation) { return { selection: f.selection, callId: 'synthetic-environment-call', nativeSkill: false, argsHash: digest(canonicalJSON(invocation.arguments)) }; }
   }));
 }
 

@@ -250,3 +250,24 @@ test('host environment copies retain OS names and sizes independently of replace
   assert.deepEqual(h.calls[0].options.env, expected);
   assert.deepEqual(env, original);
 });
+
+test('cancellation requires an exact input acknowledgement and an observed owned-child exit', async () => {
+  const abort = new AbortController();
+  const h = harness(({ child, input }) => {
+    child.send(initialization(input.session_id)); child.send({ ...input, isReplay: true });
+    queueMicrotask(() => abort.abort());
+  });
+  const result = await h.client.run(request(undefined, { signal: abort.signal }));
+  assert.equal(result.status, 'interrupted'); assert.equal(result.output, '');
+  assert.equal(h.children[0].killed, 'SIGKILL');
+});
+
+test('a successful kill request without child exit cannot prove native cancellation', async () => {
+  const abort = new AbortController();
+  const h = harness(({ child, input }) => {
+    child.send(initialization(input.session_id)); child.send({ ...input, isReplay: true });
+    child.kill = () => true;
+    queueMicrotask(() => abort.abort());
+  });
+  await assert.rejects(h.client.run(request(undefined, { signal: abort.signal })), { code: 'PROCESSING_CLIENT_INTERRUPTED', outcome: 'unknown' });
+});
