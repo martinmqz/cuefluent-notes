@@ -141,6 +141,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     dispatched.catch(() => {});
     const controller = await openController({ ...options, client }, { env,
       ...dependencies.execution,
+      preferHostEnvironment: client === 'claude',
       beforeExecution: async context => {
         signal?.throwIfAborted();
         await dependencies.execution?.beforeExecution?.(context);
