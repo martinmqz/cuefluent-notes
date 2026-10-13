@@ -15,7 +15,7 @@ import { inspectProcessing, readProcessingProposal } from './processing.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
-import { collectionIngress } from './collection-ingress.mjs';
+import { collectionIngress, registrationPath } from './collection-ingress.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { processScope } from './collection-worker.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
@@ -793,7 +793,7 @@ test('paused native source can inspect, process and save an existing proposal wi
   });
 });
 
-test('agent-created hook registration reaches real capture, native processing and exact proposal review', async t => {
+async function nativeIngressFixture(t) {
   const f = await storageFixture(t, { fullSetup: false }), sessionId = randomUUID();
   await fs.mkdir(f.collection.notes.notesDir);
   f.identity = { client: 'codex', sessionId, unitId: randomUUID() };
@@ -802,6 +802,11 @@ test('agent-created hook registration reaches real capture, native processing an
   f.operationId = randomUUID();
   const h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
   const parent = await nativeParent(t, f, h, { binding: 'ingress', headerChanges: { source: 'vscode', thread_source: 'agent_created_thread' } });
+  return { f, h, parent };
+}
+
+test('agent-created hook registration reaches real capture, native processing and exact proposal review', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), sessionId = f.identity.sessionId;
   assert.equal((await readSelection(parent.store, f.identity)).state, null);
   f.identity.unitId = await parent.work('Source decision: hold the rollout.');
   const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
@@ -831,6 +836,123 @@ test('agent-created hook registration reaches real capture, native processing an
   assert.match((await readCaptureHead(parent.store, { ...f.identity, unitId: correction })).capture.evidence[0].text, /Correction/);
   assert.equal((await readCaptureHead(parent.store, f.identity)).hash, retained.hash);
   assert.equal((await run()).saved, 0);
+});
+
+test('exact unverified registration is diagnostic only for every native control', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t);
+  const files = await fs.readdir(f.collection.intakeStateDir, { recursive: true });
+  const recordPath = path.join(f.collection.intakeStateDir, registrationPath(f.identity)), bytes = await fs.readFile(recordPath);
+  const config = await fs.readFile(f.options.configPath);
+  const original = fs.open;
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    assert.notEqual(file, parent.source.path, 'diagnostics must not open native evidence');
+    assert(!String(file).startsWith(f.collection.rawDir + path.sep), 'diagnostics must not open captures');
+    return original.call(this, file, ...args);
+  });
+  for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) for (const explicit of [false, true]) {
+    const result = await h.call(tool, explicit ? { collectionId: f.collection.id } : {});
+    assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_REGISTRATION_PENDING' });
+    assert(!JSON.stringify(result).includes(f.root));
+  }
+  assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
+  assert.equal((await readSelection(parent.store, f.identity)).state, null);
+  assert.deepEqual(await fs.readdir(f.collection.intakeStateDir, { recursive: true }), files);
+  assert.deepEqual(await fs.readFile(recordPath), bytes); assert.deepEqual(await fs.readFile(f.options.configPath), config);
+  assert.deepEqual(await fs.readdir(f.collection.rawDir), []); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('missing exact registration never borrows an unrelated registration or a collection-wide failure', async t => {
+  const { f, h } = await nativeIngressFixture(t);
+  const exact = path.join(f.collection.intakeStateDir, registrationPath(f.identity));
+  const otherIdentity = { ...f.identity, sessionId: randomUUID() };
+  const other = path.join(f.collection.intakeStateDir, registrationPath(otherIdentity));
+  await fs.mkdir(path.dirname(other), { recursive: true });
+  const registration = JSON.parse(await fs.readFile(exact));
+  await fs.writeFile(other, JSON.stringify({ ...registration, sessionId: otherIdentity.sessionId }), { mode: 0o600 });
+  await fs.rm(exact);
+  const original = fs.open;
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    assert.notEqual(file, other); assert.notEqual(file, f.source.path);
+    assert.notEqual(file, path.join(f.collection.intakeStateDir, 'ingress/status/record.json'));
+    return original.call(this, file, ...args);
+  });
+  for (const args of [{}, { collectionId: f.collection.id }]) {
+    assert.equal((await h.call('processing_status', args)).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  }
+  assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
+});
+
+test('damaged or mismatched pending registration metadata cannot become a binding', async t => {
+  for (const variant of ['identity', 'malformed', 'oversized', 'linked']) await t.test(variant, async t => {
+    const { f, h } = await nativeIngressFixture(t), file = path.join(f.collection.intakeStateDir, registrationPath(f.identity));
+    if (variant === 'identity') {
+      const value = JSON.parse(await fs.readFile(file)); value.sessionId = randomUUID(); await fs.writeFile(file, JSON.stringify(value));
+    } else if (variant === 'linked') await fs.link(file, path.join(f.root, 'second-link.json'));
+    else await fs.writeFile(file, variant === 'malformed' ? '{' : ' '.repeat(16385));
+    const before = await fs.readFile(file), result = await h.call('process_selected_captures', {});
+    assert.equal(result.error.message, variant === 'identity' ? 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' : 'PROCESSING_CONTROL_FAILED');
+    assert.deepEqual(await fs.readFile(file), before); assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
+  });
+});
+
+test('a pending-only candidate cannot block a verified native source in another collection', async t => {
+  const f = await processingFixture(t), other = await storageFixture(t, { fullSetup: false });
+  const h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation }); await nativeParent(t, f, h);
+  const collection = { ...other.collection, id: 'waiting' };
+  f.config.collections.unshift(collection);
+  f.config.routes.unshift({ ...other.config.routes[0], id: 'waiting', collectionId: 'waiting' });
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes);
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  const source = path.join(other.project, 'registered.jsonl'); await fs.writeFile(source, 'No native reads authorized here.\n');
+  await collectionIngress('codex', { session_id: f.identity.sessionId, turn_id: randomUUID(), cwd: other.project,
+    transcript_path: source, hook_event_name: 'UserPromptSubmit' }, { configPath: f.options.configPath, launch: async () => {} });
+  const pending = path.join(collection.intakeStateDir, registrationPath(f.identity));
+  const original = fs.open;
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    assert.notEqual(file, source); assert.notEqual(file, pending); return original.call(this, file, ...args);
+  });
+  assert.equal(body(await h.call('processing_status', {})).status, 'missing');
+  await fs.writeFile(pending, '{'); // Broken diagnostic metadata still cannot block the valid source.
+  assert.equal(body(await h.call('processing_status', {})).status, 'missing');
+  const lstat = fs.lstat;
+  for (const code of ['ENOTDIR', 'EACCES', 'ELOOP']) {
+    const mocked = t.mock.method(fs, 'lstat', async function(file, ...args) {
+      if (file === pending) throw Object.assign(new Error('Synthetic inaccessible diagnostic'), { code });
+      return lstat.call(this, file, ...args);
+    });
+    assert.equal(body(await h.call('processing_status', {})).status, 'missing');
+    assert.equal((await h.call('processing_status', { collectionId: 'waiting' })).error.message, 'PROCESSING_CONTROL_FAILED');
+    mocked.mock.restore();
+  }
+  assert.equal(h.opens, 5); assert.equal(h.dispatches, 0);
+  await assert.rejects(fs.lstat(path.join(collection.intakeStateDir, 'sessions')), { code: 'ENOENT' });
+});
+
+test('old-policy processing-only bindings do not hide a pending Codex collection registration', async t => {
+  const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+  const parent = await nativeParent(t, f, h, { binding: 'processing-only' });
+  const hook = () => collectionIngress('codex', { session_id: parent.source.sessionId, turn_id: randomUUID(),
+    cwd: f.project, transcript_path: parent.source.path, hook_event_name: 'UserPromptSubmit' }, {
+    configPath: f.options.configPath, launch: async () => {} });
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'prompted';
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  assert.equal((await hook()).status, 'processing-only');
+  f.config.routes[0].collection.enabled = true; f.config.routes[0].collection.generation = randomUUID();
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  assert.equal((await hook()).status, 'queued');
+  for (const args of [{}, { collectionId: f.collection.id }]) {
+    assert.equal((await h.call('process_selected_captures', args)).error.message, 'PROCESSING_CONTROL_REGISTRATION_PENDING');
+  }
+  assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
+});
+
+test('actual unsupported native ownership remains a path-free public refusal', async t => {
+  const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+  await nativeParent(t, f, h, { headerChanges: { thread_source: 'agent_created_thread', parent_thread_id: randomUUID() } });
+  for (const args of [{}, { collectionId: f.collection.id }]) {
+    assert.deepEqual((await h.call('processing_review', args)).error, { code: -32600, message: 'UNSUPPORTED_SESSION_OWNERSHIP' });
+  }
+  assert.equal(h.forms.length, 0); assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
 });
 
 test('actual source binding, engine proposal, native review and collection preserve genuine work without creating a control backlog', async t => {

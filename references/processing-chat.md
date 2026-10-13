@@ -111,15 +111,38 @@ Claude. Loading the skill, setup, status and direct saves do not start a process
 session. In a configured source chat the skill calls
 `cuefluent_control.process_selected_captures`. The source adapter verifies
 native call metadata against that selected session's actual call record. If the
-collection is omitted, bounded existing registration metadata must identify exactly
-one collection. It never selects a recent session by project path.
-Unprepared collections with no matching registration are skipped. A registered
-candidate with unsafe storage still fails closed; explicitly select a healthy
+collection is omitted, bounded existing binding metadata (selection or
+processing-only binding) must identify exactly one collection. It never selects
+a recent session by project path.
+Unprepared collections with no matching registration are skipped. A candidate
+binding with unsafe storage still fails closed; explicitly select a healthy
 collection when implicit discovery cannot complete. Claude can rebind a stale
 MCP launch session ID after `/clear` only by finding the exact native tool-use ID
 in one already registered, authorized source. Discovery and source reads have
 finite entry, byte and attempt limits. Exceeding them reports `PROCESSING_SOURCE_DISCOVERY_LIMIT`; reconnect the MCP server in
 the intended session instead of guessing a source.
+
+Independent agent-created Codex chats are supported when they satisfy the
+[root ownership contract](session-workflow.md#codex-reader-contract). Delegated,
+forked and inherited histories remain unsupported.
+`PROCESSING_CONTROL_REGISTRATION_PENDING` means an exact Codex hook registration
+exists, but no collection selection or processing-only binding was found for it.
+That registration is only metadata: it does not prove ownership, a successful
+capture, or why verification has not completed. The control does not read the
+transcript, launch a worker, or start processing from this hint. Inspect collection
+status and its current refusal, if any; retry the control after normal authorized
+collection verifies the source. Do not reset consent or the stored floor to clear
+the message. If collection is intentionally off, use the existing processing-only
+binding or [standalone explicit workflow](processing.md) without enabling it.
+
+For Codex, `UNSUPPORTED_SESSION_OWNERSHIP` means authorized native verification
+actually rejected the invoking session's ownership metadata. Use a supported
+independent root chat; do not edit the transcript or bypass its ownership checks. Missing registrations and other
+unproven calls still report `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These refusals
+leave captures, proposals and notes unchanged. Claude retains a generic refusal
+when ownership fails during source discovery: its launch-session hint may be
+stale and another registered candidate may have failed, so that failure does not
+establish that the invoking chat is unsupported.
 
 The adapter briefly retries missing native records in the selected source because
 client persistence can lag tool dispatch. Claude's registered-source fallback
@@ -164,9 +187,10 @@ run arbitrary shell commands, browse, change settings, trust hooks or approve it
 own proposal. Inherited hooks, plugins and unrelated tools are disabled and checked
 before processing starts. Collection settings in the work project stay unchanged.
 
-Each request resumes existing selected work and handles at most one bounded
-operation. It stops at a proposal, no-change result, a conflict or recovery
-requirement. Further requests reuse the same processing session. Busy requests
+The formal skill request selects retained captures from its invoking session,
+not every session or project in the collection. Each request resumes existing
+selected work and handles at most one bounded operation. It stops at a proposal,
+no-change result, a conflict or recovery requirement. Further requests reuse the same processing session. Busy requests
 do not dispatch duplicate work. An outstanding proposal must receive a disposition
 before another operation starts. Engine page acknowledgments and proposal hashes,
 not conversational recollection, determine the resume point.
