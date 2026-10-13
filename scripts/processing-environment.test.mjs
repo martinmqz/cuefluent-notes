@@ -14,7 +14,7 @@ import { openProcessingController } from './processing-controller.mjs';
 import { claudeHarness, success } from './test-support/claude-client.mjs';
 import { rpcClient } from './test-support/rpc-client.mjs';
 
-async function withLaunchFixture(t, run, nativeRun = success) {
+async function withLaunchFixture(t, run, nativeRun = success, { insideClaude = true } = {}) {
   // One explicit lifetime owns jobs, mocks, environment and files. LIFO cleanup
   // drains RPC jobs first, including when an assertion throws after admission.
   const cleanups = [], defer = fn => cleanups.push(fn);
@@ -24,7 +24,7 @@ async function withLaunchFixture(t, run, nativeRun = success) {
     const environment = { CLAUDE_CONFIG_DIR: profile, CLAUDE_CODE_SESSION_ID: f.identity.sessionId,
       CLAUDECODE: '1', 'CUEFLUENT_TEST(x86)': 'synthetic inherited value' };
     const clearedProviderKeys = ['CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_FOUNDRY_RESOURCE', 'ANTHROPIC_FOUNDRY_API_KEY',
-      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_SKIP_VERTEX_AUTH'];
+      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_SKIP_VERTEX_AUTH'];
     const previous = Object.fromEntries([...Object.keys(environment), ...clearedProviderKeys].map(key => [key, process.env[key]]));
     defer(() => {
       for (const [key, value] of Object.entries(previous)) {
@@ -33,6 +33,10 @@ async function withLaunchFixture(t, run, nativeRun = success) {
     });
     for (const key of clearedProviderKeys) delete process.env[key];
     Object.assign(process.env, environment);
+    if (!insideClaude) {
+      delete process.env.CLAUDECODE;
+      delete process.env.CLAUDE_CODE_SESSION_ID;
+    }
     const h = claudeHarness(nativeRun), nativeSpawn = childProcess.spawn;
     const intercepted = t.mock.method(childProcess, 'spawn', (executable, args, options) => {
       if (executable !== 'claude') return nativeSpawn(executable, args, options);
@@ -47,7 +51,7 @@ async function withLaunchFixture(t, run, nativeRun = success) {
       assert.equal(options.env.CLAUDE_CONFIG_DIR, profile);
       assert.equal(options.env['CUEFLUENT_TEST(x86)'], environment['CUEFLUENT_TEST(x86)']);
       assert.equal(Object.hasOwn(options.env, 'CLAUDECODE'), false);
-      assert.equal(process.env.CLAUDECODE, '1');
+      assert.equal(process.env.CLAUDECODE, insideClaude ? '1' : undefined);
       assert.ok(options.env.CUEFLUENT_ENGINE_TOKEN);
       assert.equal(args.some(argument => argument.includes(options.env.CUEFLUENT_ENGINE_TOKEN)), false);
     };
@@ -213,17 +217,30 @@ test('MCP dispatch preserves project host account, endpoint and model over user-
   assert.equal(f.nativeCalls[0].options.env.CLAUDE_CODE_SKIP_VERTEX_AUTH, '1');
 }));
 
-test('CLI dispatch inside a Claude host preserves project account and endpoint over user-profile defaults', async t => withLaunchFixture(t, async f => {
-  process.env.AWS_PROFILE = 'synthetic-project-account'; process.env.ANTHROPIC_BASE_URL = 'https://project.example.invalid';
-  await fs.writeFile(path.join(f.profile, 'settings.json'), JSON.stringify({ env: { AWS_PROFILE: 'synthetic-user-account',
-    ANTHROPIC_BASE_URL: 'https://user.example.invalid' } }));
+for (const insideClaude of [true, false]) test(`CLI dispatch ${insideClaude ? 'inside Claude keeps host settings' : 'outside Claude applies user settings over shell values'}`,
+  async t => withLaunchFixture(t, async f => {
+  const inherited = { AWS_PROFILE: 'synthetic-host-account', ANTHROPIC_BASE_URL: 'https://host.example.invalid',
+    ANTHROPIC_MODEL: 'synthetic-host-model', ANTHROPIC_API_KEY: 'synthetic-host-key' };
+  const profile = { AWS_PROFILE: 'synthetic-user-account', ANTHROPIC_BASE_URL: 'https://user.example.invalid',
+    ANTHROPIC_MODEL: 'synthetic-user-model', ANTHROPIC_API_KEY: 'synthetic-user-key' };
+  Object.assign(process.env, inherited);
+  if (!insideClaude) {
+    assert.equal(Object.hasOwn(process.env, 'CLAUDECODE'), false);
+    assert.equal(Object.hasOwn(process.env, 'CLAUDE_CODE_SESSION_ID'), false);
+  }
+  const file = path.join(f.profile, 'settings.json'), bytes = Buffer.from(JSON.stringify({ env: profile }));
+  await fs.writeFile(file, bytes);
   const result = await executeWorkflow('processing-chat-run', { collectionId: f.collection.id,
     expectedConfigHash: f.options.expectedConfigHash, args: { client: 'claude', requestId: randomUUID(),
       selection: f.selection, expectedChatHash: null } }, { configPath: f.options.configPath });
   assert.equal(result.state, 'idle'); f.assertLaunch();
-  assert.equal(f.nativeCalls[0].options.env.AWS_PROFILE, 'synthetic-project-account');
-  assert.equal(f.nativeCalls[0].options.env.ANTHROPIC_BASE_URL, 'https://project.example.invalid');
-}));
+  for (const [key, value] of Object.entries(insideClaude ? inherited : profile)) assert.equal(f.nativeCalls[0].options.env[key], value);
+  for (const [key, value] of Object.entries(inherited)) assert.equal(process.env[key], value);
+  assert(!JSON.stringify(f.nativeCalls[0].args).includes('synthetic-user-key'));
+  assert(!JSON.stringify(f.nativeCalls[0].args).includes('synthetic-host-key'));
+  assert((await fs.readFile(file)).equals(bytes));
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+}, success, { insideClaude }));
 
 test('verified host-mode reuse keeps inherited credentials after profile rotation until its host env is refreshed', async t => withLaunchFixture(t, async f => {
   const file = path.join(f.profile, 'settings.json');
