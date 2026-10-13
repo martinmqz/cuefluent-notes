@@ -217,15 +217,19 @@ authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
 
 Source-binding failures use bounded MCP error codes. An exact Codex ingress
-registration without a selection or processing-only binding reports
-`PROCESSING_CONTROL_REGISTRATION_PENDING`; ingress metadata supplies no dispatch
-authority. Actual ownership rejection for the invoking Codex source reports
-`UNSUPPORTED_SESSION_OWNERSHIP`; Claude retains its generic refusal when discovery
+registration with current collection authority but without a selection or
+processing-only binding reports `PROCESSING_CONTROL_REGISTRATION_UNVERIFIED`;
+ingress metadata supplies neither dispatch authority nor a worker outcome.
+Changed collection authority reports `REGISTRATION_REQUIRES_REVIEW`. Actual
+ownership, history or identity rejection for the invoking Codex source reports
+`UNSUPPORTED_SESSION_OWNERSHIP`, `UNSUPPORTED_CODEX_HISTORY` or
+`SOURCE_IDENTITY_MISMATCH`; Claude retains its generic refusal when discovery
 could have rejected a different registered candidate. An absent or otherwise
 unproven binding remains
 `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These errors contain no source paths or
 evidence and do not change the command schemas. See the
-[processing entry guidance](processing-chat.md#entry-and-reuse) for recovery.
+[processing entry guidance](processing-chat.md#entry-and-reuse) for precedence,
+storage-safety diagnostics and recovery.
 
 Outputs are versioned bounded status with `statusText`, `status`, `requestId`,
 `collectionId`, `chat`, `nextAction` and diagnostic codes. They contain no evidence

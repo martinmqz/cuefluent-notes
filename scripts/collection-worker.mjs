@@ -15,7 +15,7 @@ import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan, C
 import { createProcessingExecutionResolver } from './processing-execution-receipts.mjs';
 import { hydrateReaderCheckpoint } from './reader-pages.mjs';
 import { readTombstone } from './capture-retention.mjs';
-import { validateRegistration, publishIngressMetadata, wakePath, collectionStatusPath, registrationPath, drainedPath, suspendedPath, READER_SUSPENSION_VERSION, assertRegistrationGrant } from './collection-ingress.mjs';
+import { readRegistration, publishIngressMetadata, wakePath, collectionStatusPath, registrationPath, drainedPath, suspendedPath, READER_SUSPENSION_VERSION, assertRegistrationGrant } from './collection-ingress.mjs';
 import { withWorkflowBudget, checkWorkflowBudget } from './workflow-budget.mjs';
 import { CLIENTS, fail, nativeId, keys, hash, integer, choice, canonicalJSON, digest } from './workflow-values.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
@@ -274,10 +274,8 @@ async function recoverOwner(capability, store, snapshot, collectionId) {
   } else {
     // Exact lookup precedes the bounded registration batch. Missing/revoked
     // ongoing authority leaves explicit or foreign intent untouched for recovery.
-    const value = intakeJSON(await intakeSnapshot(store, 'state', registrationPath(pending.identity), { maxBytes: 16384 }));
-    if (value === null) fail('INTAKE_RECOVERY_REQUIRED');
-    const registration = validateRegistration(value);
-    if (registration.client !== pending.identity.client || registration.sessionId !== pending.identity.sessionId) fail('INTAKE_RECOVERY_REQUIRED');
+    const { registration } = await readRegistration(store, pending.identity, { mismatchCode: 'INTAKE_RECOVERY_REQUIRED' });
+    if (registration === null) fail('INTAKE_RECOVERY_REQUIRED');
     const route = await resolveWorkflowRoute(snapshot.config, registration);
     if (!route.intended?.collect || route.collection.id !== collectionId) fail('INTAKE_RECOVERY_REQUIRED');
     const selected = await readSelection(store, pending.identity);
@@ -338,15 +336,13 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
         seen.add(job.file);
         output.lastRegistration = job.file;
         try {
-          const registered = await intakeSnapshot(store, 'state', job.file, { maxBytes: 16384 });
+          const { snapshot: registered, registration } = await readRegistration(store, job);
           if (registered.bytes === null) {
             // A locator-only trigger can have no registration yet. A discovered
             // directory without its atomically published record is damaged.
             if (job.cursor !== null || await lstatOrNull(path.dirname(await intakePath(store, 'state', job.file)))) fail('INVALID_REGISTRATION');
             continue;
           }
-          const registration = validateRegistration(intakeJSON(registered));
-          if (registration.client !== job.client || registration.sessionId !== job.sessionId) fail('INVALID_REGISTRATION');
           const route = await resolveWorkflowRoute(snapshot.config, registration);
           if (!route.intended?.collect) continue;
           if (route.collection.id !== collectionId) continue;

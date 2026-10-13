@@ -110,6 +110,38 @@ test('delayed agent-created registration preserves its grant and original floor 
   assert.equal((await f.run()).saved, 0);
 });
 
+test('agent-created SessionStart excludes the creating agent seed before collecting later human work', async t => {
+  for (const history_mode of ['legacy', 'paginated']) await t.test(history_mode, async t => {
+    const f = await fixture(t, { headerChanges: { thread_source: 'agent_created_thread', source: 'vscode', history_mode } });
+    let ordinal = 0;
+    const append = async rows => fs.appendFile(f.source, rows.map(value => JSON.stringify({ timestamp: stamp, ...value, ordinal: ordinal++ }) + '\n').join(''));
+    const header = JSON.parse(await fs.readFile(f.source, 'utf8')); header.ordinal = ordinal++;
+    await fs.writeFile(f.source, JSON.stringify(header) + '\n');
+    const { turn_id: _turn, prompt: _prompt, ...start } = f.payload;
+    await collectionIngress('codex', { ...start, hook_event_name: 'SessionStart', source: 'startup' }, f.options);
+    const registration = intakeJSON(await intakeSnapshot(f.store, 'state', registrationPath({ client: 'codex', sessionId: S })));
+    assert.equal(registration.event, 'SessionStart'); assert.equal(registration.unitId, null);
+    assert((await f.run()).pending.includes('NATIVE_BOUNDARY_PENDING'));
+    const records = (id, text) => [
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: id, root_turn_id: id } },
+      history_mode === 'legacy' ? { type: 'event_msg', payload: { type: 'user_message', message: text } }
+        : { type: 'event_msg', payload: { type: 'item_completed', thread_id: S, turn_id: id,
+          item: { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text }] } } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: id } }
+    ];
+    await append(records(A, 'Agent-authored seed: proposed decision, not human evidence.'));
+    const armed = await f.run(); assert.equal(armed.saved, 0); assert.deepEqual(armed.pending, []);
+    assert(armed.boundaryExcluded.some(value => value.unitId === A));
+    assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head, null);
+    await append(records(B, 'Human correction: keep the synthetic rollout paused.'));
+    assert.equal((await f.run()).saved, 1);
+    const capture = (await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B })).capture;
+    assert.deepEqual(capture.evidence.map(value => value.text), ['Human correction: keep the synthetic rollout paused.']);
+    assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state.intervals[0].lower.eofByte, registration.snapshot.eofByte);
+    assert.equal((await f.run()).saved, 0);
+  });
+});
+
 for (const held of [false, true]) test(`v1 Codex progress and published units continue under v2 with held cursor=${held}`, async t => {
   const f = await fixture(t); await collectionIngress('codex', f.payload, f.options);
   await fs.appendFile(f.source, turn(A, 'Boundary')); await f.run();

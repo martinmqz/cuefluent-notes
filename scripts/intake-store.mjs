@@ -10,7 +10,7 @@ import { newSelectionState, validateSelectionState, applySelectionControl, evalu
 import { guardStore, intakePath, intakeSnapshot, intakeJSON, assertIntakeTransaction, assertIntakePrivacy, replaceIntakeJSON, writeIntakeStage, MAX_INTAKE_METADATA_BYTES } from './intake-io.mjs';
 import { keys, hash, nativeId, integer, list, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
-const selectionPath = identity => {
+export const selectionPath = identity => {
   logicalCaptureIdentity({ ...identity, unitId: identity.unitId ?? identity.sessionId });
   return `sessions/${identity.client}/${identity.sessionId}.json`;
 };

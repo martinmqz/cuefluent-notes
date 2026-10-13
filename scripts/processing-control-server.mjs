@@ -35,7 +35,10 @@ const ERRORS = new Set([...DIAGNOSTICS, 'PROCESSING_CONTROL_PROTOCOL', 'PROCESSI
   'PROCESSING_CLIENT_POLICY_CHANGED', 'PROCESSING_CHAT_HISTORY_FULL', 'PROCESSING_CHAT_BINDINGS_FULL',
   'PROCESSING_CONTROL_RECEIPT_CONFLICT', 'WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_OPERATION_COMPLETE',
   'PROCESSING_STATE_CHANGED', 'PROCESSING_CONTROL_SOURCE_DISCOVERY_INCOMPLETE',
-  'PROCESSING_CONTROL_REGISTRATION_PENDING', 'UNSUPPORTED_SESSION_OWNERSHIP']);
+  'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED', 'REGISTRATION_REQUIRES_REVIEW',
+  'UNSAFE_INTAKE_PATH', 'UNSAFE_PRIVATE_STORAGE', 'STORAGE_NOT_PRIVATE', 'INTAKE_ROOT_CHANGED', 'PRIVATE_STORAGE_CHANGED',
+  'UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
+const codexSourceErrors = new Set(['UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
 const uuidSchema = { type: 'string', pattern: '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' };
 const retrySchema = { ...uuidSchema, description: 'Opaque token returned for native verification. End the current exec, then repeat the same tool and arguments with this token. Never invent one.' };
 const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
@@ -293,7 +296,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
       // Claude may have rejected an unrelated registered source during /clear
       // fallback. Preserve its existing generic refusal instead of attributing
       // that ownership failure to the invoking chat. Codex binds the exact ID.
-      const code = ERRORS.has(error?.code) && !(client === 'claude' && error.code === 'UNSUPPORTED_SESSION_OWNERSHIP')
+      const code = ERRORS.has(error?.code) && !(client === 'claude' && codexSourceErrors.has(error.code))
         ? error.code : 'PROCESSING_CONTROL_FAILED';
       await reply({ jsonrpc: '2.0', id: rpcId, error: { code: code === 'PROCESSING_CONTROL_METHOD_UNSUPPORTED' ? -32601 : -32600, message: code } });
     } finally { requests.delete(rpcId); rejectForms('PROCESSING_REVIEW_INTERRUPTED', rpcId); }

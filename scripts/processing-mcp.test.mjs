@@ -718,7 +718,9 @@ async function nativeParent(t, f, h, { binding = 'active', headerChanges = {} } 
       evt('task_complete', { turn_id: unitId })]);
     return unitId;
   };
-  return { source, store, selected, controls, finish, work, boundaryUnitId: previous };
+  const resume = changes => append([{ type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cwd: f.project,
+    cli_version: '0.157.1', source: 'cli', history_mode: 'paginated', ...headerChanges, ...changes } }]);
+  return { source, store, selected, controls, finish, work, resume, boundaryUnitId: previous };
 }
 
 test('omitted MCP arguments bind to the exact empty native invocation', async t => {
@@ -793,7 +795,7 @@ test('paused native source can inspect, process and save an existing proposal wi
   });
 });
 
-async function nativeIngressFixture(t) {
+async function nativeIngressFixture(t, { headerChanges = {} } = {}) {
   const f = await storageFixture(t, { fullSetup: false }), sessionId = randomUUID();
   await fs.mkdir(f.collection.notes.notesDir);
   f.identity = { client: 'codex', sessionId, unitId: randomUUID() };
@@ -801,7 +803,7 @@ async function nativeIngressFixture(t) {
   f.source = { client: 'codex', sessionId, projectRoot: f.project, path: path.join(f.project, 'native.jsonl') };
   f.operationId = randomUUID();
   const h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
-  const parent = await nativeParent(t, f, h, { binding: 'ingress', headerChanges: { source: 'vscode', thread_source: 'agent_created_thread' } });
+  const parent = await nativeParent(t, f, h, { binding: 'ingress', headerChanges: { source: 'vscode', thread_source: 'agent_created_thread', ...headerChanges } });
   return { f, h, parent };
 }
 
@@ -851,7 +853,7 @@ test('exact unverified registration is diagnostic only for every native control'
   });
   for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) for (const explicit of [false, true]) {
     const result = await h.call(tool, explicit ? { collectionId: f.collection.id } : {});
-    assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_REGISTRATION_PENDING' });
+    assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED' });
     assert(!JSON.stringify(result).includes(f.root));
   }
   assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
@@ -882,15 +884,42 @@ test('missing exact registration never borrows an unrelated registration or a co
   assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
 });
 
+test('refused ownership remains unverified while a stale registration grant explicitly requires review', async t => {
+  for (const variant of ['ownership', 'grant']) await t.test(variant, async t => {
+    const { f, h } = await nativeIngressFixture(t, { headerChanges: variant === 'ownership' ? { parent_thread_id: randomUUID() } : {} });
+    if (variant === 'grant') {
+      f.config.routes[0].collection.generation = randomUUID();
+      await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+    }
+    const worker = await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    assert(worker.pending.includes(variant === 'ownership' ? 'UNSUPPORTED_SESSION_OWNERSHIP' : 'REGISTRATION_REQUIRES_REVIEW'));
+    const original = fs.open;
+    t.mock.method(fs, 'open', async function(file, ...args) {
+      assert.notEqual(file, f.source.path); assert.notEqual(file, path.join(f.collection.intakeStateDir, 'ingress/status/record.json'));
+      return original.call(this, file, ...args);
+    });
+    const files = await fs.readdir(f.collection.intakeStateDir, { recursive: true });
+    for (const args of [{}, { collectionId: f.collection.id }]) {
+      const result = await h.call('process_selected_captures', args);
+      assert.equal(result.error.message, variant === 'grant' ? 'REGISTRATION_REQUIRES_REVIEW' : 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
+      assert(!JSON.stringify(result).includes(f.root));
+    }
+    assert.deepEqual(await fs.readdir(f.collection.intakeStateDir, { recursive: true }), files);
+    assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
+    assert.deepEqual(await fs.readdir(f.collection.rawDir), []);
+  });
+});
+
 test('damaged or mismatched pending registration metadata cannot become a binding', async t => {
-  for (const variant of ['identity', 'malformed', 'oversized', 'linked']) await t.test(variant, async t => {
+  for (const variant of ['identity', 'malformed', 'null', 'oversized', 'linked']) await t.test(variant, async t => {
     const { f, h } = await nativeIngressFixture(t), file = path.join(f.collection.intakeStateDir, registrationPath(f.identity));
     if (variant === 'identity') {
       const value = JSON.parse(await fs.readFile(file)); value.sessionId = randomUUID(); await fs.writeFile(file, JSON.stringify(value));
     } else if (variant === 'linked') await fs.link(file, path.join(f.root, 'second-link.json'));
-    else await fs.writeFile(file, variant === 'malformed' ? '{' : ' '.repeat(16385));
+    else await fs.writeFile(file, variant === 'malformed' ? '{' : variant === 'null' ? 'null' : ' '.repeat(16385));
     const before = await fs.readFile(file), result = await h.call('process_selected_captures', {});
-    assert.equal(result.error.message, variant === 'identity' ? 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' : 'PROCESSING_CONTROL_FAILED');
+    assert.equal(result.error.message, variant === 'identity' ? 'PROCESSING_CONTROL_SOURCE_UNVERIFIED'
+      : variant === 'linked' ? 'UNSAFE_PRIVATE_STORAGE' : 'PROCESSING_CONTROL_FAILED');
     assert.deepEqual(await fs.readFile(file), before); assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
   });
 });
@@ -926,6 +955,24 @@ test('a pending-only candidate cannot block a verified native source in another 
   }
   assert.equal(h.opens, 5); assert.equal(h.dispatches, 0);
   await assert.rejects(fs.lstat(path.join(collection.intakeStateDir, 'sessions')), { code: 'ENOENT' });
+  const store = await openWorkflowIntake(f.capability), selected = await readSelection(store, f.identity);
+  selected.state.safetyStop = { reason: 'capacity', unitId: f.identity.unitId };
+  await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${f.identity.sessionId}.json`, selected.state, selected.hash));
+  // A failed real binding must remain visible, even beside damaged registration-only metadata.
+  assert.equal((await h.call('processing_status', {})).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal(h.opens, 5); assert.equal(h.dispatches, 0);
+});
+
+test('explicit collection requests use guarded intake paths before source classification', async t => {
+  for (const parentName of ['sessions/codex', 'ingress/processing-sources/codex']) await t.test(parentName, async t => {
+    const { f, h } = await nativeIngressFixture(t), parent = path.join(f.collection.intakeStateDir, parentName);
+    await fs.mkdir(path.dirname(parent), { recursive: true, mode: 0o700 });
+    await fs.writeFile(parent, 'Synthetic invalid directory', { mode: 0o600 });
+    const before = await fs.readFile(parent);
+    assert.equal((await h.call('processing_status', { collectionId: f.collection.id })).error.message, 'UNSAFE_INTAKE_PATH');
+    assert.deepEqual(await fs.readFile(parent), before);
+    assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
+  });
 });
 
 test('old-policy processing-only bindings do not hide a pending Codex collection registration', async t => {
@@ -941,7 +988,7 @@ test('old-policy processing-only bindings do not hide a pending Codex collection
   await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
   assert.equal((await hook()).status, 'queued');
   for (const args of [{}, { collectionId: f.collection.id }]) {
-    assert.equal((await h.call('process_selected_captures', args)).error.message, 'PROCESSING_CONTROL_REGISTRATION_PENDING');
+    assert.equal((await h.call('process_selected_captures', args)).error.message, 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
   }
   assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
 });
@@ -953,6 +1000,23 @@ test('actual unsupported native ownership remains a path-free public refusal', a
     assert.deepEqual((await h.call('processing_review', args)).error, { code: -32600, message: 'UNSUPPORTED_SESSION_OWNERSHIP' });
   }
   assert.equal(h.forms.length, 0); assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
+});
+
+test('resumed history and project mismatches remain actionable through the public MCP control', async t => {
+  for (const kind of ['history', 'project']) await t.test(kind, async t => {
+    const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+    const parent = await nativeParent(t, f, h, { headerChanges: { thread_source: 'agent_created_thread' } });
+    const changes = kind === 'history' ? { history_mode: 'legacy' } : { cwd: path.join(f.root, 'other-project') };
+    await parent.resume(changes);
+    const selected = await readSelection(parent.store, f.identity);
+    for (const args of [{}, { collectionId: f.collection.id }]) {
+      const response = await h.call('processing_review', args);
+      assert.equal(response.error.message, kind === 'history' ? 'UNSUPPORTED_CODEX_HISTORY' : 'SOURCE_IDENTITY_MISMATCH');
+      assert(!JSON.stringify(response).includes(f.root));
+    }
+    assert.equal((await readSelection(parent.store, f.identity)).hash, selected.hash);
+    assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
+  });
 });
 
 test('actual source binding, engine proposal, native review and collection preserve genuine work without creating a control backlog', async t => {

@@ -125,24 +125,42 @@ the intended session instead of guessing a source.
 Independent agent-created Codex chats are supported when they satisfy the
 [root ownership contract](session-workflow.md#codex-reader-contract). Delegated,
 forked and inherited histories remain unsupported.
-`PROCESSING_CONTROL_REGISTRATION_PENDING` means an exact Codex hook registration
-exists, but no collection selection or processing-only binding was found for it.
-That registration is only metadata: it does not prove ownership, a successful
-capture, or why verification has not completed. The control does not read the
-transcript, launch a worker, or start processing from this hint. Inspect collection
-status and its current refusal, if any; retry the control after normal authorized
-collection verifies the source. Do not reset consent or the stored floor to clear
-the message. If collection is intentionally off, use the existing processing-only
-binding or [standalone explicit workflow](processing.md) without enabling it.
+`PROCESSING_CONTROL_REGISTRATION_UNVERIFIED` means an exact Codex hook registration
+exists with a current collection grant, but no collection selection or
+processing-only binding was found. This is an observation of metadata, not a
+worker status: the source may be waiting for a native boundary or may have already
+been refused. It does not promise that waiting or retrying will succeed. The
+control does not read the transcript, launch a worker, or start processing from
+this hint. Inspect collection status for a diagnostic matching the exact session;
+an absent diagnostic does not prove verification is still pending. Follow any
+identified refusal before retrying. A registration that no longer matches current
+collection authority reports `REGISTRATION_REQUIRES_REVIEW`. Do not reset consent
+or the stored floor to clear either message. If collection is intentionally off,
+use the existing processing-only binding or [standalone explicit workflow](processing.md)
+without enabling it. A failed binding takes precedence over registration-only
+hints in other collections; explicitly selecting a collection can disambiguate.
 
 For Codex, `UNSUPPORTED_SESSION_OWNERSHIP` means authorized native verification
 actually rejected the invoking session's ownership metadata. Use a supported
-independent root chat; do not edit the transcript or bypass its ownership checks. Missing registrations and other
-unproven calls still report `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These refusals
+independent root chat; do not edit the transcript or bypass its ownership checks.
+`UNSUPPORTED_CODEX_HISTORY` reports an unsupported or changed history mode;
+`SOURCE_IDENTITY_MISMATCH` reports metadata inconsistent with the bound source,
+including its project directory. These checks also apply to resumed metadata in
+the authorized tail. Preserve the source and binding and inspect their mismatch;
+do not rewrite the transcript, reset the floor or claim a new identity to bypass it.
+Missing registrations and other unproven calls still report
+`PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These refusals
 leave captures, proposals and notes unchanged. Claude retains a generic refusal
-when ownership fails during source discovery: its launch-session hint may be
+when these source checks fail during discovery: its launch-session hint may be
 stale and another registered candidate may have failed, so that failure does not
 establish that the invoking chat is unsupported.
+
+Explicit collection requests verify private storage and use guarded intake reads
+before classifying source metadata. Known storage refusals remain path-free:
+`UNSAFE_INTAKE_PATH`, `UNSAFE_PRIVATE_STORAGE`, `STORAGE_NOT_PRIVATE`,
+`INTAKE_ROOT_CHANGED` or `PRIVATE_STORAGE_CHANGED`. Check the selected storage
+against the [private-storage requirements](session-workflow.md#private-storage-and-explicit-pruning)
+before retrying; do not relocate locks or discard state to bypass the refusal.
 
 The adapter briefly retries missing native records in the selected source because
 client persistence can lag tool dispatch. Claude's registered-source fallback

@@ -136,6 +136,14 @@ export function validateRegistration(value) {
   return value;
 }
 
+/** Exact bounded metadata only; a registration is never source-read authority. */
+export async function readRegistration(store, identity, { mismatchCode = 'INVALID_REGISTRATION' } = {}) {
+  const snapshot = await intakeSnapshot(store, 'state', registrationPath(identity), { maxBytes: 16384 });
+  const registration = snapshot.bytes === null ? null : validateRegistration(intakeJSON(snapshot));
+  if (registration && (registration.client !== identity.client || registration.sessionId !== identity.sessionId)) fail(mismatchCode);
+  return { snapshot, registration };
+}
+
 /** Registrations keep their original locator and floor. A reviewed selection
  * may bind a fresh grant atomically, but can never change the native source. */
 export async function assertRegistrationGrant(store, registration, state, grantHash, route) {
@@ -219,9 +227,8 @@ export async function collectionIngress(client, payload, { configPath, launch = 
       sourcePath, cwd: envelope.cwd, projectRoot: route.route.projectRoot, routeId: route.route.id, collectionId: route.collection.id,
       grantHash: await collectionGrantHash(snapshot.config, route.route.id, envelope), registeredAt: new Date().toISOString(), event: envelope.event, unitId: envelope.unitId,
       startSource: envelope.startSource ?? null, snapshot: source };
-    const name = registrationPath(envelope), old = intakeJSON(await intakeSnapshot(store, 'state', name, { maxBytes: 16384 }));
+    const name = registrationPath(envelope), { registration: old } = await readRegistration(store, envelope);
     if (old !== null) {
-      validateRegistration(old);
       await assertRegistrationGrant(store, old, selected.state, registration.grantHash, route);
       if (old.sourcePath !== sourcePath ||
           (old.snapshot && source && old.snapshot.fileIdentity !== source.fileIdentity) ||
