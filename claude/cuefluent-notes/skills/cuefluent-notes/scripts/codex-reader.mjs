@@ -51,8 +51,10 @@ export async function verifyCodexHeader(line, source) {
   if (line?.type !== 'session_meta' || !meta) fail('UNSUPPORTED_CODEX_HEADER');
   // The client version is provenance; compatibility comes from the native shape.
   clientVersion(meta.cli_version);
+  // thread_source is a creation-origin label. An app-created independent chat
+  // still has to prove root ownership through both IDs and every lineage field.
   if (meta.id !== source.sessionId || meta.session_id !== source.sessionId || source.client !== 'codex' ||
-      !['cli', 'vscode', 'exec', 'mcp'].includes(meta.source) || (meta.thread_source != null && meta.thread_source !== 'user') ||
+      !['cli', 'vscode', 'exec', 'mcp'].includes(meta.source) || (meta.thread_source != null && !['user', 'agent_created_thread'].includes(meta.thread_source)) ||
       meta.parent_thread_id != null || meta.agent_path != null || meta.subagent_history_start_ordinal != null || meta.history_base != null ||
       meta.forked_from_id != null || meta.forked_from_ordinal_exclusive != null) fail('UNSUPPORTED_SESSION_OWNERSHIP');
   absolutePath(meta.cwd);

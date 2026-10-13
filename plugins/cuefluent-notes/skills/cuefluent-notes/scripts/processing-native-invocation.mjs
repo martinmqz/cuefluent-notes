@@ -140,6 +140,14 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
     ...(context.client === 'codex' ? { verifyHeader: verifyCodexHeader }
       : { readHeader: claudeRegistrationHeader(source), verifyHeader: value => value }) });
   if (read.blocked || read.limited) throw new UnavailableNativeSource();
+  // Resume metadata inside the already authorized tail must preserve the same
+  // root ownership and history shape as the initial header. Never scan backward
+  // beyond that bounded tail to look for another source or a usable header.
+  if (context.client === 'codex') for (const { value } of read.records) {
+    if (value.type !== 'session_meta') continue;
+    const resumed = await verifyCodexHeader(value, source);
+    if (resumed.historyMode !== read.metadata.historyMode) fail('UNSUPPORTED_CODEX_HISTORY');
+  }
   const argsHash = digest(canonicalJSON(invocation.arguments));
   let call = null, unitId = context.unitId ?? null, nativeSkill = false;
   const nested = context.client === 'codex' ? codexNestedCall(read.records, context, invocation, argsHash) : null;

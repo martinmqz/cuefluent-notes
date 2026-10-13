@@ -4,9 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { workflowConfigPath, readWorkflowSnapshot } from './workflow-config.mjs';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
-import { openWorkflowIntake, withIntakeLock } from './intake-io.mjs';
-import { readSelection } from './intake-store.mjs';
-import { processingSourceDirectory } from './collection-ingress.mjs';
+import { openWorkflowIntake, withIntakeLock, intakeSnapshot } from './intake-io.mjs';
+import { readSelection, selectionPath } from './intake-store.mjs';
+import { processingSourceDirectory, processingSourcePath, registrationPath, readRegistration, assertRegistrationGrant } from './collection-ingress.mjs';
+import { collectionGrantHash } from './collection-grant.mjs';
+import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { recordProcessingControlDispatch, createProcessingControlResolver } from './processing-control-receipts.mjs';
 import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessingInvocation } from './processing-native-invocation.mjs';
 import { runProcessingControlServer } from './processing-control-server.mjs';
@@ -38,6 +40,33 @@ function nativeRequestId(source, client) {
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }
 
+// Exact metadata locations only. Presence is a candidate hint, never a source
+// binding; guarded reads and native verification still own all authority.
+async function sourcePresence(collection, context, policyHash, capability = null) {
+  const { client, sessionId } = context;
+  const identity = { client, sessionId };
+  // Explicit selection uses the same guarded metadata reads as native resolution;
+  // implicit discovery alone needs cheap hints to skip unprepared collections.
+  if (capability) {
+    if (client !== 'codex') return 'binding'; // Claude retains its registered-source fallback.
+    const store = await openWorkflowIntake(capability);
+    if ((await readSelection(store, identity)).state ||
+        (await intakeSnapshot(store, 'state', processingSourcePath(context, policyHash), { maxBytes: 16384 })).bytes !== null) return 'binding';
+    return 'registration'; // The later exact guarded read distinguishes absence.
+  }
+  const probes = [client === 'codex' ? selectionPath(identity) : path.posix.dirname(selectionPath(identity)),
+    client === 'codex' ? processingSourcePath(context, policyHash) : processingSourceDirectory(client)];
+  for (const probe of probes) {
+    try { await fs.lstat(path.join(collection.intakeStateDir, probe)); return 'binding'; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  if (client === 'codex') {
+    try { await fs.lstat(path.join(collection.intakeStateDir, registrationPath(context))); return 'registration'; }
+    catch (error) { if (error.code !== 'ENOENT') return 'registration'; }
+  }
+  return 'missing';
+}
+
 /** Native MCP front door. Its background tasks are finite explicit requests,
  * never scheduled/automatic work. Exit waits for owned tasks; killed hosts leave
  * the controller's durable unknown outcome, not a replacement chat.
@@ -53,35 +82,50 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (!snapshot.config) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
     const requested = invocation.arguments.collectionId;
     if (snapshot.config.collections.length > 64) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
-    const matches = [];
+    const matches = [], registrationCollections = [];
+    let failedBinding = false;
     for (const collection of snapshot.config.collections) {
       if (requested !== undefined && collection.id !== requested) continue;
-      if (requested === undefined) {
-        if (!snapshot.config.routes.some(route => route.collectionId === collection.id && route.clients.includes(client))) continue;
-        // Only bounded registration metadata is probed before full verification.
-        const probes = [path.join('sessions', context.client, ...(client === 'codex' ? [`${context.sessionId}.json`] : [])),
-          path.join(processingSourceDirectory(client), ...(client === 'codex' ? [context.sessionId] : []))];
-        let present = false;
-        for (const probe of probes) {
-          try { await fs.lstat(path.join(collection.intakeStateDir, probe)); present = true; break; }
-          catch (error) { if (error.code !== 'ENOENT') throw error; }
-        }
-        if (!present) continue;
-      }
+      if (requested === undefined && !snapshot.config.routes.some(route => route.collectionId === collection.id && route.clients.includes(client))) continue;
       const options = { configPath: selectedConfig, collectionId: collection.id, expectedConfigHash: snapshot.hash };
-      const capability = await verifyWorkflowStorage(options);
+      let capability = requested === undefined ? null : await verifyWorkflowStorage(options);
+      const presence = await withStorageProbes(() => sourcePresence(collection, context, snapshot.hash, capability));
+      if (presence === 'registration') { registrationCollections.push(collection); continue; }
+      if (requested === undefined && presence === 'missing') continue;
+      capability ??= await verifyWorkflowStorage(options);
       let source;
       try { source = await withStorageProbes(() => resolveInvocation(capability, context, invocation, { skillPath, signal, requireCompleted })); }
       catch (error) {
-        if (requested === undefined && error.code === 'PROCESSING_CONTROL_SOURCE_UNVERIFIED') continue;
+        if (requested === undefined && error.code === 'PROCESSING_CONTROL_SOURCE_UNVERIFIED') { failedBinding = true; continue; }
         throw error;
       }
       if (!isProcessingInvocation(source) && !isPendingProcessingInvocation(source) && !dependencies.resolveInvocation) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
       const resolved = Object.freeze({ ...source, collectionId: collection.id });
       owners.set(resolved, { capability, options }); matches.push(resolved);
     }
-    if (matches.length !== 1) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
-    return matches[0];
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1 || failedBinding) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    // Diagnose only after all real bindings miss. Pending-only metadata cannot
+    // prevent a valid match or supply an invocation, even if its JSON is broken.
+    const registrationUnverified = await withStorageProbes(async () => {
+      let present = false;
+      for (const collection of registrationCollections) {
+        const capability = await verifyWorkflowStorage({ configPath: selectedConfig, collectionId: collection.id, expectedConfigHash: snapshot.hash });
+        const store = await openWorkflowIntake(capability);
+        const { registration: record } = await readRegistration(store, context, { mismatchCode: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+        if (record === null) continue;
+        if (record.collectionId !== collection.id) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+        const route = await resolveWorkflowRoute(snapshot.config, record);
+        // A retired collection registration cannot establish a processing-only
+        // binding. Reviewing its grant cannot restore intentionally absent consent.
+        if (!route.intended?.collect) continue;
+        if (route.collection.id !== collection.id) fail('REGISTRATION_REQUIRES_REVIEW');
+        await assertRegistrationGrant(store, record, null, await collectionGrantHash(snapshot.config, route.route.id, record), route);
+        present = true;
+      }
+      return present;
+    });
+    fail(registrationUnverified ? 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED' : 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   }
   function selected(source) {
     const owner = owners.get(source);
