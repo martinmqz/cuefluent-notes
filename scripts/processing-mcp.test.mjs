@@ -19,6 +19,8 @@ import { collectionIngress } from './collection-ingress.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { processScope } from './collection-worker.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
+import { storageFixture } from './test-support/storage-fixture.mjs';
+import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 
 const deferred = () => {
   let resolve, reject;
@@ -643,7 +645,7 @@ test('a settings change while native review is open cannot authorize the stale p
   assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
 });
 
-async function nativeParent(t, f, h, { binding = 'active' } = {}) {
+async function nativeParent(t, f, h, { binding = 'active', headerChanges = {} } = {}) {
   const sessionId = binding === 'processing-only' ? randomUUID() : f.identity.sessionId, previous = randomUUID(), stamp = '2026-10-10T12:00:00.000Z';
   // The pending synthetic capture belongs to this same source session. Replace
   // the fixture's placeholder bytes before starting its new live interval.
@@ -663,7 +665,8 @@ async function nativeParent(t, f, h, { binding = 'active' } = {}) {
   const response = (unitId, payload, kinds) => ({ type: 'response_item', payload: { ...payload,
     internal_chat_message_metadata_passthrough: { turn_id: unitId, ...(kinds ? { content_item_kinds: kinds } : {}) } } });
   const anchors = await append([{ type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cwd: f.project,
-    cli_version: '0.157.1', source: 'cli', history_mode: 'paginated' } }, evt('task_started', { turn_id: previous, root_turn_id: previous })]);
+    cli_version: '0.157.1', source: 'cli', history_mode: 'paginated', ...headerChanges } },
+    ...(binding === 'ingress' ? [] : [evt('task_started', { turn_id: previous, root_turn_id: previous })])]);
   source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
   const store = await openWorkflowIntake(f.capability, { client: 'codex', sessionId, cwd: f.project, unitId: null }, 'collect');
   const previousSelection = await readSelection(store, { client: 'codex', sessionId });
@@ -675,6 +678,14 @@ async function nativeParent(t, f, h, { binding = 'active' } = {}) {
     // Its already-published raw capture stays byte-for-byte intact.
     selected.state.explicitScopes[0].start = anchors.at(-1);
     await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${sessionId}.json`, selected.state, selected.hash));
+  }
+  if (binding === 'ingress') {
+    await collectionIngress('codex', { session_id: sessionId, turn_id: previous,
+      cwd: f.project, transcript_path: source.path, hook_event_name: 'UserPromptSubmit' }, {
+      configPath: f.options.configPath, launch: async () => {} });
+    await append([evt('task_started', { turn_id: previous, root_turn_id: previous }),
+      item(previous, { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text: 'Excluded hook boundary' }] }),
+      evt('task_complete', { turn_id: previous })]);
   }
   const controls = [], metadata = new Map();
   h.beforeCall = async (name, args, callNumber) => {
@@ -707,7 +718,7 @@ async function nativeParent(t, f, h, { binding = 'active' } = {}) {
       evt('task_complete', { turn_id: unitId })]);
     return unitId;
   };
-  return { source, store, selected, controls, finish, work };
+  return { source, store, selected, controls, finish, work, boundaryUnitId: previous };
 }
 
 test('omitted MCP arguments bind to the exact empty native invocation', async t => {
@@ -726,9 +737,9 @@ test('omitted MCP arguments bind to the exact empty native invocation', async t 
 });
 
 test('collection-off native controls process and review manual backlog without enabling collection', async t => {
-  for (const binding of ['manual', 'processing-only']) for (const explicit of [true, false]) await t.test(`${binding}, explicit=${explicit}`, async t => {
+  for (const thread_source of [undefined, 'agent_created_thread']) for (const binding of ['manual', 'processing-only']) for (const explicit of [true, false]) await t.test(`${thread_source ?? 'unlabelled'}, ${binding}, explicit=${explicit}`, async t => {
     const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
-    const parent = await nativeParent(t, f, h, { binding });
+    const parent = await nativeParent(t, f, h, { binding, headerChanges: { thread_source } });
     f.config.routes[0].collection.enabled = false;
     if (binding === 'processing-only') f.config.routes[0].processing.mode = 'prompted';
     const config = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, config);
@@ -756,9 +767,9 @@ test('collection-off native controls process and review manual backlog without e
 });
 
 test('paused native source can inspect, process and save an existing proposal with explicit or inferred collection', async t => {
-  for (const explicit of [true, false]) await t.test(explicit ? 'explicit collection' : 'inferred collection', async t => {
+  for (const thread_source of [undefined, 'agent_created_thread']) for (const explicit of [true, false]) await t.test(`${thread_source ?? 'unlabelled'}, explicit=${explicit}`, async t => {
     const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
-    const parent = await nativeParent(t, f, h), unitId = await parent.work('Pause collection.');
+    const parent = await nativeParent(t, f, h, { headerChanges: { thread_source } }), unitId = await parent.work('Pause collection.');
     const paused = await withIntakeLock(parent.store, async tx => controlSelection(tx, { source: parent.source,
       expectedHash: parent.selected.hash, authorize: async () => true,
       request: { id: randomUUID(), client: 'codex', sessionId: f.identity.sessionId, unitId,
@@ -780,6 +791,46 @@ test('paused native source can inspect, process and save an existing proposal wi
     assert.deepEqual(await fs.readFile(f.options.configPath), config);
     await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
   });
+});
+
+test('agent-created hook registration reaches real capture, native processing and exact proposal review', async t => {
+  const f = await storageFixture(t, { fullSetup: false }), sessionId = randomUUID();
+  await fs.mkdir(f.collection.notes.notesDir);
+  f.identity = { client: 'codex', sessionId, unitId: randomUUID() };
+  f.selection = { client: 'codex', sessionId, cwd: f.project, unitId: null };
+  f.source = { client: 'codex', sessionId, projectRoot: f.project, path: path.join(f.project, 'native.jsonl') };
+  f.operationId = randomUUID();
+  const h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+  const parent = await nativeParent(t, f, h, { binding: 'ingress', headerChanges: { source: 'vscode', thread_source: 'agent_created_thread' } });
+  assert.equal((await readSelection(parent.store, f.identity)).state, null);
+  f.identity.unitId = await parent.work('Source decision: hold the rollout.');
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const collected = await run(); assert.deepEqual(collected.pending, []); assert.equal(collected.saved, 1);
+  assert(collected.boundaryExcluded.some(item => item.unitId === parent.boundaryUnitId));
+  assert.equal((await readCaptureHead(parent.store, { ...f.identity, unitId: parent.boundaryUnitId })).head, null);
+  const retained = await readCaptureHead(parent.store, f.identity);
+  assert.equal(retained.capture.evidence[0].text, 'Source decision: hold the rollout.');
+  f.inputs = [{ identity: f.identity, headHash: retained.hash }];
+  h.script = proposeThroughTools(f);
+  const closed = h.whenClosed(), started = await h.call('process_selected_captures', {});
+  assert.equal(body(started).status, 'busy'); await parent.finish(started); await closed; await h.jobs[0];
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+  const next = h.nextForm(), review = h.call('processing_review', {}), form = await next;
+  const preview = form.params.requestedSchema.properties.changes.default;
+  assert(preview.includes('PRIVATE-SYNTHETIC-PROPOSAL')); assert(preview.includes('Keep the rollout paused.'));
+  assert(preview.includes(`codex session ${sessionId}, turn ${f.identity.unitId}`));
+  assert(preview.includes('Terminal: completed'));
+  assert(preview.includes(`Exact proposal: ${(await inspectProcessing(f.capability, f.operationId)).proposalHash}`));
+  h.answer(form, { action: 'accept', content: { decision: 'save' } });
+  const reviewed = await review; assert.equal(body(reviewed).status, 'idle'); await parent.finish(reviewed);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+  const correction = await parent.work('Correction: the rollout can proceed after verification.');
+  assert.equal((await run()).saved, 1);
+  for (const unitId of parent.controls) assert.equal((await readCaptureHead(parent.store, { ...f.identity, unitId })).head, null);
+  assert.match((await readCaptureHead(parent.store, { ...f.identity, unitId: correction })).capture.evidence[0].text, /Correction/);
+  assert.equal((await readCaptureHead(parent.store, f.identity)).hash, retained.hash);
+  assert.equal((await run()).saved, 0);
 });
 
 test('actual source binding, engine proposal, native review and collection preserve genuine work without creating a control backlog', async t => {

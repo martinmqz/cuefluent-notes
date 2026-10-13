@@ -15,7 +15,7 @@ import { collectionIngress, processingSourcePath } from './collection-ingress.mj
 const stamp = '2026-10-10T12:00:00.000Z';
 const line = value => JSON.stringify(value) + '\n';
 const unavailable = { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' };
-async function fixture(t, client = 'codex', { register = true, midRecord = false, collection = true, mode = 'manual' } = {}) {
+async function fixture(t, client = 'codex', { register = true, midRecord = false, collection = true, mode = 'manual', headerChanges = {} } = {}) {
   const f = await storageFixture(t, { fullSetup: false });
   if (!collection || mode !== 'manual') {
     f.config.routes[0].collection.enabled = collection; f.config.routes[0].processing.mode = mode;
@@ -30,7 +30,7 @@ async function fixture(t, client = 'codex', { register = true, midRecord = false
   const skillPath = path.join(f.root, 'synthetic-plugin', 'SKILL.md');
   const header = client === 'codex'
     ? { timestamp: stamp, ordinal: 0, type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cwd: f.project,
-      cli_version: '0.156.1', source: 'cli', history_mode: 'paginated' } }
+      cli_version: '0.156.1', source: 'cli', history_mode: 'paginated', ...headerChanges } }
     : { type: 'system', subtype: 'init', uuid: randomUUID(), timestamp: stamp, sessionId,
       version: '2.1.280', cwd: f.project, isSidechain: false, parentUuid: null, message: { role: 'system', content: '' } };
   const preBoundary = client === 'codex'
@@ -82,6 +82,20 @@ test('Codex typed native invocation binds the selected call and exact native ski
   assert.deepEqual(await fs.readFile(f.options.configPath), config); assert.deepEqual(await fs.readFile(f.source.path), source);
   assert.equal((await readSelection(f.store, identity)).hash, selection.hash);
   assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), directories);
+});
+
+test('Codex invocation rechecks resumed metadata in its selected tail', async t => {
+  for (const [change, code] of [
+    [{ cli_version: '0.200.0', thread_source: 'agent_created_thread' }, null],
+    [{ parent_thread_id: randomUUID() }, 'UNSUPPORTED_SESSION_OWNERSHIP'],
+    [{ history_mode: 'legacy' }, 'UNSUPPORTED_CODEX_HISTORY'],
+  ]) {
+    const f = await fixture(t, 'codex', { headerChanges: { thread_source: 'agent_created_thread' } });
+    const first = JSON.parse((await fs.readFile(f.source.path, 'utf8')).split('\n')[0]);
+    await f.append([{ ...first, ordinal: 2, payload: { ...first.payload, ...change } }, { ...f.spacer(), ordinal: 3 }, f.nativeCall()]);
+    if (code) await assert.rejects(f.resolve(), { code });
+    else assert.equal((await f.resolve()).callId, f.context.toolCallId);
+  }
 });
 
 test('Claude maps formal process and review controls through trusted companion and native skill attribution', async t => {
@@ -444,9 +458,9 @@ test('Codex nested binding rejects forged metadata, arguments, duplicate calls a
 test('MCP handshake verifies native bytes end to end and refuses source replacement between calls', async t => {
   const { PassThrough, Writable } = await import('node:stream');
   const { runProcessingControlServer } = await import('./processing-control-server.mjs');
-  for (const variant of ['verified retry', 'replaced source', 'late pair', 'late output', 'never persisted']) await t.test(variant, async t => {
+  for (const variant of ['verified retry', 'agent-created retry', 'replaced source', 'late pair', 'late output', 'never persisted']) await t.test(variant, async t => {
     const altered = variant === 'replaced source';
-    const f = await fixture(t), r = nestedRows(f, null);
+    const f = await fixture(t, 'codex', { headerChanges: variant === 'agent-created retry' ? { thread_source: 'agent_created_thread' } : {} }), r = nestedRows(f, null);
     await f.append([f.spacer(), r.outer]);
     const input = new PassThrough(), received = new Map(), waiting = new Map(); let calls = 0;
     const output = new Writable({ write(bytes, _e, done) {
