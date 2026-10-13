@@ -165,6 +165,10 @@ test('client rejects arbitrary engine namespaces and shell-backed Windows launch
   assert.throws(() => createClaudeProcessingClient({ ...base, allowedTools: ['mcp__other__inspect'] }), { code: 'INVALID_PROCESSING_CLIENT_TOOLS' });
   assert.throws(() => createClaudeProcessingClient({ ...base, executable: 'claude.cmd' }), { code: 'INVALID_PROCESSING_CLIENT' });
   assert.throws(() => createClaudeProcessingClient({ ...base, engine: { ...base.engine, env: { CLAUDE_CODE_SESSION_ID: randomUUID() } } }), { code: 'INVALID_PROCESSING_CLIENT' });
+  for (const settings of [null, { disableAllHooks: false }, { disableAllHooks: true, hooks: {} },
+    { disableAllHooks: true, env: { ANTHROPIC_API_KEY: 'synthetic-private-credential' } }]) {
+    assert.throws(() => createClaudeProcessingClient({ ...base, settings }), { code: 'PROCESSING_CLIENT_SETTINGS_INVALID' });
+  }
 });
 
 test('engine authorization is inherited environment data and never a command-line argument', async () => {

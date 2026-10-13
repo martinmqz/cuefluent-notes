@@ -18,6 +18,57 @@ Status, review and registry recovery read the local client profile and stored
 state without launching a native client. A native executable is needed only when
 a request actually creates or resumes a processing run.
 
+## Claude launch settings
+
+Restricted Claude processing retains its existing native authentication and
+supported provider, deployment and connection environment settings. Before each
+eligible run, including session reuse, it reads the selected user profile's
+`settings.json` (`~/.claude/settings.json`, or the profile chosen by
+`CLAUDE_CONFIG_DIR`). A standalone CLI launch applies supported user `env` values
+over inherited shell values, as native user settings do. A verified Claude chat
+handoff preserves values already supplied by its host environment, using the
+user profile only for missing values. This keeps exported project account,
+endpoint and model selections intact. Supported profile model preferences,
+mappings, allowlists and effort settings are passed as restricted settings;
+native managed policy and environment-model precedence remain in force.
+
+Authentication values remain in process memory and environment, never command
+arguments, proposal receipts or plugin diagnostics. A missing user settings file
+retains the inherited environment. The processor does not discover project
+settings, restore Claude's credential-helper command settings, restore unrelated profile settings,
+or modify authentication. Project-specific configuration must already be supplied
+through the calling host's environment; project-specific structured settings are
+not read. Hooks, plugins, slash commands and arbitrary
+tools remain disabled; native runtime verification still requires the sole selected
+engine and its exact tool set.
+
+The inherited `CLAUDE_CONFIG_DIR` stays unset when unset, and keeps its exact
+spelling when set. Changing it can change native credential-store selection even
+when it names the same physical folder. The registry and exclusion lookup use the
+verified canonical profile. Profile aliases are rechecked before dispatch and
+engine calls, but are not locked across native startup; a changed or unverifiable
+profile stops processing without granting an exclusion or replacing state.
+
+`PROCESSING_CLIENT_SETTINGS_INVALID`, `PROCESSING_CLIENT_SETTINGS_UNAVAILABLE`
+and `PROCESSING_CLIENT_SETTINGS_LIMIT` stop before native admission when settings
+are malformed, inaccessible, changing or over their bounded limits. Ask the user
+to resolve the selected native settings in the client without printing settings
+or credential values. Keep existing processing state intact.
+`PROCESSING_CLIENT_SETTINGS_UNSUPPORTED`
+reports a configured Claude credential-helper command or an unsupported enabled
+provider switch. The native provider SDK still owns its ordinary authentication;
+the plugin neither reads credential stores nor starts sign-in commands. Use the
+[standalone workflow](processing.md) from an uncaptured chat whose
+normal authentication works. Status and existing-proposal review remain available
+without reading these launch settings. A previously interrupted or unknown run
+still needs the [existing recovery controls](workflow-cli.md#processing-chat-controls).
+
+Provider setup belongs to the native client; see its
+[Foundry](https://code.claude.com/docs/en/microsoft-foundry),
+[Bedrock](https://code.claude.com/docs/en/amazon-bedrock),
+[Google Cloud](https://code.claude.com/docs/en/google-vertex-ai) and
+[network configuration](https://code.claude.com/docs/en/network-config) guides.
+
 ## Entry and reuse
 
 Use the existing skill with the exact argument `process`: select Cuefluent Notes

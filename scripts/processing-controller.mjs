@@ -11,6 +11,7 @@ import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
 import { openCodexProcessingClient, codexProcessingProfile } from './processing-client-codex.mjs';
 import { createClaudeProcessingClient } from './processing-client-claude.mjs';
+import { resolveClaudeLaunchSettings } from './processing-claude-settings.mjs';
 import { inspectProcessing } from './processing.mjs';
 import { processingExecutionCallbacks } from './processing-execution-receipts.mjs';
 import { reconcileCompletedProcessingExecution } from './processing-chat-recovery.mjs';
@@ -55,10 +56,11 @@ export async function openProcessingController(context, dependencies = {}) {
   const { client } = context, env = dependencies.env ?? process.env;
   const options = { configPath: context.configPath, collectionId: context.collectionId, expectedConfigHash: context.expectedConfigHash };
   const capability = await verifyWorkflowStorage(options);
+  const collection = await withStorageProbes(() => assertWorkflowStorage(capability));
+  const claudeProfile = client === 'claude' ? await fs.realpath(env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude')) : null;
   const execution = dependencies.beforeExecution && dependencies.afterExecution && dependencies.guardExecution
     ? dependencies : processingExecutionCallbacks({ capability,
-      claudeConfigDir: env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude') });
-  const collection = await withStorageProbes(() => assertWorkflowStorage(capability));
+      claudeConfigDir: claudeProfile ?? env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude') });
   const cwd = collection.intakeStateDir;
   const hostId = dependencies.hostId ?? digest(canonicalJSON({ storage: collection.intakeStateDir }));
   let tools = null, nativeSession = null, verified = false, nativeResult = null, running = false, closed = false;
@@ -91,10 +93,10 @@ export async function openProcessingController(context, dependencies = {}) {
   }
   let bridge = null, transport = null;
   const profileId = dependencies.profileId ?? (client === 'codex' ? await codexProcessingProfile(env)
-    : digest(canonicalJSON({ home: await fs.realpath(env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude')), platform: process.platform })));
+    : digest(canonicalJSON({ home: claudeProfile, platform: process.platform })));
   hash(profileId);
   async function ensureTransport() {
-    if (transport) return;
+    if (transport && client === 'codex') return;
     try {
       if (client === 'codex') {
         transport = await (dependencies.openCodex ?? openCodexProcessingClient)({ cwd,
@@ -102,10 +104,15 @@ export async function openProcessingController(context, dependencies = {}) {
           onEngineTool: call => engineCall(call.tool.slice('cuefluent_'.length), call.arguments) }, { env });
         if (transport.profileId !== profileId) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
       } else {
-        bridge = await (dependencies.openBridge ?? openProcessingEngineBridge)({ toolNames: declared.map(tool => tool.name),
+        // Resolve native user provider settings before reserving or dispatching.
+        // A reused session gets a fresh environment without restoring unrelated
+        // profile behavior, modifying settings or putting credentials in argv.
+        const launch = await resolveClaudeLaunchSettings(env, { expectedProfile: claudeProfile,
+          preferHostEnvironment: dependencies.preferHostEnvironment === true });
+        bridge ??= await (dependencies.openBridge ?? openProcessingEngineBridge)({ toolNames: declared.map(tool => tool.name),
           declarations: declared, call: engineCall });
         transport = (dependencies.createClaude ?? createClaudeProcessingClient)({ executable: dependencies.claudeExecutable ?? 'claude',
-          cwd, engine: bridge.engine, allowedTools: bridge.allowedTools }, { env });
+          cwd, engine: bridge.engine, allowedTools: bridge.allowedTools, settings: launch.settings }, { env: launch.env });
       }
     } catch (error) { await transport?.close?.(); await bridge?.close(); transport = null; bridge = null; throw error; }
   }
@@ -131,6 +138,11 @@ export async function openProcessingController(context, dependencies = {}) {
   let current = null, requestId = null;
   async function guardRole() {
     if (!running || !requestSelection || !current) fail('PROCESSING_CHAT_NOT_RUNNING');
+    if (client === 'claude') {
+      try {
+        if (await fs.realpath(env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude')) !== claudeProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
+      } catch { fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE'); }
+    }
     await withStorageProbes(() => assertWorkflowStorage(capability, requestSelection, 'explicitProcess'));
     const fresh = await state.read();
     if (fresh.hash !== current.hash || fresh.state !== 'busy' || fresh.registry.active.requestId !== requestId ||

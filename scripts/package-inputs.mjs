@@ -40,6 +40,7 @@ export const SOURCE_FILES = Object.freeze([
   'scripts/processing-chat-state.mjs',
   'scripts/processing-chat-recovery.mjs',
   'scripts/processing-client-claude.mjs',
+  'scripts/processing-claude-settings.mjs',
   'scripts/processing-client-codex.mjs',
   'scripts/processing-contract.mjs',
   'scripts/processing-control-proof.mjs',
