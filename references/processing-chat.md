@@ -133,11 +133,16 @@ been refused. It does not promise that waiting or retrying will succeed. The
 control does not read the transcript, launch a worker, or start processing from
 this hint. Inspect collection status for a diagnostic matching the exact session;
 an absent diagnostic does not prove verification is still pending. Follow any
-identified refusal before retrying. A registration that no longer matches current
-collection authority reports `REGISTRATION_REQUIRES_REVIEW`. Do not reset consent
-or the stored floor to clear either message. If collection is intentionally off,
-use the existing processing-only binding or [standalone explicit workflow](processing.md)
-without enabling it. A failed binding takes precedence over registration-only
+identified refusal before retrying. When the session is still selected for active
+collection, a registration that no longer matches its current grant reports
+`REGISTRATION_REQUIRES_REVIEW`. Do not reset consent or the stored floor to clear
+either message. When collection is off or the session is no longer selected,
+old collection registrations do not request grant review; without another current
+binding the control reports `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. If collection
+is intentionally off, use a processing-only binding under existing processing
+policy, or the [standalone explicit workflow](processing.md), without enabling
+collection. Excluded or unconfigured routes do not gain processing authority from
+an old registration. A failed binding takes precedence over registration-only
 hints in other collections; explicitly selecting a collection can disambiguate.
 
 For Codex, `UNSUPPORTED_SESSION_OWNERSHIP` means authorized native verification

@@ -910,6 +910,47 @@ test('refused ownership remains unverified while a stale registration grant expl
   });
 });
 
+test('old registrations without current collection consent do not request grant review', async t => {
+  for (const variant of ['disabled-manual', 'disabled-prompted', 'deselected', 'excluded', 'unconfigured']) await t.test(variant, async t => {
+    const { f, h, parent } = await nativeIngressFixture(t), route = f.config.routes[0];
+    if (variant.startsWith('disabled')) route.collection.enabled = false;
+    if (variant === 'disabled-prompted') route.processing.mode = 'prompted';
+    if (variant === 'deselected') route.collection.selection = { kind: 'sessions', sessionIds: [] };
+    if (variant === 'excluded') route.excluded = true;
+    if (variant === 'unconfigured') f.config.routes = [];
+    const config = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, config);
+    const file = path.join(f.collection.intakeStateDir, registrationPath(f.identity)), before = await fs.readFile(file);
+    const files = await fs.readdir(f.collection.intakeStateDir, { recursive: true }), original = fs.open;
+    const guardedOpen = t.mock.method(fs, 'open', async function(file, ...args) {
+      assert.notEqual(file, parent.source.path, 'a retired registration grants no native read');
+      assert(!String(file).startsWith(f.collection.rawDir + path.sep));
+      return original.call(this, file, ...args);
+    });
+    for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) for (const args of [{}, { collectionId: f.collection.id }]) {
+      const result = await h.call(tool, args);
+      assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+    }
+    assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
+    assert.equal((await readSelection(parent.store, f.identity)).state, null);
+    assert.deepEqual(await fs.readdir(f.collection.intakeStateDir, { recursive: true }), files);
+    assert.deepEqual(await fs.readFile(file), before);
+    assert.equal(await fs.readFile(f.options.configPath, 'utf8'), config);
+    assert.deepEqual(await fs.readdir(f.collection.rawDir), []); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    guardedOpen.mock.restore();
+    if (variant === 'disabled-prompted') {
+      const ingress = await collectionIngress('codex', { session_id: f.identity.sessionId, turn_id: randomUUID(),
+        cwd: f.project, transcript_path: parent.source.path, hook_event_name: 'UserPromptSubmit' }, {
+        configPath: f.options.configPath, launch: () => assert.fail('collection must remain off') });
+      assert.equal(ingress.status, 'processing-only');
+      for (const args of [{}, { collectionId: f.collection.id }]) assert.equal(body(await h.call('processing_status', args)).status, 'missing');
+      assert.deepEqual(await fs.readFile(file), before);
+      assert.equal((await readSelection(parent.store, f.identity)).state, null);
+      assert.equal(await fs.readFile(f.options.configPath, 'utf8'), config);
+      assert.deepEqual(await fs.readdir(f.collection.rawDir), []);
+    }
+  });
+});
+
 test('damaged or mismatched pending registration metadata cannot become a binding', async t => {
   for (const variant of ['identity', 'malformed', 'null', 'oversized', 'linked']) await t.test(variant, async t => {
     const { f, h } = await nativeIngressFixture(t), file = path.join(f.collection.intakeStateDir, registrationPath(f.identity));

@@ -220,7 +220,12 @@ Source-binding failures use bounded MCP error codes. An exact Codex ingress
 registration with current collection authority but without a selection or
 processing-only binding reports `PROCESSING_CONTROL_REGISTRATION_UNVERIFIED`;
 ingress metadata supplies neither dispatch authority nor a worker outcome.
-Changed collection authority reports `REGISTRATION_REQUIRES_REVIEW`. Actual
+For a session still selected for active collection, a stale registration grant
+reports `REGISTRATION_REQUIRES_REVIEW`. Old registrations do not request grant
+review when collection is off or the session is no longer selected; without a
+current binding the control reports `PROCESSING_CONTROL_SOURCE_UNVERIFIED`.
+Use a processing-only binding under existing processing policy or the standalone
+explicit workflow without enabling collection. Actual
 ownership, history or identity rejection for the invoking Codex source reports
 `UNSUPPORTED_SESSION_OWNERSHIP`, `UNSUPPORTED_CODEX_HISTORY` or
 `SOURCE_IDENTITY_MISMATCH`; Claude retains its generic refusal when discovery

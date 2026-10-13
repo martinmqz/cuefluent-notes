@@ -116,7 +116,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         if (record === null) continue;
         if (record.collectionId !== collection.id) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
         const route = await resolveWorkflowRoute(snapshot.config, record);
-        if (!route.intended?.collect || route.collection.id !== collection.id) fail('REGISTRATION_REQUIRES_REVIEW');
+        // A retired collection registration cannot establish a processing-only
+        // binding. Reviewing its grant cannot restore intentionally absent consent.
+        if (!route.intended?.collect) continue;
+        if (route.collection.id !== collection.id) fail('REGISTRATION_REQUIRES_REVIEW');
         await assertRegistrationGrant(store, record, null, await collectionGrantHash(snapshot.config, route.route.id, record), route);
         present = true;
       }
