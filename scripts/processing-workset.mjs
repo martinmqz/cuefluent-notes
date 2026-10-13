@@ -26,7 +26,7 @@ function indexesOf(indexes, inputs) {
   list(indexes, 20, { empty: false }).forEach(index => { integer(index); if (index >= inputs.length) fail('INVALID_WORKSET_INDEX'); });
   unique(indexes); return [...indexes].sort((a, b) => a - b);
 }
-function operationFor(worksetId, indexes) {
+export function worksetOperationId(worksetId, indexes) {
   const value = digest(canonicalJSON({ domain: 'cuefluent-workset-operation-v1', worksetId, indexes }));
   return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20, 32)}`;
 }
@@ -41,7 +41,7 @@ function validate(value, ctx, worksetId) {
     if (attempt.policyHash !== undefined) hash(attempt.policyHash);
     nativeId(attempt.operationId); hash(attempt.packetHash); integer(attempt.packetBytes);
     if (attempt.packetBytes < 1 || attempt.packetBytes > PROCESSING_PACKET_BYTES ||
-        !equal(indexesOf(attempt.indexes, value.inputs), attempt.indexes) || attempt.operationId !== operationFor(worksetId, attempt.indexes)) fail('INVALID_PROCESSING_WORKSET');
+        !equal(indexesOf(attempt.indexes, value.inputs), attempt.indexes) || attempt.operationId !== worksetOperationId(worksetId, attempt.indexes)) fail('INVALID_PROCESSING_WORKSET');
   });
   unique(value.attempts.flatMap(attempt => attempt.indexes));
   if (value.attempts.reduce((n, attempt) => n + attempt.packetBytes, 0) > value.budget.maxPacketBytes) fail('INVALID_PROCESSING_WORKSET');
@@ -92,7 +92,7 @@ export async function prepareWorksetBatch(capability, { worksetId, expectedWorks
   return withProcessingState(capability, selected.value.selection, 'explicitProcess', async ctx => {
     const saved = await load(ctx, worksetId, expectedWorksetHash), { value } = saved;
     indexes = indexesOf(indexes, value.inputs);
-    const operationId = operationFor(worksetId, indexes), attempt = value.attempts.find(item => item.operationId === operationId);
+    const operationId = worksetOperationId(worksetId, indexes), attempt = value.attempts.find(item => item.operationId === operationId);
     // Only a genuinely new batch may accept fresh policy. Previously charged
     // admissions keep their exact policy even if no claim was published yet.
     const admissionPolicyHash = attempt?.policyHash ?? value.policyHash;

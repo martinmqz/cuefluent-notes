@@ -7,6 +7,7 @@ import { withStorageProbes } from './storage-platform.mjs';
 import { openWorkflowIntake, intakePath, intakeSnapshot, intakeJSON, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
 import { lstatOrNull } from './file-io.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
+import { inspectProcessing } from './processing.mjs';
 import { validateProcessingSelection } from './processing-contract.mjs';
 import { CLIENTS, canonicalJSON, digest, fail, keys, hash, nativeId, string, choice, integer, list, unique, object } from './workflow-values.mjs';
 
@@ -51,9 +52,13 @@ function nativeRunValue(value, client) {
   list(value.unitIds, 16, { empty: client === 'claude' }).forEach(nativeId); unique(value.unitIds);
 }
 function requestValue(value) {
-  keys(value, ['requestId', 'inputHash', 'operationId', 'worksetId', 'selection'], ['owner']);
+  keys(value, ['requestId', 'inputHash', 'operationId', 'worksetId', 'selection'], ['owner', 'resumeOperationId']);
   nativeId(value.requestId); hash(value.inputHash); nullableId(value.operationId); nullableId(value.worksetId);
   if (value.selection !== null) validateProcessingSelection(value.selection);
+  if (value.resumeOperationId !== undefined) {
+    nativeId(value.resumeOperationId);
+    if (value.worksetId !== null || value.operationId !== value.resumeOperationId) fail('INVALID_PROCESSING_CHAT_STATE');
+  }
   if (value.owner !== undefined) {
     keys(value.owner, ['pid', 'controllerId', 'hostname', 'boot', 'processStart', 'platform']);
     integer(value.owner.pid); if (value.owner.pid < 1) fail('INVALID_PROCESSING_CHAT_STATE');
@@ -127,7 +132,7 @@ function validateState(value, namespace, bindingHash) {
  * must establish those proofs outside this registry.
  */
 export async function createProcessingChatState(options) {
-  keys(options, ['capability', 'configPath', 'client', 'hostId', 'profileId', 'verifySession', 'verifyRun', 'verifyReview'], ['verifyAbort', 'verifyAbandon', 'reuseHost']);
+  keys(options, ['capability', 'configPath', 'client', 'hostId', 'profileId', 'verifySession', 'verifyRun', 'verifyReview'], ['verifyAbort', 'verifyAbandon', 'verifyAdvance', 'reuseHost']);
   let { capability, configPath, client, hostId, profileId, verifySession, verifyRun, verifyReview } = options;
   choice(client, CLIENTS); hash(hostId); hash(profileId);
   if ([verifySession, verifyRun, verifyReview].some(verify => typeof verify !== 'function')) fail('PROCESSING_CHAT_VERIFIER_REQUIRED');
@@ -240,6 +245,40 @@ export async function createProcessingChatState(options) {
     }
   }
 
+  async function collectionActivity() {
+    const directory = path.dirname(await intakePath(store, 'state', name));
+    if (!await lstatOrNull(directory)) return [];
+    const activity = []; let count = 0;
+    for await (const entry of await fs.opendir(directory)) {
+      checkWorkflowBudget();
+      if (++count > MAX_PROCESSING_CHAT_BINDINGS || !entry.isFile() || !/^[a-f0-9]{20}\.json$/.test(entry.name)) fail('INVALID_PROCESSING_CHAT_STATE');
+      const saved = await intakeSnapshot(store, 'state', `processing-chats/${entry.name}`, { maxBytes: MAX_BYTES });
+      if (!saved.bytes) fail('PROCESSING_CHAT_STATE_CHANGED');
+      const value = intakeJSON(saved);
+      validateState(value, value.namespace, initial.hash);
+      if (entry.name !== `${digest(canonicalJSON(value.namespace)).slice(0, 20)}.json` ||
+          !saved.bytes.equals(Buffer.from(canonicalJSON(value) + '\n'))) fail('INVALID_PROCESSING_CHAT_STATE');
+      if (value.state === 'awaiting-review') {
+        const operation = await inspectProcessing(capability, value.runs.at(-1).reviewOperationId);
+        // A completed engine outcome is authoritative even if its old native
+        // client has not yet acknowledged review. This read does not rewrite it.
+        if (operation.state === 'completed' && operation.outcome && !operation.recoveryRequired) continue;
+      }
+      if (['creating', 'busy', 'awaiting-review'].includes(value.state) ||
+          (value.state === 'blocked' && !['creation-not-dispatched', 'run-abandoned'].includes(value.block.reason))) {
+        activity.push({ own: entry.name === path.basename(name), state: value.state, client: value.namespace.client,
+          sessionId: value.session?.sessionId ?? null,
+          requestId: value.active?.requestId ?? value.runs.at(-1)?.request.requestId ?? value.creation.requestId });
+      }
+    }
+    await guard();
+    return activity;
+  }
+  async function noOtherExecution() {
+    const others = (await collectionActivity()).filter(item => !item.own);
+    if (others.length) throw Object.assign(new Error('PROCESSING_COLLECTION_BUSY'), { code: 'PROCESSING_COLLECTION_BUSY', activity: others });
+  }
+
   async function archiveRuns(tx, runs) {
     for (const run of runs) {
       const old = await archived(run.request.requestId);
@@ -256,6 +295,7 @@ export async function createProcessingChatState(options) {
 
   return Object.freeze({
     async read() { return withStorageProbes(async () => view(await snapshot())); },
+    async collectionActivity() { return withStorageProbes(collectionActivity); },
     async findRequest(requestId) {
       nativeId(requestId);
       return withStorageProbes(async () => {
@@ -332,7 +372,7 @@ export async function createProcessingChatState(options) {
           current(saved, args.expectedHash);
           return view(saved, existingAction(saved.value));
         }
-        current(saved, args.expectedHash); if (!saved.value) await countBindings();
+        current(saved, args.expectedHash); if (!saved.value) await countBindings(); await noOtherExecution();
         return write(tx, saved, { format: 'cuefluent-processing-chat', version: PROCESSING_CHAT_STATE_VERSION,
           namespace: { ...namespace }, bindingHash: initial.hash, policyHash: initial.configHash, generation: (saved.value?.generation ?? 0) + 1, revision: saved.value?.revision ?? 0,
           state: 'creating', creation: { requestId: args.requestId, requestHash: args.requestHash, ...(args.owner ? { owner: args.owner } : {}) }, session: null, active: null, runs: [], block: null }, 'create');
@@ -359,10 +399,11 @@ export async function createProcessingChatState(options) {
     },
     async begin(args) {
       args = structuredClone(args);
-      keys(args, ['expectedHash', 'generation', 'requestId', 'inputHash'], ['operationId', 'worksetId', 'selection', 'owner']);
+      keys(args, ['expectedHash', 'generation', 'requestId', 'inputHash'], ['operationId', 'worksetId', 'selection', 'owner', 'resumeOperationId']);
       expected(args.expectedHash); generation(args.generation);
       const request = { requestId: args.requestId, inputHash: args.inputHash, operationId: args.operationId ?? null,
-        worksetId: args.worksetId ?? null, selection: args.selection ?? null, ...(args.owner ? { owner: args.owner } : {}) }; requestValue(request);
+        worksetId: args.worksetId ?? null, selection: args.selection ?? null,
+        ...(args.resumeOperationId ? { resumeOperationId: args.resumeOperationId } : {}), ...(args.owner ? { owner: args.owner } : {}) }; requestValue(request);
       const before = await withStorageProbes(() => snapshot());
       if (!before.value?.session) fail('PROCESSING_CHAT_NOT_BOUND');
       if (before.value.generation !== args.generation) fail('PROCESSING_CHAT_GENERATION_CHANGED');
@@ -381,6 +422,7 @@ export async function createProcessingChatState(options) {
       return locked(async (tx, saved) => {
         current(saved, args.expectedHash, args.generation);
         if (saved.value.state !== 'idle' || !equal(saved.value.session, session)) fail('PROCESSING_CHAT_STATE_CHANGED');
+        await noOtherExecution();
         return write(tx, saved, { ...saved.value, state: 'busy', active: request }, 'dispatch');
       });
     },
@@ -388,13 +430,19 @@ export async function createProcessingChatState(options) {
       args = structuredClone(args);
       keys(args, ['expectedHash', 'generation', 'requestId', 'operationId']); expected(args.expectedHash);
       generation(args.generation); nativeId(args.requestId); nativeId(args.operationId);
+      const before = await withStorageProbes(snapshot);
+      current(before, args.expectedHash, args.generation);
+      if (before.value?.state !== 'busy' || before.value.active?.requestId !== args.requestId) fail('PROCESSING_CHAT_STATE_CHANGED');
+      const previous = before.value.active.operationId;
+      if (previous !== null && previous !== args.operationId) {
+        if (!before.value.active.worksetId || typeof options.verifyAdvance !== 'function' ||
+            await options.verifyAdvance({ requestId: args.requestId, worksetId: before.value.active.worksetId,
+              previousOperationId: previous, operationId: args.operationId }) !== true) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
+      }
       return locked((tx, saved) => {
         current(saved, args.expectedHash, args.generation);
         if (saved.value.state !== 'busy' || saved.value.active?.requestId !== args.requestId) fail('PROCESSING_CHAT_STATE_CHANGED');
-        if (saved.value.active.operationId !== null) {
-          if (saved.value.active.operationId !== args.operationId) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
-          return view(saved, 'dispatch');
-        }
+        if (saved.value.active.operationId === args.operationId) return view(saved, 'dispatch');
         return write(tx, saved, { ...saved.value, active: { ...saved.value.active, operationId: args.operationId } }, 'dispatch');
       });
     },

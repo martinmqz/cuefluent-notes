@@ -54,7 +54,7 @@ const commands = {
 };
 const chatCommands = {
   'processing-chat-status': { required: ['client'], method: 'status' },
-  'processing-chat-run': { required: ['client', 'requestId', 'selection', 'expectedChatHash'], method: 'run' },
+  'processing-chat-run': { required: ['client', 'requestId', 'selection', 'expectedChatHash'], optional: ['worksetId', 'resumeOperationId'], method: 'run' },
   'processing-chat-abandon': { required: ['client', 'requestId', 'expectedChatHash', 'offline'], method: 'abandon' },
   'processing-chat-reconcile': { required: ['client', 'requestId', 'expectedChatHash'], method: 'reconcile' },
   'processing-chat-reauthorize': { required: ['client', 'expectedChatHash', 'previousPolicyHash'], method: 'reauthorize' },
@@ -81,7 +81,7 @@ export async function executeWorkflow(command, request, { configPath } = {}) {
   if (Object.hasOwn(chatCommands, command)) {
     keys(request, ['collectionId', 'expectedConfigHash', 'args']);
     const definition = chatCommands[command];
-    keys(request.args, definition.required);
+    keys(request.args, definition.required, definition.optional ?? []);
     id(request.collectionId); hash(request.expectedConfigHash);
     configPath ??= (await resolveWorkflowConfig()).configPath;
     const controller = await openProcessingController({ configPath, collectionId: request.collectionId,

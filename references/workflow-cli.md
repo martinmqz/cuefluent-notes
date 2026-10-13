@@ -158,7 +158,7 @@ These commands use the collection envelope and return `interfaceVersion: 1`:
 | Command | `args` |
 | --- | --- |
 | `processing-chat-status` | `{client}`; reads the selected local client-profile binding without launching a native client or dispatching a model turn |
-| `processing-chat-run` | `{client, requestId, selection, expectedChatHash}`; exact status hash, or null for a missing binding; handles at most one bounded operation |
+| `processing-chat-run` | `{client, requestId, selection, expectedChatHash, worksetId?, resumeOperationId?}`; exact status hash, or null for a missing binding; the optional bindings are mutually exclusive |
 | `processing-chat-reconcile` | `{client, requestId, expectedChatHash}`; reinspects a known terminal's unresolved operation, or verifies an exact sealed Codex completion, failure or interruption; live owners and unproven outcomes remain blocked |
 | `processing-chat-abandon` | `{client, requestId, expectedChatHash, offline: true}`; explicitly retires a creating/busy run or unknown creation/dispatch outcome after the operator stops its controller and native child; refuses live or unverified owners and preserves all engine work |
 | `processing-chat-reauthorize` | `{client, expectedChatHash, previousPolicyHash}`; explicitly accepts current settings for the registry, preserving existing engine claims and proposal hashes |
@@ -302,6 +302,58 @@ Serialized child-engine results are bounded to 256 KiB; oversized results return
 `PROCESSING_ENGINE_OUTPUT_LIMIT` as a tool error without truncated evidence.
 
 ## Processing selected captures
+
+### Bound native processing runs
+
+`processing-chat-run` can bind an existing `worksetId` or `resumeOperationId`.
+With neither, it retains the single-source, single-operation contract. The source
+`selection` identifies the explicit caller; a workset or resumed operation retains
+its original engine selection and exact input hashes. This does not change
+collection settings or authorize a save.
+
+A workset run processes bounded operations sequentially in the same isolated
+native turn. The restricted `processing_pending` tool returns the frozen workset,
+its unfinished operations and `nextPreparation` (`{operationId, inputs}`), or null.
+The native agent uses that exact preparation, inspects and acknowledges each page,
+and either completes unchanged or publishes a proposal. It continues after an
+unchanged outcome; a proposal, conflict, recovery or exhausted budget stops the
+run. New captures do not enter the frozen workset. Operation IDs come from the
+workset's deterministic admission, not arbitrary model-generated IDs. Existing
+charged admissions retain their exact budget on retry. A single input that exceeds
+the remaining budget requires an explicit bounded continuation; it is not omitted
+or marked handled.
+
+An interrupted admission appears as `nextPreparation` with its original inputs
+and operation ID. A new admission cannot skip an unfinished operation. After
+`PROCESSING_BATCH_BUDGET`, call `processing_pending` again: measured input sizes
+can reduce the next preparation to a fitting prefix without charging the rejected
+batch. `reason: "input-budget"` means no leading input fits that remaining budget.
+The controller also limits each native turn to three operations, 4 MiB of
+packet admissions and eight minutes before starting another operation. An existing
+claim can finish under its original budget. `reason: "run-budget"` pauses further
+admission while preserving the exact workset for another run. These limits do not
+guarantee a model will finish one operation before its transport timeout.
+
+`resumeOperationId` binds only that existing operation and disables new preparation.
+This supports an interrupted standalone operation without rewriting its selection
+or adopting its claims into another workset. A completed bound operation or fully
+handled/exhausted workset returns `dispatch: "not-started"` and a bounded `reason`
+without starting a native client. Proposals and recovery remain explicit blockers.
+`workset-remainder-unavailable` distinguishes blocked or cancelled remaining inputs
+from exhausted admission budget. Unattempted input conflicts do not prevent valid
+independent frozen inputs from being processed. Unknown final metadata is reported
+as `WORKSET_OUTCOME_UNKNOWN`; it does not undo a recorded native completion.
+Status can include `workset` metadata separately from the native state and latest
+operation outcome; native `idle` does not mean the frozen workset is complete.
+
+Native admission checks all processing-client bindings in the collection under
+the existing intake lock. A different active, unresolved, or awaiting-review
+binding refuses another run with `PROCESSING_COLLECTION_BUSY`. Inspect or finish
+the existing owner; do not create another binding or clear locks to bypass it.
+A completed engine outcome releases this admission gate even if its former
+native client has not acknowledged the review yet. The read preserves that
+client's registry. These checks do not replace engine claims, writer conflicts,
+or recovery.
 
 ### Supported read interface
 

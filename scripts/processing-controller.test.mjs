@@ -8,8 +8,10 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { processingFixture } from './test-support/processing-fixture.mjs';
 import { openProcessingController } from './processing-controller.mjs';
-import { completeProcessing, inspectProcessing } from './processing.mjs';
+import { createProcessingWorkset, inspectProcessingWorkset, prepareWorksetBatch } from './processing-workset.mjs';
+import { prepareProcessing, completeProcessing, inspectProcessing } from './processing.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
+import { unitKey } from './capture-retention.mjs';
 import { codexProcessingProfile } from './processing-client-codex.mjs';
 
 const deferred = () => {
@@ -525,4 +527,237 @@ test('explicit offline abandonment preserves unknown claims and retires the chat
     assert.notEqual(next.chat.sessionId, blocked.chat.sessionId);
     assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
   });
+});
+
+
+async function completeBound(call, preparation) {
+  let claim = await call('processing_prepare', preparation);
+  const operationId = claim.operationId;
+  for (let page = 0; page < claim.packet.pages.length; page++) {
+    const read = await call('processing_page', { operationId, expectedClaimHash: claim.claimHash, page });
+    claim = await call('processing_ack', { operationId, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
+  }
+  return call('processing_complete', { operationId, expectedClaimHash: claim.claimHash });
+}
+
+test('one isolated turn processes sequential frozen batches across clients and excludes later arrivals', async t => {
+  const a = await processingFixture(t), b = await processingFixture(t, { base: a, client: 'claude' });
+  const worksetId = randomUUID();
+  await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs] });
+  const later = await processingFixture(t, { base: a }), h = await harness(t, a);
+  const operations = [];
+  h.script = async call => {
+    for (;;) {
+      const pending = await call('processing_pending', { limit: 1 });
+      assert.equal(pending.workset.worksetId, worksetId);
+      assert(!pending.pending.some(item => item.identity.sessionId === later.identity.sessionId));
+      if (!pending.nextPreparation) break;
+      const done = await completeBound(call, pending.nextPreparation); operations.push(done.operationId);
+      // Historical reads must not move the current operation pin backward.
+      if (operations.length > 1) assert.equal((await call('processing_status', { operationId: operations[0] })).outcome, 'unchanged');
+    }
+  };
+  const result = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(h.dispatches.length, 1); assert.equal(operations.length, 2);
+  assert.equal(result.workset.inputCounts.handled, 2); assert.equal(result.workset.remainingSelected, 0);
+  assert.equal(result.workset.chargedBatches, 2); assert.equal(result.operationOutcome, 'unchanged');
+  assert.equal((await registryJSON(a)).runs.at(-1).request.worksetId, worksetId);
+  assert.equal((await inspectProcessing(a.capability, later.operationId)).state, 'missing');
+  const empty = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(empty.dispatch, 'not-started'); assert.equal(empty.reason, 'workset-complete'); assert.equal(h.dispatches.length, 1);
+});
+
+test('frozen runs cannot start another operation until the current one has a durable terminal outcome', async t => {
+  const a = await processingFixture(t), b = await processingFixture(t, { base: a });
+  const worksetId = randomUUID();
+  await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs] });
+  const h = await harness(t, a); let operationId;
+  h.script = async call => {
+    const pending = await call('processing_pending', { limit: 1 });
+    operationId = (await call('processing_prepare', pending.nextPreparation)).operationId;
+    await assert.rejects(call('processing_prepare', { operationId: randomUUID(), inputs: b.inputs }), { code: 'PROCESSING_RESUME_REQUIRED' });
+    const again = await call('processing_pending', {});
+    assert.equal(again.operations.length, 1); assert.equal(again.nextPreparation, null);
+  };
+  const first = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(first.operationState, 'unread');
+  await h.controller.close(); h.controller = await h.open();
+  h.script = async call => {
+    const pending = await call('processing_pending', {});
+    assert.equal(pending.operations[0].operationId, operationId);
+    let claim = await call('processing_status', { operationId });
+    for (let page = 0; page < claim.inspection.totalPages; page++) {
+      const read = await call('processing_page', { operationId, expectedClaimHash: claim.claimHash, page });
+      claim = await call('processing_ack', { operationId, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
+    }
+    await call('processing_complete', { operationId, expectedClaimHash: claim.claimHash });
+    await completeBound(call, (await call('processing_pending')).nextPreparation);
+  };
+  const resumed = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(resumed.workset.inputCounts.handled, 2); assert.equal(h.creates, 1); assert.equal(h.resumes, 1);
+});
+
+test('frozen proposal review uses its original operation selection when invoked from a different chat', async t => {
+  const a = await processingFixture(t), b = await processingFixture(t, { base: a, client: 'claude' });
+  const worksetId = randomUUID();
+  await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs] });
+  const h = await harness(t, a);
+  h.script = async call => {
+    const pending = await call('processing_pending');
+    let claim = await call('processing_prepare', pending.nextPreparation);
+    const operationId = claim.operationId;
+    for (let page = 0; page < claim.packet.pages.length; page++) {
+      const read = await call('processing_page', { operationId, expectedClaimHash: claim.claimHash, page });
+      claim = await call('processing_ack', { operationId, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
+    }
+    await call('processing_propose', { operationId, expectedClaimHash: claim.claimHash, proposal: {
+      files: [{ path: 'meetings/rollout.md', expectedHash: null, content: '# Rollout\n\n## Decision\n\nKeep the rollout paused.\n' }],
+      mappings: [a, b].map(f => ({ identity: f.identity, paths: ['meetings/rollout.md'] })) } });
+  };
+  const result = await h.controller.run(await h.request({ selection: b.selection, worksetId }));
+  assert.equal(result.state, 'awaiting-review');
+  const context = await h.controller.reviewContext({ expectedChatHash: result.chatHash, requestId: result.requestId });
+  assert.deepEqual(context.selection, a.selection); assert.equal(context.operationId, result.operationId);
+  assert.deepEqual(await fs.readdir(a.collection.notes.notesDir), []);
+});
+
+test('explicit legacy-operation resume preserves exact selection and does not admit fresh evidence', async t => {
+  const a = await processingFixture(t), b = await processingFixture(t, { base: a });
+  await prepareProcessing(a.capability, { ...a.args, inputs: a.inputs });
+  const h = await harness(t, a);
+  h.script = async call => {
+    const pending = await call('processing_pending');
+    assert.equal(pending.operations[0].operationId, a.operationId); assert.deepEqual(pending.pending, []);
+    await assert.rejects(call('processing_prepare', { operationId: a.operationId, inputs: a.inputs }), { code: 'PROCESSING_RESUME_REQUIRED' });
+    const read = await call('processing_page', { operationId: a.operationId, expectedClaimHash: pending.operations[0].claimHash, page: 0 });
+    const claim = await call('processing_ack', { operationId: a.operationId, expectedClaimHash: read.claimHash, pages: [{ index: 0, hash: read.hash }] });
+    await call('processing_complete', { operationId: a.operationId, expectedClaimHash: claim.claimHash });
+  };
+  const result = await h.controller.run(await h.request({ selection: b.selection, resumeOperationId: a.operationId }));
+  assert.equal(result.operationOutcome, 'unchanged'); assert.equal(result.operationId, a.operationId);
+  assert.deepEqual((await inspectProcessing(a.capability, a.operationId)).selection, a.selection);
+  assert.equal((await inspectProcessing(a.capability, b.operationId)).state, 'missing');
+});
+
+test('a different client cannot dispatch while this collection has an active native owner', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), gate = deferred(), started = deferred();
+  h.script = async () => { started.resolve(); await gate.promise; };
+  const running = h.controller.run(await h.request());
+  const other = await openProcessingController({ ...f.options, client: 'claude' }, h.dependencies);
+  try {
+    await started.promise;
+    const activity = await other.collectionActivity(); assert.equal(activity.length, 1); assert.equal(activity[0].own, false);
+    await assert.rejects(other.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }), { code: 'PROCESSING_COLLECTION_BUSY' });
+    assert.equal(h.dispatches.length, 1); assert.equal(h.creates, 1);
+  } finally { gate.resolve(); await running; await other.close(); }
+});
+
+
+test('a settled engine proposal does not let a stale peer review registry block another client', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = propose(f);
+  const result = await h.controller.run(await h.request());
+  const other = await openProcessingController({ ...f.options, client: 'claude' }, h.dependencies);
+  try {
+    assert.equal((await other.collectionActivity())[0].state, 'awaiting-review');
+    const claim = await inspectProcessing(f.capability, f.operationId);
+    await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+    assert.deepEqual(await other.collectionActivity(), []);
+    assert.equal((await h.controller.status()).chatHash, result.chatHash);
+    assert.equal((await h.controller.status()).state, 'awaiting-review');
+  } finally { await other.close(); }
+});
+
+
+test('bound workset CLI accepts its explicit schema and returns no-dispatch for completed evidence', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), worksetId = randomUUID();
+  h.script = unchanged(f); await h.controller.run(await h.request());
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  const profile = path.join(f.root, 'cli-profile'); await fs.mkdir(profile, { mode: 0o700 });
+  const file = path.join(f.root, 'bound-cli.json');
+  await fs.writeFile(file, JSON.stringify({ collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash,
+    args: { client: 'codex', requestId: randomUUID(), selection: f.selection, expectedChatHash: null, worksetId } }));
+  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./workflow.mjs', import.meta.url)),
+    'processing-chat-run', '--config', f.options.configPath, '--request', file], { env: { ...process.env, CODEX_HOME: profile } });
+  const result = JSON.parse(stdout);
+  assert.equal(result.dispatch, 'not-started'); assert.equal(result.reason, 'workset-complete');
+  assert.equal(result.workset.inputCounts.handledElsewhere, 1);
+});
+
+
+test('workset native turns stop before a fourth operation and reuse the exact remainder', async t => {
+  const f = await processingFixture(t), fixtures = [f];
+  for (let i = 0; i < 3; i++) fixtures.push(await processingFixture(t, { base: f }));
+  const worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: fixtures.flatMap(item => item.inputs) });
+  const h = await harness(t, f); let processed = 0;
+  h.script = async call => {
+    for (let i = 0; i < 3; i++) { await completeBound(call, (await call('processing_pending', { limit: 1 })).nextPreparation); processed++; }
+    const stopped = await call('processing_pending');
+    assert.equal(stopped.nextPreparation, null); assert.equal(stopped.reason, 'run-budget');
+  };
+  const first = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(first.workset.inputCounts.unattempted, 1); assert.equal(processed, 3);
+  h.script = async call => { await completeBound(call, (await call('processing_pending')).nextPreparation); };
+  const next = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(next.workset.inputCounts.handled, 4); assert.equal(h.creates, 1); assert.equal(h.resumes, 1);
+});
+
+test('elapsed run cutoff preserves unattempted evidence and leaves the native binding idle', async t => {
+  const f = await processingFixture(t), worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  const h = await harness(t, f);
+  h.script = async call => {
+    const real = performance.now.bind(performance), mock = t.mock.method(performance, 'now', () => real() + 9 * 60 * 1000);
+    try { const pending = await call('processing_pending'); assert.equal(pending.reason, 'run-budget'); assert.equal(pending.nextPreparation, null); }
+    finally { mock.mock.restore(); }
+  };
+  const result = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(result.state, 'idle'); assert.equal(result.workset.chargedBatches, 0);
+});
+
+test('unavailable frozen inputs do not block independent work and are not described as exhausted budget', async t => {
+  const f = await processingFixture(t), b = await processingFixture(t, { base: f }), worksetId = randomUUID();
+  const workset = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: [...f.inputs, ...b.inputs] });
+  const claim = await prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] });
+  await completeProcessing(f.capability, { selection: f.selection, operationId: claim.operationId, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+  const h = await harness(t, f);
+  h.script = async call => { await completeBound(call, (await call('processing_pending')).nextPreparation); };
+  const first = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(first.workset.inputCounts.handled, 1); assert.equal(first.workset.inputCounts.cancelled, 1);
+  const next = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(next.reason, 'workset-remainder-unavailable'); assert.equal(h.dispatches.length, 1);
+});
+
+test('final workset metadata failure preserves the committed native outcome', async t => {
+  const f = await processingFixture(t), worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  const h = await harness(t, f); let mock;
+  h.script = async call => { await completeBound(call, (await call('processing_pending')).nextPreparation); };
+  h.afterNativeResult = async () => {
+    const real = fs.lstat, worksetFile = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', worksetId + '.json');
+    mock = t.mock.method(fs, 'lstat', async (file, ...args) => { if (file === worksetFile) throw Object.assign(new Error('synthetic race'), { code: 'EIO' }); return real(file, ...args); });
+  };
+  let result;
+  try { result = await h.controller.run(await h.request({ worksetId })); } finally { mock?.mock.restore(); }
+  assert.equal(result.workset, null); assert(result.diagnostics.includes('WORKSET_OUTCOME_UNKNOWN'));
+  assert.equal(result.nativeStatus, 'completed');
+  assert.equal((await registryJSON(f)).runs.length, 1);
+});
+
+
+test('a missing unattempted frozen head does not block another valid input', async t => {
+  const f = await processingFixture(t), b = await processingFixture(t, { base: f }), worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: [...f.inputs, ...b.inputs] });
+  await fs.unlink(path.join(f.collection.intakeStateDir, 'heads', unitKey(f.identity) + '.json'));
+  const h = await harness(t, f);
+  h.script = async call => {
+    const pending = await call('processing_pending');
+    assert.deepEqual(pending.nextPreparation.inputs, b.inputs);
+    await completeBound(call, pending.nextPreparation);
+  };
+  const done = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(done.workset.inputCounts.handled, 1); assert.equal(done.workset.inputCounts.blocked, 1);
+  const stopped = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(stopped.reason, 'workset-remainder-unavailable'); assert.equal(h.dispatches.length, 1);
 });
