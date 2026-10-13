@@ -2,6 +2,7 @@ import path from 'node:path';
 import { spawn as nativeSpawn } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import { fail, keys, list, nativeId, object, safeErrorCode, string, unique } from './workflow-values.mjs';
+import { validateClaudeRestrictedSettings } from './processing-claude-settings.mjs';
 
 const SERVER = 'cuefluent_engine';
 const MAX_PROMPT_BYTES = 64 * 1024, MAX_FRAME_BYTES = 2 * 1024 * 1024;
@@ -31,7 +32,7 @@ function toolNames(value) {
  * beforeDispatch. The server must bind every operation to that reservation and
  * must never expose model-callable approval or arbitrary command execution. */
 export function createClaudeProcessingClient(options, { env: baseEnv = process.env } = {}) {
-  keys(options, ['executable', 'cwd', 'engine', 'allowedTools'], ['env', 'timeoutMs', 'maxOutputBytes', 'spawn']);
+  keys(options, ['executable', 'cwd', 'engine', 'allowedTools'], ['env', 'settings', 'timeoutMs', 'maxOutputBytes', 'spawn']);
   const { executable, cwd, engine } = options;
   string(executable, 4096); string(cwd, 4096);
   if (!path.isAbsolute(cwd) || /\.(cmd|bat)$/i.test(executable)) fail('INVALID_PROCESSING_CLIENT');
@@ -55,9 +56,12 @@ export function createClaudeProcessingClient(options, { env: baseEnv = process.e
   // serialized requests cannot supply the host dependency environment.
   const inheritedEnv = options.env === undefined ? baseEnv : environment(options.env);
   const env = { ...inheritedEnv, ...engineEnv };
+  const settings = validateClaudeRestrictedSettings(options.settings === undefined ? { disableAllHooks: true } : options.settings);
   // This explicitly requested native controller owns a separate restricted run.
   // Do not inherit the enclosing Claude session's nested-launch sentinel.
-  delete env.CLAUDECODE;
+  for (const name of Object.keys(env)) {
+    if (name === 'CLAUDECODE' || (process.platform === 'win32' && name.toUpperCase() === 'CLAUDECODE')) delete env[name];
+  }
   const server = { command: engine.command, args: [...engine.args] };
   const mcp = JSON.stringify({ mcpServers: { [SERVER]: server } });
   if (Buffer.byteLength(mcp) > 128 * 1024) fail('INVALID_PROCESSING_CLIENT');
@@ -80,7 +84,7 @@ export function createClaudeProcessingClient(options, { env: baseEnv = process.e
         catch (error) { throw nativeError(safeErrorCode(error, 'PROCESSING_CLIENT_START_FAILED'), false); }
         if (signal?.aborted) throw nativeError('PROCESSING_CLIENT_INTERRUPTED', false);
         const args = ['--print', '--restricted', '--disable-slash-commands', '--no-chrome',
-          '--setting-sources', '', '--settings', JSON.stringify({ disableAllHooks: true }),
+          '--setting-sources', '', '--settings', JSON.stringify(settings),
           '--tools', '', '--strict-mcp-config', '--mcp-config', mcp,
           '--allowedTools', allowed.join(','), '--permission-mode', 'dontAsk', '--permission-prompts', 'none',
           '--input-format', 'stream-json', '--replay-user-messages', '--output-format', 'stream-json', '--verbose',
