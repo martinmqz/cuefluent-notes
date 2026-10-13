@@ -165,6 +165,10 @@ test('client rejects arbitrary engine namespaces and shell-backed Windows launch
   assert.throws(() => createClaudeProcessingClient({ ...base, allowedTools: ['mcp__other__inspect'] }), { code: 'INVALID_PROCESSING_CLIENT_TOOLS' });
   assert.throws(() => createClaudeProcessingClient({ ...base, executable: 'claude.cmd' }), { code: 'INVALID_PROCESSING_CLIENT' });
   assert.throws(() => createClaudeProcessingClient({ ...base, engine: { ...base.engine, env: { CLAUDE_CODE_SESSION_ID: randomUUID() } } }), { code: 'INVALID_PROCESSING_CLIENT' });
+  for (const settings of [null, { disableAllHooks: false }, { disableAllHooks: true, hooks: {} },
+    { disableAllHooks: true, env: { ANTHROPIC_API_KEY: 'synthetic-private-credential' } }]) {
+    assert.throws(() => createClaudeProcessingClient({ ...base, settings }), { code: 'PROCESSING_CLIENT_SETTINGS_INVALID' });
+  }
 });
 
 test('engine authorization is inherited environment data and never a command-line argument', async () => {
@@ -209,11 +213,14 @@ test('an error after OS spawn and input submission remains genuinely ambiguous',
 });
 
 test('controlled Claude launch removes the inherited nested-session sentinel without altering host environment', async () => {
-  const h = harness(success), env = { PATH: 'synthetic-path', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'parent-native-session', ANTHROPIC_API_KEY: 'synthetic-credential' };
+  const h = harness(success), env = { PATH: 'synthetic-path', CLAUDECODE: '1', claudecode: 'synthetic-lowercase-sentinel',
+    CLAUDE_CODE_SESSION_ID: 'parent-native-session', ANTHROPIC_API_KEY: 'synthetic-credential' };
   const client = createClaudeProcessingClient({ executable: 'claude', cwd, engine: { command: process.execPath, args: [] },
     allowedTools: TOOLS, spawn: h.spawn, env });
   await client.run(request());
   assert.equal(env.CLAUDECODE, '1'); assert.equal(Object.hasOwn(h.calls[0].options.env, 'CLAUDECODE'), false);
+  assert.equal(env.claudecode, 'synthetic-lowercase-sentinel');
+  assert.equal(h.calls[0].options.env.claudecode, process.platform === 'win32' ? undefined : env.claudecode);
   assert.equal(h.calls[0].options.env.CLAUDE_CODE_SESSION_ID, env.CLAUDE_CODE_SESSION_ID);
   assert.equal(h.calls[0].options.env.ANTHROPIC_API_KEY, env.ANTHROPIC_API_KEY);
   assert.equal(h.calls[0].options.env.PATH, env.PATH);
