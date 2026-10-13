@@ -162,20 +162,35 @@ export async function createProcessingChatState(options) {
   const namespace = Object.freeze({ configPath, collectionId: initial.collection.id, client, hostId, profileId });
   const namespaceHash = digest(canonicalJSON(namespace)), name = `processing-chats/${namespaceHash.slice(0, 20)}.json`;
   const host = Object.freeze({ client, hostId, profileId });
-  const archivePath = requestId => `processing-chat-history/${namespaceHash}/${nativeId(requestId)}.json`;
+  const archivePath = (requestId, nsHash = namespaceHash) => `processing-chat-history/${nsHash}/${nativeId(requestId)}.json`;
+  const operationArchivePath = (operationId, nsHash = namespaceHash) => `processing-chat-operation-history/${nsHash}/${nativeId(operationId)}.json`;
   const abandonedPath = requestId => `processing-chat-abandoned/${namespaceHash}/${nativeId(requestId)}.json`;
   const nativeArchivePath = token => `processing-chat-native-history/${namespaceHash}/${digest(token)}.json`;
-  async function archived(requestId) {
+  async function archived(requestId, ns = namespace) {
     return withStorageProbes(async () => {
-    const saved = await intakeSnapshot(store, 'state', archivePath(requestId), { maxBytes: 16 * 1024 });
+    const nsHash = digest(canonicalJSON(ns));
+    const saved = await intakeSnapshot(store, 'state', archivePath(requestId, nsHash), { maxBytes: 16 * 1024 });
     if (!saved.bytes) return null;
     const value = intakeJSON(saved);
     keys(value, ['namespaceHash', 'bindingHash', 'run']);
-    if (value.namespaceHash !== namespaceHash || value.bindingHash !== initial.hash) fail('PROCESSING_CHAT_BINDING_CHANGED');
-    runValue(value.run, client);
+    if (value.namespaceHash !== nsHash || value.bindingHash !== initial.hash) fail('PROCESSING_CHAT_BINDING_CHANGED');
+    runValue(value.run, ns.client);
     if (value.run.request.requestId !== requestId || !saved.bytes.equals(Buffer.from(canonicalJSON(value) + '\n'))) fail('INVALID_PROCESSING_CHAT_STATE');
     return value.run;
     });
+  }
+  const ownsOperation = (run, operationId) => run.request.operationId === operationId || run.reviewOperationId === operationId;
+  async function archivedOperation(operationId, ns = namespace) {
+    const nsHash = digest(canonicalJSON(ns));
+    const saved = await intakeSnapshot(store, 'state', operationArchivePath(operationId, nsHash), { maxBytes: 1024 });
+    if (!saved.bytes) return null;
+    const value = intakeJSON(saved);
+    keys(value, ['namespaceHash', 'bindingHash', 'operationId', 'requestId']); nativeId(value.requestId);
+    if (value.namespaceHash !== nsHash || value.bindingHash !== initial.hash) fail('PROCESSING_CHAT_BINDING_CHANGED');
+    if (value.operationId !== operationId || !saved.bytes.equals(Buffer.from(canonicalJSON(value) + '\n'))) fail('INVALID_PROCESSING_CHAT_STATE');
+    const run = await archived(value.requestId, ns);
+    if (!run || !ownsOperation(run, operationId)) fail('INVALID_PROCESSING_CHAT_STATE');
+    return run;
   }
 
   async function guard() {
@@ -292,6 +307,13 @@ export async function createProcessingChatState(options) {
       const old = await archived(run.request.requestId);
       if (old && !equal(old, run)) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
       if (!old) await replaceIntakeJSON(tx, archivePath(run.request.requestId), { namespaceHash, bindingHash: initial.hash, run }, null);
+      // Exact operation-to-request references preserve stopped-owner proof across
+      // rollover without scanning lifetime history. The immutable run remains
+      // authoritative; later terminal retries of this operation reuse its proof.
+      for (const operationId of new Set([run.request.operationId, run.reviewOperationId].filter(Boolean))) {
+        if (!await archivedOperation(operationId)) await replaceIntakeJSON(tx, operationArchivePath(operationId),
+          { namespaceHash, bindingHash: initial.hash, operationId, requestId: run.request.requestId }, null);
+      }
       for (const token of new Set([run.native.runId, run.native.inputId, ...run.native.unitIds])) {
         const name = nativeArchivePath(token), snapshot = await intakeSnapshot(store, 'state', name, { maxBytes: 1024 });
         const value = { namespaceHash, token, requestId: run.request.requestId };
@@ -311,8 +333,12 @@ export async function createProcessingChatState(options) {
         // A claim alone says nothing about a standalone agent's liveness.
         // Only a recorded terminal native run supplies automatic resume authority.
         if (records.some(({ value }) => ['creating', 'busy', 'blocked'].includes(value.state))) return false;
-        return records.some(({ value }) => value.runs.some(run =>
-          run.request.operationId === operationId || run.reviewOperationId === operationId));
+        for (const { value } of records) {
+          if (value.runs.some(run => ownsOperation(run, operationId)) || await archivedOperation(operationId, value.namespace)) {
+            await guard(); return true;
+          }
+        }
+        await guard(); return false;
       });
     },
     async findRequest(requestId) {

@@ -15,6 +15,7 @@ const controlFile = (ctx, id) => `processed/shortcut-controls/${ctx.bindingHash}
 const equal = (a, b) => canonicalJSON(a) === canonicalJSON(b);
 const reference = input => ({ identity: { ...input.identity }, headHash: input.headHash });
 const refKey = input => `${unitKey(input.identity)}/${input.headHash}`;
+const unfinishedClaims = operations => operations.filter(item => item.claimHash && (!item.outcome || item.recoveryRequired));
 const worksetIdFor = (id, index) => {
   const text = digest(canonicalJSON({ domain: 'cuefluent-shortcut-workset-v1', id, index }));
   return `${text.slice(0, 8)}-${text.slice(8, 12)}-${text.slice(12, 16)}-${text.slice(16, 20)}-${text.slice(20, 32)}`;
@@ -125,7 +126,7 @@ export async function selectProcessingShortcut(capability, { selection, requestI
       if (previous.reviews.length) return { ...previous, nextRun: null, reason: 'review' };
       fail('PROCESSING_SHORTCUT_SCOPE_CONFLICT');
     }
-    for (const operation of previous.operations.filter(item => saved.value.operationIds.includes(item.operationId) && !item.outcome)) {
+    for (const operation of unfinishedClaims(previous.operations)) {
       if (!await canResumeOperation(operation.operationId)) return { ...previous, nextRun: null,
         blockers: ['PROCESSING_OPERATION_OWNER_UNVERIFIED'] };
     }
@@ -190,6 +191,12 @@ export async function selectProcessingShortcut(capability, { selection, requestI
     }
   }
   if ((await load(ctx)).hash !== saved.hash) fail('PROCESSING_SHORTCUT_CHANGED');
+  // Workset membership proves selection, not native ownership. A standalone
+  // preparer may have published a claim since the earlier projection.
+  for (const operation of unfinishedClaims(result.operations)) {
+    if (!await canResumeOperation(operation.operationId)) return { ...result, nextRun: null,
+      blockers: ['PROCESSING_OPERATION_OWNER_UNVERIFIED'] };
+  }
   await ctx.guard();
   return result;
 }
@@ -206,7 +213,7 @@ export async function cancelProcessingShortcut(capability, { selection, expected
   if (saved.value.phase === 'cancelled') return project(capability, saved);
   await assertStopped();
   const before = await project(capability, saved);
-  for (const operation of before.operations.filter(item => saved.value.operationIds.includes(item.operationId) && !item.outcome)) {
+  for (const operation of unfinishedClaims(before.operations)) {
     if (!await canResumeOperation(operation.operationId)) fail('PROCESSING_CANCEL_UNVERIFIED');
   }
   saved = await write(capability, selection, saved, { ...saved.value, phase: 'cancelling' });
@@ -217,6 +224,7 @@ export async function cancelProcessingShortcut(capability, { selection, expected
     if (operation.recoveryRequired) fail('PROCESSING_RECOVERY_REQUIRED');
     if (!operation.selection || !operation.claimHash) fail('PROCESSING_CANCEL_UNVERIFIED');
     await assertStopped();
+    if (!await canResumeOperation(operation.operationId)) fail('PROCESSING_CANCEL_UNVERIFIED');
     await completeProcessing(capability, { selection: operation.selection, operationId: operation.operationId,
       expectedClaimHash: operation.claimHash, outcome: 'cancelled' });
   }

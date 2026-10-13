@@ -415,6 +415,10 @@ execution proof. At the 128-run active-history limit,
 `processing-chat-rollover` archives settled history with replay protection while
 retaining the same chat. It refuses active or unresolved review state; it neither
 deletes evidence nor starts a replacement session.
+Rollover also preserves exact operation-to-request references to terminal runs,
+so shortcut resume and cancellation can verify stopped owners after active
+history is cleared. These references do not override a currently active or
+unresolved native owner. Missing or invalid proof remains a refusal.
 New sealed executions have a request-keyed recovery record, so recovery does not
 scan the session's lifetime history after rollover. Older unindexed receipts retain
 their bounded lookup and are never rewritten to infer missing authority.

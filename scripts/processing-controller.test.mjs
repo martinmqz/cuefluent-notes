@@ -639,6 +639,43 @@ test('explicit legacy-operation resume preserves exact selection and does not ad
   assert.equal((await inspectProcessing(a.capability, b.operationId)).state, 'missing');
 });
 
+test('shortcut ownership survives rollover and exact replay for unfinished legacy and workset operations', async t => {
+  const { selectProcessingShortcut, cancelProcessingShortcut } = await import('./processing-shortcuts.mjs');
+  for (const kind of ['legacy', 'workset']) await t.test(kind, async t => {
+    const f = await processingFixture(t), h = await harness(t, f);
+    let chosen, operationId = f.operationId;
+    if (kind === 'workset') chosen = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() });
+    h.script = async call => {
+      if (kind === 'legacy') await call('processing_prepare', { operationId, inputs: f.inputs });
+      else {
+        const pending = await call('processing_pending', {});
+        const batch = await call('processing_prepare', pending.nextPreparation);
+        operationId = batch.operationId;
+      }
+    };
+    const request = await h.request(chosen ? chosen.nextRun : {});
+    const finished = await h.controller.run(request);
+    assert.equal(finished.state, 'idle'); assert.equal(await h.controller.canResumeOperation(operationId), true);
+    const owner = { canResumeOperation: id => h.controller.canResumeOperation(id) };
+    chosen = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID(), mode: 'resume' }, owner);
+    assert(chosen.nextRun);
+    const claim = await inspectProcessing(f.capability, operationId);
+    const rolled = await h.controller.rollover({ expectedChatHash: finished.chatHash });
+    assert.equal(await h.controller.canResumeOperation(operationId), true);
+    await h.controller.run(request);
+    assert.equal(h.dispatches.length, 1);
+    const resumed = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID(), mode: 'resume' }, owner);
+    assert.deepEqual(resumed.nextRun, chosen.nextRun);
+    assert.equal((await inspectProcessing(f.capability, operationId)).claimHash, claim.claimHash);
+    assert.equal(rolled.chat.sessionId, finished.chat.sessionId);
+    const cancelled = await cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: resumed.checkpointHash },
+      { ...owner, assertStopped: async () => { assert.deepEqual(await h.controller.collectionActivity(), []); } });
+    assert.equal(cancelled.phase, 'cancelled');
+    assert.equal((await inspectProcessing(f.capability, operationId)).outcome, 'cancelled');
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+});
+
 test('a different client cannot dispatch while this collection has an active native owner', async t => {
   const f = await processingFixture(t), h = await harness(t, f), gate = deferred(), started = deferred();
   h.script = async () => { started.resolve(); await gate.promise; };

@@ -1367,6 +1367,24 @@ test('shortcut process and cancel preserve standalone claims and drafts without 
   });
 });
 
+test('MCP resume and cancel preserve a standalone claim in the shortcut workset', async t => {
+  const f = await processingFixture(t);
+  const { selectProcessingShortcut, inspectProcessingShortcut } = await import('./processing-shortcuts.mjs');
+  const { prepareWorksetBatch } = await import('./processing-workset.mjs');
+  const chosen = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() });
+  const workset = chosen.worksets[0];
+  const claim = await prepareWorksetBatch(f.capability, { worksetId: workset.worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] });
+  const h = await harness(t, f);
+  const resumed = body(await h.call('processing_resume', { collectionId: f.collection.id }));
+  assert.deepEqual(resumed.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+  assert.equal(resumed.nextAction, 'inspect');
+  const cancelled = await h.call('processing_cancel', { collectionId: f.collection.id });
+  assert.equal(cancelled.error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.equal((await inspectProcessing(f.capability, claim.operationId)).claimHash, claim.claimHash);
+  assert.equal((await inspectProcessingShortcut(f.capability, { selection: f.selection })).checkpointHash, chosen.checkpointHash);
+  assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
 test('routine intake contention is reported as wait without inventing recovery', async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   const lock = path.join(f.collection.intakeStateDir, '.intake-lock'); await fs.mkdir(lock, { mode: 0o700 });

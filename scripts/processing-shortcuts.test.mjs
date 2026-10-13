@@ -90,7 +90,8 @@ test('cancel requires internal stop verification and leaves retained evidence pe
   await assert.rejects(cancelProcessingShortcut(f.capability, args), { code: 'PROCESSING_CANCEL_UNVERIFIED' });
   await assert.rejects(cancelProcessingShortcut(f.capability, args, { assertStopped: async () => { throw new Error('still running'); } }), /still running/);
   assert.equal((await inspectProcessing(f.capability, claim.operationId)).claimHash, claim.claimHash);
-  const cancelled = await cancelProcessingShortcut(f.capability, args, { assertStopped: async () => {} });
+  const cancelled = await cancelProcessingShortcut(f.capability, args, { assertStopped: async () => {},
+    canResumeOperation: async id => id === claim.operationId });
   assert.equal(cancelled.phase, 'cancelled');
   assert.equal((await inspectProcessing(f.capability, claim.operationId)).outcome, 'cancelled');
   const resume = await select(f, { mode: 'resume' });
@@ -133,6 +134,7 @@ test('interrupted cancellation gates native admission and resumes without discar
   const admitted = await prepareWorksetBatch(f.capability, { worksetId: workset.worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] });
   let checks = 0;
   await assert.rejects(cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: chosen.checkpointHash }, {
+    canResumeOperation: async id => id === admitted.operationId,
     assertStopped: async () => { if (++checks === 2) throw Object.assign(new Error('interrupted'), { code: 'SYNTHETIC_INTERRUPTION' }); }
   }), { code: 'SYNTHETIC_INTERRUPTION' });
   const pending = await inspectProcessingShortcut(f.capability, { selection: f.selection });
@@ -140,7 +142,8 @@ test('interrupted cancellation gates native admission and resumes without discar
   assert.equal((await inspectProcessing(f.capability, admitted.operationId)).outcome, null);
   const { assertProcessingShortcutExecution } = await import('./processing-shortcuts.mjs');
   await assert.rejects(assertProcessingShortcutExecution(f.capability), { code: 'PROCESSING_CANCELLATION_PENDING' });
-  const cancelled = await cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: pending.checkpointHash }, { assertStopped: async () => {} });
+  const cancelled = await cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: pending.checkpointHash }, {
+    assertStopped: async () => {}, canResumeOperation: async id => id === admitted.operationId });
   assert.equal(cancelled.phase, 'cancelled');
   await assert.rejects(assertProcessingShortcutExecution(f.capability, { worksetId: workset.worksetId }), { code: 'PROCESSING_CANCELLATION_PENDING' });
   assert.equal((await inspectProcessing(f.capability, admitted.operationId)).outcome, 'cancelled');
@@ -182,6 +185,36 @@ test('unowned standalone claims cannot be adopted for shortcut processing', asyn
     assert.equal(result.nextRun, null); assert.equal(result.checkpointHash, null);
   }
   assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
+});
+
+test('workset membership does not authorize resume or cancel of a standalone claim', async t => {
+  const f = await processingFixture(t), chosen = await select(f), workset = chosen.worksets[0];
+  const claim = await prepareWorksetBatch(f.capability, { worksetId: workset.worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] });
+  const checked = [], canResumeOperation = async id => { checked.push(id); return false; };
+  const resumed = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID(), mode: 'resume' }, { canResumeOperation });
+  assert.deepEqual(checked, [claim.operationId]);
+  assert.equal(resumed.nextRun, null); assert.deepEqual(resumed.blockers, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+  await assert.rejects(cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: chosen.checkpointHash },
+    { assertStopped: async () => {}, canResumeOperation }), { code: 'PROCESSING_CANCEL_UNVERIFIED' });
+  assert.deepEqual(checked, [claim.operationId, claim.operationId]);
+  assert.equal((await inspectProcessing(f.capability, claim.operationId)).claimHash, claim.claimHash);
+  assert.equal((await inspectProcessingShortcut(f.capability, { selection: f.selection })).checkpointHash, chosen.checkpointHash);
+  const allowed = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID(), mode: 'resume' },
+    { canResumeOperation: async id => id === claim.operationId });
+  assert.deepEqual(allowed.nextRun, { worksetId: workset.worksetId });
+});
+
+test('charged workset admissions without a published claim remain resumable and cancellable', async t => {
+  const f = await processingFixture(t), chosen = await select(f), workset = chosen.worksets[0];
+  await assert.rejects(prepareWorksetBatch(f.capability, { worksetId: workset.worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] },
+    { fault: at => { if (at === 'workset-admission') throw new Error('interrupted admission'); } }), /interrupted admission/);
+  const resumed = await select(f, { mode: 'resume' });
+  assert.deepEqual(resumed.nextRun, { worksetId: workset.worksetId });
+  assert.equal(resumed.operations[0].admissionPending, true); assert.equal(resumed.operations[0].claimHash, null);
+  const cancelled = await cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: chosen.checkpointHash },
+    { assertStopped: async () => {} });
+  assert.equal(cancelled.phase, 'cancelled');
+  assert.equal((await inspectProcessing(f.capability, resumed.operations[0].operationId)).state, 'missing');
 });
 
 test('collections sharing a writer keep separate shortcut checkpoints and execution gates', async t => {
