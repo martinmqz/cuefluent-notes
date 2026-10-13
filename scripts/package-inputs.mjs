@@ -63,6 +63,7 @@ export const SOURCE_FILES = Object.freeze([
   'scripts/processing-tool-contracts.mjs',
   'scripts/processing.mjs',
   'scripts/processing-workset.mjs',
+  'scripts/processing-collection.mjs',
   'scripts/reader-checkpoint.mjs',
   'scripts/reader-pages.mjs',
   'scripts/session-jsonl.mjs',

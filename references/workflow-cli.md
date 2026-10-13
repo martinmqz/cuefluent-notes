@@ -305,8 +305,8 @@ Serialized child-engine results are bounded to 256 KiB; oversized results return
 
 ### Supported read interface
 
-`--help`, `processing-capabilities`, `processing-pending`, `processing-status`,
-`processing-worksets`, and `processing-workset-status` advertise `interfaceVersion: 1`.
+`--help`, `processing-capabilities`, `processing-pending`, `processing-inventory`,
+`processing-status`, `processing-worksets`, and `processing-workset-status` advertise `interfaceVersion: 1`.
 Workset creation and preparation also return a versioned workset view; ordinary
 page, ack and proposal responses do not advertise a separate version. This is the public command/read-model contract, independent
 of capture and private-state schema versions. Consumers must use these commands,
@@ -334,7 +334,7 @@ implementation support, not consent or feature
 switches. Extra request keys, including claimed provenance, are rejected. See
 [generated-output provenance](session-workflow.md#generated-output-provenance-gate).
 
-Inventory `counts` apply only to the returned head page (`scope:
+`processing-pending` counts apply only to the returned head page (`scope:
 "returned-head-page"`): pending, unclaimed, exactly claimed, blocked by an older claim, and handled **revisions**.
 They are not note counts or collection totals. `operations` covers the selected
 session/unit independently of head pagination, within the existing operation bound.
@@ -391,6 +391,48 @@ creates no approval. Drafts plus originals are bounded to 4 MiB; native forms
 have the smaller 256 KiB limit. Run this explicit draft read outside captured
 work chats when avoiding echoed content. Use the unchanged save/recovery commands
 below for standalone operation.
+
+`processing-inventory` accepts `{selection, scope?, limit?, maxSessions?, after?}`.
+It reads retained source, head, disposition and operation metadata across the
+selected collection without reading native transcripts or raw evidence. `scope`
+is `collection` (default), `repo` or `chat`. Repository scope uses the nearest
+regular `.git` marker above the selected cwd; `PROCESSING_REPOSITORY_UNVERIFIED`
+requires an explicit chat or collection scope when no repository can be established.
+Each source must resolve to that same repository root; nested repositories are
+outside the parent repository's scope. It does not infer a repository from a
+route folder name.
+
+Each source requires current explicit-processing authority. Excluded sources
+remain excluded even when they were captured previously. The caller's selection
+must itself be authorized for the collection. This command neither starts
+collection nor changes settings. `limit` bounds returned head metadata (default
+and maximum 100); `maxSessions` bounds visited sources (default 32, maximum 128).
+Each source directory scan retains the existing 65,536-entry ceiling. Membership
+checks for existing operations and the current page together read at most 256
+distinct sources; larger requests fail with `PROCESSING_INVENTORY_CAPACITY`.
+Return the exact `nextCursor` as `after` for another page; it binds the scope,
+collection and settings revision. Cursor objects contain `{scopeHash, client, sessionId, unitId}`;
+a null unit ID means that source was fully visited. Pages are lexical, not temporal.
+An empty incomplete page is not evidence of an empty backlog. A cursor from a
+different scope, collection or settings revision is refused with
+`PROCESSING_INVENTORY_CURSOR_MISMATCH`; begin fresh discovery without that cursor.
+
+The versioned response includes `scope`, `scopeHash`, `pending`, `operations`,
+`blockers`, `intakeBlocked`, `counts`, `incomplete`, `nextCursor` and
+`sourceCompleteness`. `excludedSources` counts settings-denied sources;
+`outsideScopeSources` counts authorized sources outside the requested scope.
+Counts cover the returned page only. Operations cover active claims and
+same-collection writer transactions throughout the collection, independently of
+that page; `scopeMatch` is `full`, `partial` or
+`outside`. A narrow request cannot resume a partial or outside operation by
+silently expanding its scope. Existing conflicts, proposals and recovery are
+reported without resolving them, including intake/prune recovery and held intake
+locks. Claimless writer transactions retain their operation ID and recovery hash.
+`sourceCompleteness: "unknown"` remains separate
+from how much retained metadata was inspected. Discovery is advisory rather than
+an atomic queue snapshot: pass exact returned `{identity, headHash}` references
+to the existing workset or preparation commands, which revalidate evidence and
+shared claims. A discovery result grants no permission to save notes.
 
 1. `processing-pending`: `{selection, limit?, afterUnitId?}`. Reads bounded head,
    disposition and operation metadata, not raw bodies. Default limit 20, maximum
@@ -716,7 +758,8 @@ schemas above. Do not parse private files to infer state or maintain another cla
 receipts, approval or writer database. The plugin remains usable without an app.
 
 Read-only processing commands are `processing-capabilities`, `processing-pending`,
-`processing-status`, `processing-worksets`, and `processing-workset-status`.
+`processing-inventory`, `processing-status`, `processing-worksets`, and
+`processing-workset-status`.
 They describe capabilities or metadata progress. `processing-page` is mutating:
 it records issued pages and can change the claim hash, even without acknowledgment.
 Page/ack requires explicit processing authority and coordination with the owning

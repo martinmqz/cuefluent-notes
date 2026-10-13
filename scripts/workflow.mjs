@@ -9,6 +9,7 @@ import { PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { generatedOutputCapabilities } from './workflow-context.mjs';
 import { createProcessingWorkset, prepareWorksetBatch, inspectProcessingWorkset, listProcessingWorksets } from './processing-workset.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
+import { pendingCollectionProcessing } from './processing-collection.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
   completeProcessing, inspectProcessing, recoverProcessing, readProcessingProposal } from './processing.mjs';
 import { captureStorageStatus, previewCapturePrune, applyCapturePrune, recoverCapturePrune, abandonCapturePrune } from './capture-maintenance.mjs';
@@ -29,6 +30,7 @@ const commands = {
   'capture-select': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], run: selectExplicitCapture },
   'capture-run': { required: ['selection', 'scopeId', 'expectedSelectionHash'], optional: ['unitIds'], run: runSelectedCapture },
   'processing-pending': { required: ['selection'], optional: ['limit', 'afterUnitId'], run: pendingProcessing },
+  'processing-inventory': { required: ['selection'], optional: ['scope', 'limit', 'maxSessions', 'after'], run: pendingCollectionProcessing },
   'processing-worksets': { required: [], optional: ['selection', 'limit', 'afterWorksetId'], run: listProcessingWorksets },
   'processing-workset-create': { required: ['selection', 'worksetId', 'inputs'], optional: ['runBudget', 'unscannedRemainder'], run: createProcessingWorkset },
   'processing-workset-status': { required: ['worksetId'], run: inspectProcessingWorkset },
