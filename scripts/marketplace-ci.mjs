@@ -57,8 +57,11 @@ export function verifyReleaseEvidence({ release, runs, tag, commit }) {
   if (release?.tag_name !== tag || release.draft !== false || release.prerelease !== false || !release.published_at) {
     throw new Error('A published stable release is required.');
   }
+  // GitHub can append @ref to the workflow path. Compare the file identity;
+  // the independent tag, commit and run-result checks remain authoritative.
   if (!sha(commit) || !runs?.workflow_runs?.some(run => run.head_sha === commit && run.head_branch === tag &&
-      run.path === '.github/workflows/release.yml' && run.event === 'push' && run.status === 'completed' && run.conclusion === 'success')) {
+      typeof run.path === 'string' && run.path.split('@', 1)[0] === '.github/workflows/release.yml' &&
+      run.event === 'push' && run.status === 'completed' && run.conclusion === 'success')) {
     throw new Error('No successful Prepare release run for the exact tag commit.');
   }
 }

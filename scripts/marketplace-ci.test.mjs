@@ -287,13 +287,24 @@ test('published stable identity and exact successful tag run are mandatory', () 
   const run = { head_sha: commit, head_branch: tag, path: '.github/workflows/release.yml',
     event: 'push', status: 'completed', conclusion: 'success' };
   const evidence = { release, runs: { workflow_runs: [run] }, tag, commit };
-  verifyReleaseEvidence(evidence);
+  const workflowPaths = [run.path, `${run.path}@main`, `${run.path}@${tag}`,
+    `${run.path}@refs/tags/${tag}`, `${run.path}@${commit}`];
+  for (const workflowPath of workflowPaths) {
+    verifyReleaseEvidence({ ...evidence, runs: { workflow_runs: [{ ...run, path: workflowPath }] } });
+    for (const patch of [{ head_sha: 'b'.repeat(40) }, { head_branch: 'main' },
+      { event: 'workflow_dispatch' }, { status: 'in_progress' }, { conclusion: 'failure' }]) {
+      assert.throws(() => verifyReleaseEvidence({ ...evidence,
+        runs: { workflow_runs: [{ ...run, path: workflowPath, ...patch }] } }), /No successful/);
+    }
+  }
   for (const patch of [{ draft: true }, { prerelease: true }, { tag_name: 'v1.2.4' }, { published_at: null }]) {
     assert.throws(() => verifyReleaseEvidence({ ...evidence, release: { ...release, ...patch } }), /published stable/);
   }
-  for (const patch of [{ head_sha: 'b'.repeat(40) }, { head_branch: 'main' }, { path: '.github/workflows/other.yml' },
-    { event: 'workflow_dispatch' }, { status: 'in_progress' }, { conclusion: 'failure' }]) {
-    assert.throws(() => verifyReleaseEvidence({ ...evidence, runs: { workflow_runs: [{ ...run, ...patch }] } }), /No successful/);
+  for (const workflowPath of ['.github/workflows/other.yml', '.github/workflows/other.yml@main',
+    `${run.path}.bak@main`, `other/repository/${run.path}@main`, `other.yml@${run.path}`,
+    '', undefined, null, 42]) {
+    assert.throws(() => verifyReleaseEvidence({ ...evidence,
+      runs: { workflow_runs: [{ ...run, path: workflowPath }] } }), /No successful/);
   }
   assert.throws(() => verifyReleaseEvidence({ ...evidence, runs: { workflow_runs: [] } }), /No successful/);
 });
