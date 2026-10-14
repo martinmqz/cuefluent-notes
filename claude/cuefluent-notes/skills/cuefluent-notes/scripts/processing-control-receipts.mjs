@@ -16,7 +16,7 @@ function dispatchDescriptor(value) {
   if (!['codex', 'claude'].includes(value.client) || value.skillName !== 'cuefluent-notes') fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   nativeId(value.sessionId); nativeId(value.unitId); string(value.callId, 512);
   if (!(value.client === 'codex' ? /^mcp__[a-zA-Z0-9_-]{1,128}\.[a-zA-Z0-9_-]{1,128}$/
-    : /^mcp__[a-zA-Z0-9_-]*cuefluent_control__(?:process_selected_captures|processing_review)$/).test(value.tool)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+    : /^mcp__[a-zA-Z0-9_-]*cuefluent_control__(?:process_selected_captures|processing_review|processing_status|processing_resume|processing_cancel)$/).test(value.tool)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   if (value.client === 'claude') {
     nativeId(value.inputId); nativeId(value.companionId);
     for (const field of ['inputHash', 'companionHash', 'skillExpansionHash']) hash(value[field]);
