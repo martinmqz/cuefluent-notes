@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
@@ -12,10 +12,11 @@ import YAML from 'yaml';
 import { smokeEnvironment } from './smoke-environment.mjs';
 import { buildRelease } from './release.mjs';
 import { marketplaceTar } from './release-archives.mjs';
-import { MARKETPLACE_PATHS } from './marketplace-layout.mjs';
+import { MARKETPLACE_PATHS, isMarketplaceSnapshotFile } from './marketplace-layout.mjs';
+import { repositoryCommand } from './repository-command.mjs';
 import { marketplaceTreeFiles } from './marketplace-content.mjs';
 import { packageOnlyChange, selectChecks, snapshotFiles, verifyCheckResults,
-  verifyReleaseEvidence, verifyPublishedTree } from './marketplace-ci.mjs';
+  verifyReleaseEvidence, verifyPublishedTree, releaseAssets } from './marketplace-ci.mjs';
 
 const source = fileURLToPath(new URL('../', import.meta.url));
 async function fixture(t) {
@@ -42,6 +43,110 @@ async function fixture(t) {
   const event = { GITHUB_EVENT_NAME: 'pull_request', CI_BASE_REF: 'main', CI_BASE_SHA: base };
   return { root, cwd, env, git, write, commit, base, event };
 }
+
+async function isolatedCiTools(f) {
+  const directory = path.join(f.root, 'ci-tools');
+  await fs.mkdir(directory);
+  for (const name of ['marketplace-ci.mjs', 'marketplace-layout.mjs', 'release-policy.mjs',
+    'file-io.mjs', 'command.mjs', 'repository-command.mjs']) {
+    await fs.copyFile(path.join(source, 'scripts', name), path.join(directory, name));
+  }
+  return path.join(directory, 'marketplace-ci.mjs');
+}
+
+test('classification fetches only selected trees; candidates alone need ancestry and a release tag', async t => {
+  const f = await fixture(t);
+  const cli = await isolatedCiTools(f);
+  f.git('config', 'uploadpack.allowFilter', 'true');
+  f.git('switch', '--orphan', 'unrelated');
+  await f.write('unrelated.txt', 'Unrelated history.'); const unrelated = f.commit();
+  f.git('tag', 'v1.2.3'); f.git('tag', 'unrelated-tag');
+  f.git('switch', 'main');
+  await f.write('release.json', JSON.stringify({ version: '1.2.3' }));
+  f.commit();
+  const checkout = path.join(f.root, 'shallow');
+  f.git('clone', '--no-tags', '--depth=1', '--branch=main', pathToFileURL(f.cwd).href, checkout);
+  const env = { ...f.env, ...f.event, GITHUB_REPOSITORY: 'synthetic/example', GITHUB_OUTPUT: path.join(f.root, 'output') };
+  const run = args => spawnSync(process.execPath, [cli, ...args], { cwd: checkout, env, encoding: 'utf8' });
+  const localGit = (...args) => {
+    const result = spawnSync('git', args, { cwd: checkout, env: f.env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
+  };
+  const head = localGit('rev-parse', 'HEAD');
+  assert.equal(run(['classify']).status, 0);
+  assert.equal(await fs.readFile(env.GITHUB_OUTPUT, 'utf8'), 'mode=candidate\n');
+  assert.equal(localGit('rev-list', '--count', 'HEAD'), '1', 'classification must not deepen source history');
+  assert.equal(localGit('tag', '--list'), '');
+  const history = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import {fetchCheckHistory,packageOnlyChange} from ${JSON.stringify(pathToFileURL(cli).href)};
+     fetchCheckHistory(process.cwd(), process.env);
+     if (!packageOnlyChange(process.cwd(), process.env)) process.exit(1);`], { cwd: checkout, env, encoding: 'utf8' });
+  assert.equal(history.status, 0, history.stderr);
+  assert.equal(localGit('rev-parse', 'HEAD'), head);
+  assert.equal(localGit('rev-parse', '--is-shallow-repository'), 'false');
+  assert.equal(localGit('tag', '--list'), '');
+  assert.notEqual(spawnSync('git', ['-c', 'remote.origin.promisor=false', 'cat-file', '-e', unrelated],
+    { cwd: checkout, env: { ...f.env, GIT_NO_LAZY_FETCH: '1' } }).status, 0);
+  const selected = run(['select', '--fetch']);
+  assert.equal(selected.status, 1);
+  assert.match(selected.stderr, /Release provenance refused: the tag commit is not in the CI base history/);
+  assert.equal(localGit('tag', '--list'), 'v1.2.3', 'fetch only the selected release tag');
+  assert.equal(await fs.readFile(env.GITHUB_OUTPUT, 'utf8'), 'mode=candidate\n', 'failed verification cannot emit packages');
+  assert.equal(localGit('rev-parse', 'HEAD'), head);
+
+  // An ordinary source diff needs the base tree but neither ancestry nor npm.
+  await f.write('source.mjs', 'export const synthetic = true;'); f.commit();
+  const fullCheckout = path.join(f.root, 'source-shallow');
+  f.git('clone', '--no-tags', '--depth=1', '--branch=main', pathToFileURL(f.cwd).href, fullCheckout);
+  const full = spawnSync(process.execPath, [cli, 'classify'],
+    { cwd: fullCheckout, env: { ...env, GITHUB_OUTPUT: path.join(f.root, 'full-output') }, encoding: 'utf8' });
+  assert.equal(full.status, 0, full.stderr);
+  assert.equal(await fs.readFile(path.join(f.root, 'full-output'), 'utf8'), 'mode=full\n');
+  assert.equal(spawnSync('git', ['rev-list', '--count', 'HEAD'], { cwd: fullCheckout, env: f.env, encoding: 'utf8' }).stdout.trim(), '1');
+});
+
+test('gate and ineligible-event classification work without npm dependencies or a Git checkout', async t => {
+  const f = await fixture(t), cli = await isolatedCiTools(f);
+  const directory = path.dirname(cli);
+  const needs = { scope: { result: 'success', outputs: { mode: 'packages' } },
+    test: { result: 'success' }, 'client-smoke': { result: 'success' } };
+  const run = (args, event) => spawnSync(process.execPath, [cli, ...args],
+    { cwd: directory, env: { ...f.env, ...event }, encoding: 'utf8' });
+  assert.equal(run(['gate'], { CI_NEEDS: JSON.stringify(needs) }).status, 0);
+  needs['client-smoke'].result = 'failure';
+  assert.match(run(['gate'], { CI_NEEDS: JSON.stringify(needs) }).stderr, /client registration/);
+  for (const event of [{ GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/tags/v1.2.3' }, { GITHUB_EVENT_NAME: 'workflow_dispatch' }]) {
+    const classified = run(['classify'], event);
+    assert.equal(classified.status, 0, classified.stderr);
+    assert.match(classified.stdout, /Full source checks required/);
+  }
+});
+
+test('maintenance command transport preserves binary input and enforces status and output bounds', () => {
+  const bytes = Buffer.from([0, 128, 255, 10]);
+  assert.deepEqual(repositoryCommand(source, process.execPath, ['-e', 'process.stdin.pipe(process.stdout)'],
+    { input: bytes, encoding: null }).stdout, bytes);
+  assert.equal(repositoryCommand(source, process.execPath, ['-e', 'process.exit(1)'], { allowedStatuses: [0, 1] }).status, 1);
+  assert.throws(() => repositoryCommand(source, process.execPath, ['-e', 'process.exit(1)']), /exit status 1/);
+  assert.throws(() => repositoryCommand(source, process.execPath, ['-e', 'process.stdout.write(Buffer.alloc(65536))'],
+    { encoding: null, maxBuffer: 1024 }), /ENOBUFS/);
+});
+
+test('release asset preflight rejects missing, duplicate, incomplete and oversized metadata', () => {
+  const release = { assets: [
+    { id: 1, name: 'cuefluent-notes-1.2.3-marketplace.tar.gz', size: 4096, state: 'uploaded' },
+    { id: 2, name: 'SHA256SUMS', size: 256, state: 'uploaded' },
+  ] };
+  assert.deepEqual(releaseAssets(release, '1.2.3').map(asset => asset.id), [1, 2]);
+  for (const assets of [[], release.assets.slice(1), [...release.assets, release.assets[0]], null]) {
+    assert.throws(() => releaseAssets({ assets }, '1.2.3'), /published asset/);
+  }
+  for (const index of [0, 1]) for (const patch of [{ size: -1 }, { size: 0 }, { size: 1.5 },
+    { size: index === 0 ? 128 * 1024 * 1024 + 1 : 65537 }, { state: 'new' }, { id: '../escape' }, { id: 0 }]) {
+    const invalid = structuredClone(release); Object.assign(invalid.assets[index], patch);
+    assert.throws(() => releaseAssets(invalid, '1.2.3'), /published asset/);
+  }
+});
 
 test('complete Git diff classification is conservative across events, deletions and renames', async t => {
   const f = await fixture(t);
@@ -145,6 +250,9 @@ test('package path compares exact published files, never a self-asserted invento
   f.git('commit', '-m', 'test: tab in tracked package path');
   assert.throws(() => marketplaceTreeFiles(f.cwd, 'HEAD'), /Nonportable marketplace/,
     'The complete tabbed filename must be rejected, not truncated to a published name.');
+  assert.throws(() => marketplaceTreeFiles(f.cwd, 'HEAD'), error =>
+    error.message.includes(JSON.stringify(`${tabbed}\thidden`)) && !error.message.includes('\t'),
+  'Report the offending path with controls escaped.');
   await assert.rejects(verifyPublishedTree(f.cwd, assets), /Nonportable marketplace/);
   f.git('read-tree', candidate); // Drop the deliberately uncheckoutable entry.
   f.git('reset', '--hard', candidate);
@@ -195,6 +303,8 @@ test('snapshot checksum, entry ownership, duplicate and link checks happen befor
   const valid = [{ name: 'README.md', bytes: Buffer.from('Archive only') },
     { name: 'release.json', bytes: Buffer.from('{}') }];
   const snapshot = await marketplaceTar(valid);
+  for (const file of valid) assert.equal(isMarketplaceSnapshotFile(file.name), true);
+  assert.equal(isMarketplaceSnapshotFile('.github/workflows/ci.yml'), false);
   assert.deepEqual(await snapshotFiles(snapshot, sumsFor(snapshot), '1.2.3'), valid.slice(1));
   for (const sums of [Buffer.alloc(0), Buffer.concat([sumsFor(snapshot), sumsFor(snapshot)]),
     Buffer.from(`${'0'.repeat(64)}  cuefluent-notes-1.2.3-marketplace.tar.gz\n`), Buffer.from('Invalid\n')]) {
@@ -214,8 +324,8 @@ test('snapshot checksum, entry ownership, duplicate and link checks happen befor
 });
 
 test('required result gate refuses failure, cancellation, missing modes and unjustified skips', () => {
-  const needs = (mode, scope = 'success', result = 'success') =>
-    ({ scope: { result: scope, outputs: { mode } }, test: { result } });
+  const needs = (mode, scope = 'success', result = 'success', smoke = 'success') =>
+    ({ scope: { result: scope, outputs: { mode } }, test: { result }, 'client-smoke': { result: smoke } });
   assert.equal(verifyCheckResults(needs('full')), 'full');
   assert.equal(verifyCheckResults(needs('packages')), 'packages');
   for (const mode of ['full', 'packages', '', 'unknown']) {
@@ -224,20 +334,26 @@ test('required result gate refuses failure, cancellation, missing modes and unju
   }
   assert.throws(() => verifyCheckResults(needs('full', 'success', 'skipped')));
   assert.throws(() => verifyCheckResults(needs('packages', 'success', 'skipped')));
+  for (const mode of ['full', 'packages']) for (const smoke of ['failure', 'cancelled', 'skipped', '']) {
+    assert.throws(() => verifyCheckResults(needs(mode, 'success', 'success', smoke)), /client registration/);
+  }
+  assert.equal(verifyCheckResults(needs('full', 'success', 'success', 'skipped'), 'refs/tags/v1.2.3'), 'full');
+  assert.throws(() => verifyCheckResults(needs('packages', 'success', 'success', 'skipped'), 'refs/tags/v1.2.3'));
+  assert.throws(() => verifyCheckResults(needs('full', 'success', 'success', 'failure'), 'refs/tags/v1.2.3'));
   assert.throws(() => verifyCheckResults({}));
 });
 
 test('workflow preserves required checks and gates short-path smokes on provenance', async () => {
   const workflow = YAML.parse(await fs.readFile(path.join(source, '.github/workflows/ci.yml'), 'utf8'));
   const jobs = workflow.jobs;
-  assert.deepEqual(jobs.reproducibility.needs, ['scope', 'test']);
+  assert.deepEqual(jobs.reproducibility.needs, ['scope', 'test', 'client-smoke']);
   assert.equal(jobs.reproducibility.if, '${{ always() }}');
   assert.ok(jobs.reproducibility.steps.some(step => step.run === 'node scripts/marketplace-ci.mjs gate' && step.env.CI_NEEDS === '${{ toJSON(needs) }}'));
   assert.equal(jobs.test.needs, 'scope'); assert.equal(jobs['client-smoke'].needs, 'scope');
   assert.equal(jobs.test.if, undefined, 'Required matrix context names must exist on both paths.');
   assert.equal(jobs.test.name, 'test (${{ matrix.os }})');
   assert.equal(jobs.test['runs-on'], '${{ matrix.os }}', 'Required platform checks must run on their named OS.');
-  assert.match(jobs.test['timeout-minutes'], /^\$\{\{ needs.scope.outputs.mode == 'packages' && 5 \|\|/);
+  assert.match(jobs.test['timeout-minutes'], /^\$\{\{ needs.scope.outputs.mode == 'packages' && 10 \|\|/);
   const packageStep = jobs.test.steps.findIndex(step => step.run === 'node --test scripts/published-marketplace.test.mjs');
   assert.ok(packageStep > 0, 'The short path must run actual package tests, not an echo acknowledgement.');
   assert.equal(jobs.test.steps[packageStep].if, "needs.scope.outputs.mode == 'packages'");
@@ -246,9 +362,13 @@ test('workflow preserves required checks and gates short-path smokes on provenan
   assert.deepEqual(jobs.test.strategy.matrix.os, ['ubuntu-24.04', 'macos-14', 'windows-2025']);
   assert.deepEqual(jobs['client-smoke'].strategy.matrix.os, ['macos-14', 'windows-2025']);
   const select = jobs.scope.steps.find(step => step.id === 'select');
-  assert.equal(select.run, 'node scripts/marketplace-ci.mjs select');
-  assert.equal(select.env.CI_BASE_SHA, '${{ github.event.pull_request.base.sha || github.event.before }}');
-  assert.equal(jobs.scope.steps.find(step => step.uses?.startsWith('actions/checkout@')).with['fetch-depth'], 0);
+  assert.equal(select.run, 'node scripts/marketplace-ci.mjs select --fetch');
+  assert.equal(select.if, "steps.classify.outputs.mode == 'candidate'");
+  assert.equal(jobs.scope.env.CI_BASE_SHA, '${{ github.event.pull_request.base.sha || github.event.before }}');
+  assert.equal(jobs.scope.steps.find(step => step.uses?.startsWith('actions/checkout@')).with['fetch-depth'], 1);
+  assert.equal(jobs.scope.steps.find(step => step.run === 'npm ci --ignore-scripts').if, "steps.classify.outputs.mode == 'candidate'");
+  assert.equal(jobs.scope.outputs.mode, '${{ steps.select.outputs.mode || steps.classify.outputs.mode }}');
+  assert.ok(!jobs.reproducibility.steps.some(step => step.run?.includes('npm ')), 'The gate needs no npm dependencies.');
   for (const step of jobs.reproducibility.steps.filter(step => step.uses?.startsWith('actions/download-artifact@') || step.run?.includes('diff -u'))) {
     assert.equal(step.if, "needs.scope.outputs.mode == 'full'");
   }

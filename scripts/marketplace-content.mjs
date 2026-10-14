@@ -1,18 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { repositoryCommand } from './repository-command.mjs';
 import { archiveFiles, pluginZip } from './release-archives.mjs';
-import { MARKETPLACE_PATHS, MARKETPLACE_PLUGINS, isMarketplaceFile } from './marketplace-layout.mjs';
+import { MARKETPLACE_PATHS, MARKETPLACE_PLUGINS, isMarketplaceFile, isMarketplaceSnapshotFile } from './marketplace-layout.mjs';
 import { checkReleaseTag, stableVersionParts } from './release-policy.mjs';
 import { compare, isMain } from './file-io.mjs';
 import { INVENTORY_FILE, verifyPackageFiles } from './package-integrity.mjs';
 import { validateManifestPair } from './plugin-manifest.mjs';
 
 function git(root, args, input) {
-  const result = spawnSync('git', args, { cwd: root, input, maxBuffer: 64 * 1024 * 1024 });
-  if (result.status !== 0) throw new Error(result.error?.message ?? result.stderr.toString());
-  return result.stdout;
+  return repositoryCommand(root, 'git', args, { input, encoding: null }).stdout;
 }
 
 /** Read committed candidate bytes, including Git's staging conversions. Archive
@@ -24,7 +22,7 @@ export function marketplaceTreeFiles(root, tree) {
       const meta = row.slice(0, separator), name = row.slice(separator + 1);
       const [mode, type, oid] = meta.split(' ');
       if (mode !== '100644' || type !== 'blob' || !isMarketplaceFile(name) || /[\\\x00-\x1f\x7f\ufffd]/.test(name)) {
-        throw new Error('Nonportable marketplace Git entry.');
+        throw new Error(`Nonportable marketplace Git entry: ${JSON.stringify(name)}`);
       }
       return { name, oid };
     });
@@ -127,7 +125,7 @@ export async function verifyMarketplaceSnapshot(root, tag) {
   async function checkEntries(relative = '') {
     for (const entry of await fs.readdir(path.join(root, relative), { withFileTypes: true })) {
       const name = relative ? `${relative}/${entry.name}` : entry.name;
-      const allowed = isMarketplaceFile(name) || name === 'README.md' || MARKETPLACE_PATHS.some(owned => owned.startsWith(`${name}/`));
+      const allowed = isMarketplaceSnapshotFile(name) || MARKETPLACE_PATHS.some(owned => owned.startsWith(`${name}/`));
       if (!allowed) throw new Error(`Unexpected marketplace snapshot entry: ${name}`);
       if (entry.isDirectory()) await checkEntries(name);
       else if (!entry.isFile()) throw new Error(`Nonportable marketplace snapshot entry: ${name}`);
@@ -136,7 +134,7 @@ export async function verifyMarketplaceSnapshot(root, tag) {
   await checkEntries();
   const files = await archiveFiles(root);
   for (const { name } of files) {
-    if (name !== 'README.md' && !isMarketplaceFile(name)) throw new Error(`Unexpected marketplace snapshot entry: ${name}`);
+    if (!isMarketplaceSnapshotFile(name)) throw new Error(`Unexpected marketplace snapshot entry: ${name}`);
   }
   return verifyMarketplaceFiles(files, tag);
 }

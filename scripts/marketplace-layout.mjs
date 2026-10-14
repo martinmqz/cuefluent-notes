@@ -11,3 +11,6 @@ export const MARKETPLACE_PATHS = [
 export function isMarketplaceFile(name) {
   return MARKETPLACE_PATHS.includes(name) || MARKETPLACE_PLUGINS.some(plugin => name.startsWith(`${plugin.root}/`));
 }
+export function isMarketplaceSnapshotFile(name) {
+  return name === 'README.md' || isMarketplaceFile(name);
+}

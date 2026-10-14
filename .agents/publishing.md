@@ -130,11 +130,18 @@ release archive checksums. The [Checks workflow](https://github.com/martinmqz/cu
 defines the current jobs.
 
 Source changes, release tags and manual runs use the full source test/build
-matrix. For PRs into `main` and pushes to `main`, CI can use a shorter path when
+matrix. Scope classification uses a shallow checkout and, for eligible events,
+the selected base tree; full source runs and tag/manual runs do not install scope
+dependencies or fetch full history. Only package candidates load verification
+dependencies and fetch the selected base/HEAD ancestry and release tag.
+For PRs into `main` and pushes to `main`, CI can use a shorter path when
 the complete Git diff changes only the canonical marketplace publication paths.
 It verifies a newer, stable published release, a successful **Prepare release**
 run for its exact tag commit in the base's history, the published snapshot checksum,
 and exact agreement between that snapshot and the committed packages and catalogs.
+Release asset metadata must fit the download bounds before either body is fetched;
+asset-ID downloads also enforce byte limits and must match the advertised sizes,
+using GitHub’s [release asset API](https://docs.github.com/en/rest/releases/assets#get-a-release-asset).
 Missing provenance or a mismatch fails CI; a package's own inventory is not enough.
 Source, dependency, workflow and other file changes always use full checks. A
 known base outside the current history also selects full checks. For an otherwise
@@ -142,15 +149,24 @@ eligible package-only diff, same-version edits and downgrades are refused as
 release-policy violations; publish a newer version rather than changing immutable
 published content.
 
+The repository-only `scripts/marketplace-ci.mjs` commands keep classification and
+verification separate: `classify` emits `full` or `candidate`; `select --fetch`
+fetches the selected history/tag and emits `full` or verified `packages`. Plain
+`select` expects those Git objects to be present already. `gate` checks `CI_NEEDS`
+against the selected mode and uses `GITHUB_REF` for the tag-only client-check
+exception. A candidate result never authorizes the shorter path on its own.
+
 The shorter path retains guidance checks and isolated macOS/Windows client
 registration checks against the committed marketplace. It skips source-installer
 rebuilds and the full source suites. Each required `test (...)` job runs focused
 committed-package tests on its named native platform, under a shorter timeout.
-The required `reproducibility` check requires successful package provenance and
-those native package tests; on the full path it still compares all native build
-artifacts. Required check names and protected-main settings stay the same. A
-failed or cancelled selection cannot satisfy the required check. Published assets are neither rebuilt nor
-replaced by the shorter path.
+The required `reproducibility` check requires successful package provenance,
+those native package tests and client registration checks. Its result gate has no
+npm dependencies. On the full path it still compares all native build artifacts;
+only tag runs may omit client registration, as defined below. Required check names
+and protected-main settings stay the same. A failed or cancelled selection cannot
+satisfy the required check. Published assets are neither rebuilt nor replaced by
+the shorter path.
 
 The `client-smoke` job skips tag refs. On the full path it checks disposable
 client registration using separately built packages and, when present, the

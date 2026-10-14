@@ -18,24 +18,31 @@ jobs:
       contents: read
       actions: read
     outputs:
-      mode: ${{ steps.select.outputs.mode }}
+      mode: ${{ steps.select.outputs.mode || steps.classify.outputs.mode }}
+    env:
+      CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      CI_BASE_REF: ${{ github.event.pull_request.base.ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
-          persist-credentials: false
+          fetch-depth: 1
+          # The read-only checkout token also fetches selected refs in private repos.
+          persist-credentials: true
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '22'
           package-manager-cache: false
+      - name: Classify the complete diff without build dependencies
+        id: classify
+        run: node scripts/marketplace-ci.mjs classify
       - run: npm ci --ignore-scripts
-      - name: Select full checks or verify exact published packages
+        if: steps.classify.outputs.mode == 'candidate'
+      - name: Verify exact published packages and release ancestry
         id: select
+        if: steps.classify.outputs.mode == 'candidate'
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          CI_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: node scripts/marketplace-ci.mjs select
+        run: node scripts/marketplace-ci.mjs select --fetch
   guidance:
     # Maintenance tooling cannot suppress product checks or run in a job that
     # produces release assets. A tag uses the already-reviewed source guidance.
@@ -64,7 +71,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Platform-specific budgets cover the full native suite and artifact build.
     # Production worker/probe deadlines are independent of these job limits.
-    timeout-minutes: ${{ needs.scope.outputs.mode == 'packages' && 5 || matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
+    timeout-minutes: ${{ needs.scope.outputs.mode == 'packages' && 10 || matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -140,7 +147,7 @@ jobs:
     # Required by branch protection. Selection/verification failures must not
     # turn omitted native suites into a passing package-update PR.
     if: ${{ always() }}
-    needs: [scope, test]
+    needs: [scope, test, client-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -151,7 +158,6 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
-      - run: npm ci --ignore-scripts
       - name: Require successful verification for the selected CI path
         env:
           CI_NEEDS: ${{ toJSON(needs) }}

@@ -44,7 +44,8 @@ test('publication branches preserve new main source, reject unexpected or transf
   }
   await fs.mkdir(path.join(checkout, 'scripts'));
   for (const file of ['release-policy.mjs', 'marketplace-layout.mjs', 'marketplace-content.mjs',
-    'release-archives.mjs', 'file-io.mjs', 'publish-marketplace.sh', 'package-integrity.mjs', 'plugin-manifest.mjs', 'workflow-values.mjs']) {
+    'release-archives.mjs', 'file-io.mjs', 'publish-marketplace.sh', 'package-integrity.mjs', 'plugin-manifest.mjs', 'workflow-values.mjs',
+    'repository-command.mjs', 'command.mjs']) {
     await fs.copyFile(path.join(source, file), path.join(checkout, 'scripts', file));
   }
   await fs.writeFile(path.join(checkout, '.gitignore'), 'node_modules/\ndist/\n');
