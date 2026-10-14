@@ -280,11 +280,15 @@ owned by this connected controller and waits for a verified terminal result
 before releasing unapplied claims. Unknown or externally owned execution reports
 `PROCESSING_CANCEL_UNVERIFIED`; preserve it for recovery. Cancellation is durable
 and resumable if interrupted; invoke `cancel` again to finish it. It never adopts
-unrelated standalone claims or drafts. It keeps captures pending, preserves saved notes,
+unrelated standalone claims or drafts. Within the saved selection, it also cancels
+owned unsaved proposals, which can no longer be saved through review. The evidence
+and operation history remain on disk; generating a replacement proposal requires
+processing again and can incur model usage. Choose **Later** in review to preserve
+a proposal for later approval. Cancellation keeps captures pending, preserves saved notes,
 and leaves collection/processing preferences unchanged. A new `process` request
 can select those pending captures after cancellation completes. This also provides
 a fresh selection after a policy change or an unavailable frozen input, without
-rewriting the old claim hashes. Native history capacity requires guarded
+rewriting the old claim hashes. `PROCESSING_CHAT_HISTORY_FULL` requires guarded
 `processing-chat-rollover` before resuming; see the
 [shortcut command contract](workflow-cli.md#processing-shortcut-checkpoints).
 
@@ -292,6 +296,27 @@ The restricted channel accepts at most 256 KiB of serialized engine output per
 tool result. A larger result returns `PROCESSING_ENGINE_OUTPUT_LIMIT` without
 truncating evidence or terminating the chat. Use the explicit CLI from an
 uncaptured context for material that cannot fit this channel.
+
+### Unfinished operation ownership
+
+`PROCESSING_OPERATION_OWNER_UNVERIFIED` means an unfinished engine operation cannot
+be tied to a recorded native run that has stopped. It can affect standalone CLI
+operations and operations from older archived runs whose operation-to-request
+reference was never recorded. An operation's existence is not proof that its
+processor is stopped. The shortcut does not invent ownership or replace its claim.
+
+Before a fresh selection, unfinished work is checked across the collection;
+unverified work can block `process` and `resume` even when only another repository
+or chat was requested. An operation outside a narrower requested scope can instead
+report `PROCESSING_SHORTCUT_SCOPE_CONFLICT`. Existing authorized proposals remain
+available through `review`, subject to the usual execution and recovery guards.
+
+Confirm that the prior processor has stopped, inspect the affected operation and
+use the [explicit processing workflow](processing.md#outcomes-and-recovery) to
+finish it or safely cancel unapplied work. Shortcut `cancel` refuses with
+`PROCESSING_CANCEL_UNVERIFIED` when it cannot establish ownership; it is not a way
+to clear standalone or unverified operations. Keep claims, proposals and recovery
+state intact until the supported operation succeeds.
 
 ## Review controls
 
