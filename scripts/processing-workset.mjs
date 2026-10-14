@@ -126,7 +126,8 @@ export async function prepareWorksetBatch(capability, { worksetId, expectedWorks
 }
 
 async function inspectInputStates(ctx, inputs, policyHash, operations = [], attempts = []) {
-  const claims = await activeProcessingClaims(ctx), items = [];
+  const claims = await activeProcessingClaims(ctx, { allowBindingConflict: true }), items = [];
+  const bindingConflict = claims.some(item => item.bindingChanged);
   for (let index = 0; index < inputs.length; index++) {
     const input = inputs[index], operation = operations.find(item => item.indexes.includes(index));
     const doneSnapshot = await processingSnapshot(ctx, dispositionPath(input.identity, input.headHash, ctx.bindingHash));
@@ -139,7 +140,7 @@ async function inspectInputStates(ctx, inputs, policyHash, operations = [], atte
     const pruned = Boolean(await readTombstone(ctx.store, input.identity));
     const attempt = attempts.find(item => item.indexes.includes(index));
     const blocked = (attempt?.policyHash ?? policyHash) !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
-      : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
+      : bindingConflict ? 'PROCESSING_BINDING_CHANGED' : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
     const elsewhere = done && done.operationId !== operation?.operationId;
     // Input disposition is current; operation outcomes remain historical. A
     // cancelled attempt must not hide a later exact save or a new claim owner.

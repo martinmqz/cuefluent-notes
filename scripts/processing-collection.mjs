@@ -8,7 +8,7 @@ import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readProcessingState, nativeNamePage, processingNames, processingSnapshot } from './processing-state.mjs';
 import { activeProcessingClaims, describeProcessingOperation } from './processing.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
-import { PROCESSING_INTERFACE_VERSION, claimPath } from './processing-contract.mjs';
+import { PROCESSING_INTERFACE_VERSION, claimPath, sameProcessingPlacement } from './processing-contract.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { CLIENTS, PROCESSING_SCOPES, validateProcessingCursor, choice, nativeId, hash, integer, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
@@ -41,7 +41,7 @@ async function recoverySnapshot(ctx) {
     if (!saved.bytes) fail('PROCESSING_INVENTORY_CHANGED');
     const value = intakeJSON(saved);
     hash(value?.bindingHash);
-    transactions.push({ name, hash: saved.hash, operationId: value.bindingHash === ctx.bindingHash ? nativeId(value.operationId) : null });
+    transactions.push({ name, hash: saved.hash, operationId: value.bindingHash === ctx.bindingHash || sameProcessingPlacement(value?.claim?.binding, ctx.binding) ? nativeId(value.operationId) : null });
   }
   const journal = await processingSnapshot(ctx, 'journal.json');
   const pending = await intakeSnapshot(ctx.store, 'state', 'pending.json');
@@ -94,9 +94,11 @@ export async function pendingCollectionProcessing(capability, { selection, scope
     const result = { selected, hash: saved.hash, authorized };
     sources.set(key, result); return result;
   }
-  const recovery = await recoverySnapshot(ctx), { blockers } = recovery, operations = [];
+  const recovery = await recoverySnapshot(ctx), blockers = [...recovery.blockers], operations = [];
   const claimNames = await processingNames(ctx, 'claims');
-  const operationIds = new Set((await activeProcessingClaims(ctx)).map(({ claim }) => claim.operationId));
+  const claims = await activeProcessingClaims(ctx, { allowBindingConflict: true });
+  if (claims.some(item => item.bindingChanged)) blockers.push('PROCESSING_BINDING_CHANGED');
+  const operationIds = new Set(claims.map(({ claim }) => claim.operationId));
   for (const tx of recovery.transactions) if (tx.operationId !== null) operationIds.add(tx.operationId);
   for (const operationId of operationIds) {
     const { claim: _claim, ...operation } = await describeProcessingOperation(ctx, operationId, null, blockers);

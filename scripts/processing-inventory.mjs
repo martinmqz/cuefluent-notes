@@ -2,7 +2,7 @@ import path from 'node:path';
 import { readProcessingState, processingNames, processingSnapshot, nativeNamePage } from './processing-state.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { describeProcessingOperation } from './processing.mjs';
-import { validateClaim, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
+import { validateClaim, sameProcessingPlacement, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
 import { validateProcessingDisposition, dispositionPath, unitKey } from './capture-retention.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
@@ -21,7 +21,7 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
     const saved = await processingSnapshot(ctx, name);
     if (!saved.bytes) fail('PROCESSING_INVENTORY_CHANGED');
     const claim = validateClaim(intakeJSON(saved));
-    if (claim.bindingHash === ctx.bindingHash) claims.push({ claim, hash: saved.hash });
+    if (claim.bindingHash === ctx.bindingHash || sameProcessingPlacement(claim.binding, ctx.binding)) claims.push({ claim, hash: saved.hash });
   }
   const directory = path.dirname(await intakePath(ctx.store, 'state', `heads/${selection.client}/${selection.sessionId}/.list`));
   const page = selection.unitId ? { ids: [selection.unitId], incomplete: false }
@@ -56,20 +56,21 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
     const owner = claimed[0];
     const claimedHeadHash = owner?.claim.inputs.find(input => unitKey(input.identity) === unitKey(identity)).headHash;
     pending.push({ identity, headHash: snapshot.hash, evidenceHash: head.evidenceHash, fileHash: head.fileHash,
-      status: owner ? claimedHeadHash === snapshot.hash ? 'claimed' : 'blocked-by-claim' : 'pending', ...(owner ? { operationId: owner.claim.operationId, claimHash: owner.hash,
+      status: owner ? claimedHeadHash === snapshot.hash && owner.claim.bindingHash === ctx.bindingHash ? 'claimed' : 'blocked-by-claim' : 'pending', ...(owner ? { operationId: owner.claim.operationId, claimHash: owner.hash,
         proposalHash: owner.claim.proposalIntent?.hash ?? null, claimedHeadHash } : {}) });
   }
   const transactions = [];
   for (const name of await processingNames(ctx, 'transactions')) {
     const saved = await processingSnapshot(ctx, name), value = intakeJSON(saved);
-    if (value?.bindingHash === ctx.bindingHash) transactions.push({ operationId: nativeId(value.operationId), transactionHash: saved.hash });
+    if (value?.bindingHash === ctx.bindingHash || sameProcessingPlacement(value?.claim?.binding, ctx.binding)) transactions.push({ operationId: nativeId(value.operationId), transactionHash: saved.hash });
     else transactions.push({ status: 'writer-reserved-by-another-collection' });
   }
   for (const record of records) if ((await intakeSnapshot(ctx.store, 'state', record.name)).hash !== record.hash) fail('PROCESSING_INVENTORY_CHANGED');
   const journalPending = Boolean((await processingSnapshot(ctx, 'journal.json')).bytes);
   await ctx.guard();
   const operations = [], collectionBlockers = [
-    ...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []), ...(journalPending ? ['WRITER_RECOVERY_REQUIRED'] : [])
+    ...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []), ...(journalPending ? ['WRITER_RECOVERY_REQUIRED'] : []),
+    ...(claims.some(({ claim }) => claim.bindingHash !== ctx.bindingHash) ? ['PROCESSING_BINDING_CHANGED'] : [])
   ];
   for (const { claim, hash: discoveredHash } of claims.filter(item => item.claim.inputs.some(input => selectionIncludesIdentity(selection, input.identity)))) {
     const detail = await describeProcessingOperation(ctx, claim.operationId, null, collectionBlockers);
@@ -87,6 +88,6 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
     operationScope: 'selected-session-not-head-page', sourceCompleteness: 'unknown',
     pending, handledCount: handled.length, inspectedHeads: records.length, incomplete, nextCursor: incomplete ? nextCursor : null, operations, transactions,
     intakeBlocked: Boolean(await lstatOrNull(path.join(ctx.collection.intakeStateDir, '.intake-lock'))),
-    journalPending,
+    journalPending, blockers: collectionBlockers,
     limit: 'Metadata discovery only. Incomplete inventory does not mark omitted units handled; narrow selection or raise the bounded limit.' };
 }

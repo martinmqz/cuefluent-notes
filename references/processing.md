@@ -23,6 +23,12 @@ in one claim. Claims cover logical units, so a newer revision cannot bypass an
 older claim. They never expire or get stolen. Locks are held only during helper
 calls; no lock spans agent synthesis or a user approval wait.
 
+A changed physical storage identity does not release an existing claim at the
+same configured collection paths. Inventory keeps its inputs blocked and reports
+`PROCESSING_BINDING_CHANGED` on the operation. All new preparation in the collection refuses until that
+conflict is resolved; matching path names or matching draft bytes do not authorize
+adopting replacement storage. Preserve the claim and proposal for inspection.
+
 New batches default to **five revisions and 64 KiB** of serialized packet content.
 An explicit `budget` can raise these limits up to 20 revisions and 4 MiB. The
 helper measures actual UTF-8 packet bytes before creating a claim, with rendered

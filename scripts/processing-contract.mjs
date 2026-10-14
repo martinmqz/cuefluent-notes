@@ -9,6 +9,12 @@ export const transactionPath = id => `transactions/${nativeId(id)}.json`;
 export const operationPath = id => `processed/operations/${nativeId(id)}.json`;
 // Public read-model version; independent of persisted claim/capture schemas.
 export const PROCESSING_INTERFACE_VERSION = 1;
+/** Discovery scope only. Matching configured paths never establishes physical
+ * continuity or grants authority to resume a claim with changed identities. */
+export function sameProcessingPlacement(left, right) {
+  return left?.collectionId === right?.collectionId && left?.rawDir === right?.rawDir &&
+    left?.intakeStateDir === right?.intakeStateDir && canonicalJSON(left?.notes) === canonicalJSON(right?.notes);
+}
 export function inspectionProgress(claim) {
   const totalPages = claim.packet.pages.length;
   const embeddedCaptureBytes = claim.packet.captureBytes.reduce((sum, bytes) => sum + bytes, 0);

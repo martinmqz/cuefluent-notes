@@ -6,7 +6,7 @@ import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { unitKey, assertNoPrune, readLineageRecord, dispositionPath, validateProcessingDisposition, tombstonePath, assertCaptureRetained } from './capture-retention.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
 import { withProcessingState, readProcessingState, processingSnapshot, processingJSON, writeProcessingJSON, removeProcessingJSON, processingNames } from './processing-state.mjs';
-import { claimPath, proposalPath, transactionPath, operationPath, associationPath, validateClaim, validateAssociation, operationContext, inspectionProgress, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
+import { claimPath, proposalPath, transactionPath, operationPath, associationPath, validateClaim, validateAssociation, operationContext, inspectionProgress, sameProcessingPlacement, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { renderProcessingPacket, packetManifest, validatePageIndex, PROCESSING_PAGE_BYTES, PROCESSING_PACKET_BYTES } from './processing-packet.mjs';
 import { processingPageLayout, processingPagePaths, readProcessingExtent } from './processing-page.mjs';
@@ -105,7 +105,7 @@ export function processingBudget(value = DEFAULT_PROCESSING_BUDGET) {
   return { ...value };
 }
 function budgetError(code, details) { throw Object.assign(new Error(code), { code, details }); }
-export async function activeProcessingClaims(ctx) {
+export async function activeProcessingClaims(ctx, { allowBindingConflict = false } = {}) {
   const claims = [];
   for (const name of await processingNames(ctx, 'claims')) {
     const operationId = nativeId(name.slice('claims/'.length, -5));
@@ -113,8 +113,9 @@ export async function activeProcessingClaims(ctx) {
       const snapshot = await processingSnapshot(ctx, name);
       if (!snapshot.bytes) fail('PROCESSING_INVENTORY_CHANGED');
       const claim = validateClaim(intakeJSON(snapshot));
-      if (claim.bindingHash !== ctx.bindingHash) continue;
-      if (!equal(claim.binding, ctx.binding) || name !== claimPath(claim.operationId)) fail('PROCESSING_BINDING_CHANGED');
+      if (claim.bindingHash !== ctx.bindingHash && !sameProcessingPlacement(claim.binding, ctx.binding)) continue;
+      const bindingChanged = claim.bindingHash !== ctx.bindingHash || !equal(claim.binding, ctx.binding);
+      if (name !== claimPath(claim.operationId) || (bindingChanged && !allowBindingConflict)) fail('PROCESSING_BINDING_CHANGED');
       let published = false;
       if (claim.proposalIntent) {
         checkedInspection(claim);
@@ -124,7 +125,7 @@ export async function activeProcessingClaims(ctx) {
           published = true;
         }
       }
-      claims.push({ claim, published });
+      claims.push({ claim, published, bindingChanged });
     } catch (error) { error.operationId = operationId; throw error; }
   }
   return claims;
@@ -496,11 +497,21 @@ export async function describeProcessingOperation(ctx, operationId, expectedAdmi
   catch (error) { error.operationId = operationId; throw error; }
 }
 async function describeOperation(ctx, operationId, expectedAdmission, collectionBlockers) {
-  const operation = await processingSnapshot(ctx, operationPath(operationId)), tx = await transactionSnapshot(ctx, operationId);
+  const operation = await processingSnapshot(ctx, operationPath(operationId));
+  const transaction = await processingSnapshot(ctx, transactionPath(operationId));
   const saved = await processingSnapshot(ctx, claimPath(operationId));
-  const completed = operation.bytes ? validateOperation(intakeJSON(operation), ctx, operationId) : null;
   const claim = saved.bytes ? validateClaim(intakeJSON(saved)) : null;
-  if (claim && (claim.operationId !== operationId || claim.bindingHash !== ctx.bindingHash || !equal(claim.binding, ctx.binding))) fail('PROCESSING_BINDING_CHANGED');
+  // Status validates retained records in their own namespace; this is never a
+  // storage capability or permission to resume mutation in that namespace.
+  const recorded = claim ?? intakeJSON(operation)?.claim ?? intakeJSON(transaction)?.claim;
+  if (recorded) {
+    validateClaim(recorded);
+    if (recorded.operationId !== operationId || !sameProcessingPlacement(recorded.binding, ctx.binding)) fail('PROCESSING_BINDING_CHANGED');
+  }
+  const bindingChanged = Boolean(recorded && (recorded.bindingHash !== ctx.bindingHash || !equal(recorded.binding, ctx.binding)));
+  const recordedContext = recorded ? { ...ctx, binding: recorded.binding, bindingHash: recorded.bindingHash } : ctx;
+  const tx = { ...transaction, value: transaction.bytes ? validateTransaction(intakeJSON(transaction), recordedContext, operationId) : null };
+  const completed = operation.bytes ? validateOperation(intakeJSON(operation), recordedContext, operationId) : null;
   // A durable workset admission precedes its claim. Its exposed operation ID
   // alone cannot prove that a later ordinary operation resumed that admission.
   if (expectedAdmission) for (const candidate of [claim, completed?.claim, tx.value?.claim].filter(Boolean)) {
@@ -520,7 +531,7 @@ async function describeOperation(ctx, operationId, expectedAdmission, collection
     }
   }
   const inspection = basis ? inspectionProgress(basis) : null;
-  let conflict = claim && claim.policyHash !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : null;
+  let conflict = bindingChanged ? 'PROCESSING_BINDING_CHANGED' : claim && claim.policyHash !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : null;
   const blockers = [];
   if (claim && !completed && !tx.hash) {
     if (!conflict) {
@@ -533,10 +544,11 @@ async function describeOperation(ctx, operationId, expectedAdmission, collection
     }
     blockers.push(...(collectionBlockers ?? await processingCollectionBlockers(ctx)));
   }
-  const state = completed ? 'completed' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
+  const state = bindingChanged ? 'conflicted' : completed ? 'completed' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
     : claim?.proposalIntent ? 'draft-staging' : inspection?.state ?? 'missing';
   const recoveryRequired = Boolean(tx.hash || (completed && saved.hash));
-  const nextAction = recoveryRequired ? { command: 'processing-recover' }
+  const nextAction = bindingChanged ? { command: null, reason: 'resolve-conflict' }
+    : recoveryRequired ? { command: 'processing-recover' }
     : completed ? null
     : conflict ? { command: null, reason: 'resolve-conflict' }
     : blockers.length ? { command: null, reason: 'inspect-collection-recovery' }

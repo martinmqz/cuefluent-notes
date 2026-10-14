@@ -504,8 +504,14 @@ published draft or approval. `nextAction.command` names a CLI operation when one
 applies; null with `reason` means review or conflict resolution requires judgment.
 These hints do not supply missing request fields, approval, or refreshed hashes.
 `freshness: "metadata-only"` is not a declaration that every input/output is current.
-Both views check every claimed input's head/tombstone/association metadata regardless
-of inventory pagination. Collection-wide transaction, writer, intake and prune
+Claims at unchanged configured collection paths with changed physical identities
+remain visible as `conflicted` with `PROCESSING_BINDING_CHANGED`. Their revisions
+are `blocked-by-claim`; `PROCESSING_BINDING_CHANGED` also blocks all new preparation
+in the collection, including unrelated pending revisions. This metadata view does
+not establish storage continuity or authorize a save under the changed binding.
+For unchanged bindings, both views check every claimed input's
+head/tombstone/association metadata regardless of inventory pagination. A binding
+conflict stops those input checks. Collection-wide transaction, writer, intake and prune
 blockers suppress actionable hints. A fully inspected packet asks for a proposal
 **or a disposition**; inspection alone implies no new knowledge. `selection`,
 `claimHash`, and exact public `inputs` are top-level fields. Inventory omits the
