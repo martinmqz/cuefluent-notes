@@ -41,7 +41,7 @@ inspected omitted inline/base64 data or unavailable images.
 | Supported fact       | Include with a recoverable locator and the source's scope                                 |
 | Attributed statement | Retain attribution, such as a team's recorded decision or a user's report                 |
 | Inference            | Omit from ordinary factual entries unless useful, clearly labeled, and accepted in review |
-| Unknown              | State the gap; do not supply a plausible missing fact                                     |
+| Unknown              | Do not invent missing facts; state gaps that materially limit a claim or conclusion       |
 | Conflicting evidence | Surface the disagreement; resolve it or preserve the uncertainty                          |
 
 Code can establish implementation behavior. Tests demonstrate behavior within
@@ -78,12 +78,17 @@ what was decided, and what was proposed. Neither a report nor an action item
 establishes that the action was completed. Do not invent attendees, owners,
 deadlines, missing activity, or a completion date.
 
-For verification, state the behavior exercised, the conditions, the result, and
-what remains unverified. A passing count alone cannot explain what is known.
+When verification is the note's subject or supports a claim about behavior,
+state the behavior exercised, the conditions, the result, and relevant limits.
+A passing count alone cannot explain what is known.
 For example, a single fake-transport test can establish how one response was
 handled in that test; it cannot establish live service behavior or production
 deployment. Keep subject identifiers and enough explanation to understand the
 finding visible; retain its source locators with hidden provenance.
+Do not append generic testing or deployment caveats to unrelated policy,
+decision or meeting facts. Apply the
+[claim-specific content boundary](authoring.md#durable-content-and-provenance)
+while preserving attribution and qualifications that change a claim's meaning.
 
 Before delivery, compare facts and scope sentence by sentence with the evidence.
 Check identifiers, conditions, exceptions, chronology, status, rationale, and

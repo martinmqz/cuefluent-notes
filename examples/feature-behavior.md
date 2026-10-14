@@ -28,6 +28,4 @@ This fictional API documents the following rate-limit behavior:
 | Status | `429` |
 | Retry header | `Retry-After: 30` |
 
-The source gives no rationale for the request threshold or retry interval.
-
-<!-- source-review: Fictional source PAY-102, ../references/evidence.md#pay-102--rate-limit-record. -->
+<!-- source-review: Fictional source PAY-102, ../references/evidence.md#pay-102--rate-limit-record. The source gives no rationale for the threshold or retry interval. -->

@@ -23,13 +23,13 @@
       "query": "throttle",
       "file": "feature-behavior.md",
       "heading": "Request rate limit",
-      "expected": "Exceeding 60 requests per minute per client returns 429 with Retry-After: 30; the threshold rationale is unknown."
+      "expected": "Exceeding 60 requests per minute per client returns 429 with Retry-After: 30."
     },
     {
       "query": "manual retry",
       "file": "decision.md",
       "heading": "Retry decision",
-      "expected": "The September 1, 2026 decision keeps retries after 409 user-initiated during operator inspection; implementation and deployment are unconfirmed."
+      "expected": "On September 1, 2026, the fictional Atlas checkout team decided to keep retries after 409 user-initiated during operator inspection, to avoid repeated requests."
     },
     {
       "query": "Lantern",
