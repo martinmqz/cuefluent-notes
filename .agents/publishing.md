@@ -129,11 +129,64 @@ using synthetic inputs. CI runs on native Windows, Linux and macOS and compares
 release archive checksums. The [Checks workflow](https://github.com/martinmqz/cuefluent-notes/blob/main/.github/workflows/ci.yml)
 defines the current jobs.
 
-The `client-smoke` job skips tag refs. It checks disposable client registration
-using separately built packages and, when present, the committed marketplace;
-it does not validate the exact draft-release ZIPs. It covers neither remote
-authentication nor maintainer approval of a bot-created PR's Checks run. Release
-assets still need their own [inspection](#build-and-inspect-a-release).
+Source changes, release tags and manual runs use the full source test/build
+matrix. Scope classification uses a shallow checkout and, for eligible events,
+the selected base tree. The workflow's independent diff boundary uses only Node
+built-ins and Git; it never imports checked-out selector code or dependencies.
+Any source, helper, dependency, gate or workflow change forces full checks before
+the repository selector can run. The workflow itself remains review-controlled
+CI policy. Full source runs and tag/manual runs do not install scope
+dependencies or fetch full history. Only package candidates load verification
+dependencies and fetch the selected base/HEAD ancestry and release tag.
+For PRs into `main` and pushes to `main`, CI can use a shorter path when
+the complete Git diff changes only the canonical marketplace publication paths.
+It verifies a newer, stable published release, a successful **Prepare release**
+run for its exact tag commit in the base's history, the published snapshot checksum,
+and exact agreement between that snapshot and the committed packages and catalogs.
+Published checksums must also match `SHA256SUMS` inside the retained Linux artifact
+from that exact successful run. The artifact's run identity, size and GitHub SHA-256
+digest are verified before reading its bounded checksum entry in memory. This
+binds release bytes to tested build output even when a release's assets are mutable.
+Missing, expired, ambiguous or mismatched run artifacts refuse the shorter path;
+release assets and their own checksums cannot substitute for that evidence. See
+the [Actions artifact API](https://docs.github.com/en/rest/actions/artifacts).
+Release asset metadata must fit the download bounds before either body is fetched;
+asset-ID downloads also enforce byte limits and must match the advertised sizes,
+using GitHub’s [release asset API](https://docs.github.com/en/rest/releases/assets#get-a-release-asset).
+Missing provenance or a mismatch fails CI; a package's own inventory is not enough.
+Source, dependency, workflow and other file changes always use full checks. A
+known base outside the current history also selects full checks. For an otherwise
+eligible package-only diff, same-version edits and downgrades are refused as
+release-policy violations; publish a newer version rather than changing immutable
+published content.
+
+The repository-only `scripts/marketplace-ci.mjs` commands keep classification and
+verification separate: `classify` emits `full` or `candidate` for local diagnostics;
+CI uses its independent workflow boundary instead. `select --fetch`
+fetches the selected history/tag and emits `full` or verified `packages`. Plain
+`select` expects those Git objects to be present already. `gate` checks `CI_NEEDS`
+against the selected mode and uses `GITHUB_REF` for the tag-only client-check
+exception. A candidate result never authorizes the shorter path on its own.
+
+The shorter path retains guidance checks and isolated macOS/Windows client
+registration checks against the committed marketplace. It skips source-installer
+rebuilds and the full source suites. Each required `test (...)` job runs focused
+committed-package tests on its named native platform, under a shorter timeout.
+The required `reproducibility` check requires successful package provenance,
+those native package tests and client registration checks. Its result gate has no
+npm dependencies. On the full path it still compares all native build artifacts;
+only tag runs may omit client registration, as defined below. Required check names
+and protected-main settings stay the same. A failed or cancelled selection cannot
+satisfy the required check. Published assets are neither rebuilt nor replaced by
+the shorter path.
+
+The `client-smoke` job skips tag refs. On the full path it checks disposable
+client registration using separately built packages and, when present, the
+committed marketplace.
+On the package-only path it checks only that committed marketplace after release
+verification. Neither path installs the exact draft-release ZIPs. It covers
+neither remote authentication nor maintainer approval of a bot-created PR's
+Checks run. Release assets still need their own [inspection](#build-and-inspect-a-release).
 Native Windows CI exercises local NTFS; it does not establish ReFS, network-share
 or cloud-sync durability. Private-storage support still accepts local NTFS/ReFS
 under the product's permission and locality checks.
@@ -172,9 +225,10 @@ not by a matching client version string.
    **Checks** run in an approval-required state because the PR uses `GITHUB_TOKEN`.
    After reviewing the generated changes, a maintainer with write access selects
    **Approve workflows to run** in the PR. Publication does not dispatch a second run.
-6. Verify that PR's current commit's checks and merge it through the
-   normal protected-main process. Only then are the packages available through
-   the [installation commands](../README.md#from-the-marketplace). There is no
+6. Verify that PR's current commit's checks (including the published-package
+   verification and client registration checks described above) and merge it
+   through the normal protected-main process. Only then are the packages
+   available through the [installation commands](../README.md#from-the-marketplace). There is no
    automatic merge or direct main push.
 
 Both release paths require the source tag to belong to `main` history. Only

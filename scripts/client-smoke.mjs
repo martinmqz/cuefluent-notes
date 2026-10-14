@@ -10,6 +10,10 @@ import { spawnCommand } from './command.mjs';
 import { smokeEnvironment } from './smoke-environment.mjs';
 import { MARKETPLACE_PATHS } from './marketplace-layout.mjs';
 
+const checkMode = process.env.CI_CHECK_MODE ?? 'full';
+assert.ok(['full', 'packages'].includes(checkMode), 'Unknown client smoke scope.');
+const marketplaceOnly = checkMode === 'packages';
+
 const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-clients-')));
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 async function profile(directory, pinnedPath) {
@@ -32,6 +36,7 @@ try {
   assert.ok(marketplacePaths.length === 0 || marketplacePaths.length === MARKETPLACE_PATHS.length,
     'A published marketplace must contain every managed path.');
   const hasMarketplace = marketplacePaths.length !== 0;
+  assert.ok(!marketplaceOnly || hasMarketplace, 'Package-only smoke requires the committed marketplace.');
   let env = await profile(root);
   const home = env.HOME;
   const tools = path.join(root, 'clients');
@@ -44,22 +49,24 @@ try {
   };
   await fs.cp(path.join(source, 'scripts/client-fixture'), tools, { recursive: true });
   run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: tools });
-  // Build in a disposable checkout, never mutate the developer's dependencies.
-  for (const name of [...SOURCE_CHECKOUT_INPUTS, '.gitignore', '.gitattributes']) {
-    await fs.cp(path.join(source, name), path.join(checkout, name), {
-      recursive: true, filter: file => path.basename(file) !== 'node_modules',
-    });
+  if (!marketplaceOnly) {
+    // Build in a disposable checkout, never mutate the developer's dependencies.
+    for (const name of [...SOURCE_CHECKOUT_INPUTS, '.gitignore', '.gitattributes']) {
+      await fs.cp(path.join(source, name), path.join(checkout, name), {
+        recursive: true, filter: file => path.basename(file) !== 'node_modules',
+      });
+    }
+    // Include released catalogs and packages when this checkout publishes them.
+    for (const relative of marketplacePaths) {
+      await fs.cp(path.join(source, relative), path.join(checkout, relative), { recursive: true });
+    }
+    const git = args => run('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: checkout });
+    git(['init', '--initial-branch=main']);
+    git(['add', '.']);
+    if (hasMarketplace) git(['add', '-f', '--', ...marketplacePaths]);
+    git(['-c', 'user.name=Client Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '-m', 'test: seed complete source checkout']);
+    run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: checkout });
   }
-  // Include released catalogs and packages when this checkout publishes them.
-  for (const relative of marketplacePaths) {
-    await fs.cp(path.join(source, relative), path.join(checkout, relative), { recursive: true });
-  }
-  const git = args => run('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: checkout });
-  git(['init', '--initial-branch=main']);
-  git(['add', '.']);
-  if (hasMarketplace) git(['add', '-f', '--', ...marketplacePaths]);
-  git(['-c', 'user.name=Client Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '-m', 'test: seed complete source checkout']);
-  run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: checkout });
   // Claude's npm entry is a placeholder until postinstall copies this locked
   // optional binary. Select that binary directly without executing postinstall.
   const libc = process.platform === 'linux' && !process.report.getReport().header.glibcVersionRuntime ? '-musl' : '';
@@ -74,13 +81,6 @@ try {
       return client === 'codex' ? value.installed : value;
     };
     assert.deepEqual(list(), [], 'Disposable client profile must start empty.');
-    // Use the public CLI and default runner, including bare-command pinning.
-    const args = [path.join(checkout, 'scripts/install.mjs'), '--client', client];
-    run(process.execPath, args, { cwd: checkout });
-    const second = run(process.execPath, args, { cwd: checkout });
-    assert.match(second, /Previous package preserved at/, 'Repeat installation must retain the previous package.');
-    assert.equal(list().length, 1, 'Repeat installation must keep one registration.');
-    const destination = path.join(home, client === 'codex' ? 'plugins' : '.claude/skills', 'cuefluent-notes');
     const verifyHelpers = async plugin => {
       const skill = path.join(plugin, 'skills/cuefluent-notes');
       const checker = JSON.parse(run(process.execPath, [path.join(skill, 'scripts/check-notes.mjs'), path.join(skill, 'examples/decision.md')]));
@@ -90,18 +90,27 @@ try {
       assert.equal(status.runtime.hookRegistration, 'packaged');
       await assert.rejects(fs.stat(env.CUEFLUENT_WORKFLOW_CONFIG), { code: 'ENOENT' });
     };
-    const sourceEntry = list()[0];
-    assert.equal(client === 'codex' ? sourceEntry.pluginId : sourceEntry.id,
-      `cuefluent-notes@${client === 'codex' ? 'personal' : 'skills-dir'}`);
-    await verifyHelpers(destination);
-    if (client === 'claude') {
-      run(cli, ['plugin', 'validate', '--strict', '--json', destination]);
-      const release = path.join(root, 'built-marketplace');
-      run(process.execPath, [path.join(checkout, 'scripts/release.mjs'), '--out', release], { cwd: checkout });
-      run(cli, ['plugin', 'validate', '--strict', '--json', release]);
+    if (!marketplaceOnly) {
+      // Use the public CLI and default runner, including bare-command pinning.
+      const args = [path.join(checkout, 'scripts/install.mjs'), '--client', client];
+      run(process.execPath, args, { cwd: checkout });
+      const second = run(process.execPath, args, { cwd: checkout });
+      assert.match(second, /Previous package preserved at/, 'Repeat installation must retain the previous package.');
+      assert.equal(list().length, 1, 'Repeat installation must keep one registration.');
+      const destination = path.join(home, client === 'codex' ? 'plugins' : '.claude/skills', 'cuefluent-notes');
+      const sourceEntry = list()[0];
+      assert.equal(client === 'codex' ? sourceEntry.pluginId : sourceEntry.id,
+        `cuefluent-notes@${client === 'codex' ? 'personal' : 'skills-dir'}`);
+      await verifyHelpers(destination);
+      if (client === 'claude') {
+        run(cli, ['plugin', 'validate', '--strict', '--json', destination]);
+        const release = path.join(root, 'built-marketplace');
+        run(process.execPath, [path.join(checkout, 'scripts/release.mjs'), '--out', release], { cwd: checkout });
+        run(cli, ['plugin', 'validate', '--strict', '--json', release]);
+      }
+      console.log(JSON.stringify({ platform: process.platform, client, version, freshInstall: true,
+        repeatUpdate: true, registrations: 1, capture: 'unconfigured', liveModel: false }));
     }
-    console.log(JSON.stringify({ platform: process.platform, client, version, freshInstall: true,
-      repeatUpdate: true, registrations: 1, capture: 'unconfigured', liveModel: false }));
 
     if (!hasMarketplace) {
       console.log(JSON.stringify({ platform: process.platform, client,
@@ -118,6 +127,10 @@ try {
       await fs.cp(path.join(source, relative), path.join(marketplace, relative), { recursive: true });
     }
     const release = JSON.parse(await fs.readFile(path.join(marketplace, 'release.json'), 'utf8'));
+    if (client === 'claude') {
+      run(cli, ['plugin', 'validate', '--strict', '--json', marketplace]);
+      run(cli, ['plugin', 'validate', '--strict', '--json', path.join(marketplace, 'claude/cuefluent-notes')]);
+    }
     const verifyMarketplaceInstall = async () => {
       const installed = list();
       assert.equal(installed.length, 1, 'Marketplace registration must identify exactly one plugin.');

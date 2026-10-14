@@ -11,6 +11,64 @@ permissions:
   contents: read
 
 jobs:
+  scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      mode: ${{ steps.select.outputs.mode || steps.classify.outputs.mode }}
+    env:
+      CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      CI_BASE_REF: ${{ github.event.pull_request.base.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          # The read-only checkout token also fetches selected refs in private repos.
+          persist-credentials: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Classify the complete diff without build dependencies
+        id: classify
+        # This boundary must not import PR-controlled scripts or dependencies:
+        # a selector, gate, lockfile or workflow edit must take full source CI.
+        # Keep the generated-path allowlist aligned with marketplace-layout.mjs.
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          const env = process.env;
+          let mode = 'full';
+          const eligible = ((env.GITHUB_EVENT_NAME === 'pull_request' && env.CI_BASE_REF === 'main') ||
+            (env.GITHUB_EVENT_NAME === 'push' && env.GITHUB_REF === 'refs/heads/main')) &&
+            /^[a-f0-9]{40}$/.test(env.CI_BASE_SHA ?? '') && !/^0+$/.test(env.CI_BASE_SHA);
+          if (eligible) {
+            const git = args => {
+              const result = spawnSync('git', args, { encoding: 'utf8', timeout: 180000, maxBuffer: 16 * 1024 * 1024 });
+              if (result.error || result.status !== 0) throw new Error('Cannot verify the complete CI diff.');
+              return result.stdout;
+            };
+            git(['fetch', '--no-tags', '--depth=1', 'origin', env.CI_BASE_SHA]);
+            const names = git(['diff', '--no-renames', '--name-only', '-z', env.CI_BASE_SHA, 'HEAD', '--']).split('\0').filter(Boolean);
+            const generated = name => ['release.json', '.agents/plugins/marketplace.json', '.claude-plugin/marketplace.json'].includes(name) ||
+              name.startsWith('plugins/cuefluent-notes/') || name.startsWith('claude/cuefluent-notes/');
+            if (names.length && names.every(generated)) mode = 'candidate';
+          }
+          appendFileSync(env.GITHUB_OUTPUT, `mode=${mode}\n`);
+          console.log(mode === 'candidate' ? 'Package-only candidate; release verification is required.' : 'Full source checks required.');
+          NODE
+      - run: npm ci --ignore-scripts
+        if: steps.classify.outputs.mode == 'candidate'
+      - name: Verify exact published packages and release ancestry
+        id: select
+        if: steps.classify.outputs.mode == 'candidate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/marketplace-ci.mjs select --fetch
   guidance:
     # Maintenance tooling cannot suppress product checks or run in a job that
     # produces release assets. A tag uses the already-reviewed source guidance.
@@ -28,14 +86,18 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check:guidance
   test:
+    needs: scope
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2025]
+    # Required contexts always test on their named platform. The package path
+    # checks committed files there without repeating the full source suite.
     runs-on: ${{ matrix.os }}
     # Platform-specific budgets cover the full native suite and artifact build.
     # Production worker/probe deadlines are independent of these job limits.
-    timeout-minutes: ${{ matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
+    timeout-minutes: ${{ needs.scope.outputs.mode == 'packages' && 10 || matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -47,23 +109,26 @@ jobs:
       - name: Record native runtime
         run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release(),parallelism:require('os').availableParallelism()})"
       - run: npm ci --ignore-scripts
+      - name: Test committed marketplace packages on the native platform
+        if: needs.scope.outputs.mode == 'packages'
+        run: node --test scripts/published-marketplace.test.mjs
       - name: Verify Windows privacy probe before the full suite
-        if: runner.os == 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
         timeout-minutes: 2
         run: node scripts/windows-probe-smoke.mjs
       - name: Verify private storage under a real standard-user token
-        if: runner.os == 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
         shell: powershell
         run: ./scripts/test-windows-standard-user.ps1
       - name: Run tests
-        if: runner.os != 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os != 'Windows'
         run: npm test
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
       # Raise Node's default on small runners without lowering it on larger ones.
       # Files are isolated; tests inside a file remain sequential for fault injection.
       - name: Run Windows tests
-        if: runner.os == 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
         shell: pwsh
         run: |
           $testConcurrency = node -p "Math.max(2, require('os').availableParallelism() - 1)"
@@ -71,14 +136,18 @@ jobs:
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
       - run: npm run check:examples
+        if: needs.scope.outputs.mode == 'full'
       - run: npm run release:build
+        if: needs.scope.outputs.mode == 'full'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: needs.scope.outputs.mode == 'full'
         with:
           name: release-preview-${{ matrix.os }}
           path: dist/release/artifacts/
           if-no-files-found: error
           retention-days: 7
   client-smoke:
+    needs: scope
     # Third-party CLIs never share an artifact-producing job. Release preparation
     # uses locked product checks without depending on registry/client availability.
     if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -97,16 +166,35 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - name: Verify locked real clients in disposable profiles
+        env:
+          CI_CHECK_MODE: ${{ needs.scope.outputs.mode }}
         run: node scripts/client-smoke.mjs
   reproducibility:
-    needs: test
+    # Required by branch protection. Selection/verification failures must not
+    # turn omitted native suites into a passing package-update PR.
+    if: ${{ always() }}
+    needs: [scope, test, client-smoke]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Require successful verification for the selected CI path
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/marketplace-ci.mjs gate
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: needs.scope.outputs.mode == 'full'
         with:
           pattern: release-preview-*
           path: artifacts
       - name: Verify and compare Linux, macOS and Windows release artifacts
+        if: needs.scope.outputs.mode == 'full'
         run: |
           (cd artifacts/release-preview-ubuntu-24.04 && sha256sum --check SHA256SUMS)
           (cd artifacts/release-preview-macos-14 && sha256sum --check SHA256SUMS)

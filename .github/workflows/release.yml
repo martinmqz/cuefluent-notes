@@ -13,6 +13,9 @@ concurrency:
 
 jobs:
   checks:
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/ci.yml
   prepare:
     needs: checks
