@@ -367,8 +367,9 @@ export async function openProcessingController(context, dependencies = {}) {
           return publicState(current);
         }
         if (current.hash !== args.expectedChatHash) fail('PROCESSING_CHAT_STATE_CHANGED');
-        if (client === 'claude') assertClaudeHostAuthentication(env);
         if (current.state === 'awaiting-review') {
+          // Acknowledgement mutates the registry, even before a later dispatch.
+          if (client === 'claude') assertClaudeHostAuthentication(env);
           const priorReview = current.registry.runs.at(-1);
           try { current = await state.acknowledgeReview({ expectedHash: current.hash, generation: current.generation,
             requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId }); }
@@ -396,6 +397,8 @@ export async function openProcessingController(context, dependencies = {}) {
         }
         const competing = (await state.collectionActivity()).filter(item => !item.own);
         if (competing.length) throw Object.assign(new Error('PROCESSING_COLLECTION_BUSY'), { code: 'PROCESSING_COLLECTION_BUSY', activity: competing });
+        // Read-only no-launch outcomes above do not need a host credential.
+        if (client === 'claude') assertClaudeHostAuthentication(env);
         await ensureTransport();
         if (fresh) {
           const self = await ownProcessIdentity();
