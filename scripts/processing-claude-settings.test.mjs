@@ -17,14 +17,13 @@ for (const content of [null, JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'synt
   test(`missing host auth cannot fall back to ${content === null ? 'native login' : 'profile credentials'}`, async t => {
     const f = await fixture(t, content);
     const env = { ...f.env, CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' };
-    const before = { ...env };
     for (const credential of [undefined, '', '   ']) {
       if (credential === undefined) delete env.ANTHROPIC_AUTH_TOKEN; else env.ANTHROPIC_AUTH_TOKEN = credential;
+      const before = { ...env };
       await assert.rejects(resolveClaudeLaunchSettings(env, { preferHostEnvironment: true }), error =>
         error.code === 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' && error.message === error.code && error.cause === undefined);
+      assert.deepEqual(env, before);
     }
-    delete env.ANTHROPIC_AUTH_TOKEN;
-    assert.deepEqual(env, before);
     if (content === null) assert.deepEqual(await fs.readdir(f.root), []);
     else assert.equal(await fs.readFile(f.file, 'utf8'), content);
   });
@@ -42,7 +41,7 @@ for (const platform of ['linux', 'win32']) test(`inherited host credential keeps
   }
 });
 
-for (const marker of [{ CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' },
+for (const marker of [{ CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1', CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' },
   { CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' }]) {
   test(`host-managed routing never fills missing account fields from user settings: ${Object.keys(marker)[0]}`, async t => {
     const f = await fixture(t, JSON.stringify({ env: { CLAUDE_CODE_USE_FOUNDRY: '1', ANTHROPIC_API_KEY: 'synthetic-profile-key',
@@ -54,7 +53,7 @@ for (const marker of [{ CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' },
   });
 }
 
-for (const name of ['bad=name', 'x'.repeat(257), 'CLAUDECODE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CUEFLUENT_ENGINE_TOKEN']) {
+for (const name of ['bad=name', 'x'.repeat(257), 'CLAUDECODE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CUEFLUENT_ENGINE_TOKEN', 'PATH', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'HTTPS_PROXY', 'ANTHROPIC_BASE_URL']) {
   test(`unusable host credential locator is refused without exposing it: ${name.length > 40 ? 'over limit' : name}`, async t => {
     const f = await fixture(t);
     const env = { ...f.env, [name]: 'synthetic-value', CLAUDE_CODE_HOST_AUTH_ENV_VAR: name };
@@ -328,4 +327,34 @@ test('settings alias replacement during reading is refused', { skip: process.pla
     return realpath(...args);
   });
   await assert.rejects(resolveClaudeLaunchSettings(f.env), { code: 'PROCESSING_CLIENT_SETTINGS_UNAVAILABLE' });
+});
+
+for (const flag of ['1', 'true', 'yes', 'on']) test(`managed host ${flag} requires an explicit credential locator`, async t => {
+  const f = await fixture(t, JSON.stringify({ env: { ANTHROPIC_API_KEY: 'synthetic-profile' } }));
+  for (const locator of [undefined, '']) {
+    const env = { ...f.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: flag, ANTHROPIC_API_KEY: 'synthetic-inherited' };
+    if (locator !== undefined) env.CLAUDE_CODE_HOST_AUTH_ENV_VAR = locator;
+    await assert.rejects(resolveClaudeLaunchSettings(env), { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+  }
+});
+for (const flag of ['0', 'false', 'no', 'off', '']) test(`disabled managed host ${flag} preserves profile projection`, async t => {
+  const f = await fixture(t, JSON.stringify({ env: { ANTHROPIC_API_KEY: 'synthetic-profile' } }));
+  const result = await resolveClaudeLaunchSettings({ ...f.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: flag });
+  assert.equal(result.env.ANTHROPIC_API_KEY, 'synthetic-profile');
+});
+for (const platform of ['linux', 'win32']) test(`host-managed connection defaults preserve account and host overrides on ${platform}`, async t => {
+  const connection = { HTTPS_PROXY: 'https://proxy.example.invalid', NODE_EXTRA_CA_CERTS: 'synthetic-ca.pem', API_TIMEOUT_MS: '1234',
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1000', MAX_THINKING_TOKENS: '500' };
+  const f = await fixture(t, JSON.stringify({ env: { ...connection, HTTP_PROXY: 'https://unused.example.invalid',
+    CLAUDE_CODE_CLIENT_CERT: 'synthetic-other-identity.pem', CLAUDE_CODE_CLIENT_KEY: 'synthetic-other-key.pem',
+    CLAUDE_CODE_USE_FOUNDRY: '1', ANTHROPIC_AUTH_TOKEN: 'synthetic-profile', ANTHROPIC_BASE_URL: 'https://unused.example.invalid',
+    CLAUDE_CODE_USE_ANTHROPIC_AWS: '1' }, apiKeyHelper: 'must-not-run', awsAuthRefresh: 'must-not-run',
+    awsCredentialExport: 'must-not-run', gcpAuthRefresh: 'must-not-run' }));
+  const inheritedProxy = platform === 'win32' ? 'Http_Proxy' : 'http_proxy';
+  const env = { ...f.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1', CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN',
+    ANTHROPIC_AUTH_TOKEN: 'synthetic-host', [inheritedProxy]: 'https://host-proxy.example.invalid' };
+  const before = { ...env };
+  const result = await resolveClaudeLaunchSettings(env, { platform });
+  assert.deepEqual(result.env, { ...env, ...connection });
+  assert.deepEqual(env, before);
 });

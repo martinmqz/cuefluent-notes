@@ -798,3 +798,20 @@ test('a missing unattempted frozen head does not block another valid input', asy
   const stopped = await h.controller.run(await h.request({ worksetId }));
   assert.equal(stopped.reason, 'workset-remainder-unavailable'); assert.equal(h.dispatches.length, 1);
 });
+
+test('missing Claude host auth preserves a finished review and its expected chat hash', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+  h.script = propose(f);
+  const review = await h.controller.run(await h.request());
+  assert.equal(review.state, 'awaiting-review');
+  const inspected = await inspectProcessing(f.capability, f.operationId);
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: inspected.claimHash, outcome: 'skipped' });
+  const before = await h.controller.status(), stored = await registryJSON(f);
+  h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+  await assert.rejects(h.controller.run(await h.request()), { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+  assert.deepEqual(await h.controller.status(), before);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal(h.dispatches.length, 1);
+  // Read-only review remains usable without launch credentials.
+  assert.equal((await h.controller.reviewContext({ expectedChatHash: review.chatHash, requestId: review.requestId })).operationId, f.operationId);
+});

@@ -202,10 +202,10 @@ test('missing Desktop host credential fails before a CLI native reservation and 
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 }));
 
-test('MCP rejects an incomplete host credential handoff instead of accepting a model run', async t => withLaunchFixture(t, async f => {
+for (const locator of [undefined, 'ANTHROPIC_AUTH_TOKEN']) test(`MCP rejects incomplete host handoff before workset/control mutation: ${locator ?? 'no locator'}`, async t => withLaunchFixture(t, async f => {
   const original = await providerSettings(f);
   const rpc = processingRpc(f, { env: { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
-    CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' } });
+    ...(locator ? { CLAUDE_CODE_HOST_AUTH_ENV_VAR: locator } : {}), CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' } });
   f.defer(() => rpc.close());
   await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
     protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
@@ -214,6 +214,9 @@ test('MCP rejects an incomplete host credential handoff instead of accepting a m
     _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
   assert.equal(response.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
   assert.equal(response.result, undefined);
+  for (const relative of ['processed/shortcut-controls', 'processed/shortcuts', 'processed/worksets']) {
+    assert.equal(existsSync(path.join(f.collection.notes.writerStateDir, relative)), false);
+  }
   await rpc.close();
   const status = await executeWorkflow('processing-chat-status', { collectionId: f.collection.id,
     expectedConfigHash: f.options.expectedConfigHash, args: { client: 'claude' } }, { configPath: f.options.configPath });
@@ -233,6 +236,8 @@ test('a complete MCP host handoff launches with its credential and no profile pr
   for (const [key, value] of Object.entries(source)) assert.equal(options.env[key], value);
   assert.equal(Object.hasOwn(options.env, 'ANTHROPIC_FOUNDRY_API_KEY'), false);
   assert.equal(Object.hasOwn(options.env, 'ANTHROPIC_FOUNDRY_RESOURCE'), false);
+  assert.deepEqual(JSON.parse(args[args.indexOf('--settings') + 1]), { disableAllHooks: true,
+    model: original.settings.model, modelOverrides: original.settings.modelOverrides, availableModels: original.settings.availableModels });
   assert(!JSON.stringify(args).includes('synthetic-host-token'));
   assert((await fs.readFile(original.file)).equals(original.bytes));
 }));

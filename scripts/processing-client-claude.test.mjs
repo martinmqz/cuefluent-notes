@@ -271,3 +271,23 @@ test('a successful kill request without child exit cannot prove native cancellat
   });
   await assert.rejects(h.client.run(request(undefined, { signal: abort.signal })), { code: 'PROCESSING_CLIENT_INTERRUPTED', outcome: 'unknown' });
 });
+
+test('Claude child auth checks the same environment rewrites as native launch', async () => {
+  const h = claudeHarness(success);
+  const options = { executable: 'claude', cwd, engine: { command: process.execPath, args: [],
+    env: { CUEFLUENT_ENGINE_TOKEN: 'synthetic-engine-token' } }, allowedTools: TOOLS, spawn: h.spawn };
+  for (const locator of ['CLAUDECODE', 'CUEFLUENT_ENGINE_TOKEN', 'PATH', 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST']) {
+    const env = { [locator]: 'synthetic-not-a-credential', CLAUDE_CODE_HOST_AUTH_ENV_VAR: locator };
+    const before = { ...env };
+    assert.throws(() => createClaudeProcessingClient(options, { env }), { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+    assert.deepEqual(env, before);
+  }
+  assert.equal(h.calls.length, 0);
+  const env = { CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'SYNTHETIC_TOKEN', SYNTHETIC_TOKEN: 'synthetic-host-token',
+    CLAUDECODE: '1', CUEFLUENT_ENGINE_OLD: 'synthetic-stale-authority' };
+  const before = { ...env };
+  await createClaudeProcessingClient(options, { env }).run(request());
+  assert.deepEqual(h.calls[0].options.env, { CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'SYNTHETIC_TOKEN',
+    SYNTHETIC_TOKEN: 'synthetic-host-token', CUEFLUENT_ENGINE_TOKEN: 'synthetic-engine-token' });
+  assert.deepEqual(env, before);
+});

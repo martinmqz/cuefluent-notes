@@ -38,6 +38,23 @@ const ENVIRONMENT = new Set([
   'CLAUDE_CODE_CLIENT_CERT', 'CLAUDE_CODE_CLIENT_KEY', 'CLAUDE_CODE_CLIENT_KEY_PASSPHRASE',
   'CLAUDE_CODE_PROXY_RESOLVES_HOSTS'
 ]);
+// These fields affect connection/tuning without selecting an authentication
+// identity. Client certificates and provider/model routing remain host-owned.
+const HOST_PROFILE_ENVIRONMENT = new Set([
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'NODE_EXTRA_CA_CERTS',
+  'API_TIMEOUT_MS', 'CLAUDE_CODE_PROXY_RESOLVES_HOSTS',
+  'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'MAX_THINKING_TOKENS', 'CLAUDE_CODE_EFFORT_LEVEL'
+]);
+const CREDENTIAL_ENVIRONMENT = new Set([
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_FOUNDRY_API_KEY', 'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'AWS_BEARER_TOKEN_BEDROCK'
+]);
+const HOST_CONTROL_ENVIRONMENT = new Set([
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+  'CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USERPROFILE', 'NODE_OPTIONS', 'CLAUDE_CODE_SESSION_ID'
+]);
 // These are known provider selectors, not arbitrary feature toggles sharing a
 // CLAUDE_CODE_USE_ prefix. Their provider configuration is not restored here.
 const UNSUPPORTED_PROVIDERS = new Set(['CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD']);
@@ -54,12 +71,18 @@ function environmentIndex(env, platform) {
   }
   return result;
 }
-export function claudeProfileLocator(env = process.env, platform = process.platform) {
-  const key = environmentIndex(env, platform).get('CLAUDE_CONFIG_DIR')?.[0];
-  const requested = (key === undefined ? undefined : env[key]) ?? path.join(os.homedir(), '.claude');
+function environmentValue(env, index, name) {
+  const key = index.get(name)?.[0];
+  return key === undefined ? undefined : env[key];
+}
+function profileLocator(env, index) {
+  const requested = environmentValue(env, index, 'CLAUDE_CONFIG_DIR') ?? path.join(os.homedir(), '.claude');
   try { string(requested, 4096); if (!path.isAbsolute(requested)) throw new Error(); }
   catch { fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE'); }
   return requested;
+}
+export function claudeProfileLocator(env = process.env, platform = process.platform) {
+  return profileLocator(env, environmentIndex(env, platform));
 }
 export async function resolveClaudeProfile(env = process.env) {
   try {
@@ -70,10 +93,41 @@ export async function resolveClaudeProfile(env = process.env) {
   catch { fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE'); }
 }
 export function claudeHostEnvironment(env = process.env, platform = process.platform) {
-  const key = environmentIndex(env, platform).get('CLAUDECODE')?.[0];
+  const hint = environmentValue(env, environmentIndex(env, platform), 'CLAUDECODE');
   // A native nesting hint affects env precedence only. It is never session
   // identity, source attribution or permission to collect/process evidence.
-  return key !== undefined && typeof env[key] === 'string' && env[key].length > 0;
+  return typeof hint === 'string' && hint.length > 0;
+}
+/** Single owner of child-environment rewrites, shared with auth preflight. */
+export function claudeProcessingEnvironment(inherited, engine = {}, platform = process.platform) {
+  const env = { ...inherited };
+  for (const name of Object.keys(env)) {
+    const canonical = platform === 'win32' ? name.toUpperCase() : name;
+    if (canonical === 'CLAUDECODE' || /^CUEFLUENT_ENGINE_/i.test(name)) delete env[name];
+  }
+  return { ...env, ...engine };
+}
+
+/** Environment-only admission check; no settings, state or credential-store I/O. */
+export function assertClaudeHostAuthentication(env = process.env, { platform = process.platform, index = environmentIndex(env, platform) } = {}) {
+  const hostAuthName = environmentValue(env, index, 'CLAUDE_CODE_HOST_AUTH_ENV_VAR');
+  const managedFlag = environmentValue(env, index, 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST');
+  const hostAuthDeclared = hostAuthName !== undefined && hostAuthName !== '';
+  const hostManaged = (typeof managedFlag === 'string' && enabled(managedFlag)) || hostAuthDeclared;
+  if (!hostManaged) return false;
+  if (!hostAuthDeclared || typeof hostAuthName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(hostAuthName)) {
+    fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+  }
+  const canonical = platform === 'win32' ? hostAuthName.toUpperCase() : hostAuthName;
+  // A locator declares which inherited credential to use; known routing and
+  // control fields cannot serve as credentials. Presence does not prove validity.
+  const child = claudeProcessingEnvironment(env, {}, platform);
+  const credential = environmentValue(child, index, canonical);
+  if (HOST_CONTROL_ENVIRONMENT.has(canonical) || (permitted(canonical) && !CREDENTIAL_ENVIRONMENT.has(canonical)) ||
+      UNSUPPORTED_PROVIDERS.has(canonical) || typeof credential !== 'string' || !credential.trim()) {
+    fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+  }
+  return true;
 }
 const value = input => {
   try { return string(input, 32768, { empty: true }); }
@@ -126,29 +180,10 @@ export function validateClaudeRestrictedSettings(settings) {
 export async function resolveClaudeLaunchSettings(env = process.env, { platform = process.platform, expectedProfile, preferHostEnvironment = false } = {}) {
   if (typeof preferHostEnvironment !== 'boolean') fail('PROCESSING_CLIENT_SETTINGS_INVALID');
   const inherited = environmentIndex(env, platform);
-  const inheritedValue = name => {
-    const key = inherited.get(name)?.[0];
-    return key === undefined ? undefined : env[key];
-  };
-  const hostAuthName = inheritedValue('CLAUDE_CODE_HOST_AUTH_ENV_VAR');
-  const hostManaged = (typeof inheritedValue('CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST') === 'string' &&
-    enabled(inheritedValue('CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST'))) || (hostAuthName !== undefined && hostAuthName !== '');
-  // A host may deliberately withhold its credential from MCP/tool children.
-  // A user-profile credential is not a replacement for that host's account.
-  // Check the inherited handoff before reading settings or reserving a run;
-  // never retrieve a missing secret or expose its name/value in diagnostics.
-  if (hostAuthName !== undefined && hostAuthName !== '') {
-    const canonical = platform === 'win32' && typeof hostAuthName === 'string' ? hostAuthName.toUpperCase() : hostAuthName;
-    const credential = inheritedValue(canonical);
-    if (typeof hostAuthName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(hostAuthName) ||
-        canonical === 'CLAUDECODE' || canonical === 'CLAUDE_CODE_HOST_AUTH_ENV_VAR' ||
-        /^CUEFLUENT_ENGINE_/i.test(hostAuthName) || typeof credential !== 'string' || !credential.trim()) {
-      fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
-    }
-  }
+  const hostManaged = assertClaudeHostAuthentication(env, { platform, index: inherited });
   let file, bytes, profile;
   try {
-    const requested = claudeProfileLocator(env, platform);
+    const requested = profileLocator(env, inherited);
     profile = await fs.realpath(requested);
     if (expectedProfile !== undefined && profile !== expectedProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
     const profileBefore = await fs.lstat(profile, { bigint: true });
@@ -183,7 +218,7 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
   // Native settings are JSON. The second bounded parse checks duplicate keys;
   // none of its diagnostics or parsed values are exposed or executed.
   if (parseDocument(text, { schema: 'json', uniqueKeys: true, strict: true }).errors.length) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
-  for (const helper of ['apiKeyHelper', 'awsAuthRefresh', 'awsCredentialExport', 'gcpAuthRefresh']) {
+  for (const helper of hostManaged ? [] : ['apiKeyHelper', 'awsAuthRefresh', 'awsCredentialExport', 'gcpAuthRefresh']) {
     if (source[helper] !== undefined && source[helper] !== null && source[helper] !== '') fail('PROCESSING_CLIENT_SETTINGS_UNSUPPORTED');
   }
   // Preserve the native locator exactly: its presence and spelling affect
@@ -191,13 +226,14 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
   const selected = { ...env };
   const hasHostValue = name => inherited.has(name) || (platform !== 'win32' && /^(HTTP|HTTPS|ALL|NO)_PROXY$/i.test(name) &&
     (inherited.has(name.toLowerCase()) || inherited.has(name.toUpperCase())));
-  // Host-managed routing is a complete environment, not a partial profile.
-  // Filling missing fields could introduce another provider or credential.
-  if (source.env !== undefined && !hostManaged) {
+  // Project only connection/tuning defaults under host-managed authentication.
+  // Missing identity/routing fields must not be filled from another account.
+  if (source.env !== undefined) {
     if (!object(source.env) || Object.keys(source.env).length > 256) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
     const seen = new Set();
     for (const [name, entry] of Object.entries(source.env)) {
       const canonical = platform === 'win32' ? name.toUpperCase() : name;
+      if (hostManaged && !HOST_PROFILE_ENVIRONMENT.has(canonical)) continue;
       if (!permitted(canonical) && !UNSUPPORTED_PROVIDERS.has(canonical)) continue;
       const checked = value(entry);
       if (seen.has(canonical)) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
@@ -208,7 +244,7 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
       if (permitted(canonical)) {
         // Verified native handoff keeps the source host's effective project
         // environment. Bare CLI launches use native user-over-shell precedence.
-        if (preferHostEnvironment && hasHostValue(canonical)) continue;
+        if ((hostManaged || preferHostEnvironment) && hasHostValue(canonical)) continue;
         if (platform === 'win32') for (const old of inherited.get(canonical) ?? []) delete selected[old];
         selected[canonical] = checked;
       }

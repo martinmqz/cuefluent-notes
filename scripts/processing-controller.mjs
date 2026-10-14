@@ -9,7 +9,7 @@ import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
 import { openCodexProcessingClient, codexProcessingProfile } from './processing-client-codex.mjs';
 import { createClaudeProcessingClient } from './processing-client-claude.mjs';
-import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment } from './processing-claude-settings.mjs';
+import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment, assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 import { inspectProcessingWorkset } from './processing-workset.mjs';
 import { inspectProcessing } from './processing.mjs';
 import { processingExecutionCallbacks } from './processing-execution-receipts.mjs';
@@ -367,6 +367,7 @@ export async function openProcessingController(context, dependencies = {}) {
           return publicState(current);
         }
         if (current.hash !== args.expectedChatHash) fail('PROCESSING_CHAT_STATE_CHANGED');
+        if (client === 'claude') assertClaudeHostAuthentication(env);
         if (current.state === 'awaiting-review') {
           const priorReview = current.registry.runs.at(-1);
           try { current = await state.acknowledgeReview({ expectedHash: current.hash, generation: current.generation,

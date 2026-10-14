@@ -1,3 +1,4 @@
+import { assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -281,6 +282,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
     const replay = await replayControl(source); if (replay) return replay;
+    if (client === 'claude') assertClaudeHostAuthentication(env);
     const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, { selection: source.selection,
       requestId, action: mode, argsHash: source.argsHash }));
     controls.set(source, control); if (control.response) return control.response;
