@@ -75,6 +75,13 @@ function processingRpc(f, environment = {}) {
   }));
 }
 
+async function writerSnapshot(f) {
+  const root = f.collection.notes.writerStateDir;
+  const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
+  const files = entries.filter(entry => entry.isFile()).map(entry => path.join(entry.parentPath, entry.name)).sort();
+  return Promise.all(files.map(async file => [path.relative(root, file), await fs.readFile(file)]));
+}
+
 async function admit(rpc, f) {
   const initialized = await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
     protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
@@ -262,13 +269,7 @@ for (const tool of ['process_selected_captures', 'processing_resume']) for (cons
     await original.close();
     const launches = f.nativeCalls.length;
     assert.equal(launches, tool === 'process_selected_captures' ? 1 : 0);
-    const writerSnapshot = async () => {
-      const root = f.collection.notes.writerStateDir;
-      const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
-      const files = entries.filter(entry => entry.isFile()).map(entry => path.join(entry.parentPath, entry.name)).sort();
-      return Promise.all(files.map(async file => [path.relative(root, file), await fs.readFile(file)]));
-    };
-    const before = await writerSnapshot();
+    const before = await writerSnapshot(f);
     assert(before.some(([name]) => name.startsWith(`processed${path.sep}shortcut-controls${path.sep}`)));
     delete env.ANTHROPIC_AUTH_TOKEN;
     const reconnected = processingRpc(f, { env }); f.defer(() => reconnected.close());
@@ -282,9 +283,74 @@ for (const tool of ['process_selected_captures', 'processing_resume']) for (cons
     assert.equal(fresh.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
     await reconnected.close();
     assert.equal(f.nativeCalls.length, launches);
-    assert.deepEqual(await writerSnapshot(), before);
+    assert.deepEqual(await writerSnapshot(f), before);
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   }));
+}
+
+test('MCP no-launch checks return an active job without host credentials or new control writes', async t => {
+  const entered = Promise.withResolvers(); let released = false, finishNative;
+  await withLaunchFixture(t, async f => {
+    const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+      CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' };
+    const rpc = processingRpc(f, { env });
+    f.defer(async () => { released = true; finishNative?.(); await rpc.close(); });
+    await admit(rpc, f); await entered.promise;
+    const before = await writerSnapshot(f);
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    for (const [index, tool] of ['process_selected_captures', 'processing_resume'].entries()) {
+      const response = await rpc.send({ jsonrpc: '2.0', id: index + 2, method: 'tools/call', params: {
+        name: tool, arguments: { collectionId: f.collection.id },
+        _meta: { 'claudecode/toolUseId': `synthetic-active-${index}` } } });
+      assert.equal(response.error, undefined);
+      const result = JSON.parse(response.result.content[0].text);
+      assert.equal(result.status, 'busy'); assert.equal(result.statusDetail, 'already-processing');
+      assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_BUSY']);
+      assert.equal(f.nativeCalls.length, 1);
+      assert.deepEqual(await writerSnapshot(f), before);
+    }
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }, context => { finishNative = () => success(context); entered.resolve(); if (released) finishNative(); });
+});
+
+for (const peer of [false, true]) for (const state of ['busy', 'blocked']) {
+  test(`MCP no-launch checks preserve ${peer ? 'competing' : 'own'} stored ${state} without host credentials`, async t => {
+    const entered = Promise.withResolvers(); let released = false, finishNative;
+    await withLaunchFixture(t, async f => {
+      const owner = await openProcessingController({ ...f.options, client: 'claude' });
+      f.defer(() => owner.close());
+      const active = owner.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null });
+      active.catch(() => {});
+      f.defer(async () => { released = true; finishNative?.(); await active.catch(() => {}); });
+      if (state === 'blocked') await assert.rejects(active, error => error.processingChat?.state === 'blocked');
+      else await entered.promise;
+      const status = await owner.status(); assert.equal(status.state, state);
+      const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' };
+      if (peer) { env.CLAUDE_CONFIG_DIR = path.join(f.root, 'other-profile'); await fs.mkdir(env.CLAUDE_CONFIG_DIR); }
+      const rpc = processingRpc(f, { env }); f.defer(() => rpc.close());
+      await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
+        protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
+      const before = await writerSnapshot(f);
+      for (const [index, tool] of ['process_selected_captures', 'processing_resume'].entries()) {
+        const response = await rpc.send({ jsonrpc: '2.0', id: index + 1, method: 'tools/call', params: {
+          name: tool, arguments: { collectionId: f.collection.id },
+          _meta: { 'claudecode/toolUseId': `synthetic-stored-${index}` } } });
+        assert.equal(response.error, undefined);
+        const result = JSON.parse(response.result.content[0].text);
+        assert.equal(result.status, state);
+        assert.equal(result.statusDetail, state === 'busy' ? 'already-processing' : 'blocked');
+        assert(result.diagnostics.includes(peer ? 'PROCESSING_COLLECTION_BUSY' : 'PROCESSING_CHAT_BUSY'));
+        assert.equal(result.chat.sessionId, status.chat.sessionId);
+        assert.deepEqual(await owner.status(), status);
+        assert.deepEqual(await writerSnapshot(f), before);
+        assert.equal(f.nativeCalls.length, 1);
+      }
+      assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    }, context => {
+      if (state === 'blocked') { context.child.emit('close', 1, null); return; }
+      finishNative = () => success(context); entered.resolve(); if (released) finishNative();
+    });
+  });
 }
 
 test('retargeted native profile alias cannot dispatch in the old processing namespace', { skip: process.platform === 'win32' }, async t => withLaunchFixture(t, async f => {
