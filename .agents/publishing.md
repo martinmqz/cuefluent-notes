@@ -129,11 +129,32 @@ using synthetic inputs. CI runs on native Windows, Linux and macOS and compares
 release archive checksums. The [Checks workflow](https://github.com/martinmqz/cuefluent-notes/blob/main/.github/workflows/ci.yml)
 defines the current jobs.
 
-The `client-smoke` job skips tag refs. It checks disposable client registration
-using separately built packages and, when present, the committed marketplace;
-it does not validate the exact draft-release ZIPs. It covers neither remote
-authentication nor maintainer approval of a bot-created PR's Checks run. Release
-assets still need their own [inspection](#build-and-inspect-a-release).
+Source changes, release tags and manual runs use the full source test/build
+matrix. For PRs into `main` and pushes to `main`, CI can use a shorter path when
+the complete Git diff changes only the canonical marketplace publication paths.
+It verifies a newer, stable published release, a successful **Prepare release**
+run for its exact tag commit in the base's history, the published snapshot checksum,
+and exact agreement between that snapshot and the committed packages and catalogs.
+Missing provenance or a mismatch fails CI; a package's own inventory is not enough.
+Source, dependency, workflow and other file changes always use full checks.
+
+The shorter path retains guidance checks and isolated macOS/Windows client
+registration checks against the committed marketplace. It skips source-installer
+rebuilds and the native source suites. Lightweight Linux jobs preserve the existing
+required `test (...)` check names and report that native suites were not repeated.
+The required `reproducibility` check requires successful package provenance and
+those acknowledgements; on the full path it still compares all native build
+artifacts. Required check names and protected-main settings stay the same. A
+failed or cancelled selection cannot satisfy the required check. Published assets are neither rebuilt nor
+replaced by the shorter path.
+
+The `client-smoke` job skips tag refs. On the full path it checks disposable
+client registration using separately built packages and, when present, the
+committed marketplace.
+On the package-only path it checks only that committed marketplace after release
+verification. Neither path installs the exact draft-release ZIPs. It covers
+neither remote authentication nor maintainer approval of a bot-created PR's
+Checks run. Release assets still need their own [inspection](#build-and-inspect-a-release).
 Native Windows CI exercises local NTFS; it does not establish ReFS, network-share
 or cloud-sync durability. Private-storage support still accepts local NTFS/ReFS
 under the product's permission and locality checks.
@@ -172,9 +193,10 @@ not by a matching client version string.
    **Checks** run in an approval-required state because the PR uses `GITHUB_TOKEN`.
    After reviewing the generated changes, a maintainer with write access selects
    **Approve workflows to run** in the PR. Publication does not dispatch a second run.
-6. Verify that PR's current commit's checks and merge it through the
-   normal protected-main process. Only then are the packages available through
-   the [installation commands](../README.md#from-the-marketplace). There is no
+6. Verify that PR's current commit's checks (including the published-package
+   verification and client registration checks described above) and merge it
+   through the normal protected-main process. Only then are the packages
+   available through the [installation commands](../README.md#from-the-marketplace). There is no
    automatic merge or direct main push.
 
 Both release paths require the source tag to belong to `main` history. Only
