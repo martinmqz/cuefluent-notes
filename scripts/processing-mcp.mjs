@@ -1,4 +1,3 @@
-import { assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +16,7 @@ import { inspectProcessing } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
+import { assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
