@@ -13,6 +13,55 @@ async function fixture(t, content = '{}') {
   return { root, file, env: { CLAUDE_CONFIG_DIR: root, PATH: 'synthetic-native-path' } };
 }
 
+for (const content of [null, JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'synthetic-profile-token' } })]) {
+  test(`missing host auth cannot fall back to ${content === null ? 'native login' : 'profile credentials'}`, async t => {
+    const f = await fixture(t, content);
+    const env = { ...f.env, CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' };
+    const before = { ...env };
+    for (const credential of [undefined, '', '   ']) {
+      if (credential === undefined) delete env.ANTHROPIC_AUTH_TOKEN; else env.ANTHROPIC_AUTH_TOKEN = credential;
+      await assert.rejects(resolveClaudeLaunchSettings(env, { preferHostEnvironment: true }), error =>
+        error.code === 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' && error.message === error.code && error.cause === undefined);
+    }
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    assert.deepEqual(env, before);
+    if (content === null) assert.deepEqual(await fs.readdir(f.root), []);
+    else assert.equal(await fs.readFile(f.file, 'utf8'), content);
+  });
+}
+
+for (const platform of ['linux', 'win32']) test(`inherited host credential keeps its exact value and spelling on ${platform}`, async t => {
+  const f = await fixture(t);
+  const name = platform === 'win32' ? 'synthetic_host_token' : 'SYNTHETIC_HOST_TOKEN';
+  const marker = platform === 'win32' ? 'claude_code_host_auth_env_var' : 'CLAUDE_CODE_HOST_AUTH_ENV_VAR';
+  const env = { ...f.env, [marker]: 'SYNTHETIC_HOST_TOKEN', [name]: 'synthetic-host-token' };
+  assert.deepEqual((await resolveClaudeLaunchSettings(env, { platform })).env, env);
+  if (platform === 'linux') {
+    delete env[name]; env.synthetic_host_token = 'synthetic-wrong-case-token';
+    await assert.rejects(resolveClaudeLaunchSettings(env, { platform }), { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+  }
+});
+
+for (const marker of [{ CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' },
+  { CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' }]) {
+  test(`host-managed routing never fills missing account fields from user settings: ${Object.keys(marker)[0]}`, async t => {
+    const f = await fixture(t, JSON.stringify({ env: { CLAUDE_CODE_USE_FOUNDRY: '1', ANTHROPIC_API_KEY: 'synthetic-profile-key',
+      ANTHROPIC_AUTH_TOKEN: 'synthetic-profile-token', ANTHROPIC_BASE_URL: 'https://profile.example.invalid' } }));
+    const env = { ...f.env, ...marker, CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' };
+    for (const preferHostEnvironment of [false, true]) {
+      assert.deepEqual((await resolveClaudeLaunchSettings(env, { preferHostEnvironment })).env, env);
+    }
+  });
+}
+
+for (const name of ['bad=name', 'x'.repeat(257), 'CLAUDECODE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CUEFLUENT_ENGINE_TOKEN']) {
+  test(`unusable host credential locator is refused without exposing it: ${name.length > 40 ? 'over limit' : name}`, async t => {
+    const f = await fixture(t);
+    const env = { ...f.env, [name]: 'synthetic-value', CLAUDE_CODE_HOST_AUTH_ENV_VAR: name };
+    await assert.rejects(resolveClaudeLaunchSettings(env), { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+  });
+}
+
 test('missing native user settings preserve a copied host environment without writes', async t => {
   const f = await fixture(t, null);
   f.env['ProgramFiles(x86)'] = 'synthetic Windows host field';

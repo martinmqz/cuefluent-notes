@@ -25,7 +25,8 @@ async function withLaunchFixture(t, run, nativeRun = success, { insideClaude = t
     const environment = { CLAUDE_CONFIG_DIR: profile, CLAUDE_CODE_SESSION_ID: f.identity.sessionId,
       CLAUDECODE: '1', 'CUEFLUENT_TEST(x86)': 'synthetic inherited value' };
     const clearedProviderKeys = ['CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_FOUNDRY_RESOURCE', 'ANTHROPIC_FOUNDRY_API_KEY',
-      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_SKIP_VERTEX_AUTH'];
+      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_SKIP_VERTEX_AUTH',
+      'CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'ANTHROPIC_AUTH_TOKEN'];
     const previous = Object.fromEntries([...Object.keys(environment), ...clearedProviderKeys].map(key => [key, process.env[key]]));
     defer(() => {
       for (const [key, value] of Object.entries(previous)) {
@@ -183,6 +184,57 @@ test('malformed profile settings fail before native reservation while status sta
     { code: 'PROCESSING_CLIENT_SETTINGS_INVALID' });
   assert.deepEqual(await controller.status(), before); assert.equal(f.nativeCalls.length, 0);
   assert((await fs.readFile(file)).equals(bytes));
+}));
+
+test('missing Desktop host credential fails before a CLI native reservation and leaves status available', async t => withLaunchFixture(t, async f => {
+  const original = await providerSettings(f);
+  Object.assign(process.env, { CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1', CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN',
+    CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' });
+  const request = { collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash,
+    args: { client: 'claude' } };
+  const before = await executeWorkflow('processing-chat-status', request, { configPath: f.options.configPath });
+  await assert.rejects(executeWorkflow('processing-chat-run', { ...request, args: { ...request.args,
+    requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash } }, { configPath: f.options.configPath }),
+  { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+  assert.deepEqual(await executeWorkflow('processing-chat-status', request, { configPath: f.options.configPath }), before);
+  assert.equal(f.nativeCalls.length, 0);
+  assert((await fs.readFile(original.file)).equals(original.bytes));
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+}));
+
+test('MCP rejects an incomplete host credential handoff instead of accepting a model run', async t => withLaunchFixture(t, async f => {
+  const original = await providerSettings(f);
+  const rpc = processingRpc(f, { env: { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+    CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' } });
+  f.defer(() => rpc.close());
+  await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
+    protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
+  const response = await rpc.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+    name: 'process_selected_captures', arguments: { collectionId: f.collection.id },
+    _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
+  assert.equal(response.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+  assert.equal(response.result, undefined);
+  await rpc.close();
+  const status = await executeWorkflow('processing-chat-status', { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: { client: 'claude' } }, { configPath: f.options.configPath });
+  assert.equal(status.state, 'missing'); assert.equal(status.chatHash, null);
+  assert.equal(f.nativeCalls.length, 0);
+  assert((await fs.readFile(original.file)).equals(original.bytes));
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+}));
+
+test('a complete MCP host handoff launches with its credential and no profile provider fallback', async t => withLaunchFixture(t, async f => {
+  const original = await providerSettings(f);
+  const source = { CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1', CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN',
+    ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token', CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' };
+  const rpc = processingRpc(f, { env: { ...process.env, ...source } }); f.defer(() => rpc.close());
+  await admit(rpc, f); await rpc.close(); f.assertLaunch();
+  const { args, options } = f.nativeCalls[0];
+  for (const [key, value] of Object.entries(source)) assert.equal(options.env[key], value);
+  assert.equal(Object.hasOwn(options.env, 'ANTHROPIC_FOUNDRY_API_KEY'), false);
+  assert.equal(Object.hasOwn(options.env, 'ANTHROPIC_FOUNDRY_RESOURCE'), false);
+  assert(!JSON.stringify(args).includes('synthetic-host-token'));
+  assert((await fs.readFile(original.file)).equals(original.bytes));
 }));
 
 test('retargeted native profile alias cannot dispatch in the old processing namespace', { skip: process.platform === 'win32' }, async t => withLaunchFixture(t, async f => {

@@ -125,6 +125,27 @@ export function validateClaudeRestrictedSettings(settings) {
  */
 export async function resolveClaudeLaunchSettings(env = process.env, { platform = process.platform, expectedProfile, preferHostEnvironment = false } = {}) {
   if (typeof preferHostEnvironment !== 'boolean') fail('PROCESSING_CLIENT_SETTINGS_INVALID');
+  const inherited = environmentIndex(env, platform);
+  const inheritedValue = name => {
+    const key = inherited.get(name)?.[0];
+    return key === undefined ? undefined : env[key];
+  };
+  const hostAuthName = inheritedValue('CLAUDE_CODE_HOST_AUTH_ENV_VAR');
+  const hostManaged = (typeof inheritedValue('CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST') === 'string' &&
+    enabled(inheritedValue('CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST'))) || (hostAuthName !== undefined && hostAuthName !== '');
+  // A host may deliberately withhold its credential from MCP/tool children.
+  // A user-profile credential is not a replacement for that host's account.
+  // Check the inherited handoff before reading settings or reserving a run;
+  // never retrieve a missing secret or expose its name/value in diagnostics.
+  if (hostAuthName !== undefined && hostAuthName !== '') {
+    const canonical = platform === 'win32' && typeof hostAuthName === 'string' ? hostAuthName.toUpperCase() : hostAuthName;
+    const credential = inheritedValue(canonical);
+    if (typeof hostAuthName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(hostAuthName) ||
+        canonical === 'CLAUDECODE' || canonical === 'CLAUDE_CODE_HOST_AUTH_ENV_VAR' ||
+        /^CUEFLUENT_ENGINE_/i.test(hostAuthName) || typeof credential !== 'string' || !credential.trim()) {
+      fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+    }
+  }
   let file, bytes, profile;
   try {
     const requested = claudeProfileLocator(env, platform);
@@ -168,10 +189,11 @@ export async function resolveClaudeLaunchSettings(env = process.env, { platform 
   // Preserve the native locator exactly: its presence and spelling affect
   // global configuration and credential-store names, even for the same folder.
   const selected = { ...env };
-  const inherited = environmentIndex(env, platform);
   const hasHostValue = name => inherited.has(name) || (platform !== 'win32' && /^(HTTP|HTTPS|ALL|NO)_PROXY$/i.test(name) &&
     (inherited.has(name.toLowerCase()) || inherited.has(name.toUpperCase())));
-  if (source.env !== undefined) {
+  // Host-managed routing is a complete environment, not a partial profile.
+  // Filling missing fields could introduce another provider or credential.
+  if (source.env !== undefined && !hostManaged) {
     if (!object(source.env) || Object.keys(source.env).length > 256) fail('PROCESSING_CLIENT_SETTINGS_INVALID');
     const seen = new Set();
     for (const [name, entry] of Object.entries(source.env)) {
