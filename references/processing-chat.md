@@ -29,7 +29,8 @@ eligible run, including session reuse, it reads the selected user profile's
 values over inherited shell values, as native user settings do. A verified Claude
 chat handoff, or a CLI launched from Claude with its native `CLAUDECODE` nesting
 hint, preserves values already supplied by the host environment, using the user
-profile only for missing values. The hint changes environment precedence only;
+profile only for missing values, except for host-managed routing described below.
+The hint changes environment precedence only;
 it supplies no session identity or permission. This keeps exported project account,
 endpoint and model selections intact. Supported profile model preferences,
 mappings and allowlists are passed as restricted settings;
@@ -43,6 +44,33 @@ client and reconnect its plugin MCP server so the updated host environment reach
 the next request; do not discard the processing registry or captures. An ordinary
 CLI launch without a host override picks up the new profile value on its next run.
 
+Some hosts declare managed authentication with
+`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` or `CLAUDE_CODE_HOST_AUTH_ENV_VAR`.
+A managed host must provide an explicit credential locator and its nonempty
+inherited value to the separate processor. Missing, empty or unusable handoffs
+report `PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE` before acknowledging a finished
+review, freezing a new shortcut workset, or reserving a native run. Exact completed
+control replies can still replay. No model is started and no evidence is claimed.
+The plugin does not fetch host secrets, replace them from user settings, or switch
+to another provider.
+
+In host-managed mode, inherited routing and authentication own even absent fields.
+Profile provider selectors, endpoints, credentials, client certificates and
+credential-helper commands are ignored. Supported proxy, CA, timeout and output,
+thinking and effort defaults can fill missing connection/tuning fields; inherited
+host values win. Supported structured model preferences still pass as settings.
+A disabled managed-host flag alone keeps ordinary profile projection. Credential
+presence only permits launch; it does not verify authentication, expiry, or a host
+refresh channel.
+
+Use the [standalone workflow](processing.md) in an explicitly selected uncaptured
+chat whose normal authentication works, or invoke processing from an independently
+authenticated Claude terminal. Do not unset host routing or authentication markers
+inside the failing host to force a different account. Status and pending-proposal
+review do not need this launch credential. A run that already failed with an
+unknown outcome still requires the existing recovery controls below; this
+preflight does not clear it.
+
 The projection restores supported first-party/gateway, Foundry, Bedrock/Mantle
 and Vertex environment settings. Connection controls include uppercase and
 lowercase proxy variables, `API_TIMEOUT_MS`, certificate settings, and native
@@ -50,7 +78,8 @@ lowercase proxy variables, `API_TIMEOUT_MS`, certificate settings, and native
 and feature toggles are ignored, without interpreting every `CLAUDE_CODE_USE_*`
 name as a provider. The known unsupported provider selectors
 `CLAUDE_CODE_USE_ANTHROPIC_AWS` and `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` are
-refused when enabled in the user file. Other unrecognized file environment keys
+refused when enabled in projected user `env`. Host-managed routing ignores those
+unused provider switches. Other unrecognized file environment keys
 are not restored; use the standalone workflow when the native setup depends on
 them. Execution controls such as file-based `PATH`, `NODE_OPTIONS` and engine
 authorization are never restored.
@@ -82,12 +111,15 @@ profile stops processing without granting an exclusion or replacing state.
 
 `PROCESSING_CLIENT_SETTINGS_INVALID`, `PROCESSING_CLIENT_SETTINGS_UNAVAILABLE`
 and `PROCESSING_CLIENT_SETTINGS_LIMIT` stop before native admission when settings
-are malformed, inaccessible, changing or over their bounded limits. Ask the user
+are malformed, inaccessible, changing or over their bounded limits. The `env`
+shape and entry-count checks still apply in host-managed mode, while value checks
+apply only to eligible fields. File size, JSON/duplicate-key, structural and
+supported model checks apply in both modes. Ask the user
 to resolve the selected native settings in the client without printing settings
 or credential values. Keep existing processing state intact.
 `PROCESSING_CLIENT_SETTINGS_UNSUPPORTED`
-reports a configured Claude credential-helper command or an unsupported enabled
-provider switch. The native provider SDK still owns its ordinary authentication;
+reports a configured Claude credential-helper command outside host-managed mode
+or an unsupported enabled provider switch in projected user `env`. The native provider SDK still owns its ordinary authentication;
 the plugin neither reads credential stores nor starts sign-in commands. Use the
 [standalone workflow](processing.md) from an uncaptured chat whose
 normal authentication works. Status and existing-proposal review remain available

@@ -206,6 +206,25 @@ test('awaiting review cannot begin another run until the exact authoritative ope
   assert.equal((await f.registry.begin(beginArgs(done))).action, 'dispatch');
 });
 
+test('review publication preflight runs only after completion proof and preserves state on refusal', async t => {
+  const f = await fixture(t), bound = await f.bind(await f.reserve()), operationId = randomUUID(), request = { ...beginArgs(bound), operationId };
+  const busy = await f.registry.begin(request), review = await f.registry.finish({ ...finishArgs(busy, request), outcome: 'awaiting-review' });
+  const ack = { expectedHash: review.hash, generation: 1, requestId: request.requestId, operationId };
+  let calls = 0;
+  const hooks = { beforePublish() { calls++; throw Object.assign(new Error('synthetic preflight refusal'), { code: 'SYNTHETIC_PREFLIGHT_REFUSED' }); } };
+  f.reviewState = 'awaiting-review';
+  await assert.rejects(f.registry.acknowledgeReview(ack, hooks), { code: 'PROCESSING_CHAT_REVIEW_UNRESOLVED' });
+  assert.equal(calls, 0);
+  f.reviewState = 'completed';
+  await assert.rejects(f.registry.acknowledgeReview({ ...ack, expectedHash: digest('stale') }, hooks), { code: 'PROCESSING_CHAT_STATE_CHANGED' });
+  assert.equal(calls, 0);
+  await assert.rejects(f.registry.acknowledgeReview(ack, hooks), { code: 'SYNTHETIC_PREFLIGHT_REFUSED' });
+  assert.equal(calls, 1);
+  const preserved = await f.registry.read();
+  assert.equal(preserved.hash, review.hash); assert.deepEqual(preserved.registry, review.registry);
+  assert.equal((await f.registry.acknowledgeReview(ack)).state, 'idle');
+});
+
 test('review handoff must refer to the operation bound by the original request', async t => {
   const f = await fixture(t), bound = await f.bind(await f.reserve()), operationId = randomUUID();
   const request = { ...beginArgs(bound), operationId }, busy = await f.registry.begin(request);

@@ -16,6 +16,7 @@ import { inspectProcessing } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
+import { assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
@@ -281,9 +282,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
     const replay = await replayControl(source); if (replay) return replay;
-    const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, { selection: source.selection,
-      requestId, action: mode, argsHash: source.argsHash }));
-    controls.set(source, control); if (control.response) return control.response;
+    const args = { selection: source.selection, requestId, action: mode, argsHash: source.argsHash };
+    // Shortcut replies also survive without a capture-exclusion receipt. Exact
+    // completed redelivery needs no launch credential and must not create state.
+    const prior = await withStorageProbes(() => readProcessingShortcutControl(capability, args));
+    if (prior?.response) { controls.set(source, prior); return prior.response; }
     const existing = await activeJob(key, source, signal); if (existing) return existing;
     let announce, rejectAdmission, releaseDispatch, rejectDispatch;
     const admission = new Promise((resolve, reject) => { announce = resolve; rejectAdmission = reject; });
@@ -303,8 +306,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     let current, shortcut;
     try {
       signal?.throwIfAborted(); current = await controller.status({ selection: source.selection });
-      current = await acknowledgeFinishedReview(controller, capability, current);
-      if (await controller.hasRequest(requestId)) { await controller.close(); return viewOf(current); }
+      if (await controller.hasRequest(requestId)) {
+        current = await acknowledgeFinishedReview(controller, capability, current, { persist: false });
+        await controller.close(); return viewOf(current);
+      }
       const activity = await controller.collectionActivity(), competing = activity.find(item => !item.own);
       if (competing) {
         await controller.close();
@@ -314,6 +319,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         return ['creating', 'busy'].includes(other.status) ? alreadyProcessing(other) : other;
       }
       if (['creating', 'busy', 'blocked'].includes(current.state)) { await controller.close(); return alreadyProcessing(viewOf(current)); }
+      // Existing activity is a read-only result. Require launch credentials only
+      // after those exits, before control admission or review acknowledgement.
+      if (client === 'claude') assertClaudeHostAuthentication(env);
+      const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, args));
+      controls.set(source, control); if (control.response) { await controller.close(); return control.response; }
+      current = await acknowledgeFinishedReview(controller, capability, current);
       shortcut = await withStorageProbes(() => selectProcessingShortcut(capability, { selection: source.selection, requestId, scope, mode }, { canResumeOperation: id => controller.canResumeOperation(id) }));
       if (!shortcut.nextRun) { await controller.close(); return processingStatusView(current, shortcut); }
       if (current.remainingRuns === 0) { await controller.close(); return processingStatusView(current, shortcut); }

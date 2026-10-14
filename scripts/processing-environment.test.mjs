@@ -25,7 +25,8 @@ async function withLaunchFixture(t, run, nativeRun = success, { insideClaude = t
     const environment = { CLAUDE_CONFIG_DIR: profile, CLAUDE_CODE_SESSION_ID: f.identity.sessionId,
       CLAUDECODE: '1', 'CUEFLUENT_TEST(x86)': 'synthetic inherited value' };
     const clearedProviderKeys = ['CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_FOUNDRY_RESOURCE', 'ANTHROPIC_FOUNDRY_API_KEY',
-      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_SKIP_VERTEX_AUTH'];
+      'ANTHROPIC_MODEL', 'AWS_PROFILE', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_SKIP_VERTEX_AUTH',
+      'CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'ANTHROPIC_AUTH_TOKEN'];
     const previous = Object.fromEntries([...Object.keys(environment), ...clearedProviderKeys].map(key => [key, process.env[key]]));
     defer(() => {
       for (const [key, value] of Object.entries(previous)) {
@@ -70,8 +71,15 @@ function processingRpc(f, environment = {}) {
   return rpcClient(streams => runProcessingMcp({ client: 'claude', configPath: f.options.configPath, ...streams, ...environment }, {
     // Native source binding has separate coverage; retain the actual controller
     // and native transport while supplying only a synthetic source identity.
-    async resolveInvocation(_capability, _context, invocation) { return { selection: f.selection, callId: 'synthetic-environment-call', nativeSkill: false, argsHash: digest(canonicalJSON(invocation.arguments)) }; }
+    async resolveInvocation(_capability, context, invocation) { return { selection: f.selection, callId: context.toolCallId, nativeSkill: false, argsHash: digest(canonicalJSON(invocation.arguments)) }; }
   }));
+}
+
+async function writerSnapshot(f) {
+  const root = f.collection.notes.writerStateDir;
+  const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
+  const files = entries.filter(entry => entry.isFile()).map(entry => path.join(entry.parentPath, entry.name)).sort();
+  return Promise.all(files.map(async file => [path.relative(root, file), await fs.readFile(file)]));
 }
 
 async function admit(rpc, f) {
@@ -184,6 +192,166 @@ test('malformed profile settings fail before native reservation while status sta
   assert.deepEqual(await controller.status(), before); assert.equal(f.nativeCalls.length, 0);
   assert((await fs.readFile(file)).equals(bytes));
 }));
+
+test('missing Desktop host credential fails before a CLI native reservation and leaves status available', async t => withLaunchFixture(t, async f => {
+  const original = await providerSettings(f);
+  Object.assign(process.env, { CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1', CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN',
+    CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' });
+  const request = { collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash,
+    args: { client: 'claude' } };
+  const before = await executeWorkflow('processing-chat-status', request, { configPath: f.options.configPath });
+  await assert.rejects(executeWorkflow('processing-chat-run', { ...request, args: { ...request.args,
+    requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash } }, { configPath: f.options.configPath }),
+  { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+  assert.deepEqual(await executeWorkflow('processing-chat-status', request, { configPath: f.options.configPath }), before);
+  assert.equal(f.nativeCalls.length, 0);
+  assert((await fs.readFile(original.file)).equals(original.bytes));
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+}));
+
+for (const locator of [undefined, 'ANTHROPIC_AUTH_TOKEN']) test(`MCP rejects incomplete host handoff before workset/control mutation: ${locator ?? 'no locator'}`, async t => withLaunchFixture(t, async f => {
+  const original = await providerSettings(f);
+  const rpc = processingRpc(f, { env: { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+    ...(locator ? { CLAUDE_CODE_HOST_AUTH_ENV_VAR: locator } : {}), CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' } });
+  f.defer(() => rpc.close());
+  await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
+    protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
+  const response = await rpc.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+    name: 'process_selected_captures', arguments: { collectionId: f.collection.id },
+    _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
+  assert.equal(response.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+  assert.equal(response.result, undefined);
+  for (const relative of ['processed/shortcut-controls', 'processed/shortcuts', 'processed/worksets']) {
+    assert.equal(existsSync(path.join(f.collection.notes.writerStateDir, relative)), false);
+  }
+  await rpc.close();
+  const status = await executeWorkflow('processing-chat-status', { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: { client: 'claude' } }, { configPath: f.options.configPath });
+  assert.equal(status.state, 'missing'); assert.equal(status.chatHash, null);
+  assert.equal(f.nativeCalls.length, 0);
+  assert((await fs.readFile(original.file)).equals(original.bytes));
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+}));
+
+test('a complete MCP host handoff launches with its credential and no profile provider fallback', async t => withLaunchFixture(t, async f => {
+  const original = await providerSettings(f);
+  const source = { CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1', CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN',
+    ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token', CLAUDE_CODE_USE_FOUNDRY: '', ANTHROPIC_BASE_URL: 'https://host.example.invalid' };
+  const rpc = processingRpc(f, { env: { ...process.env, ...source } }); f.defer(() => rpc.close());
+  await admit(rpc, f); await rpc.close(); f.assertLaunch();
+  const { args, options } = f.nativeCalls[0];
+  for (const [key, value] of Object.entries(source)) assert.equal(options.env[key], value);
+  assert.equal(Object.hasOwn(options.env, 'ANTHROPIC_FOUNDRY_API_KEY'), false);
+  assert.equal(Object.hasOwn(options.env, 'ANTHROPIC_FOUNDRY_RESOURCE'), false);
+  assert.deepEqual(JSON.parse(args[args.indexOf('--settings') + 1]), { disableAllHooks: true,
+    model: original.settings.model, modelOverrides: original.settings.modelOverrides, availableModels: original.settings.availableModels });
+  assert(!JSON.stringify(args).includes('synthetic-host-token'));
+  assert((await fs.readFile(original.file)).equals(original.bytes));
+}));
+
+for (const tool of ['process_selected_captures', 'processing_resume']) for (const collect of [true, false]) {
+  test(`MCP replays ${tool} without host credentials or capture receipts, collection ${collect ? 'on' : 'off'}`, async t => withLaunchFixture(t, async f => {
+    if (!collect) {
+      f.config.routes[0].collection.enabled = false;
+      await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+    }
+    const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+      CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' };
+    const initialize = { jsonrpc: '2.0', id: 0, method: 'initialize', params: {
+      protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } };
+    const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: tool, arguments: { collectionId: f.collection.id },
+      _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } };
+    const original = processingRpc(f, { env }); f.defer(() => original.close());
+    await original.send(initialize);
+    const first = await original.send(request);
+    assert.equal(first.error, undefined); assert.ok(first.result);
+    await original.close();
+    const launches = f.nativeCalls.length;
+    assert.equal(launches, tool === 'process_selected_captures' ? 1 : 0);
+    const before = await writerSnapshot(f);
+    assert(before.some(([name]) => name.startsWith(`processed${path.sep}shortcut-controls${path.sep}`)));
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    const reconnected = processingRpc(f, { env }); f.defer(() => reconnected.close());
+    await reconnected.send(initialize);
+    assert.deepEqual((await reconnected.send(request)).result, first.result);
+    const changed = await reconnected.send({ ...request, id: 2, params: {
+      ...request.params, arguments: {} } });
+    assert.equal(changed.error?.message, 'PROCESSING_CONTROL_RECEIPT_CONFLICT');
+    const fresh = await reconnected.send({ ...request, id: 3, params: {
+      ...request.params, _meta: { 'claudecode/toolUseId': 'synthetic-new-call' } } });
+    assert.equal(fresh.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+    await reconnected.close();
+    assert.equal(f.nativeCalls.length, launches);
+    assert.deepEqual(await writerSnapshot(f), before);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }));
+}
+
+test('MCP no-launch checks return an active job without host credentials or new control writes', async t => {
+  const entered = Promise.withResolvers(); let released = false, finishNative;
+  await withLaunchFixture(t, async f => {
+    const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+      CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' };
+    const rpc = processingRpc(f, { env });
+    f.defer(async () => { released = true; finishNative?.(); await rpc.close(); });
+    await admit(rpc, f); await entered.promise;
+    const before = await writerSnapshot(f);
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    for (const [index, tool] of ['process_selected_captures', 'processing_resume'].entries()) {
+      const response = await rpc.send({ jsonrpc: '2.0', id: index + 2, method: 'tools/call', params: {
+        name: tool, arguments: { collectionId: f.collection.id },
+        _meta: { 'claudecode/toolUseId': `synthetic-active-${index}` } } });
+      assert.equal(response.error, undefined);
+      const result = JSON.parse(response.result.content[0].text);
+      assert.equal(result.status, 'busy'); assert.equal(result.statusDetail, 'already-processing');
+      assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_BUSY']);
+      assert.equal(f.nativeCalls.length, 1);
+      assert.deepEqual(await writerSnapshot(f), before);
+    }
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }, context => { finishNative = () => success(context); entered.resolve(); if (released) finishNative(); });
+});
+
+for (const peer of [false, true]) for (const state of ['busy', 'blocked']) {
+  test(`MCP no-launch checks preserve ${peer ? 'competing' : 'own'} stored ${state} without host credentials`, async t => {
+    const entered = Promise.withResolvers(); let released = false, finishNative;
+    await withLaunchFixture(t, async f => {
+      const owner = await openProcessingController({ ...f.options, client: 'claude' });
+      f.defer(() => owner.close());
+      const active = owner.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null });
+      active.catch(() => {});
+      f.defer(async () => { released = true; finishNative?.(); await active.catch(() => {}); });
+      if (state === 'blocked') await assert.rejects(active, error => error.processingChat?.state === 'blocked');
+      else await entered.promise;
+      const status = await owner.status(); assert.equal(status.state, state);
+      const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' };
+      if (peer) { env.CLAUDE_CONFIG_DIR = path.join(f.root, 'other-profile'); await fs.mkdir(env.CLAUDE_CONFIG_DIR); }
+      const rpc = processingRpc(f, { env }); f.defer(() => rpc.close());
+      await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
+        protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
+      const before = await writerSnapshot(f);
+      for (const [index, tool] of ['process_selected_captures', 'processing_resume'].entries()) {
+        const response = await rpc.send({ jsonrpc: '2.0', id: index + 1, method: 'tools/call', params: {
+          name: tool, arguments: { collectionId: f.collection.id },
+          _meta: { 'claudecode/toolUseId': `synthetic-stored-${index}` } } });
+        assert.equal(response.error, undefined);
+        const result = JSON.parse(response.result.content[0].text);
+        assert.equal(result.status, state);
+        assert.equal(result.statusDetail, state === 'busy' ? 'already-processing' : 'blocked');
+        assert(result.diagnostics.includes(peer ? 'PROCESSING_COLLECTION_BUSY' : 'PROCESSING_CHAT_BUSY'));
+        assert.equal(result.chat.sessionId, status.chat.sessionId);
+        assert.deepEqual(await owner.status(), status);
+        assert.deepEqual(await writerSnapshot(f), before);
+        assert.equal(f.nativeCalls.length, 1);
+      }
+      assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    }, context => {
+      if (state === 'blocked') { context.child.emit('close', 1, null); return; }
+      finishNative = () => success(context); entered.resolve(); if (released) finishNative();
+    });
+  });
+}
 
 test('retargeted native profile alias cannot dispatch in the old processing namespace', { skip: process.platform === 'win32' }, async t => withLaunchFixture(t, async f => {
   const alias = path.join(f.root, 'profile-alias'), replacement = path.join(f.root, 'other-profile');

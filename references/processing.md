@@ -128,7 +128,9 @@ search for newer evidence. Compare authority, scope and occurrence dates, not
 review order or “latest wins.” A fix proposal is not proof of a tested fix; a
 reported outcome for one case does not resolve another. An unavailable screenshot
 supports no visual claims: attribute the available report and keep the image
-verification limit visible. Unknown dates stay unknown.
+verification limit visible. Do not invent unknown dates; follow the
+[meeting content guidance](authoring.md#durable-content-and-provenance) on when
+the date uncertainty needs visible prose.
 
 Materially revised text needs a new exact proposal and fresh approval when required.
 An immutable proposal cannot be edited in place: inspect/cancel an unapplied

@@ -9,7 +9,7 @@ import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
 import { openCodexProcessingClient, codexProcessingProfile } from './processing-client-codex.mjs';
 import { createClaudeProcessingClient } from './processing-client-claude.mjs';
-import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment } from './processing-claude-settings.mjs';
+import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment, assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 import { inspectProcessingWorkset } from './processing-workset.mjs';
 import { inspectProcessing } from './processing.mjs';
 import { processingExecutionCallbacks } from './processing-execution-receipts.mjs';
@@ -370,7 +370,8 @@ export async function openProcessingController(context, dependencies = {}) {
         if (current.state === 'awaiting-review') {
           const priorReview = current.registry.runs.at(-1);
           try { current = await state.acknowledgeReview({ expectedHash: current.hash, generation: current.generation,
-            requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId }); }
+            requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId },
+          { beforePublish: () => { if (client === 'claude') assertClaudeHostAuthentication(env); } }); }
           catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return publicState(await state.read()); throw error; }
         }
         const fresh = current.state === 'missing' || (current.state === 'blocked' && ['creation-not-dispatched', 'run-abandoned'].includes(current.registry.block.reason));
@@ -395,6 +396,8 @@ export async function openProcessingController(context, dependencies = {}) {
         }
         const competing = (await state.collectionActivity()).filter(item => !item.own);
         if (competing.length) throw Object.assign(new Error('PROCESSING_COLLECTION_BUSY'), { code: 'PROCESSING_COLLECTION_BUSY', activity: competing });
+        // Read-only no-launch outcomes above do not need a host credential.
+        if (client === 'claude') assertClaudeHostAuthentication(env);
         await ensureTransport();
         if (fresh) {
           const self = await ownProcessIdentity();

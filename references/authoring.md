@@ -21,6 +21,14 @@ Summarize the useful knowledge rather than reproducing the transcript. Keep who
 reported or decided something and any uncertainty that changes its meaning
 visible; a reported result must not become an independently verified fact.
 
+Distinguish a secondhand account from an inspected meeting record. When a user's
+recollection is the only evidence for an outcome or completion, retain that
+attribution. A reporting-date preamble is needed only when that timing is material.
+Omit an unknown meeting date when it does not affect the useful account; state
+the uncertainty when chronology or the reporting period depends on it. Use the
+[date evidence rules](evidence.md#dates-reports-and-verification) to distinguish
+occurrence dates from later capture, upload or note-writing timestamps.
+
 Keep identifiers that name the subject, such as a ticket, task, test or decision,
 visible when useful. Distinguish them from technical capture/source IDs and hashes.
 Keep technical source IDs, locators, hashes, transcript offsets, transcription
@@ -67,8 +75,16 @@ purpose and consent boundaries; they do not change ordinary knowledge notes.
 
 Keep material evidence gaps visible alongside affected claims. Routine details
 about how a transcript was supplied or checked belong with provenance; missing
-evidence that prevents a conclusion belongs with that conclusion. Before
-proposing a save, read the visible text you drafted on its own and remove
+evidence that prevents a conclusion belongs with that conclusion. Assess a gap
+against what the note actually says, rather than appending a checklist of absent
+fields. A note that records a policy decision does not need a generic
+“implementation and testing were not reported” disclaimer when it makes no claim
+about implementation or testing. A note assessing whether that policy works in
+production does need the relevant evidence and limitations. Preserve the
+distinction through accurate wording such as “the team decided,” without turning
+the decision into a claim about deployed behavior.
+
+Before proposing a save, read the visible text you drafted on its own and remove
 extraction logs, processing narration and source bookkeeping that do not serve
 the note's subject.
 

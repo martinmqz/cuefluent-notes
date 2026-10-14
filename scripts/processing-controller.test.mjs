@@ -798,3 +798,95 @@ test('a missing unattempted frozen head does not block another valid input', asy
   const stopped = await h.controller.run(await h.request({ worksetId }));
   assert.equal(stopped.reason, 'workset-remainder-unavailable'); assert.equal(h.dispatches.length, 1);
 });
+
+for (const reason of ['workset-complete', 'workset-budget', 'workset-remainder-unavailable', 'operation-complete']) {
+  test(`missing Claude host auth preserves the no-launch ${reason} result`, async t => {
+    const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+    let binding;
+    if (reason === 'operation-complete') {
+      const claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+      await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'skipped' });
+      binding = { resumeOperationId: f.operationId };
+    } else {
+      const inputs = [...f.inputs];
+      if (reason === 'workset-budget') inputs.push(...(await processingFixture(t, { base: f, client: 'claude' })).inputs);
+      const worksetId = randomUUID();
+      const workset = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs,
+        runBudget: { maxBatches: 1, maxPacketBytes: 65536 } });
+      const claim = await prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] });
+      await completeProcessing(f.capability, { selection: f.selection, operationId: claim.operationId,
+        expectedClaimHash: claim.claimHash, outcome: reason === 'workset-complete' ? 'skipped' : 'cancelled' });
+      binding = { worksetId };
+    }
+    const request = await h.request(binding), before = await h.controller.status();
+    const evidence = () => binding.worksetId
+      ? inspectProcessingWorkset(f.capability, binding) : inspectProcessing(f.capability, f.operationId);
+    const stored = await evidence();
+    h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+    const result = await h.controller.run(request);
+    assert.equal(result.dispatch, 'not-started'); assert.equal(result.reason, reason);
+    assert.deepEqual(await h.controller.status(), before);
+    assert.deepEqual(await evidence(), stored);
+    assert.equal(h.dispatches.length, 0); assert.equal(h.bridgeCall, undefined);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+for (const state of ['busy', 'blocked']) test(`missing Claude host auth returns existing ${state} without dispatch or mutation`, async t => {
+  const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+  const entered = deferred(), release = deferred();
+  h.script = async () => {
+    if (state === 'blocked') throw Object.assign(new Error('synthetic transport loss'), { code: 'PROCESSING_CLIENT_OUTCOME_UNKNOWN' });
+    entered.resolve(); await release.promise;
+  };
+  const active = h.controller.run(await h.request());
+  try {
+    if (state === 'blocked') await assert.rejects(active, { code: 'PROCESSING_CLIENT_OUTCOME_UNKNOWN' });
+    else await entered.promise;
+    const other = await h.open(), before = await other.status(), stored = await registryJSON(f);
+    assert.equal(before.state, state);
+    h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+    const result = await other.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash });
+    assert.equal(result.state, state); assert.equal(result.chatHash, before.chatHash);
+    assert.deepEqual(await other.status(), before); assert.deepEqual(await registryJSON(f), stored);
+    assert.equal(h.dispatches.length, 1);
+  } finally {
+    release.resolve();
+    if (state === 'busy') await active;
+    else await active.catch(() => {});
+  }
+});
+
+test('missing Claude host auth returns an unresolved review without acknowledging or dispatching', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+  h.script = propose(f);
+  const review = await h.controller.run(await h.request());
+  assert.equal(review.state, 'awaiting-review');
+  const before = await h.controller.status(), stored = await registryJSON(f);
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+  const pending = await h.controller.run(await h.request());
+  assert.equal(pending.state, 'awaiting-review'); assert.equal(pending.chatHash, review.chatHash);
+  assert.deepEqual(await h.controller.status(), before);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.dispatches.length, 1);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('missing Claude host auth preserves a finished review and its expected chat hash', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+  h.script = propose(f);
+  const review = await h.controller.run(await h.request());
+  assert.equal(review.state, 'awaiting-review');
+  const inspected = await inspectProcessing(f.capability, f.operationId);
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: inspected.claimHash, outcome: 'skipped' });
+  const before = await h.controller.status(), stored = await registryJSON(f);
+  h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+  await assert.rejects(h.controller.run(await h.request()), { code: 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE' });
+  assert.deepEqual(await h.controller.status(), before);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal(h.dispatches.length, 1);
+  // Read-only review remains usable without launch credentials.
+  assert.equal((await h.controller.reviewContext({ expectedChatHash: review.chatHash, requestId: review.requestId })).operationId, f.operationId);
+});
