@@ -225,7 +225,7 @@ test('pending intake, pruning and locks are visible and a changing recovery snap
   }
   const lock = path.join(f.collection.intakeStateDir, '.intake-lock'); await fs.mkdir(lock, { mode: 0o700 });
   const held = await pendingCollectionProcessing(f.capability, request(f));
-  assert(held.blockers.includes('INTAKE_BUSY')); assert.equal(held.intakeBlocked, true); await fs.rmdir(lock);
+  assert.deepEqual(held.blockers, []); assert.equal(held.intakeBlocked, true); await fs.rmdir(lock);
   const open = fs.open.bind(fs); let injected = false;
   const head = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
   t.mock.method(fs, 'open', async (file, ...args) => {
@@ -265,4 +265,27 @@ test('empty pages distinguish absent chats from incomplete repo scans and bind c
   const bytes = canonicalJSON(config); await fs.writeFile(a.options.configPath, bytes);
   const capability = await verifyWorkflowStorage({ ...a.options, expectedConfigHash: digest(bytes) });
   await assert.rejects(pendingCollectionProcessing(capability, { ...request(selected), scope: 'repo', after: empty.nextCursor }), { code: 'PROCESSING_INVENTORY_CURSOR_MISMATCH' });
+});
+
+test('lock churn does not invalidate a metadata read; changed recovery state receives a bounded retry', async t => {
+  const { stablePendingCollectionProcessing } = await import('./processing-collection.mjs');
+  const f = await processingFixture(t), lock = path.join(f.collection.intakeStateDir, '.intake-lock');
+  const head = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
+  const open = fs.open.bind(fs); let lockInjected = false;
+  const lockMock = t.mock.method(fs, 'open', async (file, ...args) => {
+    if (file === head && !lockInjected) { lockInjected = true; await fs.mkdir(lock, { mode: 0o700 }); }
+    return open(file, ...args);
+  });
+  const result = await pendingCollectionProcessing(f.capability, request(f));
+  assert.equal(result.counts.unclaimedRevisions, 1); assert.deepEqual(result.blockers, []); assert.equal(result.intakeBlocked, true);
+  lockMock.mock.restore(); await fs.rmdir(lock);
+  let recoveryInjected = false;
+  t.mock.method(fs, 'open', async (file, ...args) => {
+    if (file === head && !recoveryInjected) {
+      recoveryInjected = true; await fs.writeFile(path.join(f.collection.intakeStateDir, 'pending.json'), '{}', { mode: 0o600 });
+    }
+    return open(file, ...args);
+  });
+  const changed = await stablePendingCollectionProcessing(f.capability, request(f));
+  assert(recoveryInjected); assert(changed.blockers.includes('INTAKE_RECOVERY_REQUIRED'));
 });

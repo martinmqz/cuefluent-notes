@@ -320,3 +320,18 @@ test('changed policy, namespace and unsupported persisted state fail without rep
   await assert.rejects(changed.reserve({ expectedHash: reserved.hash, requestId: randomUUID(), requestHash: digest('new') }), { code: 'PROCESSING_CHAT_POLICY_CHANGED' });
   assert.deepEqual(await fs.readFile(statePath(f, reserved)), original);
 });
+
+test('known nonexecuting peer blocks preserve terminal operation ownership; unknown blocks do not', async t => {
+  const f = await fixture(t), bound = await f.bind(await f.reserve()), operationId = randomUUID();
+  const request = { ...beginArgs(bound), operationId }, busy = await f.registry.begin(request);
+  await f.registry.finish(finishArgs(busy, request));
+  const peer = await createProcessingChatState({ ...f.factory, profileId: digest('other-synthetic-profile') });
+  const reserved = await peer.reserve({ expectedHash: null, requestId: randomUUID(), requestHash: digest('peer creation') });
+  const blocked = await peer.block({ expectedHash: reserved.hash, generation: reserved.generation, reason: 'creation-not-dispatched' });
+  for (const [reason, allowed] of [['creation-not-dispatched', true], ['run-abandoned', true], ['creation-outcome-unknown', false], ['host-unavailable', false]]) {
+    await writeFixtureState(f, blocked, value => { value.block.reason = reason; });
+    assert.equal(await f.registry.canResumeOperation(operationId), allowed, reason);
+    assert.equal((await f.registry.collectionActivity()).some(item => !item.own), !allowed, reason);
+    assert.equal(await f.registry.canResumeOperation(randomUUID()), false, 'a harmless peer cannot fabricate ownership');
+  }
+});

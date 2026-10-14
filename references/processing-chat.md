@@ -239,7 +239,11 @@ than replacing it. After finishing prior work, `process` can select one fresh
 bounded portion in the requested scope within the same request limits. Invoke
 `process` again for later inventory portions. Discovery and selection limits are in the
 [shortcut command contract](workflow-cli.md#processing-shortcut-checkpoints).
-An incomplete inventory is never reported as an empty backlog.
+An incomplete inventory is never reported as an empty backlog. If the saved
+selection reaches its continuation capacity, status directs you to cancel that
+selection and use `process` for the remaining captures. Changed or unavailable
+frozen inputs stay reported as conflicts; independent unchanged inputs can
+continue without replacing their hashes.
 
 The checkpoint contains scope, frozen inputs and continuation pointers. Existing
 engine worksets, claims, acknowledgments, proposals and outcomes remain the
@@ -292,7 +296,9 @@ uncaptured context for material that cannot fit this channel.
 ## Review controls
 
 Invoke the same skill with `review`. When several proposals are pending, first
-choose the draft in the native selector. Selecting it is not approval. Its
+choose an authorized draft in the native selector. Drafts whose sources are no
+longer authorized remain preserved and are not offered. They do not prevent
+reviewing other authorized drafts. Selecting a draft is not approval. Its
 `cuefluent_control.processing_review` call requests a native host form displaying
 the exact proposal, original note contents, paths, new directories, input identities
 and known evidence limits. Read the full preview in the scrollable **Proposed

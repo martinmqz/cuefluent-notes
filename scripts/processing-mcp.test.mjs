@@ -1385,15 +1385,16 @@ test('MCP resume and cancel preserve a standalone claim in the shortcut workset'
   assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
-test('routine intake contention is reported as wait without inventing recovery', async t => {
+test('routine intake contention does not block read-only inventory or review discovery', async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   const lock = path.join(f.collection.intakeStateDir, '.intake-lock'); await fs.mkdir(lock, { mode: 0o700 });
   try {
     const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
-    assert.equal(status.statusDetail, 'intake-busy'); assert.equal(status.nextAction, 'wait');
-    assert.deepEqual(status.diagnostics, ['INTAKE_BUSY']);
+    assert.equal(status.statusDetail, 'pending'); assert.equal(status.nextAction, 'process');
+    assert.deepEqual(status.diagnostics, []);
     const review = body(await h.call('processing_review', { collectionId: f.collection.id }));
-    assert.equal(review.statusDetail, 'intake-busy'); assert.equal(h.forms.length, 0);
+    assert.equal(review.statusDetail, 'pending'); assert.equal(h.forms.length, 0);
+    assert.equal((await h.call('process_selected_captures', {})).error.message, 'INTAKE_BLOCKED');
   } finally { await fs.rmdir(lock); }
 });
 
@@ -1511,5 +1512,94 @@ test('unavailable frozen inputs offer safe cancellation instead of an endless in
   await fs.writeFile(head, bytes, { mode: 0o600 });
   const freshClosed = h.whenClosed();
   assert.equal(body(await h.call('process_selected_captures', {})).statusDetail, 'accepted'); await freshClosed;
+  assert.equal(h.dispatches, 2);
+});
+
+test('the engine enforces the draft-selector limit even for claims prepared before the queue fills', async t => {
+  const { inspectedClaim } = await import('./test-support/processing-fixture.mjs');
+  const f = await processingFixture(t), fixtures = [f];
+  for (let i = 1; i < 6; i++) fixtures.push(await processingFixture(t, { base: f }));
+  const claims = [];
+  for (let i = 0; i < 5; i++) claims.push(await inspectedClaim(fixtures[i], { parallelism: 5 }));
+  for (let i = 0; i < 4; i++) await proposedClaim(fixtures[i], { claim: claims[i], name: `meetings/synthetic-${i}.md` });
+  claims.push(await inspectedClaim(fixtures[5], { parallelism: 5 }));
+  await proposedClaim(fixtures[4], { claim: claims[4], name: 'meetings/synthetic-4.md' });
+  await assert.rejects(proposedClaim(fixtures[5], { claim: claims[5], name: 'meetings/synthetic-5.md' }), { code: 'PROCESSING_PROPOSAL_QUEUE_FULL' });
+  const h = await harness(t, f), ready = h.nextForm(), result = h.call('processing_review', {}), selector = await ready;
+  const choices = selector.params.requestedSchema.properties.operationId.oneOf;
+  assert.equal(choices.length, 5); assert(!choices.some(item => item.const === fixtures[5].operationId));
+  h.answer(selector, { action: 'cancel' }); assert.equal(body(await result).status, 'awaiting-review');
+  assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('an unauthorized draft stays intact while an authorized draft can be reviewed', async t => {
+  const f = await processingFixture(t);
+  const project = path.join(f.project, 'restricted'); await fs.mkdir(project);
+  const b = await processingFixture(t, { base: { ...f, project } });
+  const allowed = await proposedClaim(f), denied = await proposedClaim(b);
+  // The retained source registration now points outside authorized projects;
+  // the immutable draft still belongs to its original inspected input.
+  const outside = path.join(f.root, 'outside'); await fs.mkdir(outside);
+  const sourceFile = path.join(f.collection.intakeStateDir, 'sessions', b.identity.client, `${b.identity.sessionId}.json`);
+  const source = JSON.parse(await fs.readFile(sourceFile)); source.source.projectRoot = outside;
+  await fs.writeFile(sourceFile, canonicalJSON(source) + '\n');
+  assert.equal((await inspectProcessing(f.capability, b.operationId)).state, 'awaiting-review');
+  const h = await harness(t, f), status = body(await h.call('processing_status', {}));
+  assert.equal(status.nextAction, 'review'); assert.equal(status.inventory.awaitingReview, 1);
+  const ready = h.nextForm(), result = h.call('processing_review', {}), preview = await ready;
+  assert(preview.params.requestedSchema.properties.changes.default.includes(allowed.proposalHash));
+  h.answer(preview, { action: 'accept', content: { decision: 'later' } }); body(await result);
+  assert.equal((await inspectProcessing(f.capability, b.operationId)).claimHash, denied.claimHash);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, allowed.claimHash);
+});
+
+test('review acknowledges its own completed draft after another host applied the outcome', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  await proposeInChat(f, h);
+  await reviewProcessingProposal(f.capability, { selection: f.selection, operationId: f.operationId }, { elicit: async () => ({ action: 'accept', content: { decision: 'skip' } }) });
+  const status = body(await h.call('processing_status', {}));
+  assert.notEqual(status.status, 'awaiting-review'); assert.equal(h.finishReviewCalls ?? 0, 0, 'status remains read-only');
+  const reviewed = body(await h.call('processing_review', {}));
+  assert.notEqual(reviewed.status, 'awaiting-review'); assert.equal(h.finishReviewCalls, 1); assert.equal(h.forms.length, 0);
+  const again = body(await h.call('processing_status', {})); assert.notEqual(again.status, 'awaiting-review');
+});
+
+test('status distinguishes selection conflicts, mixed policy conflicts and genuine recovery', async () => {
+  const { processingStatusView } = await import('./processing-mcp.mjs');
+  const native = { state: 'idle', requestId: null, chat: null }, shortcut = { phase: 'ready', counts: { selected: 1 }, reviews: [] };
+  for (const blockers of [['PROCESSING_INPUT_CHANGED'], ['PROCESSING_INPUT_ALREADY_HANDLED'], ['WORKFLOW_POLICY_CHANGED', 'PROCESSING_HEAD_CHANGED']]) {
+    const status = processingStatusView(native, { ...shortcut, blockers });
+    assert.equal(status.nextAction, 'cancel'); assert(!status.diagnostics.includes('PROCESSING_RECOVERY_REQUIRED'));
+  }
+  const recovery = processingStatusView(native, { ...shortcut, blockers: ['PROCESSING_INPUT_CHANGED', 'WRITER_RECOVERY_REQUIRED'] });
+  assert.equal(recovery.nextAction, 'inspect'); assert.deepEqual(recovery.diagnostics, ['PROCESSING_RECOVERY_REQUIRED']);
+});
+
+test('cancel drains a checkpoint transition before pinning its target and cannot cancel a later request on replay', async t => {
+  const { selectProcessingShortcut } = await import('./processing-shortcuts.mjs');
+  const f = await processingFixture(t);
+  await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() });
+  const h = await harness(t, f), entered = deferred(), release = deferred(); h.release = release.resolve;
+  h.script = call => completeNextBatch(call, f);
+  const rename = fs.rename.bind(fs); let transition = false, arriving;
+  const mock = t.mock.method(fs, 'rename', async (from, to) => {
+    if (String(to).includes(`${path.sep}processed${path.sep}shortcuts${path.sep}`)) {
+      const value = JSON.parse(await fs.readFile(from));
+      if (value.phase === 'discovering' && !transition) { transition = true; entered.resolve(); await release.promise; }
+    }
+    return rename(from, to);
+  });
+  const closed = h.whenClosed();
+  // The pre-existing selection completes, then this process request starts its
+  // fresh bounded selection. Hold that publication while Cancel arrives.
+  await h.call('process_selected_captures', {}); await entered.promise;
+  arriving = h.call('processing_cancel', {});
+  await new Promise(resolve => setTimeout(resolve, 30)); release.resolve();
+  const cancelled = body(await arriving); await closed; mock.mock.restore();
+  assert(transition); assert.equal(cancelled.statusDetail, 'cancelled'); assert.equal(h.dispatches, 1);
+  await processingFixture(t, { base: f });
+  h.script = async call => call('processing_pending', {});
+  const nextClosed = h.whenClosed(); await h.call('process_selected_captures', {}); await nextClosed;
+  h.callId = 'call_2'; assert.deepEqual(body(await h.call('processing_cancel', {})), cancelled);
   assert.equal(h.dispatches, 2);
 });

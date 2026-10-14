@@ -239,3 +239,129 @@ test('collections sharing a writer keep separate shortcut checkpoints and execut
   await assertProcessingShortcutExecution(b.capability, second.nextRun);
   assert.equal((await inspectProcessingShortcut(b.capability, { selection: b.selection })).checkpointHash, second.checkpointHash);
 });
+
+async function boundToOneBatch(f, workset) {
+  const { canonicalJSON } = await import('./workflow-values.mjs');
+  const { inspectProcessingWorkset } = await import('./processing-workset.mjs');
+  const file = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', `${workset.worksetId}.json`);
+  const value = JSON.parse(await fs.readFile(file)); value.budget.maxBatches = 1;
+  await fs.writeFile(file, canonicalJSON(value) + '\n');
+  return inspectProcessingWorkset(f.capability, { worksetId: workset.worksetId });
+}
+async function removeFrozenHead(f, input) {
+  const file = path.join(f.collection.intakeStateDir, 'heads', input.identity.client, input.identity.sessionId, `${input.identity.unitId}.json`);
+  await fs.unlink(file);
+}
+
+test('known claimless recovery refuses cancellation before changing the checkpoint phase', async t => {
+  const f = await processingFixture(t), claim = await inspectedClaim(f);
+  const chosen = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() }, { canResumeOperation: async () => true });
+  const { proposedClaim } = await import('./test-support/processing-fixture.mjs');
+  const { saveProcessing } = await import('./processing.mjs');
+  const proposal = await proposedClaim(f, { claim });
+  await assert.rejects(saveProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash, approvedProposalHash: proposal.proposalHash }, {
+    fault: at => { if (at === 'claim-release') throw new Error('synthetic release interruption'); }
+  }), /synthetic release interruption/);
+  const before = await inspectProcessingShortcut(f.capability, { selection: f.selection });
+  assert.equal(before.operations[0].claimHash, null); assert.equal(before.operations[0].recoveryRequired, true);
+  await assert.rejects(cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: chosen.checkpointHash },
+    { assertStopped: async () => {}, canResumeOperation: async () => true }), { code: 'PROCESSING_RECOVERY_REQUIRED' });
+  const after = await inspectProcessingShortcut(f.capability, { selection: f.selection });
+  assert.equal(after.checkpointHash, before.checkpointHash); assert.equal(after.phase, 'ready');
+});
+
+test('continuation recovers an earlier workset input after its foreign claim is released', async t => {
+  const f = await processingFixture(t);
+  await processingFixture(t, { base: f }); await processingFixture(t, { base: f });
+  const chosen = await select(f), first = await boundToOneBatch(f, chosen.worksets[0]);
+  const prepared = await prepareWorksetBatch(f.capability, { worksetId: first.worksetId, expectedWorksetHash: first.worksetHash, indexes: [0] });
+  await finish(f, prepared.operationId);
+  const foreignId = randomUUID(), foreign = await prepareProcessing(f.capability, { selection: f.selection, operationId: foreignId, inputs: [first.inputs[1]] });
+  const middle = await select(f, { mode: 'resume' });
+  assert.deepEqual(middle.worksets[1].inputs, [first.inputs[2]]);
+  const second = await boundToOneBatch(f, middle.worksets[1]);
+  const completed = await prepareWorksetBatch(f.capability, { worksetId: second.worksetId, expectedWorksetHash: second.worksetHash, indexes: [0], parallelism: 2 });
+  await finish(f, completed.operationId);
+  await completeProcessing(f.capability, { selection: f.selection, operationId: foreignId, expectedClaimHash: foreign.claimHash, outcome: 'cancelled' });
+  const resumed = await select(f, { mode: 'resume' });
+  assert.equal(resumed.worksets.length, 3); assert.deepEqual(resumed.worksets[2].inputs, [first.inputs[1]]);
+  assert.deepEqual(resumed.nextRun, { worksetId: resumed.worksets[2].worksetId });
+});
+
+test('a ready checkpoint without a workset reports changed heads and advances independent frozen inputs', async t => {
+  const f = await processingFixture(t); await processingFixture(t, { base: f });
+  const rename = fs.rename.bind(fs);
+  const mock = t.mock.method(fs, 'rename', async (from, to) => {
+    if (String(to).includes(`${path.sep}processed${path.sep}worksets${path.sep}`)) throw new Error('synthetic workset interruption');
+    return rename(from, to);
+  });
+  await assert.rejects(select(f), /synthetic workset interruption/); mock.mock.restore();
+  await removeFrozenHead(f, f.inputs[0]);
+  const resumed = await select(f, { mode: 'resume' });
+  assert.equal(resumed.counts.selected, 2); assert.equal(resumed.counts.unavailable, 1);
+  assert.equal(resumed.worksets.length, 1); assert.equal(resumed.worksets[0].inputs.length, 1);
+  assert.notEqual(resumed.worksets[0].inputs[0].identity.sessionId, f.identity.sessionId);
+  assert(resumed.nextRun);
+});
+
+test('a published workset with a missing checkpoint pointer is recovered exactly after heads change', async t => {
+  const f = await processingFixture(t), rename = fs.rename.bind(fs); let worksetId;
+  const mock = t.mock.method(fs, 'rename', async (from, to) => {
+    if (String(to).includes(`${path.sep}processed${path.sep}shortcuts${path.sep}`)) {
+      const value = JSON.parse(await fs.readFile(from));
+      if (value.worksetIds.length) { worksetId = value.worksetIds[0]; throw new Error('synthetic pointer interruption'); }
+    }
+    return rename(from, to);
+  });
+  await assert.rejects(select(f), /synthetic pointer interruption/); mock.mock.restore();
+  const file = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', `${worksetId}.json`);
+  const frozen = await fs.readFile(file);
+  await removeFrozenHead(f, f.inputs[0]);
+  const before = await inspectProcessingShortcut(f.capability, { selection: f.selection });
+  assert.equal(before.unlinkedWorksetId, worksetId); assert.equal(before.counts.unavailable, 1);
+  const resumed = await select(f, { mode: 'resume' });
+  assert.equal(resumed.unlinkedWorksetId, null); assert.equal(resumed.worksets[0].worksetId, worksetId);
+  assert.equal(resumed.nextRun, null); assert.deepEqual(await fs.readFile(file), frozen);
+});
+
+test('continuation capacity reports cancellation and fresh selection without changing frozen evidence', async t => {
+  const f = await processingFixture(t);
+  for (let i = 0; i < 10; i++) await processingFixture(t, { base: f });
+  let chosen = await select(f);
+  for (let i = 0; i < 10; i++) {
+    const workset = await boundToOneBatch(f, chosen.worksets.at(-1));
+    const claim = await prepareWorksetBatch(f.capability, { worksetId: workset.worksetId, expectedWorksetHash: workset.worksetHash, indexes: [0] });
+    await finish(f, claim.operationId);
+    chosen = await select(f, { mode: 'resume' });
+  }
+  assert.equal(chosen.worksets.length, 10); assert.equal(chosen.counts.unattempted, 1);
+  assert.deepEqual(chosen.blockers, ['PROCESSING_SHORTCUT_CAPACITY']); assert.equal(chosen.nextRun, null);
+  const { processingStatusView } = await import('./processing-mcp.mjs');
+  const status = processingStatusView({ state: 'idle', requestId: null, chat: null }, chosen);
+  assert.equal(status.statusDetail, 'selection-limit'); assert.equal(status.nextAction, 'cancel');
+  const replay = await select(f, { mode: 'resume' }); assert.equal(replay.checkpointHash, chosen.checkpointHash);
+  await cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: chosen.checkpointHash }, { assertStopped: async () => {} });
+  const fresh = await select(f); assert.equal(fresh.counts.selected, 1); assert(fresh.nextRun);
+});
+
+test('missing operation records refuse cancellation without freezing collection execution', async t => {
+  const f = await processingFixture(t);
+  await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  const chosen = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() }, { canResumeOperation: async () => true });
+  await fs.unlink(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`));
+  await assert.rejects(cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: chosen.checkpointHash },
+    { assertStopped: async () => {}, canResumeOperation: async () => true }), { code: 'PROCESSING_CANCEL_UNVERIFIED' });
+  assert.equal((await inspectProcessingShortcut(f.capability, { selection: f.selection })).checkpointHash, chosen.checkpointHash);
+  const { assertProcessingShortcutExecution } = await import('./processing-shortcuts.mjs');
+  await assertProcessingShortcutExecution(f.capability);
+});
+
+test('shared digest IDs retain persisted workset, turn and dispatch identities', async () => {
+  const { digestId } = await import('./workflow-values.mjs');
+  const { worksetOperationId } = await import('./processing-workset.mjs');
+  const id = '11111111-1111-4111-8111-111111111111';
+  assert.equal(digestId('cuefluent-shortcut-workset-v1', { id, index: 0 }), '7365ad5c-76f2-64ed-d3dd-c09863947720');
+  assert.equal(digestId('cuefluent-shortcut-turn-v1', { id, index: 1 }), '7f66aa15-6c6d-b4d2-c79f-c191bb06768a');
+  assert.equal(worksetOperationId(id, [0, 2]), 'ff3ee0ed-2f07-d625-2576-73e7684d7d3c');
+  assert.equal(digestId('cuefluent-processing-dispatch-v1', { client: 'codex', sessionId: id, callId: 'call_1' }, { dispatchBits: true }), '422be199-1e97-84c5-8174-bef4caeb7a9c');
+});

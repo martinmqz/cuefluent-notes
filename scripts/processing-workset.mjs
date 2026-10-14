@@ -6,7 +6,7 @@ import { intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readProcessingState, withProcessingState, processingSnapshot, writeProcessingJSON, processingNamePage } from './processing-state.mjs';
 import { claimPath, operationPath, PROCESSING_INTERFACE_VERSION, validateProcessingSelection } from './processing-contract.mjs';
 import { describeProcessingOperation, prepareProcessingInState, processingBudget, activeProcessingClaims, processingCollectionBlockers } from './processing.mjs';
-import { keys, nativeId, hash, integer, list, unique, timestamp, canonicalJSON, digest, fail } from './workflow-values.mjs';
+import { keys, nativeId, hash, integer, list, unique, timestamp, canonicalJSON, digestId, fail } from './workflow-values.mjs';
 
 const file = id => `processed/worksets/${nativeId(id)}.json`;
 const equal = (a, b) => canonicalJSON(a) === canonicalJSON(b);
@@ -27,8 +27,7 @@ function indexesOf(indexes, inputs) {
   unique(indexes); return [...indexes].sort((a, b) => a - b);
 }
 export function worksetOperationId(worksetId, indexes) {
-  const value = digest(canonicalJSON({ domain: 'cuefluent-workset-operation-v1', worksetId, indexes }));
-  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20, 32)}`;
+  return digestId('cuefluent-workset-operation-v1', { worksetId, indexes });
 }
 function validate(value, ctx, worksetId) {
   keys(value, ['format', 'version', 'worksetId', 'bindingHash', 'policyHash', 'selection', 'createdAt', 'inputs', 'budget', 'unscannedRemainder', 'attempts']);
@@ -126,19 +125,10 @@ export async function prepareWorksetBatch(capability, { worksetId, expectedWorks
   });
 }
 
-export async function inspectProcessingWorkset(capability, { worksetId }) {
-  const ctx = await readProcessingState(capability, null, 'maintenance'), saved = await load(ctx, worksetId), { value } = saved;
-  const operations = [], collectionBlockers = await processingCollectionBlockers(ctx);
-  for (const attempt of value.attempts) {
-    const { claim, ...status } = await describeProcessingOperation(ctx, attempt.operationId, {
-      selection: value.selection, policyHash: attempt.policyHash ?? value.policyHash, inputs: attempt.indexes.map(index => value.inputs[index]),
-      packetHash: attempt.packetHash, packetBytes: attempt.packetBytes,
-    }, collectionBlockers);
-    operations.push({ ...status, indexes: attempt.indexes, admissionPending: status.state === 'missing' });
-  }
+async function inspectInputStates(ctx, inputs, policyHash, operations = [], attempts = []) {
   const claims = await activeProcessingClaims(ctx), items = [];
-  for (let index = 0; index < value.inputs.length; index++) {
-    const input = value.inputs[index], operation = operations.find(item => item.indexes.includes(index));
+  for (let index = 0; index < inputs.length; index++) {
+    const input = inputs[index], operation = operations.find(item => item.indexes.includes(index));
     const doneSnapshot = await processingSnapshot(ctx, dispositionPath(input.identity, input.headHash, ctx.bindingHash));
     const done = doneSnapshot.bytes ? validateProcessingDisposition(intakeJSON(doneSnapshot)) : null;
     if (done && (done.bindingHash !== ctx.bindingHash || done.headHash !== input.headHash || !equal(done.identity, input.identity))) fail('STALE_PROCESSING_DISPOSITION');
@@ -147,8 +137,8 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
     const owner = owners[0]?.claim;
     const changed = (await intakeSnapshot(ctx.store, 'state', `heads/${unitKey(input.identity)}.json`)).hash !== input.headHash;
     const pruned = Boolean(await readTombstone(ctx.store, input.identity));
-    const attempt = value.attempts.find(item => item.indexes.includes(index));
-    const blocked = (attempt?.policyHash ?? value.policyHash) !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
+    const attempt = attempts.find(item => item.indexes.includes(index));
+    const blocked = (attempt?.policyHash ?? policyHash) !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
       : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
     const elsewhere = done && done.operationId !== operation?.operationId;
     // Input disposition is current; operation outcomes remain historical. A
@@ -160,6 +150,30 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
       externalOutcome: elsewhere ? done.outcome : null,
       conflict: elsewhere || (operation?.outcome && operation.outcome !== 'cancelled') ? null : blocked ?? operation?.conflict ?? null });
   }
+  return items;
+}
+
+// Also project frozen shortcut inputs that have not reached a workset yet.
+export async function inspectFrozenProcessingInputs(capability, { inputs, policyHash }) {
+  if (inputs.length) references(inputs);
+  hash(policyHash);
+  const ctx = await readProcessingState(capability, null, 'maintenance');
+  const items = await inspectInputStates(ctx, inputs, policyHash);
+  await ctx.guard();
+  return items;
+}
+
+export async function inspectProcessingWorkset(capability, { worksetId }) {
+  const ctx = await readProcessingState(capability, null, 'maintenance'), saved = await load(ctx, worksetId), { value } = saved;
+  const operations = [], collectionBlockers = await processingCollectionBlockers(ctx);
+  for (const attempt of value.attempts) {
+    const { claim, ...status } = await describeProcessingOperation(ctx, attempt.operationId, {
+      selection: value.selection, policyHash: attempt.policyHash ?? value.policyHash, inputs: attempt.indexes.map(index => value.inputs[index]),
+      packetHash: attempt.packetHash, packetBytes: attempt.packetBytes,
+    }, collectionBlockers);
+    operations.push({ ...status, indexes: attempt.indexes, admissionPending: status.state === 'missing' });
+  }
+  const items = await inspectInputStates(ctx, value.inputs, value.policyHash, operations, value.attempts);
   for (const operation of operations.filter(item => item.admissionPending)) {
     const members = items.filter(item => operation.indexes.includes(item.index));
     const blocker = members.find(item => item.conflict || item.state === 'handled-elsewhere');

@@ -10,12 +10,12 @@ import { activeProcessingClaims, describeProcessingOperation } from './processin
 import { pendingProcessing } from './processing-inventory.mjs';
 import { PROCESSING_INTERFACE_VERSION, claimPath } from './processing-contract.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
-import { CLIENTS, choice, keys, nativeId, hash, integer, canonicalJSON, digest, fail } from './workflow-values.mjs';
+import { CLIENTS, PROCESSING_SCOPES, validateProcessingCursor, choice, nativeId, hash, integer, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
 /** Resolve repository narrowing from a real Git marker, never from a guessed
  * route basename. This is metadata only; Git configuration is not executed. */
 export async function processingScope(selection, kind = 'collection') {
-  choice(kind, ['collection', 'repo', 'chat']);
+  choice(kind, PROCESSING_SCOPES);
   selection = await normalizeWorkflowSelection(selection);
   if (kind === 'collection') return { kind };
   if (kind === 'chat') return { kind, client: selection.client, sessionId: selection.sessionId, unitId: selection.unitId };
@@ -46,11 +46,10 @@ async function recoverySnapshot(ctx) {
   const journal = await processingSnapshot(ctx, 'journal.json');
   const pending = await intakeSnapshot(ctx.store, 'state', 'pending.json');
   const prune = await intakeSnapshot(ctx.store, 'state', 'prune-pending.json');
-  const intakeBlocked = Boolean(await lstatOrNull(path.join(ctx.collection.intakeStateDir, '.intake-lock')));
-  return { transactions, journalHash: journal.hash, pendingHash: pending.hash, pruneHash: prune.hash, intakeBlocked,
+  return { transactions, journalHash: journal.hash, pendingHash: pending.hash, pruneHash: prune.hash,
     blockers: [...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []),
       ...(journal.bytes ? ['WRITER_RECOVERY_REQUIRED'] : []), ...(intakeJSON(pending) !== null ? ['INTAKE_RECOVERY_REQUIRED'] : []),
-      ...(intakeJSON(prune) !== null ? ['PRUNE_RECOVERY_REQUIRED'] : []), ...(intakeBlocked ? ['INTAKE_BUSY'] : [])] };
+      ...(intakeJSON(prune) !== null ? ['PRUNE_RECOVERY_REQUIRED'] : [])] };
 }
 
 /** Inventory only retained, already-selected sources. No model, native history,
@@ -63,8 +62,7 @@ export async function pendingCollectionProcessing(capability, { selection, scope
   const selectedScope = await processingScope(selection, scope);
   const scopeHash = digest(canonicalJSON({ scope: selectedScope, bindingHash: ctx.bindingHash, policyHash: ctx.policyHash }));
   if (after !== null) {
-    keys(after, ['scopeHash', 'client', 'sessionId', 'unitId']); hash(after.scopeHash);
-    choice(after.client, CLIENTS); nativeId(after.sessionId); if (after.unitId !== null) nativeId(after.unitId);
+    validateProcessingCursor(after);
     if (after.scopeHash !== scopeHash) fail('PROCESSING_INVENTORY_CURSOR_MISMATCH');
   }
   const sources = new Map(), repositories = new Map();
@@ -160,13 +158,24 @@ export async function pendingCollectionProcessing(capability, { selection, scope
   if (canonicalJSON(await processingNames(ctx, 'claims')) !== canonicalJSON(claimNames)) fail('PROCESSING_INVENTORY_CHANGED');
   for (const operation of operations) if ((await processingSnapshot(ctx, claimPath(operation.operationId))).hash !== operation.claimHash) fail('PROCESSING_INVENTORY_CHANGED');
   for (const input of pending) if ((await readCaptureHead(ctx.store, input.identity, { metadataOnly: true })).hash !== input.headHash) fail('PROCESSING_INVENTORY_CHANGED');
+  // Lock presence is an observation, not recovery state or read authority.
+  // Mutations still acquire the intake lock and revalidate exact inputs.
+  const intakeBlocked = Boolean(await lstatOrNull(path.join(ctx.collection.intakeStateDir, '.intake-lock')));
   await ctx.guard();
   return { interfaceVersion: PROCESSING_INTERFACE_VERSION, scope: selectedScope, scopeHash,
-    pending, operations, blockers, intakeBlocked: recovery.intakeBlocked, incomplete, nextCursor: incomplete ? cursor : null,
+    pending, operations, blockers, intakeBlocked, incomplete, nextCursor: incomplete ? cursor : null,
     counts: { scope: 'returned-head-page', pendingRevisions: pending.length,
       unclaimedRevisions: pending.filter(item => item.status === 'pending').length,
       claimedRevisions: pending.filter(item => item.status === 'claimed').length,
       blockedByClaimRevisions: pending.filter(item => item.status === 'blocked-by-claim').length,
       handledRevisions, inspectedHeads, visitedSessions, excludedSources, outsideScopeSources }, sourceCompleteness: 'unknown',
     limitation: 'Metadata pages are not an atomic queue snapshot. Preparation revalidates each exact input; incomplete discovery is not an empty backlog.' };
+}
+
+/** Retry only a changed read snapshot, never a mutation or recovery blocker. */
+export async function stablePendingCollectionProcessing(capability, args) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return await pendingCollectionProcessing(capability, args); }
+    catch (error) { if (error.code !== 'PROCESSING_INVENTORY_CHANGED' || attempt) throw error; }
+  }
 }

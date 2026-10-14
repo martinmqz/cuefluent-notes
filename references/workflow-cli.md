@@ -336,7 +336,12 @@ collection/config envelope:
 Both return `interfaceVersion: 1`, `checkpointHash`, `requestId`, `phase`, `scope`,
 `operations`, `worksets`, `nextRun`, `incomplete` and `sourceCompleteness`.
 An existing checkpoint also reports its original `selection`, `policyHash`,
-`counts`, `blockers`, `reviews` and `continuationNeeded`. Status adds `policyState`.
+`counts`, `blockers`, `reviews`, `continuationNeeded`, `remainingInputs` and
+`unlinkedWorksetId`. `remainingInputs` contains exact unattempted
+`{identity, headHash}` references across the entire frozen selection.
+`unlinkedWorksetId` is null or the deterministic workset published before an
+interrupted checkpoint update; inspection includes it and selection repairs its
+pointer without replacing its contents. Status adds `policyState`.
 `nextRun` is null or an exact `{worksetId}` / `{resumeOperationId}` binding for
 `processing-chat-run`. Counts distinguish selected, unattempted, handled,
 unavailable, cancelled, unfinished operations and awaiting-review operations. No native
@@ -356,6 +361,9 @@ backlog. A changed policy, scope conflict or recovery requirement preserves the
 checkpoint. Cancel safely owned unapplied work before starting a fresh selection
 under changed policy or after unavailable inputs; never refresh old hashes.
 Finished or cancelled selections may be replaced by a fresh `process` request.
+When continuation capacity is exhausted, `PROCESSING_SHORTCUT_CAPACITY` is a
+checkpoint blocker and native status offers Cancel, followed by a fresh Process.
+It does not keep offering an unusable Resume.
 `INTAKE_BUSY` means a current storage write, not recovery. If inventory changes
 during a bounded status retry, `PROCESSING_INVENTORY_INCOMPLETE` accompanies the
 execution snapshot without claiming inventory totals.
@@ -551,8 +559,10 @@ same-collection writer transactions throughout the collection, independently of
 that page; `scopeMatch` is `full`, `partial` or
 `outside`. A narrow request cannot resume a partial or outside operation by
 silently expanding its scope. Existing conflicts, proposals and recovery are
-reported without resolving them, including intake/prune recovery and held intake
-locks. Claimless writer transactions retain their operation ID and recovery hash.
+reported without resolving them, including intake/prune recovery. `intakeBlocked`
+is only an observation of lock presence, not a recovery blocker or a stable
+snapshot field. Read-only inventory can proceed during collection; mutations
+still acquire the intake lock and validate current state. Claimless writer transactions retain their operation ID and recovery hash.
 `sourceCompleteness: "unknown"` remains separate
 from how much retained metadata was inspected. Discovery is advisory rather than
 an atomic queue snapshot: pass exact returned `{identity, headHash}` references

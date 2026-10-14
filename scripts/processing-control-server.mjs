@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { CLIENTS, canonicalJSON, digest, choice, fail, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
+import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
@@ -27,6 +27,7 @@ const STATUS_DETAILS = Object.freeze({
   unfinished: { states: ['idle'], text: 'Processing stopped with unfinished work.' },
   inactive: { states: ['idle'], text: 'No processing run is active.' },
   missing: { states: ['missing'], text: 'No processing session has been started.' },
+  'selection-limit': { states: ['blocked'], text: 'The saved selection reached its continuation limit. Cancel it, then use process for remaining captures.' },
   blocked: { states: ['blocked'], text: 'Processing needs attention.' },
   completed: { states: ['completed'], text: 'Processing operation completed.' },
   'selection-complete': { states: ['missing', 'idle', 'completed'], text: 'Selected captures have been handled.' },
@@ -70,7 +71,7 @@ const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
 const selectionSchema = { type: 'object', additionalProperties: false, required: ['client', 'sessionId', 'cwd'],
   properties: { client: { type: 'string', enum: CLIENTS }, sessionId: uuidSchema,
     cwd: { type: 'string', minLength: 1, maxLength: 4096 }, unitId: uuidSchema } };
-const scopeSchema = { type: 'string', enum: ['collection', 'repo', 'chat'], description: 'Pending retained evidence scope; defaults to the existing collection.' };
+const scopeSchema = { type: 'string', enum: PROCESSING_SCOPES, description: 'Pending retained evidence scope; defaults to the existing collection.' };
 const TOOLS = [
   { name: 'processing_status', description: 'Read bounded processing-chat status for the selected collection. Returns no evidence or drafts.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
@@ -125,7 +126,7 @@ function argumentsFor(name, args) {
     if (args.retryToken !== undefined) nativeId(args.retryToken);
     const result = args.collectionId === undefined ? {} : { collectionId: args.collectionId };
     if (args.requestId !== undefined) result.requestId = args.requestId;
-    if (args.scope !== undefined) result.scope = choice(args.scope, ['collection', 'repo', 'chat']);
+    if (args.scope !== undefined) result.scope = choice(args.scope, PROCESSING_SCOPES);
     if (args.selection !== undefined) {
       keys(args.selection, ['client', 'sessionId', 'cwd'], ['unitId']);
       choice(args.selection.client, CLIENTS); nativeId(args.selection.sessionId); string(args.selection.cwd);
@@ -166,7 +167,7 @@ export function processingControlStatusView(value, args) {
       result.statusText = `Cuefluent: ${detail.text}`;
     }
     if (value.scope !== undefined) {
-      result.scope = choice(value.scope, ['collection', 'repo', 'chat']);
+      result.scope = choice(value.scope, PROCESSING_SCOPES);
       result.statusText += ` Scope: ${result.scope}.`;
     }
     if (value.progress !== undefined) {

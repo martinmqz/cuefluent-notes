@@ -278,6 +278,8 @@ export async function createProcessingChatState(options) {
     }
     await guard(); return records;
   }
+  const executing = value => ['creating', 'busy'].includes(value.state) ||
+    (value.state === 'blocked' && !['creation-not-dispatched', 'run-abandoned'].includes(value.block.reason));
   async function collectionActivity() {
     const activity = [];
     for (const { own, value } of await collectionRegistries()) {
@@ -287,8 +289,7 @@ export async function createProcessingChatState(options) {
         // client has not yet acknowledged review. This read does not rewrite it.
         if (operation.state === 'completed' && operation.outcome && !operation.recoveryRequired) continue;
       }
-      if (['creating', 'busy', 'awaiting-review'].includes(value.state) ||
-          (value.state === 'blocked' && !['creation-not-dispatched', 'run-abandoned'].includes(value.block.reason))) {
+      if (value.state === 'awaiting-review' || executing(value)) {
         activity.push({ own, state: value.state, client: value.namespace.client,
           sessionId: value.session?.sessionId ?? null,
           requestId: value.active?.requestId ?? value.runs.at(-1)?.request.requestId ?? value.creation.requestId });
@@ -332,7 +333,7 @@ export async function createProcessingChatState(options) {
         const records = await collectionRegistries();
         // A claim alone says nothing about a standalone agent's liveness.
         // Only a recorded terminal native run supplies automatic resume authority.
-        if (records.some(({ value }) => ['creating', 'busy', 'blocked'].includes(value.state))) return false;
+        if (records.some(({ value }) => executing(value))) return false;
         for (const { value } of records) {
           if (value.runs.some(run => ownsOperation(run, operationId)) || await archivedOperation(operationId, value.namespace)) {
             await guard(); return true;
