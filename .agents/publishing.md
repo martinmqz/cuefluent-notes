@@ -131,7 +131,11 @@ defines the current jobs.
 
 Source changes, release tags and manual runs use the full source test/build
 matrix. Scope classification uses a shallow checkout and, for eligible events,
-the selected base tree; full source runs and tag/manual runs do not install scope
+the selected base tree. The workflow's independent diff boundary uses only Node
+built-ins and Git; it never imports checked-out selector code or dependencies.
+Any source, helper, dependency, gate or workflow change forces full checks before
+the repository selector can run. The workflow itself remains review-controlled
+CI policy. Full source runs and tag/manual runs do not install scope
 dependencies or fetch full history. Only package candidates load verification
 dependencies and fetch the selected base/HEAD ancestry and release tag.
 For PRs into `main` and pushes to `main`, CI can use a shorter path when
@@ -139,6 +143,13 @@ the complete Git diff changes only the canonical marketplace publication paths.
 It verifies a newer, stable published release, a successful **Prepare release**
 run for its exact tag commit in the base's history, the published snapshot checksum,
 and exact agreement between that snapshot and the committed packages and catalogs.
+Published checksums must also match `SHA256SUMS` inside the retained Linux artifact
+from that exact successful run. The artifact's run identity, size and GitHub SHA-256
+digest are verified before reading its bounded checksum entry in memory. This
+binds release bytes to tested build output even when a release's assets are mutable.
+Missing, expired, ambiguous or mismatched run artifacts refuse the shorter path;
+release assets and their own checksums cannot substitute for that evidence. See
+the [Actions artifact API](https://docs.github.com/en/rest/actions/artifacts).
 Release asset metadata must fit the download bounds before either body is fetched;
 asset-ID downloads also enforce byte limits and must match the advertised sizes,
 using GitHub’s [release asset API](https://docs.github.com/en/rest/releases/assets#get-a-release-asset).
@@ -150,7 +161,8 @@ release-policy violations; publish a newer version rather than changing immutabl
 published content.
 
 The repository-only `scripts/marketplace-ci.mjs` commands keep classification and
-verification separate: `classify` emits `full` or `candidate`; `select --fetch`
+verification separate: `classify` emits `full` or `candidate` for local diagnostics;
+CI uses its independent workflow boundary instead. `select --fetch`
 fetches the selected history/tag and emits `full` or verified `packages`. Plain
 `select` expects those Git objects to be present already. `gate` checks `CI_NEEDS`
 against the selected mode and uses `GITHUB_REF` for the tag-only client-check

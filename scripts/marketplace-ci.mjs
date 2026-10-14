@@ -59,10 +59,50 @@ export function verifyReleaseEvidence({ release, runs, tag, commit }) {
   }
   // GitHub can append @ref to the workflow path. Compare the file identity;
   // the independent tag, commit and run-result checks remain authoritative.
-  if (!sha(commit) || !runs?.workflow_runs?.some(run => run.head_sha === commit && run.head_branch === tag &&
+  const run = runs?.workflow_runs?.find(run => run.head_sha === commit && run.head_branch === tag &&
       typeof run.path === 'string' && run.path.split('@', 1)[0] === '.github/workflows/release.yml' &&
-      run.event === 'push' && run.status === 'completed' && run.conclusion === 'success')) {
+      run.event === 'push' && run.status === 'completed' && run.conclusion === 'success');
+  if (!sha(commit) || !run || !Number.isSafeInteger(run.id) || run.id <= 0) {
     throw new Error('No successful Prepare release run for the exact tag commit.');
+  }
+  return run;
+}
+
+/** The API is scoped to the verified run. Refuse incomplete lists, ambiguous
+ * names and expired artifacts; release assets alone are mutable evidence. */
+export function releaseRunArtifact(list, run) {
+  if (!Array.isArray(list?.artifacts) || list.artifacts.length > 100 || list.total_count !== list.artifacts.length) {
+    throw new Error('Incomplete release-run artifact evidence.');
+  }
+  const matches = list.artifacts.filter(artifact => artifact?.name === 'release-preview-ubuntu-24.04');
+  const artifact = matches[0];
+  if (matches.length !== 1 || artifact.expired !== false || !Number.isSafeInteger(artifact.id) || artifact.id <= 0 ||
+      !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes <= 0 || artifact.size_in_bytes > MAX_BYTES ||
+      !/^sha256:[a-f0-9]{64}$/.test(artifact.digest ?? '') || artifact.workflow_run?.id !== run.id ||
+      artifact.workflow_run.head_sha !== run.head_sha || artifact.workflow_run.head_branch !== run.head_branch) {
+    throw new Error('A retained release artifact bound to the verified tag run is required.');
+  }
+  return artifact;
+}
+
+/** Authenticate the Actions ZIP before inspecting only its bounded checksum
+ * entry in memory. Never extract artifact paths or inflate its package payloads. */
+export async function verifyRunArtifactSums(archive, artifact, sums) {
+  if (archive.length > MAX_BYTES || archive.length !== artifact.size_in_bytes || sums.length > 65536 ||
+      `sha256:${createHash('sha256').update(archive).digest('hex')}` !== artifact.digest) {
+    throw new Error('Release-run artifact size or digest mismatch.');
+  }
+  const { unzipSync } = await import('fflate');
+  let count = 0;
+  const files = unzipSync(archive, { filter(entry) {
+    if (entry.name !== 'SHA256SUMS') return false;
+    if (++count !== 1 || !Number.isSafeInteger(entry.originalSize) || entry.originalSize <= 0 || entry.originalSize > 65536) {
+      throw new Error('Invalid release-run checksum entry.');
+    }
+    return true;
+  } });
+  if (count !== 1 || !Buffer.from(files.SHA256SUMS).equals(sums)) {
+    throw new Error('Published checksums differ from the verified release-run artifact.');
   }
 }
 
@@ -143,7 +183,8 @@ async function readPublished(cwd, env, version, fetchTag = false) {
   const api = endpoint => JSON.parse(command(cwd, 'gh', ['api', `repos/${repository}/${endpoint}`]));
   const release = api(`releases/tags/${tag}`);
   const runs = api(`actions/workflows/release.yml/runs?event=push&status=success&head_sha=${commit}&per_page=100`);
-  verifyReleaseEvidence({ release, runs, tag, commit });
+  const run = verifyReleaseEvidence({ release, runs, tag, commit });
+  const artifact = releaseRunArtifact(api(`actions/runs/${run.id}/artifacts?per_page=100`), run);
   // Validate both sizes before fetching either body. Download by validated asset
   // ID into bounded buffers, not an unbounded temporary file on the runner.
   const [snapshot, sums] = releaseAssets(release, version).map(asset => {
@@ -152,6 +193,9 @@ async function readPublished(cwd, env, version, fetchTag = false) {
     if (bytes.length !== asset.size) throw new Error(`Published asset size changed: ${asset.name}`);
     return bytes;
   });
+  const archive = repositoryCommand(cwd, 'gh', ['api', `repos/${repository}/actions/artifacts/${artifact.id}/zip`],
+    { encoding: null, maxBuffer: artifact.size_in_bytes }).stdout;
+  await verifyRunArtifactSums(archive, artifact, sums);
   return { snapshot, sums, version };
 }
 

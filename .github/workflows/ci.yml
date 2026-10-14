@@ -34,7 +34,33 @@ jobs:
           package-manager-cache: false
       - name: Classify the complete diff without build dependencies
         id: classify
-        run: node scripts/marketplace-ci.mjs classify
+        # This boundary must not import PR-controlled scripts or dependencies:
+        # a selector, gate, lockfile or workflow edit must take full source CI.
+        # Keep the generated-path allowlist aligned with marketplace-layout.mjs.
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          const env = process.env;
+          let mode = 'full';
+          const eligible = ((env.GITHUB_EVENT_NAME === 'pull_request' && env.CI_BASE_REF === 'main') ||
+            (env.GITHUB_EVENT_NAME === 'push' && env.GITHUB_REF === 'refs/heads/main')) &&
+            /^[a-f0-9]{40}$/.test(env.CI_BASE_SHA ?? '') && !/^0+$/.test(env.CI_BASE_SHA);
+          if (eligible) {
+            const git = args => {
+              const result = spawnSync('git', args, { encoding: 'utf8', timeout: 180000, maxBuffer: 16 * 1024 * 1024 });
+              if (result.error || result.status !== 0) throw new Error('Cannot verify the complete CI diff.');
+              return result.stdout;
+            };
+            git(['fetch', '--no-tags', '--depth=1', 'origin', env.CI_BASE_SHA]);
+            const names = git(['diff', '--no-renames', '--name-only', '-z', env.CI_BASE_SHA, 'HEAD', '--']).split('\0').filter(Boolean);
+            const generated = name => ['release.json', '.agents/plugins/marketplace.json', '.claude-plugin/marketplace.json'].includes(name) ||
+              name.startsWith('plugins/cuefluent-notes/') || name.startsWith('claude/cuefluent-notes/');
+            if (names.length && names.every(generated)) mode = 'candidate';
+          }
+          appendFileSync(env.GITHUB_OUTPUT, `mode=${mode}\n`);
+          console.log(mode === 'candidate' ? 'Package-only candidate; release verification is required.' : 'Full source checks required.');
+          NODE
       - run: npm ci --ignore-scripts
         if: steps.classify.outputs.mode == 'candidate'
       - name: Verify exact published packages and release ancestry

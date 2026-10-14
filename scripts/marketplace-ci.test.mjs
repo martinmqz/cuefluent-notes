@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import tar from 'tar-stream';
+import { zipSync } from 'fflate';
 import YAML from 'yaml';
 import { smokeEnvironment } from './smoke-environment.mjs';
 import { buildRelease } from './release.mjs';
@@ -16,7 +17,8 @@ import { MARKETPLACE_PATHS, isMarketplaceSnapshotFile } from './marketplace-layo
 import { repositoryCommand } from './repository-command.mjs';
 import { marketplaceTreeFiles } from './marketplace-content.mjs';
 import { packageOnlyChange, selectChecks, snapshotFiles, verifyCheckResults,
-  verifyReleaseEvidence, verifyPublishedTree, releaseAssets } from './marketplace-ci.mjs';
+  verifyReleaseEvidence, verifyPublishedTree, releaseAssets, releaseRunArtifact,
+  verifyRunArtifactSums } from './marketplace-ci.mjs';
 
 const source = fileURLToPath(new URL('../', import.meta.url));
 async function fixture(t) {
@@ -53,6 +55,56 @@ async function isolatedCiTools(f) {
   }
   return path.join(directory, 'marketplace-ci.mjs');
 }
+
+test('workflow boundary forces full CI without executing changed selectors, helpers or dependencies', async t => {
+  const f = await fixture(t);
+  const workflow = YAML.parse(await fs.readFile(path.join(source, '.github/workflows/ci.yml'), 'utf8'));
+  const step = workflow.jobs.scope.steps.find(step => step.id === 'classify');
+  const script = /^node --input-type=module <<'NODE'\n([\s\S]+)\nNODE\n?$/.exec(step.run)?.[1];
+  assert.ok(script, 'The workflow must classify independently of checked-out modules.');
+  const marker = path.join(f.root, 'selector-executed'), output = path.join(f.root, 'boundary-output');
+  const poison = `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(marker)}, 'ran');
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, 'mode=packages\\n');`;
+  await f.write('scripts/marketplace-ci.mjs', poison);
+  const base = f.commit();
+  f.git('remote', 'add', 'origin', pathToFileURL(f.cwd).href);
+  const run = async (event = f.event) => {
+    await fs.rm(output, { force: true });
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script],
+      { cwd: f.cwd, env: { ...f.env, ...event, CI_BASE_SHA: base, GITHUB_OUTPUT: output }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    await assert.rejects(fs.stat(marker), { code: 'ENOENT' }, 'No checkout code may execute at the boundary.');
+    return fs.readFile(output, 'utf8');
+  };
+  assert.equal(await run(), 'mode=full\n', 'An empty diff must run full CI.');
+  for (const name of MARKETPLACE_PATHS) {
+    f.git('reset', '--hard', base);
+    const file = name.endsWith('.json') ? name : `${name}/fixture.md`;
+    await f.write(file); f.commit();
+    assert.equal(await run(), 'mode=candidate\n', file);
+  }
+  const packages = f.git('rev-parse', 'HEAD');
+  for (const name of ['scripts/marketplace-ci.mjs', 'scripts/marketplace-layout.mjs', 'scripts/repository-command.mjs',
+    'scripts/file-io.mjs', 'package.json', 'package-lock.json', '.npmrc', '.github/workflows/ci.yml',
+    '.agents/plugins/other.json', 'plugins/cuefluent-notes-other/file.md']) {
+    f.git('reset', '--hard', packages);
+    await f.write(name, `${poison}\n// Changed source\n`); f.commit();
+    assert.equal(await run(), 'mode=full\n', name);
+  }
+  f.git('reset', '--hard', packages);
+  await fs.mkdir(path.join(f.cwd, 'plugins/cuefluent-notes'), { recursive: true });
+  f.git('mv', 'README.md', 'plugins/cuefluent-notes/moved.md'); f.commit();
+  assert.equal(await run(), 'mode=full\n', 'Renaming source into generated files still changes source.');
+  f.git('reset', '--hard', packages);
+  f.git('rm', 'scripts/marketplace-ci.mjs'); f.commit();
+  assert.equal(await run(), 'mode=full\n', 'Deleting a selector must not prevent full-mode classification.');
+  f.git('reset', '--hard', packages);
+  for (const event of [{ GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/tags/v1.2.3' },
+    { GITHUB_EVENT_NAME: 'workflow_dispatch' }, { ...f.event, CI_BASE_REF: 'other' }]) {
+    assert.equal(await run(event), 'mode=full\n');
+  }
+  assert.equal(await run({ GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main' }), 'mode=candidate\n');
+});
 
 test('classification fetches only selected trees; candidates alone need ancestry and a release tag', async t => {
   const f = await fixture(t);
@@ -146,6 +198,46 @@ test('release asset preflight rejects missing, duplicate, incomplete and oversiz
     const invalid = structuredClone(release); Object.assign(invalid.assets[index], patch);
     assert.throws(() => releaseAssets(invalid, '1.2.3'), /published asset/);
   }
+});
+
+test('release-run artifact selection requires bounded retained evidence from the exact run', () => {
+  const run = { id: 123, head_sha: 'a'.repeat(40), head_branch: 'v1.2.3' };
+  const artifact = { id: 456, name: 'release-preview-ubuntu-24.04', size_in_bytes: 4096,
+    digest: `sha256:${'b'.repeat(64)}`, expired: false, workflow_run: run };
+  const list = { total_count: 1, artifacts: [artifact] };
+  assert.equal(releaseRunArtifact(list, run), artifact);
+  for (const invalid of [null, {}, { ...list, total_count: 2 }, { total_count: 0, artifacts: [] },
+    { total_count: 2, artifacts: [artifact, artifact] }, { total_count: 101, artifacts: Array(101).fill(artifact) }]) {
+    assert.throws(() => releaseRunArtifact(invalid, run), /artifact evidence|retained release artifact/);
+  }
+  for (const patch of [{ expired: true }, { id: 0 }, { id: '../escape' }, { size_in_bytes: 0 },
+    { size_in_bytes: 128 * 1024 * 1024 + 1 }, { digest: null }, { digest: 'sha256:invalid' },
+    { name: 'release-preview-windows-2025' }, { workflow_run: { ...run, id: 999 } },
+    { workflow_run: { ...run, head_sha: 'c'.repeat(40) } }, { workflow_run: { ...run, head_branch: 'main' } }]) {
+    assert.throws(() => releaseRunArtifact({ ...list, artifacts: [{ ...artifact, ...patch }] }, run), /retained release artifact/);
+  }
+});
+
+test('published checksums must match the digest-verified run artifact, even after consistent asset replacement', async () => {
+  const original = Buffer.from('original release snapshot'), replacement = Buffer.from('replacement snapshot');
+  const sums = sumsFor(original), changedSums = sumsFor(replacement);
+  const zip = entries => Buffer.from(zipSync(entries));
+  const archive = zip({ SHA256SUMS: sums, 'ignored-package.zip': Buffer.alloc(1024 * 1024) });
+  const metadata = bytes => ({ size_in_bytes: bytes.length, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}` });
+  await verifyRunArtifactSums(archive, metadata(archive), sums);
+  await assert.rejects(verifyRunArtifactSums(archive, metadata(archive), changedSums), /Published checksums differ/);
+  const changedArchive = zip({ SHA256SUMS: changedSums });
+  await assert.rejects(verifyRunArtifactSums(changedArchive, metadata(archive), changedSums), /size or digest mismatch/);
+  await assert.rejects(verifyRunArtifactSums(archive, { ...metadata(archive), digest: `sha256:${'0'.repeat(64)}` }, sums), /size or digest mismatch/);
+  for (const entries of [{}, { 'nested/SHA256SUMS': sums }, { SHA256SUMS: Buffer.alloc(65537) }]) {
+    const invalid = zip(entries);
+    await assert.rejects(verifyRunArtifactSums(invalid, metadata(invalid), sums), /checksum/);
+  }
+  const duplicate = zip({ SHA256SUMS: sums, SHA256SUMX: sums });
+  for (let index = duplicate.indexOf('SHA256SUMX'); index !== -1; index = duplicate.indexOf('SHA256SUMX')) {
+    duplicate.write('SHA256SUMS', index);
+  }
+  await assert.rejects(verifyRunArtifactSums(duplicate, metadata(duplicate), sums), /Invalid release-run checksum entry/);
 });
 
 test('complete Git diff classification is conservative across events, deletions and renames', async t => {
@@ -284,14 +376,14 @@ test('package path compares exact published files, never a self-asserted invento
 test('published stable identity and exact successful tag run are mandatory', () => {
   const commit = 'a'.repeat(40), tag = 'v1.2.3';
   const release = { tag_name: tag, draft: false, prerelease: false, published_at: '2020-01-01T00:00:00Z' };
-  const run = { head_sha: commit, head_branch: tag, path: '.github/workflows/release.yml',
+  const run = { id: 123, head_sha: commit, head_branch: tag, path: '.github/workflows/release.yml',
     event: 'push', status: 'completed', conclusion: 'success' };
   const evidence = { release, runs: { workflow_runs: [run] }, tag, commit };
   const workflowPaths = [run.path, `${run.path}@main`, `${run.path}@${tag}`,
     `${run.path}@refs/tags/${tag}`, `${run.path}@${commit}`];
   for (const workflowPath of workflowPaths) {
     verifyReleaseEvidence({ ...evidence, runs: { workflow_runs: [{ ...run, path: workflowPath }] } });
-    for (const patch of [{ head_sha: 'b'.repeat(40) }, { head_branch: 'main' },
+    for (const patch of [{ id: 0 }, { id: undefined }, { head_sha: 'b'.repeat(40) }, { head_branch: 'main' },
       { event: 'workflow_dispatch' }, { status: 'in_progress' }, { conclusion: 'failure' }]) {
       assert.throws(() => verifyReleaseEvidence({ ...evidence,
         runs: { workflow_runs: [{ ...run, path: workflowPath, ...patch }] } }), /No successful/);
