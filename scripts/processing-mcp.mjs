@@ -282,9 +282,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
     const replay = await replayControl(source); if (replay) return replay;
+    const args = { selection: source.selection, requestId, action: mode, argsHash: source.argsHash };
+    // Shortcut replies also survive without a capture-exclusion receipt. Exact
+    // completed redelivery needs no launch credential and must not create state.
+    const prior = await withStorageProbes(() => readProcessingShortcutControl(capability, args));
+    if (prior?.response) { controls.set(source, prior); return prior.response; }
     if (client === 'claude') assertClaudeHostAuthentication(env);
-    const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, { selection: source.selection,
-      requestId, action: mode, argsHash: source.argsHash }));
+    const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, args));
     controls.set(source, control); if (control.response) return control.response;
     const existing = await activeJob(key, source, signal); if (existing) return existing;
     let announce, rejectAdmission, releaseDispatch, rejectDispatch;

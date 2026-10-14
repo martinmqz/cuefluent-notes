@@ -71,7 +71,7 @@ function processingRpc(f, environment = {}) {
   return rpcClient(streams => runProcessingMcp({ client: 'claude', configPath: f.options.configPath, ...streams, ...environment }, {
     // Native source binding has separate coverage; retain the actual controller
     // and native transport while supplying only a synthetic source identity.
-    async resolveInvocation(_capability, _context, invocation) { return { selection: f.selection, callId: 'synthetic-environment-call', nativeSkill: false, argsHash: digest(canonicalJSON(invocation.arguments)) }; }
+    async resolveInvocation(_capability, context, invocation) { return { selection: f.selection, callId: context.toolCallId, nativeSkill: false, argsHash: digest(canonicalJSON(invocation.arguments)) }; }
   }));
 }
 
@@ -241,6 +241,51 @@ test('a complete MCP host handoff launches with its credential and no profile pr
   assert(!JSON.stringify(args).includes('synthetic-host-token'));
   assert((await fs.readFile(original.file)).equals(original.bytes));
 }));
+
+for (const tool of ['process_selected_captures', 'processing_resume']) for (const collect of [true, false]) {
+  test(`MCP replays ${tool} without host credentials or capture receipts, collection ${collect ? 'on' : 'off'}`, async t => withLaunchFixture(t, async f => {
+    if (!collect) {
+      f.config.routes[0].collection.enabled = false;
+      await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+    }
+    const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+      CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' };
+    const initialize = { jsonrpc: '2.0', id: 0, method: 'initialize', params: {
+      protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } };
+    const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: tool, arguments: { collectionId: f.collection.id },
+      _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } };
+    const original = processingRpc(f, { env }); f.defer(() => original.close());
+    await original.send(initialize);
+    const first = await original.send(request);
+    assert.equal(first.error, undefined); assert.ok(first.result);
+    await original.close();
+    const launches = f.nativeCalls.length;
+    assert.equal(launches, tool === 'process_selected_captures' ? 1 : 0);
+    const writerSnapshot = async () => {
+      const root = f.collection.notes.writerStateDir;
+      const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
+      const files = entries.filter(entry => entry.isFile()).map(entry => path.join(entry.parentPath, entry.name)).sort();
+      return Promise.all(files.map(async file => [path.relative(root, file), await fs.readFile(file)]));
+    };
+    const before = await writerSnapshot();
+    assert(before.some(([name]) => name.startsWith(`processed${path.sep}shortcut-controls${path.sep}`)));
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    const reconnected = processingRpc(f, { env }); f.defer(() => reconnected.close());
+    await reconnected.send(initialize);
+    assert.deepEqual((await reconnected.send(request)).result, first.result);
+    const changed = await reconnected.send({ ...request, id: 2, params: {
+      ...request.params, arguments: {} } });
+    assert.equal(changed.error?.message, 'PROCESSING_CONTROL_RECEIPT_CONFLICT');
+    const fresh = await reconnected.send({ ...request, id: 3, params: {
+      ...request.params, _meta: { 'claudecode/toolUseId': 'synthetic-new-call' } } });
+    assert.equal(fresh.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+    await reconnected.close();
+    assert.equal(f.nativeCalls.length, launches);
+    assert.deepEqual(await writerSnapshot(), before);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }));
+}
 
 test('retargeted native profile alias cannot dispatch in the old processing namespace', { skip: process.platform === 'win32' }, async t => withLaunchFixture(t, async f => {
   const alias = path.join(f.root, 'profile-alias'), replacement = path.join(f.root, 'other-profile');
