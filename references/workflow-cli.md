@@ -258,7 +258,7 @@ portion or `cancel` for an unchanged frozen selection that cannot continue. Tool
 New responses also include `statusDetail`: `accepted`, `already-processing`,
 `processing`, `preparing`, `draft-ready`, `unfinished`, `inactive`, `missing`,
 `blocked` or `completed`, plus `nothing-pending`, `nothing-to-resume`,
-`discovery`, `continuation`, `cancelled`, `intake-busy`, `selection-complete`,
+`discovery`, `continuation`, `cancelled`, `selection-limit`, `selection-complete`,
 `pending` and `inventory-incomplete` for shortcut results. Admission, a competing request and a read-only progress
 snapshot remain distinct even when their stored execution state is `busy`.
 An idle native session with unfinished engine work reports `unfinished`, with
@@ -364,9 +364,11 @@ Finished or cancelled selections may be replaced by a fresh `process` request.
 When continuation capacity is exhausted, `PROCESSING_SHORTCUT_CAPACITY` is a
 checkpoint blocker and native status offers Cancel, followed by a fresh Process.
 It does not keep offering an unusable Resume.
-`INTAKE_BUSY` means a current storage write, not recovery. If inventory changes
-during a bounded status retry, `PROCESSING_INVENTORY_INCOMPLETE` accompanies the
-execution snapshot without claiming inventory totals.
+An observed intake lock does not block read-only inventory or review discovery.
+Mutating helpers still acquire the intake lock and refuse with `INTAKE_BLOCKED`
+if the lock already exists. If inventory changes during a bounded status retry,
+`PROCESSING_INVENTORY_INCOMPLETE` accompanies the execution snapshot without
+claiming inventory totals.
 
 The MCP shortcut can reuse a native session for at most eight sequential turns
 per request and admits no further turn after 45 minutes. Each turn retains the

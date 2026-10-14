@@ -20,7 +20,6 @@ const ACTIONS = ['inspect', 'process', 'resume', 'review', 'cancel', 'wait', 'no
 const STATUS_DETAILS = Object.freeze({
   accepted: { states: ['busy'], text: 'Processing request accepted.' },
   'already-processing': { states: ['creating', 'busy'], text: 'Already processing; no additional run was started.' },
-  'intake-busy': { states: ['busy'], text: 'Collection storage is busy. Retry after the current write finishes.' },
   processing: { states: ['busy'], text: 'Processing is in progress.' },
   preparing: { states: ['creating'], text: 'Preparing the processing session.' },
   'draft-ready': { states: ['awaiting-review'], text: 'Draft ready for review.' },
@@ -40,7 +39,7 @@ const STATUS_DETAILS = Object.freeze({
   cancelled: { states: ['idle', 'completed', 'missing'], text: 'Processing cancelled; unhandled captures remain pending.' },
 });
 const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CONTROL_FAILED',
-  'INTAKE_BUSY', 'PROCESSING_INVENTORY_CHANGED', 'PROCESSING_OPERATION_OWNER_UNVERIFIED', 'PROCESSING_CHAT_HISTORY_FULL', 'PROCESSING_CHAT_BUSY', 'PROCESSING_CHAT_BLOCKED', 'PROCESSING_CHAT_MISSING', 'PROCESSING_CHAT_BINDING_CHANGED',
+  'PROCESSING_INVENTORY_CHANGED', 'PROCESSING_OPERATION_OWNER_UNVERIFIED', 'PROCESSING_CHAT_HISTORY_FULL', 'PROCESSING_CHAT_BUSY', 'PROCESSING_CHAT_BLOCKED', 'PROCESSING_CHAT_MISSING', 'PROCESSING_CHAT_BINDING_CHANGED',
   'PROCESSING_CHAT_HOST_UNAVAILABLE', 'PROCESSING_CHAT_SESSION_UNAVAILABLE', 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
   'WORKSET_OUTCOME_UNKNOWN', 'PROCESSING_SHORTCUT_CHANGED', 'PROCESSING_SHORTCUT_SCOPE_CONFLICT', 'PROCESSING_CANCEL_UNVERIFIED',
   'PROCESSING_CANCELLATION_PENDING', 'PROCESSING_SHORTCUT_CAPACITY', 'PROCESSING_REPOSITORY_UNVERIFIED', 'PROCESSING_INVENTORY_INCOMPLETE',

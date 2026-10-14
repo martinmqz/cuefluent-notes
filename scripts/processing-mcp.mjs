@@ -68,8 +68,6 @@ function blockedInventory(view, blockers) {
     return { ...view, status: 'blocked', statusDetail: blockers.includes('PROCESSING_SHORTCUT_CAPACITY') ? 'selection-limit' : 'blocked',
       nextAction: 'cancel', diagnostics: [...new Set(blockers.map(code => ['WORKFLOW_POLICY_CHANGED', 'PROCESSING_SHORTCUT_CAPACITY'].includes(code) ? code : 'PROCESSING_SELECTION_CHANGED'))] };
   }
-  if (blockers.length && blockers.every(code => code === 'INTAKE_BUSY')) return { ...view, status: 'busy',
-    statusDetail: 'intake-busy', nextAction: 'wait', diagnostics: ['INTAKE_BUSY'] };
   const recovery = blockers.some(code => ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED', 'INTAKE_RECOVERY_REQUIRED', 'PRUNE_RECOVERY_REQUIRED'].includes(code));
   return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect',
     diagnostics: recovery ? ['PROCESSING_RECOVERY_REQUIRED'] : blockers.includes('PROCESSING_OPERATION_OWNER_UNVERIFIED') ? ['PROCESSING_OPERATION_OWNER_UNVERIFIED'] : ['PROCESSING_CONTROL_FAILED'] };
