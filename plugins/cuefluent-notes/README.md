@@ -1,4 +1,4 @@
-# Cuefluent Notes 0.14.2
+# Cuefluent Notes 0.15.0
 
 Codex plugin, optional hook-enabled package. Requires Node.js 22 or later on the host PATH. Runtime dependencies and their license notices are included.
 

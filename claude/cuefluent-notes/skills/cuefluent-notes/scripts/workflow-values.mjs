@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 
 export const CLIENTS = Object.freeze(['codex', 'claude']);
+export const PROCESSING_SCOPES = Object.freeze(['collection', 'repo', 'chat']);
 
 export function fail(code, message = code) { throw Object.assign(new Error(message), { code }); }
 export function safeErrorCode(error, fallback) {
@@ -62,3 +63,17 @@ export function canonicalJSON(value) {
   fail('INVALID_WORKFLOW');
 }
 export const digest = value => createHash('sha256').update(value).digest('hex');
+
+// Keep domain payloads and the historical dispatch UUID bits stable: these IDs
+// address durable worksets, native requests and their replay receipts.
+export function digestId(domain, value, { dispatchBits = false } = {}) {
+  const text = digest(canonicalJSON({ ...value, domain }));
+  return `${text.slice(0, 8)}-${text.slice(8, 12)}-${dispatchBits ? '8' : text[12]}${text.slice(13, 16)}-${dispatchBits ? '8' : text[16]}${text.slice(17, 20)}-${text.slice(20, 32)}`;
+}
+
+export function validateProcessingCursor(value) {
+  keys(value, ['scopeHash', 'client', 'sessionId', 'unitId']); hash(value.scopeHash);
+  choice(value.client, CLIENTS); nativeId(value.sessionId);
+  if (value.unitId !== null) nativeId(value.unitId);
+  return value;
+}

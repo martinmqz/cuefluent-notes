@@ -210,25 +210,63 @@ run arbitrary shell commands, browse, change settings, trust hooks or approve it
 own proposal. Inherited hooks, plugins and unrelated tools are disabled and checked
 before processing starts. Collection settings in the work project stay unchanged.
 
-The formal skill request selects retained captures from its invoking session,
-not every session or project in the collection. Each request resumes existing
-selected work and handles at most one bounded operation. It stops at a proposal,
-no-change result, a conflict or recovery requirement. Further requests reuse the same processing session. Busy requests
-do not dispatch duplicate work. An outstanding proposal must receive a disposition
-before another operation starts. Engine page acknowledgments and proposal hashes,
-not conversational recollection, determine the resume point.
-A repeated process request while review is outstanding returns `awaiting-review`
-without launching the client. A narrower unit-scoped operation in the selected
-session resumes with its original selection. An operation spanning other evidence
-is listed as a blocker with `resumeSupported: false` and
-`nextAction: inspect-with-original-selection`; inspect it through the explicit CLI
-with its original scope. It does not prevent listing the other pending work.
+### Shortcut scopes and continuation
+
+Use the [formal skill actions](../SKILL.md#formal-processing-controls) in either
+client. In Claude, append the action to `/cuefluent-notes:cuefluent-notes`; in
+Codex, select Cuefluent Notes and type the action. Plain `process` selects pending
+retained evidence across the existing collection, including configured repos and
+both clients. `process repo` uses the nearest verified Git checkout and excludes
+separate nested repositories. `process chat` selects the invoking native session.
+The invoking chat proves the request; it is not the default evidence boundary.
+These actions never create a new route or change collection settings.
+
+Selection begins with metadata, preserves exact head hashes, and resumes existing
+unfinished operations with a verified stopped native owner before admitting more
+evidence. A standalone claim without that proof stays preserved for explicit CLI
+handling; the shortcuts cannot infer that its agent has stopped. Processing handles bounded
+batches sequentially in the reusable isolated session. It stops for an exact
+proposal, an unfinished operation, a conflict, recovery, lack of progress or a
+run limit. A completed no-change operation allows another batch. Already handled
+revisions are not admitted again. A changed head is new evidence, not permission
+to replace an existing conflicted claim.
+
+`resume` keeps the saved evidence selection and inspection checkpoints. It does
+not add captures that arrived later, and reports a no-op when no unfinished work
+exists. A `process` request also resumes saved unfinished work first; it reports
+that selection's actual scope. A conflicting narrower request is refused rather
+than replacing it. After finishing prior work, `process` can select one fresh
+bounded portion in the requested scope within the same request limits. Invoke
+`process` again for later inventory portions. Discovery and selection limits are in the
+[shortcut command contract](workflow-cli.md#processing-shortcut-checkpoints).
+An incomplete inventory is never reported as an empty backlog. If the saved
+selection reaches its continuation capacity, status directs you to cancel that
+selection and use `process` for the remaining captures. Changed or unavailable
+frozen inputs stay reported as conflicts; independent unchanged inputs can
+continue without replacing their hashes.
+
+The checkpoint contains scope, frozen inputs and continuation pointers. Existing
+engine worksets, claims, acknowledgments, proposals and outcomes remain the
+source of truth. It supplies no independent save or completion authority. Each
+proposal still needs its exact native review decision.
 
 Redelivery of an exact verified formal call returns its original admitted response
 without dispatching again, reopening a review form or rewriting its receipt. That
-response can still say `busy` after completion; use `processing_status` to read
-current progress. A `busy` result with no busy diagnostic acknowledges the
-accepted run; it does not mean the request was rejected as another run.
+response can still describe admission after completion; use `processing_status`
+to read current progress. New responses distinguish **Processing request accepted**
+from **Already processing; no additional run was started**. A status read reports
+**Processing is in progress** while the native run remains busy. Acceptance does
+not prove that the model has started reading evidence or completed a note.
+Older stored replies retain their original `busy` wording on exact replay.
+If the native run stopped but its engine operation remains unfinished, status
+reports **Processing stopped with unfinished work** and a resume or inspection
+action. Status also separates frozen-selection progress from the bounded
+collection inventory and lists the collection's unfinished operations and draft
+count. Inventory counts describe only the examined page; partial inventory and
+unknown source completeness remain explicit. An unknown outcome or recovery
+requirement calls for inspection, not a replacement operation.
+**No processing run is active** describes execution only; it does not
+assert that the collection has no pending captures or that notes were saved.
 Keep the source client and its MCP host open until processing reaches a review or
 terminal state. A one-shot client that terminates the host after admission can
 interrupt the run; use the existing status and recovery controls rather than
@@ -237,17 +275,55 @@ assuming the background work completed.
 A native request cancellation received while admission is pending releases that
 admission without starting the model turn or returning a response. Once admission
 has completed, cancelling that finished request does not cancel the separate run
-or undo a saved note; use current operation status and the explicit recovery or
-cancellation controls.
+or undo a saved note. The separate `cancel` action stops only native execution
+owned by this connected controller and waits for a verified terminal result
+before releasing unapplied claims. Unknown or externally owned execution reports
+`PROCESSING_CANCEL_UNVERIFIED`; preserve it for recovery. Cancellation is durable
+and resumable if interrupted; invoke `cancel` again to finish it. It never adopts
+unrelated standalone claims or drafts. Within the saved selection, it also cancels
+owned unsaved proposals, which can no longer be saved through review. The evidence
+and operation history remain on disk; generating a replacement proposal requires
+processing again and can incur model usage. Choose **Later** in review to preserve
+a proposal for later approval. Cancellation keeps captures pending, preserves saved notes,
+and leaves collection/processing preferences unchanged. A new `process` request
+can select those pending captures after cancellation completes. This also provides
+a fresh selection after a policy change or an unavailable frozen input, without
+rewriting the old claim hashes. `PROCESSING_CHAT_HISTORY_FULL` requires guarded
+`processing-chat-rollover` before resuming; see the
+[shortcut command contract](workflow-cli.md#processing-shortcut-checkpoints).
 
 The restricted channel accepts at most 256 KiB of serialized engine output per
 tool result. A larger result returns `PROCESSING_ENGINE_OUTPUT_LIMIT` without
 truncating evidence or terminating the chat. Use the explicit CLI from an
 uncaptured context for material that cannot fit this channel.
 
+### Unfinished operation ownership
+
+`PROCESSING_OPERATION_OWNER_UNVERIFIED` means an unfinished engine operation cannot
+be tied to a recorded native run that has stopped. It can affect standalone CLI
+operations and operations from older archived runs whose operation-to-request
+reference was never recorded. An operation's existence is not proof that its
+processor is stopped. The shortcut does not invent ownership or replace its claim.
+
+Before a fresh selection, unfinished work is checked across the collection;
+unverified work can block `process` and `resume` even when only another repository
+or chat was requested. An operation outside a narrower requested scope can instead
+report `PROCESSING_SHORTCUT_SCOPE_CONFLICT`. Existing authorized proposals remain
+available through `review`, subject to the usual execution and recovery guards.
+
+Confirm that the prior processor has stopped, inspect the affected operation and
+use the [explicit processing workflow](processing.md#outcomes-and-recovery) to
+finish it or safely cancel unapplied work. Shortcut `cancel` refuses with
+`PROCESSING_CANCEL_UNVERIFIED` when it cannot establish ownership; it is not a way
+to clear standalone or unverified operations. Keep claims, proposals and recovery
+state intact until the supported operation succeeds.
+
 ## Review controls
 
-Invoke the same skill with `review`. Its
+Invoke the same skill with `review`. When several proposals are pending, first
+choose an authorized draft in the native selector. Drafts whose sources are no
+longer authorized remain preserved and are not offered. They do not prevent
+reviewing other authorized drafts. Selecting a draft is not approval. Its
 `cuefluent_control.processing_review` call requests a native host form displaying
 the exact proposal, original note contents, paths, new directories, input identities
 and known evidence limits. Read the full preview in the scrollable **Proposed
@@ -370,6 +446,10 @@ execution proof. At the 128-run active-history limit,
 `processing-chat-rollover` archives settled history with replay protection while
 retaining the same chat. It refuses active or unresolved review state; it neither
 deletes evidence nor starts a replacement session.
+Rollover also preserves exact operation-to-request references to terminal runs,
+so shortcut resume and cancellation can verify stopped owners after active
+history is cleared. These references do not override a currently active or
+unresolved native owner. Missing or invalid proof remains a refusal.
 New sealed executions have a request-keyed recovery record, so recovery does not
 scan the session's lifetime history after rollover. Older unindexed receipts retain
 their bounded lookup and are never rewritten to infer missing authority.

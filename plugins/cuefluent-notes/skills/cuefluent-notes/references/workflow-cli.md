@@ -158,7 +158,7 @@ These commands use the collection envelope and return `interfaceVersion: 1`:
 | Command | `args` |
 | --- | --- |
 | `processing-chat-status` | `{client}`; reads the selected local client-profile binding without launching a native client or dispatching a model turn |
-| `processing-chat-run` | `{client, requestId, selection, expectedChatHash}`; exact status hash, or null for a missing binding; handles at most one bounded operation |
+| `processing-chat-run` | `{client, requestId, selection, expectedChatHash, worksetId?, resumeOperationId?}`; exact status hash, or null for a missing binding; the optional bindings are mutually exclusive |
 | `processing-chat-reconcile` | `{client, requestId, expectedChatHash}`; reinspects a known terminal's unresolved operation, or verifies an exact sealed Codex completion, failure or interruption; live owners and unproven outcomes remain blocked |
 | `processing-chat-abandon` | `{client, requestId, expectedChatHash, offline: true}`; explicitly retires a creating/busy run or unknown creation/dispatch outcome after the operator stops its controller and native child; refuses live or unverified owners and preserves all engine work |
 | `processing-chat-reauthorize` | `{client, expectedChatHash, previousPolicyHash}`; explicitly accepts current settings for the registry, preserving existing engine claims and proposal hashes |
@@ -168,10 +168,17 @@ These commands use the collection envelope and return `interfaceVersion: 1`:
 reused for retries of that exact request. A duplicate never dispatches again.
 `state` is `missing`, `creating`, `idle`, `busy`, `awaiting-review` or `blocked`.
 `chatHash` binds registry mutations; `policyHash` exposes the registry's accepted
-settings hash for explicit reauthorization. `nativeStatus` distinguishes a completed,
+settings hash for explicit reauthorization. `remainingRuns` reports the native
+history capacity left before guarded rollover. `nativeStatus` distinguishes a completed,
 failed or interrupted native run; null means no terminal is available for the
 current state. `operationId` points to authoritative engine
-status. `chat` identifies the native session, while `desktopVisibility` remains
+status. For an idle chat with a recorded operation, status also returns
+`operationState`, `operationOutcome` and `recoveryRequired` from a metadata-only
+engine inspection; a completed native turn does not imply completed engine work.
+When that inspection is unavailable, `operationState` is `unknown`, both outcome
+and recovery fields are null, and `OPERATION_OUTCOME_UNKNOWN` calls for inspection.
+These fields concern the latest recorded operation, not a collection inventory.
+`chat` identifies the native session, while `desktopVisibility` remains
 `unverified`. Neither `idle` nor a native completed turn means a note was saved.
 Busy or blocked state must not be bypassed with another binding or writer.
 `processing-chat-abandon` archives the exact binding and returns blocked status
@@ -182,12 +189,14 @@ abandoned request can never dispatch again. `offline: true` records the operator
 confirmation that both the controller and native child are stopped, including
 for older records with no saved owner. It is not a model-selected retry flag.
 
-The installed `cuefluent_control` MCP server exposes three strict tools:
+The installed `cuefluent_control` MCP server exposes these strict tools:
 
 | Tool | Arguments |
 | --- | --- |
 | `processing_status` | `{collectionId?, retryToken?}` |
-| `process_selected_captures` | `{collectionId?, selection?, requestId?, retryToken?}` |
+| `process_selected_captures` | `{collectionId?, selection?, requestId?, retryToken?, scope?}` |
+| `processing_resume` | `{collectionId?, retryToken?}` |
+| `processing_cancel` | `{collectionId?, retryToken?}` |
 | `processing_review` | `{collectionId?, retryToken?}` |
 
 The MCP `arguments` member may be omitted or null for an empty argument object;
@@ -207,10 +216,10 @@ binding. Processing-only bindings record a locator and future byte boundary unde
 the current policy; they never enable collection. The explicit request verifies
 the native source header and exact call within the bounded recent range.
 Omitted collection selection must resolve uniquely from bounded registration
-metadata; no new source is discovered. Omitted evidence `selection` selects the
-source session, not just its control turn. A formal skill control rejects a
-selection that differs from its verified source. Other explicit selections still
-require existing policy. MCP dispatch identity derives from the verified native
+metadata; no new source is discovered. The optional `selection` must match the
+verified caller; it is not the default evidence boundary. Evidence `scope` is
+`collection` (default), `repo` or `chat`. A mismatched exact formal action and tool
+scope is refused. Narrower scopes still require existing per-input policy. MCP dispatch identity derives from the verified native
 session and call ID: redelivery replays, while another invocation is new even if
 the model repeats its optional `requestId` hint. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
@@ -238,7 +247,23 @@ storage-safety diagnostics and recovery.
 
 Outputs are versioned bounded status with `statusText`, `status`, `requestId`,
 `collectionId`, `chat`, `nextAction` and diagnostic codes. They contain no evidence
-or draft text. Tool arguments accept no approval or source-proof object.
+or draft text. Optional `scope` is `collection`, `repo` or `chat`. Optional
+`progress` reports selected/unattempted/handled/unavailable/cancelled revisions,
+unfinishedOperations, awaitingReview and incomplete for the frozen selection.
+Status also returns `inventory` with pending, claimed, blockedByClaim, inspected,
+handled, unfinishedOperations, awaitingReview, incomplete and sourceCompleteness.
+Inventory is collection-wide but bounded to one metadata page; counts are not an
+atomic total. `nextAction` can additionally be `process` for another inventory
+portion or `cancel` for an unchanged frozen selection that cannot continue. Tool arguments accept no approval or source-proof object.
+New responses also include `statusDetail`: `accepted`, `already-processing`,
+`processing`, `preparing`, `draft-ready`, `unfinished`, `inactive`, `missing`,
+`blocked` or `completed`, plus `nothing-pending`, `nothing-to-resume`,
+`discovery`, `continuation`, `cancelled`, `selection-limit`, `selection-complete`,
+`pending` and `inventory-incomplete` for shortcut results. Admission, a competing request and a read-only progress
+snapshot remain distinct even when their stored execution state is `busy`.
+An idle native session with unfinished engine work reports `unfinished`, with
+`resume` or `inspect` as the next action. `inactive` does not mean an empty backlog.
+Legacy response receipts omit this field and replay their original text unchanged.
 If the engine disposition committed but registry or receipt bookkeeping failed,
 the response is `completed` with `nextAction: "inspect"` and a bounded diagnostic.
 Inspect the existing operation; do not repeat its save. That response does not
@@ -252,7 +277,12 @@ names an older one. Clients unable to accept it cannot use this MCP server and
 must use the explicit CLI commands; clients accepting it without form capability receive
 `PROCESSING_REVIEW_UNSUPPORTED` for review. See
 [MCP version negotiation](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#version-negotiation).
-The form uses a short header, a required `changes` string containing
+When multiple proposals are pending, review first sends a selector with a required
+`operationId` string and titled `oneOf` choices (`const` is the exact operation ID).
+There is no default. Acceptance selects a preview only; decline/cancel leaves all
+proposals unchanged. The subsequent form remains bound to the selected exact
+proposal. This uses the [supported single-select schema](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation#requested-schema).
+The proposal form uses a short header, a required `changes` string containing
 the complete readable preview as its default, and a required `decision` enum (`save`, `skip`,
 `cancel`, `later`) without a default. An accepted host response must echo the
 unchanged preview plus the chosen decision, allowing LF/CRLF/CR line-ending
@@ -290,10 +320,128 @@ Serialized child-engine results are bounded to 256 KiB; oversized results return
 
 ## Processing selected captures
 
+### Processing shortcut checkpoints
+
+The same engine exposes these versioned CLI commands through the ordinary
+collection/config envelope:
+
+- `processing-shortcut-select`: `{selection, requestId, scope?, mode?}`. `scope`
+  is `collection` (default), `repo` or `chat`; `mode` is `process` (default) or
+  `resume`. The caller is independently authorized. A UUID request ID makes
+  selection retries idempotent. This command selects metadata and worksets; it
+  does not launch a native client or save notes.
+- `processing-shortcut-status`: `{selection}`. Read the current checkpoint and
+  authoritative workset/operation outcomes without changing them.
+
+Both return `interfaceVersion: 1`, `checkpointHash`, `requestId`, `phase`, `scope`,
+`operations`, `worksets`, `nextRun`, `incomplete` and `sourceCompleteness`.
+An existing checkpoint also reports its original `selection`, `policyHash`,
+`counts`, `blockers`, `reviews`, `continuationNeeded`, `remainingInputs` and
+`unlinkedWorksetId`. `remainingInputs` contains exact unattempted
+`{identity, headHash}` references across the entire frozen selection.
+`unlinkedWorksetId` is null or the deterministic workset published before an
+interrupted checkpoint update; inspection includes it and selection repairs its
+pointer without replacing its contents. Status adds `policyState`.
+`nextRun` is null or an exact `{worksetId}` / `{resumeOperationId}` binding for
+`processing-chat-run`. Counts distinguish selected, unattempted, handled,
+unavailable, cancelled, unfinished operations and awaiting-review operations. No native
+session, no checkpoint, and no remaining selected evidence are different states.
+`sourceCompleteness: "unknown"` never asserts that retained captures contain all
+original output. A `reason` may explain a no-op or recovery requirement.
+
+A selection examines at most four metadata pages per call and freezes at most
+100 pending revisions. Its scope-bound cursor preserves discovery progress;
+a frozen selection excludes later arrivals. It uses existing worksets, with at
+most 20 admissions and 16 MiB per workset; up to ten continuations preserve the
+same exact remaining inputs. Existing unfinished operations with a verified stopped native owner run first.
+Standalone claims without that proof remain preserved for explicit CLI handling. `resume`
+never opens a fresh evidence selection after the frozen one finishes; a new
+`process` may continue the inventory cursor. Incomplete discovery is not an empty
+backlog. A changed policy, scope conflict or recovery requirement preserves the
+checkpoint. Cancel safely owned unapplied work before starting a fresh selection
+under changed policy or after unavailable inputs; never refresh old hashes.
+Finished or cancelled selections may be replaced by a fresh `process` request.
+When continuation capacity is exhausted, `PROCESSING_SHORTCUT_CAPACITY` is a
+checkpoint blocker and native status offers Cancel, followed by a fresh Process.
+It does not keep offering an unusable Resume.
+An observed intake lock does not block read-only inventory or review discovery.
+Mutating helpers still acquire the intake lock and refuse with `INTAKE_BLOCKED`
+if the lock already exists. If inventory changes during a bounded status retry,
+`PROCESSING_INVENTORY_INCOMPLETE` accompanies the execution snapshot without
+claiming inventory totals.
+
+The MCP shortcut can reuse a native session for at most eight sequential turns
+per request and admits no further turn after 45 minutes. Each turn retains the
+[bound-run limits](#bound-native-processing-runs). These are admission bounds,
+not promises about a model's response time. A proposal, unfinished operation,
+conflict, native failure or lack of progress stops continuation earlier. No
+shortcut automatically saves or changes capture configuration.
+If native history reaches capacity, `PROCESSING_CHAT_HISTORY_FULL` stops further
+turns. Use the existing guarded `processing-chat-rollover` command while the
+session is idle, then resume; its archive preserves request replay and the chat.
+
+Cancellation is a native control, not a CLI assertion that execution stopped.
+`processing_cancel` must verify owned native termination before releasing claims.
+Cancel never adopts unrelated standalone operations or drafts.
+Standalone agents retain the existing explicit completion and recovery commands;
+a serialized stop flag cannot grant native cancellation authority.
+
+### Bound native processing runs
+
+`processing-chat-run` can bind an existing `worksetId` or `resumeOperationId`.
+With neither, it retains the single-source, single-operation contract. The source
+`selection` identifies the explicit caller; a workset or resumed operation retains
+its original engine selection and exact input hashes. This does not change
+collection settings or authorize a save.
+
+A workset run processes bounded operations sequentially in the same isolated
+native turn. The restricted `processing_pending` tool returns the frozen workset,
+its unfinished operations and `nextPreparation` (`{operationId, inputs}`), or null.
+The native agent uses that exact preparation, inspects and acknowledges each page,
+and either completes unchanged or publishes a proposal. It continues after an
+unchanged outcome; a proposal, conflict, recovery or exhausted budget stops the
+run. New captures do not enter the frozen workset. Operation IDs come from the
+workset's deterministic admission, not arbitrary model-generated IDs. Existing
+charged admissions retain their exact budget on retry. A single input that exceeds
+the remaining budget requires an explicit bounded continuation; it is not omitted
+or marked handled.
+
+An interrupted admission appears as `nextPreparation` with its original inputs
+and operation ID. A new admission cannot skip an unfinished operation. After
+`PROCESSING_BATCH_BUDGET`, call `processing_pending` again: measured input sizes
+can reduce the next preparation to a fitting prefix without charging the rejected
+batch. `reason: "input-budget"` means no leading input fits that remaining budget.
+The controller also limits each native turn to three operations, 4 MiB of
+packet admissions and eight minutes before starting another operation. An existing
+claim can finish under its original budget. `reason: "run-budget"` pauses further
+admission while preserving the exact workset for another run. These limits do not
+guarantee a model will finish one operation before its transport timeout.
+
+`resumeOperationId` binds only that existing operation and disables new preparation.
+This supports an interrupted standalone operation without rewriting its selection
+or adopting its claims into another workset. A completed bound operation or fully
+handled/exhausted workset returns `dispatch: "not-started"` and a bounded `reason`
+without starting a native client. Proposals and recovery remain explicit blockers.
+`workset-remainder-unavailable` distinguishes blocked or cancelled remaining inputs
+from exhausted admission budget. Unattempted input conflicts do not prevent valid
+independent frozen inputs from being processed. Unknown final metadata is reported
+as `WORKSET_OUTCOME_UNKNOWN`; it does not undo a recorded native completion.
+Status can include `workset` metadata separately from the native state and latest
+operation outcome; native `idle` does not mean the frozen workset is complete.
+
+Native admission checks all processing-client bindings in the collection under
+the existing intake lock. A different active, unresolved, or awaiting-review
+binding refuses another run with `PROCESSING_COLLECTION_BUSY`. Inspect or finish
+the existing owner; do not create another binding or clear locks to bypass it.
+A completed engine outcome releases this admission gate even if its former
+native client has not acknowledged the review yet. The read preserves that
+client's registry. These checks do not replace engine claims, writer conflicts,
+or recovery.
+
 ### Supported read interface
 
-`--help`, `processing-capabilities`, `processing-pending`, `processing-status`,
-`processing-worksets`, and `processing-workset-status` advertise `interfaceVersion: 1`.
+`--help`, `processing-capabilities`, `processing-pending`, `processing-inventory`,
+`processing-status`, `processing-worksets`, and `processing-workset-status` advertise `interfaceVersion: 1`.
 Workset creation and preparation also return a versioned workset view; ordinary
 page, ack and proposal responses do not advertise a separate version. This is the public command/read-model contract, independent
 of capture and private-state schema versions. Consumers must use these commands,
@@ -321,7 +469,7 @@ implementation support, not consent or feature
 switches. Extra request keys, including claimed provenance, are rejected. See
 [generated-output provenance](session-workflow.md#generated-output-provenance-gate).
 
-Inventory `counts` apply only to the returned head page (`scope:
+`processing-pending` counts apply only to the returned head page (`scope:
 "returned-head-page"`): pending, unclaimed, exactly claimed, blocked by an older claim, and handled **revisions**.
 They are not note counts or collection totals. `operations` covers the selected
 session/unit independently of head pagination, within the existing operation bound.
@@ -378,6 +526,50 @@ creates no approval. Drafts plus originals are bounded to 4 MiB; native forms
 have the smaller 256 KiB limit. Run this explicit draft read outside captured
 work chats when avoiding echoed content. Use the unchanged save/recovery commands
 below for standalone operation.
+
+`processing-inventory` accepts `{selection, scope?, limit?, maxSessions?, after?}`.
+It reads retained source, head, disposition and operation metadata across the
+selected collection without reading native transcripts or raw evidence. `scope`
+is `collection` (default), `repo` or `chat`. Repository scope uses the nearest
+regular `.git` marker above the selected cwd; `PROCESSING_REPOSITORY_UNVERIFIED`
+requires an explicit chat or collection scope when no repository can be established.
+Each source must resolve to that same repository root; nested repositories are
+outside the parent repository's scope. It does not infer a repository from a
+route folder name.
+
+Each source requires current explicit-processing authority. Excluded sources
+remain excluded even when they were captured previously. The caller's selection
+must itself be authorized for the collection. This command neither starts
+collection nor changes settings. `limit` bounds returned head metadata (default
+and maximum 100); `maxSessions` bounds visited sources (default 32, maximum 128).
+Each source directory scan retains the existing 65,536-entry ceiling. Membership
+checks for existing operations and the current page together read at most 256
+distinct sources; larger requests fail with `PROCESSING_INVENTORY_CAPACITY`.
+Return the exact `nextCursor` as `after` for another page; it binds the scope,
+collection and settings revision. Cursor objects contain `{scopeHash, client, sessionId, unitId}`;
+a null unit ID means that source was fully visited. Pages are lexical, not temporal.
+An empty incomplete page is not evidence of an empty backlog. A cursor from a
+different scope, collection or settings revision is refused with
+`PROCESSING_INVENTORY_CURSOR_MISMATCH`; begin fresh discovery without that cursor.
+
+The versioned response includes `scope`, `scopeHash`, `pending`, `operations`,
+`blockers`, `intakeBlocked`, `counts`, `incomplete`, `nextCursor` and
+`sourceCompleteness`. `excludedSources` counts settings-denied sources;
+`outsideScopeSources` counts authorized sources outside the requested scope.
+Counts cover the returned page only. Operations cover active claims and
+same-collection writer transactions throughout the collection, independently of
+that page; `scopeMatch` is `full`, `partial` or
+`outside`. A narrow request cannot resume a partial or outside operation by
+silently expanding its scope. Existing conflicts, proposals and recovery are
+reported without resolving them, including intake/prune recovery. `intakeBlocked`
+is only an observation of lock presence, not a recovery blocker or a stable
+snapshot field. Read-only inventory can proceed during collection; mutations
+still acquire the intake lock and validate current state. Claimless writer transactions retain their operation ID and recovery hash.
+`sourceCompleteness: "unknown"` remains separate
+from how much retained metadata was inspected. Discovery is advisory rather than
+an atomic queue snapshot: pass exact returned `{identity, headHash}` references
+to the existing workset or preparation commands, which revalidate evidence and
+shared claims. A discovery result grants no permission to save notes.
 
 1. `processing-pending`: `{selection, limit?, afterUnitId?}`. Reads bounded head,
    disposition and operation metadata, not raw bodies. Default limit 20, maximum
@@ -703,7 +895,8 @@ schemas above. Do not parse private files to infer state or maintain another cla
 receipts, approval or writer database. The plugin remains usable without an app.
 
 Read-only processing commands are `processing-capabilities`, `processing-pending`,
-`processing-status`, `processing-worksets`, and `processing-workset-status`.
+`processing-inventory`, `processing-status`, `processing-worksets`, and
+`processing-workset-status`.
 They describe capabilities or metadata progress. `processing-page` is mutating:
 it records issued pages and can change the claim hash, even without acknowledgment.
 Page/ack requires explicit processing authority and coordination with the owning

@@ -2,14 +2,14 @@
   "format": "cuefluent-package",
   "schemaVersion": 1,
   "name": "cuefluent-notes",
-  "version": "0.14.2",
+  "version": "0.15.0",
   "client": "codex",
   "variant": "hooks",
   "files": [
     {
       "path": ".codex-plugin/plugin.json",
       "bytes": 1075,
-      "sha256": "c61c8833044e9a5b46eeeb6000503e459b235b3639c3b3c7a6874fe5e7435282"
+      "sha256": "a9bb1b1da63b797c91283d389f39c82a1d703fc3ee00e851a7eefe886f38bcd2"
     },
     {
       "path": ".mcp.json",
@@ -24,7 +24,7 @@
     {
       "path": "README.md",
       "bytes": 1105,
-      "sha256": "6ae957a0084abf7b402c5c1f678e7015ff9775e7ea74a680468de0e845c3b3ef"
+      "sha256": "f8548d4eef5f3b4036a7fbad5ad4b9c51c09fb7330ba87913dc9ec37e8be7707"
     },
     {
       "path": "hooks/hooks.json",
@@ -38,13 +38,13 @@
     },
     {
       "path": "skills/cuefluent-notes/README.md",
-      "bytes": 15250,
-      "sha256": "a351d537e76adda8967c12e9728939e008394e7817c82b088d1d627538cafb93"
+      "bytes": 15566,
+      "sha256": "1c3c81e847d236160bc060acbf1a74dcc7b8cdd13f8b4381552f96c2a9b5cecc"
     },
     {
       "path": "skills/cuefluent-notes/SKILL.md",
-      "bytes": 17685,
-      "sha256": "852fa91f718272c951441844973682d6ac68e8f8f15553f994d1d8ae41d7565f"
+      "bytes": 18963,
+      "sha256": "b330130bcd6427a883f4365b7c7d49bd3886c3672a51763233fc4992651946fa"
     },
     {
       "path": "skills/cuefluent-notes/examples/check-cases.json",
@@ -1829,12 +1829,12 @@
     {
       "path": "skills/cuefluent-notes/package-lock.json",
       "bytes": 4438,
-      "sha256": "95c2686870516398e5d1f523b893fd6dc9c00a9394f4418ca1b0eaa4eb53c54e"
+      "sha256": "feac51a51c59534654f3e848c6d301d01bb8a36a899be64230ee9a9150387387"
     },
     {
       "path": "skills/cuefluent-notes/package.json",
       "bytes": 388,
-      "sha256": "da3c1e16f6cdda97e89c530b0cf6c9ca03634cad64599abd42358e625834e3b8"
+      "sha256": "e8dc13b56ec01568b14c508adfe3737d2c2ae6aa9faa2fa8ddc5f50bfecbd227"
     },
     {
       "path": "skills/cuefluent-notes/references/authoring.md",
@@ -1868,8 +1868,8 @@
     },
     {
       "path": "skills/cuefluent-notes/references/processing-chat.md",
-      "bytes": 26100,
-      "sha256": "a19740c579e04fb17d794659f1efe030b1cecb28070d7022b1eed2618d92a930"
+      "bytes": 31674,
+      "sha256": "c1fa003ef2f0b2cbcdeb547306c1265f3dbb3d25f19a9849d863e773d3d94dc7"
     },
     {
       "path": "skills/cuefluent-notes/references/processing.md",
@@ -1903,8 +1903,8 @@
     },
     {
       "path": "skills/cuefluent-notes/references/workflow-cli.md",
-      "bytes": 50646,
-      "sha256": "9e7fc590e9c6c0b769c09d84b6101f684dc54e3e73fe14b0c4014cbb03db6446"
+      "bytes": 64371,
+      "sha256": "0e7b5ed22d48480150fbf5c76e2f6785b7b16c0b585514cc2df454ade915d8ee"
     },
     {
       "path": "skills/cuefluent-notes/references/workflow.md",
@@ -2058,8 +2058,8 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-chat-state.mjs",
-      "bytes": 37154,
-      "sha256": "48a0a4d25c1b6ac5da9a10c669c55bde5deefac07f6475afdae1009c071681ab"
+      "bytes": 43359,
+      "sha256": "151f3b87ae8e5c429cc875db31799823f8c4662fe4d800e507d090cb0033a079"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-claude-settings.mjs",
@@ -2068,13 +2068,18 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-client-claude.mjs",
-      "bytes": 13822,
-      "sha256": "0f99af90ba53f9a5c8cc3be59673ef70a82758d1fe78cdab8331cd5b2420c6f1"
+      "bytes": 14379,
+      "sha256": "4439b3bccda1b0f2059d34324faa30a7f02149c2ea1f9e1dee37af8d53aa4ae4"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-client-codex.mjs",
       "bytes": 20658,
       "sha256": "2e17263e1bf707bfe6c90f6e8c72a27553dbd5aa670f4c4ca8d200b84c83a540"
+    },
+    {
+      "path": "skills/cuefluent-notes/scripts/processing-collection.mjs",
+      "bytes": 11881,
+      "sha256": "7913f8b85b6d31c86e7e7895586928d5234868445a78a159e961ac95cbf75efe"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-contract.mjs",
@@ -2083,23 +2088,23 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-control-proof.mjs",
-      "bytes": 19718,
-      "sha256": "68857b0a1a3c97b191d784787de7c78791f43c8b8e816e63eecf17bb65134825"
+      "bytes": 20582,
+      "sha256": "59c23c7eaa449cd932feb2702adebc24d7f2bcff217877dc9ca155ab65ea35a7"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-control-receipts.mjs",
-      "bytes": 8265,
-      "sha256": "7e364f650e82b4dfee23819cb4cdb7b31e54a8add024fff684677ef4db5ff165"
+      "bytes": 8319,
+      "sha256": "45b8b800bcf50adb16a6784895d9f7351cc1f2cfc360f53af3929531691320b8"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-control-server.mjs",
-      "bytes": 26103,
-      "sha256": "9172b909bd6c8e5feed81a006dab90b60f8818ac9027cb8b7ee990438b9fa749"
+      "bytes": 33195,
+      "sha256": "f6129efa22cc7c10101272cfc25bc53f76717be796e657c9fc33ce642b51fbc0"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-controller.mjs",
-      "bytes": 26378,
-      "sha256": "745c5df88e6ef8a4008c025bb037dfc6dd2c9227fe0d6422f5524de037b995d2"
+      "bytes": 37370,
+      "sha256": "f3afec61fecd0d6748f2c06de1b40373640858e0f955bf7afd4477d13b5f2285"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-engine-bridge.mjs",
@@ -2113,8 +2118,8 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-engine-tools.mjs",
-      "bytes": 17037,
-      "sha256": "2e9cce9168a1eda91f0e3b37677445f226e3d80e282a4ddd05475760fe90d8dc"
+      "bytes": 24301,
+      "sha256": "180382f3bdbdd833d46f4d456caf3b462e38cdbed43c1f23db827edd1d46d61a"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-execution-proof.mjs",
@@ -2138,13 +2143,13 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-mcp.mjs",
-      "bytes": 21589,
-      "sha256": "548b370b8d923a3fbf6a2a5892cdfcdef1b08c82f4349c021a8f44ac2233807e"
+      "bytes": 40022,
+      "sha256": "533c2007c174145543548dd770c5a35010cdbfabb7d94ca27c06efae8def073a"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-native-invocation.mjs",
-      "bytes": 16658,
-      "sha256": "44b43edb06625b216371b310a9de3ecf2504985e6772313f757e59363ae66a84"
+      "bytes": 17731,
+      "sha256": "e8a47d1e8eddcf5832f629e780500491051530073ea7f9af218635968e9da80b"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-packet.mjs",
@@ -2162,6 +2167,11 @@
       "sha256": "9b202b32590305691c89117ed8111c180d2093b0581a871dfd63888271dcd91f"
     },
     {
+      "path": "skills/cuefluent-notes/scripts/processing-shortcuts.mjs",
+      "bytes": 23740,
+      "sha256": "2c628bcfe324adb2377278362b5450efb565f2f9035ffdb2a03f56900e01de58"
+    },
+    {
       "path": "skills/cuefluent-notes/scripts/processing-state.mjs",
       "bytes": 6627,
       "sha256": "d6d724687f944286c2b7b820d8e53e6bd9c3e7fd2f3b6b3bfbd7b74560047ab8"
@@ -2173,8 +2183,8 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing-workset.mjs",
-      "bytes": 17429,
-      "sha256": "739eab7b85c909278acc815847e893d06cef7bc10f532e05e7acd17592530ec2"
+      "bytes": 17907,
+      "sha256": "45ae5fcb3fd2abbdbef499f997bb79b2442458430a6137d886af2b4b9be742bc"
     },
     {
       "path": "skills/cuefluent-notes/scripts/processing.mjs",
@@ -2273,13 +2283,13 @@
     },
     {
       "path": "skills/cuefluent-notes/scripts/workflow-values.mjs",
-      "bytes": 3173,
-      "sha256": "f2b23b92332fcf78c70ca73d24e8b57eb8a3e6370d7153917b45289e0099f8e7"
+      "bytes": 3992,
+      "sha256": "85250f174aa16ee3ac4e8023ea06476b4ebaee1308271cb116373dcbc73e32c1"
     },
     {
       "path": "skills/cuefluent-notes/scripts/workflow.mjs",
-      "bytes": 15561,
-      "sha256": "00337cfbe3f85b62e7b68096a47c05e61d74e53741cb810f57c25f65a88b593b"
+      "bytes": 16177,
+      "sha256": "6a902ce1c41b8d16f757e375afee1b18ef4a94726ad9e1b67b319c483bf133fd"
     },
     {
       "path": "skills/cuefluent-notes/scripts/writer-protocol.mjs",

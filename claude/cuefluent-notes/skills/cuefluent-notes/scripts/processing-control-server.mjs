@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { CLIENTS, canonicalJSON, digest, choice, fail, id, keys, list, nativeId, object, string, unique } from './workflow-values.mjs';
+import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
@@ -14,11 +14,36 @@ const PROTOCOL_VERSION = '2025-11-25';
 // its form closes. Ordinary requests retain INPUT_BYTES after classification.
 const FRAME_BYTES = 6 * FORM_BYTES;
 const STATES = ['missing', 'creating', 'busy', 'idle', 'awaiting-review', 'blocked', 'completed'];
-const ACTIONS = ['inspect', 'resume', 'review', 'wait', 'none'];
+const ACTIONS = ['inspect', 'process', 'resume', 'review', 'cancel', 'wait', 'none'];
+// The optional detail distinguishes a request outcome from a state snapshot.
+// Absence retains the original projection for immutable response receipts.
+const STATUS_DETAILS = Object.freeze({
+  accepted: { states: ['busy'], text: 'Processing request accepted.' },
+  'already-processing': { states: ['creating', 'busy'], text: 'Already processing; no additional run was started.' },
+  processing: { states: ['busy'], text: 'Processing is in progress.' },
+  preparing: { states: ['creating'], text: 'Preparing the processing session.' },
+  'draft-ready': { states: ['awaiting-review'], text: 'Draft ready for review.' },
+  unfinished: { states: ['idle'], text: 'Processing stopped with unfinished work.' },
+  inactive: { states: ['idle'], text: 'No processing run is active.' },
+  missing: { states: ['missing'], text: 'No processing session has been started.' },
+  'selection-limit': { states: ['blocked'], text: 'The saved selection reached its continuation limit. Cancel it, then use process for remaining captures.' },
+  blocked: { states: ['blocked'], text: 'Processing needs attention.' },
+  completed: { states: ['completed'], text: 'Processing operation completed.' },
+  'selection-complete': { states: ['missing', 'idle', 'completed'], text: 'Selected captures have been handled.' },
+  pending: { states: ['missing', 'idle'], text: 'Pending captures are available. Use process to draft notes.' },
+  'inventory-incomplete': { states: ['missing', 'idle'], text: 'The bounded inventory is incomplete. Use process to continue through pending captures.' },
+  'nothing-pending': { states: ['missing', 'idle', 'completed'], text: 'No pending captures in the selected scope.' },
+  'nothing-to-resume': { states: ['missing', 'idle', 'completed'], text: 'No unfinished processing selection to resume.' },
+  discovery: { states: ['missing', 'idle'], text: 'Inventory paused; resume continues from its saved position.' },
+  continuation: { states: ['idle'], text: 'Selected evidence remains. Use resume to continue.' },
+  cancelled: { states: ['idle', 'completed', 'missing'], text: 'Processing cancelled; unhandled captures remain pending.' },
+});
 const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CONTROL_FAILED',
-  'PROCESSING_CHAT_BUSY', 'PROCESSING_CHAT_BLOCKED', 'PROCESSING_CHAT_MISSING', 'PROCESSING_CHAT_BINDING_CHANGED',
+  'PROCESSING_INVENTORY_CHANGED', 'PROCESSING_OPERATION_OWNER_UNVERIFIED', 'PROCESSING_CHAT_HISTORY_FULL', 'PROCESSING_CHAT_BUSY', 'PROCESSING_CHAT_BLOCKED', 'PROCESSING_CHAT_MISSING', 'PROCESSING_CHAT_BINDING_CHANGED',
   'PROCESSING_CHAT_HOST_UNAVAILABLE', 'PROCESSING_CHAT_SESSION_UNAVAILABLE', 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
-  'PROCESSING_CHAT_CONFLICT', 'PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED',
+  'WORKSET_OUTCOME_UNKNOWN', 'PROCESSING_SHORTCUT_CHANGED', 'PROCESSING_SHORTCUT_SCOPE_CONFLICT', 'PROCESSING_CANCEL_UNVERIFIED',
+  'PROCESSING_CANCELLATION_PENDING', 'PROCESSING_SHORTCUT_CAPACITY', 'PROCESSING_REPOSITORY_UNVERIFIED', 'PROCESSING_INVENTORY_INCOMPLETE',
+  'PROCESSING_INPUT_BUDGET', 'PROCESSING_COLLECTION_BUSY', 'PROCESSING_CHAT_CONFLICT', 'PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED',
   'WORKFLOW_POLICY_CHANGED', 'PROCESSING_APPROVAL_REQUIRED', 'PROCESSING_SELECTION_CHANGED',
   'PROCESSING_REVIEW_UNSUPPORTED', 'PROCESSING_REVIEW_TOO_LARGE', 'PROCESSING_REVIEW_LIMIT', 'PROCESSING_REVIEW_INTERRUPTED', 'PROCESSING_REVIEW_PREVIEW_CHANGED',
   'PROCESSING_CHAT_REVIEW_UNRESOLVED', 'PROCESSING_CHAT_POLICY_CHANGED', 'PROCESSING_CHAT_STATE_CHANGED',
@@ -45,14 +70,21 @@ const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
 const selectionSchema = { type: 'object', additionalProperties: false, required: ['client', 'sessionId', 'cwd'],
   properties: { client: { type: 'string', enum: CLIENTS }, sessionId: uuidSchema,
     cwd: { type: 'string', minLength: 1, maxLength: 4096 }, unitId: uuidSchema } };
+const scopeSchema = { type: 'string', enum: PROCESSING_SCOPES, description: 'Pending retained evidence scope; defaults to the existing collection.' };
 const TOOLS = [
   { name: 'processing_status', description: 'Read bounded processing-chat status for the selected collection. Returns no evidence or drafts.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
   { name: 'process_selected_captures', description: 'Request the existing Cuefluent Notes skill processing workflow in its reusable excluded chat. Requires verified native source context and existing consent. Returns only status; never approves or saves a proposal.',
     inputSchema: { type: 'object', additionalProperties: false,
-      properties: { collectionId: collectionSchema, retryToken: retrySchema, requestId: uuidSchema, selection: selectionSchema } },
+      properties: { collectionId: collectionSchema, retryToken: retrySchema, requestId: uuidSchema, selection: selectionSchema, scope: scopeSchema } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
+  ...[
+    ['processing_resume', 'Resume the saved unfinished evidence selection without adding new captures. Never saves notes.'],
+    ['processing_cancel', 'Stop the owned processing run and release unapplied operations after verified termination. Keeps captures pending and settings unchanged.']
+  ].map(([name, description]) => ({ name, description,
+    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } })),
   { name: 'processing_review', description: 'Open native review controls for the exact outstanding proposal. Drafts stay in the host form; only a native host response can save, skip, or cancel. Tool arguments never authorize an outcome.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } }
@@ -85,14 +117,15 @@ function nativeContext(client, meta, env) {
 
 function argumentsFor(name, args) {
   try {
-    if (['processing_status', 'processing_review'].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
-    else if (name === 'process_selected_captures') keys(args, [], ['requestId', 'collectionId', 'selection', 'retryToken']);
+    if (['processing_status', 'processing_review', 'processing_resume', 'processing_cancel'].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
+    else if (name === 'process_selected_captures') keys(args, [], ['requestId', 'collectionId', 'selection', 'retryToken', 'scope']);
     else fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
     if (args.collectionId !== undefined) id(args.collectionId);
     if (args.requestId !== undefined) nativeId(args.requestId);
     if (args.retryToken !== undefined) nativeId(args.retryToken);
     const result = args.collectionId === undefined ? {} : { collectionId: args.collectionId };
     if (args.requestId !== undefined) result.requestId = args.requestId;
+    if (args.scope !== undefined) result.scope = choice(args.scope, PROCESSING_SCOPES);
     if (args.selection !== undefined) {
       keys(args.selection, ['client', 'sessionId', 'cwd'], ['unitId']);
       choice(args.selection.client, CLIENTS); nativeId(args.selection.sessionId); string(args.selection.cwd);
@@ -125,6 +158,32 @@ export function processingControlStatusView(value, args) {
     for (const diagnostic of value.diagnostics ?? []) {
       choice(diagnostic, DIAGNOSTICS); result.diagnostics.push(diagnostic);
     }
+    if (value.statusDetail !== undefined) {
+      choice(value.statusDetail, Object.keys(STATUS_DETAILS));
+      const detail = STATUS_DETAILS[value.statusDetail];
+      choice(result.status, detail.states);
+      result.statusDetail = value.statusDetail;
+      result.statusText = `Cuefluent: ${detail.text}`;
+    }
+    if (value.scope !== undefined) {
+      result.scope = choice(value.scope, PROCESSING_SCOPES);
+      result.statusText += ` Scope: ${result.scope}.`;
+    }
+    if (value.progress !== undefined) {
+      keys(value.progress, ['selected', 'unattempted', 'handled', 'unavailable', 'cancelled', 'unfinishedOperations', 'awaitingReview', 'incomplete']);
+      const { incomplete, ...counts } = value.progress;
+      for (const count of Object.values(counts)) { integer(count); if (count > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); }
+      if (typeof incomplete !== 'boolean') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      result.progress = { ...counts, incomplete };
+    }
+    if (value.inventory !== undefined) {
+      keys(value.inventory, ['pending', 'claimed', 'blockedByClaim', 'inspected', 'handled', 'incomplete', 'unfinishedOperations', 'awaitingReview', 'sourceCompleteness']);
+      const { incomplete, sourceCompleteness, ...counts } = value.inventory;
+      for (const count of Object.values(counts)) { integer(count); if (count > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); }
+      if (typeof incomplete !== 'boolean' || sourceCompleteness !== 'unknown') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      result.inventory = { ...counts, incomplete, sourceCompleteness };
+      result.statusText += ` Inventory${incomplete ? ' (partial)' : ''}: ${counts.pending} pending, ${counts.claimed} claimed, ${counts.awaitingReview} drafts awaiting review.`;
+    }
     if (result.diagnostics.length) result.statusText += ` ${result.diagnostics.join(', ')}. Next action: ${result.nextAction}.`;
     return result;
   } catch { fail('PROCESSING_CONTROL_OUTPUT_INVALID'); }
@@ -136,7 +195,7 @@ export function processingControlStatusView(value, args) {
  * skill/control provenance for a dispatch. Its opaque result is never accepted
  * from JSON or returned to the model. No transcript discovery exists here. */
 export async function runProcessingControlServer({ client, input = process.stdin, output = process.stdout,
-  env = process.env, resolveSource, getStatus, requestProcessing, requestReview, beforeResponse } = {}) {
+  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse } = {}) {
   choice(client, CLIENTS);
   if ([resolveSource, getStatus, requestProcessing].some(value => typeof value !== 'function')) fail('PROCESSING_CONTROL_INVALID_REQUEST');
   const launchEnv = { CLAUDE_CODE_SESSION_ID: env.CLAUDE_CODE_SESSION_ID };
@@ -165,6 +224,12 @@ export async function runProcessingControlServer({ client, input = process.stdin
       keys(row.result, ['action'], ['content']);
       choice(row.result.action, ['accept', 'decline', 'cancel']);
       if (row.result.action === 'accept') {
+        if (form.kind === 'selection') {
+          keys(row.result.content, ['operationId']); nativeId(row.result.content.operationId);
+          if (!form.ids.includes(row.result.content.operationId)) fail('PROCESSING_REVIEW_INTERRUPTED');
+          form.resolve(Object.freeze({ action: 'accept', content: Object.freeze({ operationId: row.result.content.operationId }) }));
+          return;
+        }
         keys(row.result.content, ['changes', 'decision']);
         if (typeof row.result.content.changes !== 'string') fail('PROCESSING_REVIEW_INTERRUPTED');
         const changes = row.result.content.changes.replace(/\r\n?/g, '\n');
@@ -240,18 +305,27 @@ export async function runProcessingControlServer({ client, input = process.stdin
           try { id(collectionId); } catch { fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); }
           if (source.collectionId !== undefined && source.collectionId !== collectionId) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
           const resolvedArgs = Object.freeze({ ...args, collectionId });
-          let elicited = false;
+          let elicited = 0, selectedForm = false;
           const elicit = async proposal => {
-            keys(proposal, ['message']); string(proposal.message, FORM_BYTES);
+            const selecting = proposal.choices !== undefined;
+            keys(proposal, selecting ? ['choices'] : ['message']);
+            if (selecting) {
+              list(proposal.choices, 5, { empty: false }).forEach(item => { keys(item, ['operationId', 'label']); nativeId(item.operationId); string(item.label, 256); });
+              unique(proposal.choices.map(item => item.operationId));
+            } else string(proposal.message, FORM_BYTES);
             if (!formSupported) fail('PROCESSING_REVIEW_UNSUPPORTED');
             if (closed || request.cancelled || request.complete || requests.get(rpcId) !== request) fail('PROCESSING_REVIEW_INTERRUPTED');
-            if (elicited) fail('PROCESSING_CONTROL_PROTOCOL');
-            elicited = true;
+            if (elicited >= 2 || (elicited === 1 && (!selectedForm || selecting))) fail('PROCESSING_CONTROL_PROTOCOL');
+            elicited++; if (selecting) selectedForm = true;
             const formId = `cuefluent-review-${randomUUID()}`;
             // Desktop renders message/description in a fixed header. Keep them
             // short; the full preview belongs in its scrollable text control.
             // "changes" sorts before "decision" in the canonical wire JSON.
-            const message = { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form',
+            const message = selecting ? { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form',
+              message: 'Choose a draft to preview. This choice does not save, skip or cancel it.',
+              requestedSchema: { type: 'object', properties: { operationId: { type: 'string', title: 'Draft to review',
+                oneOf: proposal.choices.map(item => ({ const: item.operationId, title: item.label })) } }, required: ['operationId'] } } }
+              : { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form',
               message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.',
               requestedSchema: { type: 'object', properties: {
                 changes: { type: 'string', title: 'Proposed changes',
@@ -266,7 +340,8 @@ export async function runProcessingControlServer({ client, input = process.stdin
             let resolve, reject;
             const response = new Promise((a, b) => { resolve = a; reject = b; });
             response.catch(() => {});
-            forms.set(formId, { requestId: rpcId, preview: proposal.message, resolve, reject });
+            forms.set(formId, { requestId: rpcId, kind: selecting ? 'selection' : 'preview',
+              ids: selecting ? proposal.choices.map(item => item.operationId) : null, preview: proposal.message, resolve, reject });
             try { await reply(message, FORM_BYTES); return await response; }
             finally { forms.delete(formId); }
           };
@@ -277,7 +352,12 @@ export async function runProcessingControlServer({ client, input = process.stdin
               response = { ...current, diagnostics: [...new Set(['PROCESSING_REVIEW_UNSUPPORTED', ...(current.diagnostics ?? [])])].slice(0, 8) };
             }
             else response = await requestReview({ source, context, ...resolvedArgs, clientCapabilities, elicit, signal, commitResponse });
-          } else response = await (row.params.name === 'processing_status' ? getStatus : requestProcessing)({ source, context, ...resolvedArgs, signal });
+          } else {
+            const action = { processing_status: getStatus, process_selected_captures: requestProcessing,
+              processing_resume: requestResume, processing_cancel: requestCancel }[row.params.name];
+            if (typeof action !== 'function') fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
+            response = await action({ source, context, ...resolvedArgs, signal });
+          }
           signal.throwIfAborted();
           const view = processingControlStatusView(response, resolvedArgs);
           result = { content: [{ type: 'text', text: canonicalJSON(view) }], isError: false };

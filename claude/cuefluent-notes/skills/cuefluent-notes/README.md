@@ -101,6 +101,10 @@ for this user. Clone the repository and run its install:codex npm script
 select the Cuefluent Notes skill in Codex and enter `process`, or use
 `/cuefluent-notes:cuefluent-notes process` in Claude. Invoke the same skill with
 `review` to review an exact proposal through the client's supported native form.
+Plain `process` covers pending captures across the existing collection; use
+`process repo` or `process chat` to narrow it, `resume` for saved unfinished work,
+`status` for progress, and `cancel` to stop owned work while keeping captures
+pending. Processing prepares drafts; only an exact review decision saves them.
 The controller uses the existing native client and processing engine; it does not
 require the Cuefluent app. See [processing chats](references/processing-chat.md)
 for prerequisites, capture prevention and recovery.

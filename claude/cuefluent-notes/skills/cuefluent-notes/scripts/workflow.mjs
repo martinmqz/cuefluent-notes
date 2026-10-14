@@ -9,6 +9,8 @@ import { PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { generatedOutputCapabilities } from './workflow-context.mjs';
 import { createProcessingWorkset, prepareWorksetBatch, inspectProcessingWorkset, listProcessingWorksets } from './processing-workset.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
+import { selectProcessingShortcut, inspectProcessingShortcut } from './processing-shortcuts.mjs';
+import { pendingCollectionProcessing } from './processing-collection.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
   completeProcessing, inspectProcessing, recoverProcessing, readProcessingProposal } from './processing.mjs';
 import { captureStorageStatus, previewCapturePrune, applyCapturePrune, recoverCapturePrune, abandonCapturePrune } from './capture-maintenance.mjs';
@@ -23,12 +25,15 @@ import { keys, id, hash, list, fail, canonicalJSON, safeErrorCode, isNativeId } 
 // Public request schemas expose selections and inspected hashes, never native
 // reader proofs, lock capabilities, callback code or hook-context authority.
 const commands = {
+  'processing-shortcut-select': { required: ['selection', 'requestId'], optional: ['scope', 'mode'], run: selectProcessingShortcut },
+  'processing-shortcut-status': { required: ['selection'], run: inspectProcessingShortcut },
   'capture-status': { required: ['selection'], optional: ['sourcePath', 'scopeId', 'includeReaderAllocation'], run: captureSelectionStatus },
   'capture-control': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation'], run: controlCapture },
   'capture-preview': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], run: previewExplicitCapture },
   'capture-select': { required: ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], run: selectExplicitCapture },
   'capture-run': { required: ['selection', 'scopeId', 'expectedSelectionHash'], optional: ['unitIds'], run: runSelectedCapture },
   'processing-pending': { required: ['selection'], optional: ['limit', 'afterUnitId'], run: pendingProcessing },
+  'processing-inventory': { required: ['selection'], optional: ['scope', 'limit', 'maxSessions', 'after'], run: pendingCollectionProcessing },
   'processing-worksets': { required: [], optional: ['selection', 'limit', 'afterWorksetId'], run: listProcessingWorksets },
   'processing-workset-create': { required: ['selection', 'worksetId', 'inputs'], optional: ['runBudget', 'unscannedRemainder'], run: createProcessingWorkset },
   'processing-workset-status': { required: ['worksetId'], run: inspectProcessingWorkset },
@@ -52,7 +57,7 @@ const commands = {
 };
 const chatCommands = {
   'processing-chat-status': { required: ['client'], method: 'status' },
-  'processing-chat-run': { required: ['client', 'requestId', 'selection', 'expectedChatHash'], method: 'run' },
+  'processing-chat-run': { required: ['client', 'requestId', 'selection', 'expectedChatHash'], optional: ['worksetId', 'resumeOperationId'], method: 'run' },
   'processing-chat-abandon': { required: ['client', 'requestId', 'expectedChatHash', 'offline'], method: 'abandon' },
   'processing-chat-reconcile': { required: ['client', 'requestId', 'expectedChatHash'], method: 'reconcile' },
   'processing-chat-reauthorize': { required: ['client', 'expectedChatHash', 'previousPolicyHash'], method: 'reauthorize' },
@@ -79,7 +84,7 @@ export async function executeWorkflow(command, request, { configPath } = {}) {
   if (Object.hasOwn(chatCommands, command)) {
     keys(request, ['collectionId', 'expectedConfigHash', 'args']);
     const definition = chatCommands[command];
-    keys(request.args, definition.required);
+    keys(request.args, definition.required, definition.optional ?? []);
     id(request.collectionId); hash(request.expectedConfigHash);
     configPath ??= (await resolveWorkflowConfig()).configPath;
     const controller = await openProcessingController({ configPath, collectionId: request.collectionId,
