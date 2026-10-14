@@ -368,11 +368,10 @@ export async function openProcessingController(context, dependencies = {}) {
         }
         if (current.hash !== args.expectedChatHash) fail('PROCESSING_CHAT_STATE_CHANGED');
         if (current.state === 'awaiting-review') {
-          // Acknowledgement mutates the registry, even before a later dispatch.
-          if (client === 'claude') assertClaudeHostAuthentication(env);
           const priorReview = current.registry.runs.at(-1);
           try { current = await state.acknowledgeReview({ expectedHash: current.hash, generation: current.generation,
-            requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId }); }
+            requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId },
+          { beforePublish: () => { if (client === 'claude') assertClaudeHostAuthentication(env); } }); }
           catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return publicState(await state.read()); throw error; }
         }
         const fresh = current.state === 'missing' || (current.state === 'blocked' && ['creation-not-dispatched', 'run-abandoned'].includes(current.registry.block.reason));

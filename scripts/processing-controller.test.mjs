@@ -857,6 +857,23 @@ for (const state of ['busy', 'blocked']) test(`missing Claude host auth returns 
   }
 });
 
+test('missing Claude host auth returns an unresolved review without acknowledging or dispatching', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+  h.script = propose(f);
+  const review = await h.controller.run(await h.request());
+  assert.equal(review.state, 'awaiting-review');
+  const before = await h.controller.status(), stored = await registryJSON(f);
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+  const pending = await h.controller.run(await h.request());
+  assert.equal(pending.state, 'awaiting-review'); assert.equal(pending.chatHash, review.chatHash);
+  assert.deepEqual(await h.controller.status(), before);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.dispatches.length, 1);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
 test('missing Claude host auth preserves a finished review and its expected chat hash', async t => {
   const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
   h.script = propose(f);
