@@ -12,11 +12,12 @@ import { marketplaceTreeFiles, verifyMarketplaceFiles } from './marketplace-cont
 import { checkMarketplaceAdvance, stableVersionParts } from './release-policy.mjs';
 
 const MAX_BYTES = 128 * 1024 * 1024;
-function command(cwd, name, args) {
+function commandResult(cwd, name, args, allowedStatuses = [0]) {
   const result = spawnSync(name, args, { cwd, encoding: 'utf8', timeout: 180000, maxBuffer: MAX_BYTES });
-  if (result.error || result.status !== 0) throw new Error(`${name} failed: ${result.error?.message ?? result.stderr}`);
-  return result.stdout;
+  if (result.error || !allowedStatuses.includes(result.status)) throw new Error(`${name} failed: ${result.error?.message ?? result.stderr}`);
+  return result;
 }
+const command = (cwd, name, args) => commandResult(cwd, name, args).stdout;
 const git = (cwd, args) => command(cwd, 'git', args);
 const sha = value => /^[a-f0-9]{40}$/.test(value ?? '');
 
@@ -27,7 +28,9 @@ export function packageOnlyChange(cwd, env) {
   const eligible = (env.GITHUB_EVENT_NAME === 'pull_request' && env.CI_BASE_REF === 'main') ||
     (env.GITHUB_EVENT_NAME === 'push' && env.GITHUB_REF === 'refs/heads/main');
   if (!eligible || !sha(env.CI_BASE_SHA) || /^0+$/.test(env.CI_BASE_SHA)) return false;
-  git(cwd, ['merge-base', '--is-ancestor', env.CI_BASE_SHA, 'HEAD']);
+  // Exit 1 is a valid negative ancestry result, not a Git failure. Rewritten
+  // main history must take full CI; missing objects and command errors still fail.
+  if (commandResult(cwd, 'git', ['merge-base', '--is-ancestor', env.CI_BASE_SHA, 'HEAD'], [0, 1]).status === 1) return false;
   const names = git(cwd, ['diff', '--no-renames', '--name-only', '-z', env.CI_BASE_SHA, 'HEAD', '--'])
     .split('\0').filter(Boolean);
   return names.length > 0 && names.every(isMarketplaceFile);
@@ -91,16 +94,6 @@ export async function verifyPublishedTree(cwd, { snapshot, sums, version }) {
   if (candidate.length !== expected.size || candidate.some(file => !expected.get(file.name)?.equals(file.bytes))) {
     throw new Error('Committed marketplace differs from the published release.');
   }
-  // Archive digests normalize permissions. Also reject executable-bit edits,
-  // symlinks and submodules in the committed tree before any client loads it.
-  const modes = git(cwd, ['ls-tree', '-r', '-z', '--full-tree', 'HEAD']).split('\0').filter(Boolean);
-  for (const row of modes) {
-    const separator = row.indexOf('\t');
-    const metadata = row.slice(0, separator), name = row.slice(separator + 1);
-    if (isMarketplaceFile(name) && (!metadata.startsWith('100644 blob ') || /[\\\x00-\x1f\x7f\ufffd]/.test(name))) {
-      throw new Error('Nonportable marketplace Git entry.');
-    }
-  }
 }
 
 async function readPublished(cwd, env, version) {
@@ -116,12 +109,12 @@ async function readPublished(cwd, env, version) {
   verifyReleaseEvidence({ release, runs, tag, commit });
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-release-ci-'));
   try {
-    const name = `cuefluent-notes-${version}-marketplace.tar.gz`;
-    command(cwd, 'gh', ['release', 'download', tag, '--repo', repository, '--pattern', name, '--pattern', 'SHA256SUMS', '--dir', directory]);
-    for (const name of await fs.readdir(directory)) {
-      if ((await fs.stat(path.join(directory, name))).size > MAX_BYTES) throw new Error('Release asset exceeds CI bounds.');
+    const snapshotName = `cuefluent-notes-${version}-marketplace.tar.gz`;
+    command(cwd, 'gh', ['release', 'download', tag, '--repo', repository, '--pattern', snapshotName, '--pattern', 'SHA256SUMS', '--dir', directory]);
+    for (const fileName of await fs.readdir(directory)) {
+      if ((await fs.stat(path.join(directory, fileName))).size > MAX_BYTES) throw new Error('Release asset exceeds CI bounds.');
     }
-    return { snapshot: await fs.readFile(path.join(directory, name)), sums: await fs.readFile(path.join(directory, 'SHA256SUMS')), version };
+    return { snapshot: await fs.readFile(path.join(directory, snapshotName)), sums: await fs.readFile(path.join(directory, 'SHA256SUMS')), version };
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 }
 
@@ -131,7 +124,11 @@ export async function selectChecks(cwd, env, loadPublished = readPublished) {
   stableVersionParts(next.version);
   const hasPrevious = git(cwd, ['ls-tree', env.CI_BASE_SHA, '--', 'release.json']).trim();
   const previous = hasPrevious ? JSON.parse(git(cwd, ['show', `${env.CI_BASE_SHA}:release.json`])) : null;
-  if (checkMarketplaceAdvance(next, previous) !== 'new-version') throw new Error('Package-only CI requires a new published version.');
+  try {
+    if (checkMarketplaceAdvance(next, previous) !== 'new-version') {
+      throw new Error('Published marketplace files are immutable; package-only changes require a newer published version.');
+    }
+  } catch (error) { throw new Error(`Marketplace release policy: ${error.message}`, { cause: error }); }
   await verifyPublishedTree(cwd, await loadPublished(cwd, env, next.version));
   return 'packages';
 }

@@ -77,6 +77,26 @@ test('complete Git diff classification is conservative across events, deletions 
   assert.throws(() => eligible({ ...f.event, CI_BASE_SHA: 'f'.repeat(40) }), /git failed/);
 });
 
+test('a rewritten push base selects full checks without reading release evidence', async t => {
+  const f = await fixture(t);
+  await f.write('plugins/cuefluent-notes/file.md', 'Before rewrite.');
+  const previous = f.commit();
+  f.git('reset', '--hard', f.base);
+  await f.write('plugins/cuefluent-notes/file.md', 'After rewrite.');
+  f.commit();
+  const event = { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main', CI_BASE_SHA: previous };
+  const unexpectedRead = async () => assert.fail('Full checks must not need release evidence.');
+  assert.equal(packageOnlyChange(f.cwd, event), false);
+  assert.equal(await selectChecks(f.cwd, event, unexpectedRead), 'full');
+  await f.write('scripts/runtime.mjs', 'Source change after rewrite.'); f.commit();
+  assert.equal(await selectChecks(f.cwd, event, unexpectedRead), 'full');
+  const output = path.join(f.root, 'github-output');
+  const selected = spawnSync(process.execPath, [path.join(source, 'scripts/marketplace-ci.mjs'), 'select'],
+    { cwd: f.cwd, env: { ...f.env, ...event, GITHUB_OUTPUT: output }, encoding: 'utf8' });
+  assert.equal(selected.status, 0, selected.stderr);
+  assert.equal(await fs.readFile(output, 'utf8'), 'mode=full\n');
+});
+
 test('package path compares exact published files, never a self-asserted inventory', async t => {
   const f = await fixture(t);
   const built = await buildRelease({ outDir: path.join(f.root, 'release') });
@@ -123,18 +143,34 @@ test('package path compares exact published files, never a self-asserted invento
   // is ever created in the filesystem.
   f.git('-c', 'core.protectNTFS=false', 'update-index', '--add', '--cacheinfo', `100644,${blob},${tabbed}\thidden`);
   f.git('commit', '-m', 'test: tab in tracked package path');
-  const names = marketplaceTreeFiles(f.cwd, 'HEAD').map(file => file.name);
-  assert.ok(names.includes(`${tabbed}\thidden`));
-  assert.ok(!names.includes(tabbed));
-  await assert.rejects(verifyPublishedTree(f.cwd, assets), /differs from the published release/);
+  assert.throws(() => marketplaceTreeFiles(f.cwd, 'HEAD'), /Nonportable marketplace/,
+    'The complete tabbed filename must be rejected, not truncated to a published name.');
+  await assert.rejects(verifyPublishedTree(f.cwd, assets), /Nonportable marketplace/);
   f.git('read-tree', candidate); // Drop the deliberately uncheckoutable entry.
   f.git('reset', '--hard', candidate);
   await fs.appendFile(path.join(f.cwd, 'plugins/cuefluent-notes/README.md'), '\n'); f.commit();
-  await assert.rejects(selectChecks(f.cwd, { ...f.event, CI_BASE_SHA: candidate }, load), /new published version/);
+  const policyEvent = { ...f.event, CI_BASE_SHA: candidate };
+  const policyRefusal = async pattern => {
+    const before = reads;
+    await assert.rejects(selectChecks(f.cwd, policyEvent, load), pattern);
+    assert.equal(reads, before, 'Policy refusal must precede release downloads.');
+    const output = path.join(f.root, 'refused-output');
+    const selected = spawnSync(process.execPath, [path.join(source, 'scripts/marketplace-ci.mjs'), 'select'],
+      { cwd: f.cwd, env: { ...f.env, ...policyEvent, GITHUB_OUTPUT: output }, encoding: 'utf8' });
+    assert.equal(selected.status, 1);
+    assert.match(selected.stderr, pattern);
+    await assert.rejects(fs.stat(output), { code: 'ENOENT' }, 'A refusal must not emit a passing CI mode.');
+  };
+  await policyRefusal(/Marketplace release policy:.*immutable.*newer published version/);
+  f.git('reset', '--hard', candidate);
+  const replaced = JSON.parse(await fs.readFile(path.join(f.cwd, 'release.json'), 'utf8'));
+  replaced.archives[0].sha256 = '0'.repeat(64);
+  await f.write('release.json', JSON.stringify(replaced)); f.commit();
+  await policyRefusal(/Marketplace release policy:.*replace an existing version/);
   f.git('reset', '--hard', candidate);
   const older = JSON.parse(await fs.readFile(path.join(f.cwd, 'release.json'), 'utf8'));
   older.version = '0.0.0'; await f.write('release.json', JSON.stringify(older)); f.commit();
-  await assert.rejects(selectChecks(f.cwd, { ...f.event, CI_BASE_SHA: candidate }, load), /downgrade/);
+  await policyRefusal(/Marketplace release policy:.*downgrade/);
 });
 
 test('published stable identity and exact successful tag run are mandatory', () => {
@@ -200,8 +236,13 @@ test('workflow preserves required checks and gates short-path smokes on provenan
   assert.equal(jobs.test.needs, 'scope'); assert.equal(jobs['client-smoke'].needs, 'scope');
   assert.equal(jobs.test.if, undefined, 'Required matrix context names must exist on both paths.');
   assert.equal(jobs.test.name, 'test (${{ matrix.os }})');
-  assert.equal(jobs.test['runs-on'], "${{ needs.scope.outputs.mode == 'packages' && 'ubuntu-24.04' || matrix.os }}");
-  for (const step of jobs.test.steps.slice(1)) assert.match(step.if, /^needs.scope.outputs.mode == 'full'/);
+  assert.equal(jobs.test['runs-on'], '${{ matrix.os }}', 'Required platform checks must run on their named OS.');
+  assert.match(jobs.test['timeout-minutes'], /^\$\{\{ needs.scope.outputs.mode == 'packages' && 5 \|\|/);
+  const packageStep = jobs.test.steps.findIndex(step => step.run === 'node --test scripts/published-marketplace.test.mjs');
+  assert.ok(packageStep > 0, 'The short path must run actual package tests, not an echo acknowledgement.');
+  assert.equal(jobs.test.steps[packageStep].if, "needs.scope.outputs.mode == 'packages'");
+  for (const step of jobs.test.steps.slice(0, packageStep)) assert.equal(step.if, undefined, 'Both paths need native setup.');
+  for (const step of jobs.test.steps.slice(packageStep + 1)) assert.match(step.if, /^needs.scope.outputs.mode == 'full'/);
   assert.deepEqual(jobs.test.strategy.matrix.os, ['ubuntu-24.04', 'macos-14', 'windows-2025']);
   assert.deepEqual(jobs['client-smoke'].strategy.matrix.os, ['macos-14', 'windows-2025']);
   const select = jobs.scope.steps.find(step => step.id === 'select');

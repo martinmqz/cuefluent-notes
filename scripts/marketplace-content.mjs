@@ -15,15 +15,16 @@ function git(root, args, input) {
   return result.stdout;
 }
 
-/** Read committed candidate bytes, including Git's staging conversions. */
+/** Read committed candidate bytes, including Git's staging conversions. Archive
+ * digests normalize modes, so enforce ordinary 0644 files in the Git tree too. */
 export function marketplaceTreeFiles(root, tree) {
   const entries = git(root, ['ls-tree', '-r', '-z', '--full-tree', tree, '--', ...MARKETPLACE_PATHS])
     .toString().split('\0').filter(Boolean).map(row => {
       const separator = row.indexOf('\t');
       const meta = row.slice(0, separator), name = row.slice(separator + 1);
       const [mode, type, oid] = meta.split(' ');
-      if (!/^100(644|755)$/.test(mode) || type !== 'blob' || !isMarketplaceFile(name)) {
-        throw new Error(`Nonportable marketplace entry: ${name}`);
+      if (mode !== '100644' || type !== 'blob' || !isMarketplaceFile(name) || /[\\\x00-\x1f\x7f\ufffd]/.test(name)) {
+        throw new Error('Nonportable marketplace Git entry.');
       }
       return { name, oid };
     });

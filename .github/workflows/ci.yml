@@ -59,29 +59,26 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2025]
-    # Keep every required context; package acknowledgements need no native VM.
-    runs-on: ${{ needs.scope.outputs.mode == 'packages' && 'ubuntu-24.04' || matrix.os }}
+    # Required contexts always test on their named platform. The package path
+    # checks committed files there without repeating the full source suite.
+    runs-on: ${{ matrix.os }}
     # Platform-specific budgets cover the full native suite and artifact build.
     # Production worker/probe deadlines are independent of these job limits.
-    timeout-minutes: ${{ matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
+    timeout-minutes: ${{ needs.scope.outputs.mode == 'packages' && 5 || matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
     steps:
-      - name: Published packages verified; native source suite not repeated
-        if: needs.scope.outputs.mode == 'packages'
-        run: echo 'Exact published bytes verified by scope; native source tests were already run for the release.'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: needs.scope.outputs.mode == 'full'
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        if: needs.scope.outputs.mode == 'full'
         with:
           node-version: '22'
           package-manager-cache: false
       - name: Record native runtime
-        if: needs.scope.outputs.mode == 'full'
         run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release(),parallelism:require('os').availableParallelism()})"
       - run: npm ci --ignore-scripts
-        if: needs.scope.outputs.mode == 'full'
+      - name: Test committed marketplace packages on the native platform
+        if: needs.scope.outputs.mode == 'packages'
+        run: node --test scripts/published-marketplace.test.mjs
       - name: Verify Windows privacy probe before the full suite
         if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
         timeout-minutes: 2

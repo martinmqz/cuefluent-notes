@@ -136,14 +136,18 @@ It verifies a newer, stable published release, a successful **Prepare release**
 run for its exact tag commit in the base's history, the published snapshot checksum,
 and exact agreement between that snapshot and the committed packages and catalogs.
 Missing provenance or a mismatch fails CI; a package's own inventory is not enough.
-Source, dependency, workflow and other file changes always use full checks.
+Source, dependency, workflow and other file changes always use full checks. A
+known base outside the current history also selects full checks. For an otherwise
+eligible package-only diff, same-version edits and downgrades are refused as
+release-policy violations; publish a newer version rather than changing immutable
+published content.
 
 The shorter path retains guidance checks and isolated macOS/Windows client
 registration checks against the committed marketplace. It skips source-installer
-rebuilds and the native source suites. Lightweight Linux jobs preserve the existing
-required `test (...)` check names and report that native suites were not repeated.
+rebuilds and the full source suites. Each required `test (...)` job runs focused
+committed-package tests on its named native platform, under a shorter timeout.
 The required `reproducibility` check requires successful package provenance and
-those acknowledgements; on the full path it still compares all native build
+those native package tests; on the full path it still compares all native build
 artifacts. Required check names and protected-main settings stay the same. A
 failed or cancelled selection cannot satisfy the required check. Published assets are neither rebuilt nor
 replaced by the shorter path.
