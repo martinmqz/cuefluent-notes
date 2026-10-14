@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { createProcessingEngineTools } from './processing-engine-tools.mjs';
 import { processingFixture, inspectedClaim } from './test-support/processing-fixture.mjs';
 import { digest } from './workflow-values.mjs';
+import { createProcessingWorkset, inspectProcessingWorkset, prepareWorksetBatch, worksetOperationId } from './processing-workset.mjs';
 import { inspectProcessing, prepareProcessing } from './processing.mjs';
 import { inspectNoteMetadata } from './note-metadata.mjs';
 import { PROCESSING_GUIDES, processingToolDeclarations } from './processing-tool-contracts.mjs';
@@ -222,4 +223,85 @@ test('a narrower unfinished CLI claim resumes with its exact selection through t
   const saved = await inspectProcessing(f.capability, f.operationId);
   assert.equal(saved.state, 'awaiting-review');
   assert.equal(saved.selection.unitId, f.identity.unitId);
+});
+
+
+test('workset-bound tools reject new evidence, invented operation IDs, policy drift and extra authority', async t => {
+  const a = await processingFixture(t), b = await processingFixture(t, { base: a, client: 'claude' });
+  const worksetId = randomUUID();
+  await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: b.inputs });
+  const tools = await createProcessingEngineTools({ ...a.options, selection: a.selection, worksetId });
+  await assert.rejects(tools.call('processing_prepare', { operationId: randomUUID(), inputs: a.inputs }), { code: 'PROCESSING_SELECTION_CHANGED' });
+  await assert.rejects(tools.call('processing_prepare', { operationId: randomUUID(), inputs: b.inputs }), { code: 'PROCESSING_OPERATION_CONFLICT' });
+  await assert.rejects(tools.call('processing_pending', { limit: 0 }), { code: 'INVALID_PENDING_LIMIT' });
+  await assert.rejects(tools.call('processing_pending', { afterUnitId: a.identity.unitId }), { code: 'PROCESSING_WORKSET_CURSOR_UNSUPPORTED' });
+  await assert.rejects(tools.call('processing_pending', { approve: true }), { code: 'INVALID_WORKFLOW' });
+  assert.equal((await inspectProcessingWorkset(a.capability, { worksetId })).chargedBatches, 0);
+  const preparation = (await tools.call('processing_pending')).nextPreparation;
+  assert.equal(preparation.operationId, worksetOperationId(worksetId, [0]));
+  const claim = await tools.call('processing_prepare', preparation);
+  assert.deepEqual(claim.inputs.map(item => item.identity), [b.identity]);
+  // Changing only recorded settings still revokes this context's pinned authority.
+  const bytes = await fs.readFile(a.options.configPath); await fs.writeFile(a.options.configPath, Buffer.concat([bytes, Buffer.from(' ')]));
+  await assert.rejects(tools.call('processing_page', { operationId: claim.operationId, expectedClaimHash: claim.claimHash, page: 0 }), { code: 'WORKFLOW_POLICY_CHANGED' });
+});
+
+test('workset preparation enforces its byte budget without charging rejected evidence', async t => {
+  const f = await processingFixture(t, { text: 'Synthetic long evidence. '.repeat(4000) }), worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs,
+    runBudget: { maxBatches: 2, maxPacketBytes: 65536 } });
+  const tools = await createProcessingEngineTools({ ...f.options, selection: f.selection, worksetId });
+  const preparation = (await tools.call('processing_pending')).nextPreparation;
+  await assert.rejects(tools.call('processing_prepare', preparation), { code: 'PROCESSING_BATCH_BUDGET' });
+  const workset = await inspectProcessingWorkset(f.capability, { worksetId });
+  assert.equal(workset.chargedBatches, 0); assert.equal(workset.operations.length, 0);
+});
+
+
+test('bound tools retry exact interrupted admission and refuse skipping to another batch', async t => {
+  const a = await processingFixture(t), b = await processingFixture(t, { base: a }), worksetId = randomUUID();
+  const created = await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs] });
+  await assert.rejects(prepareWorksetBatch(a.capability, { worksetId, expectedWorksetHash: created.worksetHash, indexes: [0] },
+    { fault: () => { throw new Error('synthetic crash'); } }), /synthetic crash/);
+  const tools = await createProcessingEngineTools({ ...a.options, selection: a.selection, worksetId });
+  const pending = await tools.call('processing_pending');
+  assert.equal(pending.operations[0].admissionPending, true);
+  assert.deepEqual(pending.nextPreparation, { operationId: worksetOperationId(worksetId, [0]), inputs: a.inputs });
+  await assert.rejects(tools.call('processing_prepare', { operationId: worksetOperationId(worksetId, [1]), inputs: b.inputs }), { code: 'PROCESSING_RESUME_REQUIRED' });
+  const claim = await tools.call('processing_prepare', pending.nextPreparation);
+  assert.equal(claim.workset.chargedBatches, 1);
+  assert.equal((await tools.call('processing_pending')).nextPreparation, null);
+});
+
+test('oversized multi-input preparation offers a fitting exact prefix without charging the rejection', async t => {
+  const a = await processingFixture(t, { text: 'Synthetic bounded evidence. '.repeat(1400) });
+  const b = await processingFixture(t, { base: a, text: 'Other synthetic evidence. '.repeat(1400) }), worksetId = randomUUID();
+  await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs],
+    runBudget: { maxBatches: 3, maxPacketBytes: 65536 } });
+  const tools = await createProcessingEngineTools({ ...a.options, selection: a.selection, worksetId });
+  await assert.rejects(tools.call('processing_prepare', (await tools.call('processing_pending')).nextPreparation), { code: 'PROCESSING_BATCH_BUDGET' });
+  assert.equal((await inspectProcessingWorkset(a.capability, { worksetId })).chargedBatches, 0);
+  const fitting = (await tools.call('processing_pending')).nextPreparation;
+  assert.deepEqual(fitting, { operationId: worksetOperationId(worksetId, [0]), inputs: a.inputs });
+  assert.equal((await tools.call('processing_prepare', fitting)).workset.chargedBatches, 1);
+});
+
+test('per-run packet budget pauses a fitting workset remainder and a fresh adapter resumes it', async t => {
+  const a = await processingFixture(t, { text: 'Synthetic bounded evidence. '.repeat(1400) });
+  const b = await processingFixture(t, { base: a, text: 'Other synthetic evidence. '.repeat(1400) }), worksetId = randomUUID();
+  await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs] });
+  const context = { ...a.options, selection: a.selection, worksetId };
+  const tools = await createProcessingEngineTools(context, { runBudget: { maxOperations: 3, maxPacketBytes: 65536, maxElapsedMs: 60000 } });
+  await assert.rejects(tools.call('processing_prepare', (await tools.call('processing_pending')).nextPreparation), { code: 'PROCESSING_BATCH_BUDGET' });
+  let claim = await tools.call('processing_prepare', (await tools.call('processing_pending')).nextPreparation);
+  const operationId = claim.operationId;
+  for (let page = 0; page < claim.packet.pages.length; page++) {
+    const read = await tools.call('processing_page', { operationId, expectedClaimHash: claim.claimHash, page });
+    claim = await tools.call('processing_ack', { operationId, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
+  }
+  await tools.call('processing_complete', { operationId, expectedClaimHash: claim.claimHash });
+  const stopped = await tools.call('processing_pending');
+  assert.equal(stopped.reason, 'run-budget'); assert.equal(stopped.nextPreparation, null);
+  const reopened = await createProcessingEngineTools(context);
+  assert.deepEqual((await reopened.call('processing_pending')).nextPreparation.inputs, b.inputs);
 });

@@ -4,6 +4,7 @@ import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage
 import { withStorageProbes } from './storage-platform.mjs';
 import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
+import { inspectProcessingWorkset, prepareWorksetBatch, worksetOperationId } from './processing-workset.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, inspectProcessing, proposeProcessing, completeProcessing } from './processing.mjs';
 import { withProcessingState, processingSnapshot, writeProcessingBytes, removeProcessingJSON } from './processing-state.mjs';
 import { validateClaim, claimPath, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
@@ -59,14 +60,37 @@ async function readGuidance(guide) {
  * that has separately verified its host identity may hand these tools to an agent.
  * The agent never receives collection/configuration setters or approval authority.
  */
-export async function createProcessingEngineTools(context) {
-  keys(context, ['configPath', 'collectionId', 'expectedConfigHash', 'selection']);
+export async function createProcessingEngineTools(context, { runBudget = null } = {}) {
+  keys(context, ['configPath', 'collectionId', 'expectedConfigHash', 'selection'], ['worksetId', 'resumeOperationId']);
+  if (context.worksetId !== undefined) nativeId(context.worksetId);
+  if (context.resumeOperationId !== undefined) nativeId(context.resumeOperationId);
+  if (context.worksetId !== undefined && context.resumeOperationId !== undefined) fail('PROCESSING_SELECTION_CHANGED');
   if (typeof context.configPath !== 'string' || !path.isAbsolute(context.configPath)) fail('ABSOLUTE_PATH_REQUIRED');
   const bound = structuredClone(context);
   bound.selection = await normalizeWorkflowSelection(bound.selection);
   const selection = Object.freeze(bound.selection);
   const options = Object.freeze({ configPath: bound.configPath, collectionId: bound.collectionId, expectedConfigHash: bound.expectedConfigHash });
   let notesIdentity;
+  const startedAt = performance.now(), admitted = new Map(), inputSizes = new Map();
+  if (runBudget !== null) {
+    keys(runBudget, ['maxOperations', 'maxPacketBytes', 'maxElapsedMs']);
+    for (const value of Object.values(runBudget)) { integer(value); if (value < 1) fail('INVALID_PROCESSING_BUDGET'); }
+    runBudget = Object.freeze({ ...runBudget });
+  }
+  const remainingRunBytes = () => runBudget === null ? 4 * 1024 * 1024
+    : Math.max(0, runBudget.maxPacketBytes - [...admitted.values()].reduce((sum, bytes) => sum + bytes, 0));
+  const runStopped = () => runBudget !== null && (admitted.size >= runBudget.maxOperations ||
+    remainingRunBytes() === 0 || performance.now() - startedAt >= runBudget.maxElapsedMs);
+  function nextIndexes(workset, limit) {
+    const indexes = [], maxBytes = Math.min(workset.remainingPacketBytes, remainingRunBytes());
+    let bytes = 0;
+    for (const item of workset.items.filter(item => item.state === 'unattempted').slice(0, limit)) {
+      const size = inputSizes.get(item.index);
+      if (size !== undefined && bytes + size > maxBytes) break;
+      indexes.push(item.index); bytes += size ?? 0;
+    }
+    return indexes;
+  }
 
   async function authorized() {
     const capability = await verifyWorkflowStorage(options);
@@ -177,7 +201,7 @@ export async function createProcessingEngineTools(context) {
       if (snapshot.hash !== args.expectedClaimHash) fail('PROCESSING_CLAIM_CHANGED');
       const claim = validateClaim(intakeJSON(snapshot));
       if (!equal(claim.selection, operationSelection) || claim.bindingHash !== ctx.bindingHash ||
-        claim.inputs.some(input => !selectionIncludesIdentity(selection, input.identity))) fail('PROCESSING_SELECTION_CHANGED');
+        (!bound.worksetId && !bound.resumeOperationId && claim.inputs.some(input => !selectionIncludesIdentity(selection, input.identity)))) fail('PROCESSING_SELECTION_CHANGED');
       validateMappings(args.proposal.mappings, claim.inputs, files);
       if (claim.acknowledged.length !== claim.packet.pages.length) fail('PROCESSING_INSPECTION_INCOMPLETE');
       if (claim.proposalIntent && (claim.proposalIntent.value.copies.length !== files.length || files.some((file, index) =>
@@ -201,7 +225,20 @@ export async function createProcessingEngineTools(context) {
     }
     return result;
   }
-  function compatible(operation) {
+  async function boundWorkset(capability) {
+    const workset = await inspectProcessingWorkset(capability, { worksetId: bound.worksetId });
+    if (workset.policyState !== 'current') fail('WORKFLOW_POLICY_CHANGED');
+    await assertWorkflowStorage(capability, workset.selection, 'explicitProcess');
+    return workset;
+  }
+  async function compatible(operation, capability) {
+    if (bound.worksetId) {
+      const workset = await boundWorkset(capability);
+      // The workset inspector verifies exact admission hashes, packet and inputs.
+      return workset.operations.some(item => item.operationId === operation.operationId && !item.admissionPending);
+    }
+    if (bound.resumeOperationId) return operation.operationId === bound.resumeOperationId && operation.selection !== null;
+
     const old = operation.selection;
     return old && old.client === selection.client && old.sessionId === selection.sessionId && old.cwd === selection.cwd &&
       (selection.unitId === null || old.unitId === selection.unitId) &&
@@ -235,23 +272,83 @@ export async function createProcessingEngineTools(context) {
           return prepareNote({ ...args, now, skillVersion });
         }
         if (name === 'processing_pending') {
+          if (args.limit !== undefined) { integer(args.limit); if (args.limit < 1 || args.limit > 100) fail('INVALID_PENDING_LIMIT'); }
+          if (args.afterUnitId !== undefined) nativeId(args.afterUnitId);
+        }
+        if (name === 'processing_pending' && bound.worksetId) {
+          if (args.afterUnitId !== undefined) fail('PROCESSING_WORKSET_CURSOR_UNSUPPORTED');
+          const workset = await boundWorkset(capability);
+          const remaining = workset.items.filter(item => item.state === 'unattempted');
+          const indexes = nextIndexes(workset, Math.min(args.limit ?? 5, 5));
+          const unfinished = workset.operations.filter(item => !item.outcome || item.recoveryRequired);
+          const retry = unfinished.length === 1 && unfinished[0].admissionPending && !unfinished[0].conflict
+            ? unfinished[0] : null;
+          const firstBytes = inputSizes.get(remaining[0]?.index);
+          const runBytesStop = !indexes.length && firstBytes <= workset.remainingPacketBytes && firstBytes > remainingRunBytes();
+          return { interfaceVersion: PROCESSING_INTERFACE_VERSION, workset,
+            pending: remaining.map(item => workset.inputs[item.index]), operations: unfinished.map(item => ({ ...item, resumeSupported: true })),
+            reason: !unfinished.length && (runStopped() || runBytesStop) ? 'run-budget' : !unfinished.length && remaining.length && !indexes.length ? 'input-budget' : null,
+            nextPreparation: retry ? { operationId: retry.operationId, inputs: retry.indexes.map(index => workset.inputs[index]) }
+              : !unfinished.length && !runStopped() && !workset.budgetExhausted && indexes.length
+                ? { operationId: worksetOperationId(bound.worksetId, indexes), inputs: indexes.map(index => workset.inputs[index]) } : null };
+        }
+        if (name === 'processing_pending' && bound.resumeOperationId) {
+          const operation = await inspectProcessing(capability, bound.resumeOperationId);
+          if (operation.selection === null) fail('PROCESSING_CLAIM_MISSING');
+          await assertWorkflowStorage(capability, operation.selection, 'explicitProcess');
+          return { interfaceVersion: PROCESSING_INTERFACE_VERSION, pending: [],
+            operations: operation.outcome && !operation.recoveryRequired ? [] : [{ ...operation, resumeSupported: true }], nextPreparation: null };
+        }
+        if (name === 'processing_pending') {
           const result = await pendingProcessing(capability, { ...args, selection });
-          return { ...result, operations: result.operations.map(operation => compatible(operation)
+          return { ...result, operations: await Promise.all(result.operations.map(async operation => await compatible(operation, capability)
             ? { ...operation, resumeSupported: true }
             : { operationId: operation.operationId, state: operation.state, resumeSupported: false,
-              diagnostic: 'PROCESSING_SELECTION_CHANGED', nextAction: 'inspect-with-original-selection' }) };
+              diagnostic: 'PROCESSING_SELECTION_CHANGED', nextAction: 'inspect-with-original-selection' })) };
         }
         let operationSelection = selection;
         if (args.operationId && name !== 'processing_prepare') {
           const result = await inspectProcessing(capability, args.operationId);
           if (result.state === 'missing' && name === 'processing_status') return result;
-          if (!compatible(result)) fail('PROCESSING_SELECTION_CHANGED');
+          if (!await compatible(result, capability)) fail('PROCESSING_SELECTION_CHANGED');
           operationSelection = result.selection;
+          // Count resumed operations once as well as new admissions. Finishing
+          // an already claimed operation remains possible after the run cutoff.
+          if (bound.worksetId && !result.outcome && !admitted.has(args.operationId)) admitted.set(args.operationId, result.claim?.packet.bytes ?? 0);
           if (name === 'processing_status') return result;
           if (name === 'processing_complete' && result.proposalHash !== null) fail('PROCESSING_REVIEW_REQUIRED');
         }
         if (name === 'processing_prepare') {
           list(args.inputs, 20, { empty: false });
+          if (bound.resumeOperationId) fail('PROCESSING_RESUME_REQUIRED');
+          if (bound.worksetId) {
+            const workset = await boundWorkset(capability);
+            const indexes = args.inputs.map(input => {
+              const index = workset.inputs.findIndex(candidate => equal(candidate, input));
+              if (index < 0) fail('PROCESSING_SELECTION_CHANGED');
+              return index;
+            }).sort((a, b) => a - b);
+            if (args.operationId !== worksetOperationId(bound.worksetId, indexes)) fail('PROCESSING_OPERATION_CONFLICT');
+            const attempt = workset.operations.find(item => item.operationId === args.operationId);
+            if (!attempt && workset.operations.some(item => !item.outcome || item.recoveryRequired)) fail('PROCESSING_RESUME_REQUIRED');
+            if (!attempt && runStopped()) fail('PROCESSING_RUN_BUDGET');
+            if (!attempt && workset.budgetExhausted) fail('PROCESSING_WORKSET_BUDGET');
+            try {
+              const result = await prepareWorksetBatch(capability, { worksetId: bound.worksetId, expectedWorksetHash: workset.worksetHash, indexes,
+                // An existing admission retains its exact charged cost on retry.
+                ...(!attempt ? { batchBudget: { maxInputs: 5, maxPacketBytes: Math.min(4 * 1024 * 1024, workset.remainingPacketBytes, remainingRunBytes()) } } : {}) });
+              admitted.set(args.operationId, result.packet.bytes);
+              return result;
+            } catch (error) {
+              // No admission was written on this refusal. Retain measured
+              // per-input costs so the next pending call offers a fitting prefix.
+              // A single-input packet includes framing, making the sum conservative.
+              if (!attempt && error.code === 'PROCESSING_BATCH_BUDGET' && error.details?.inputSizes) {
+                for (const item of error.details.inputSizes) inputSizes.set(item.index, item.packetBytes);
+              }
+              throw error;
+            }
+          }
           if (args.inputs.some(input => !selectionIncludesIdentity(selection, input.identity))) fail('PROCESSING_SELECTION_CHANGED');
           return prepareProcessing(capability, { ...args, selection });
         }

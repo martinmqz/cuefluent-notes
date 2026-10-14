@@ -262,6 +262,35 @@ test('explicit policy reauthorization pins old and new policy without changing s
   await assert.rejects(fresh.rollover({ expectedHash: changed.hash }), { code: 'PROCESSING_CHAT_BUSY' });
 });
 
+test('archived operation proof is bounded, namespace-bound and refuses missing or mismatched history', async t => {
+  const f = await fixture(t), bound = await f.bind(await f.reserve()), operationId = randomUUID();
+  const request = { ...beginArgs(bound), operationId }, busy = await f.registry.begin(request);
+  const finished = await f.registry.finish(finishArgs(busy, request));
+  const rolled = await f.registry.rollover({ expectedHash: finished.hash });
+  const other = await createProcessingChatState({ ...f.factory, profileId: digest('other-profile') });
+  assert.equal(await other.canResumeOperation(operationId), true, 'lookup uses the owning registry namespace');
+  const index = path.join(f.collection.intakeStateDir, 'processing-chat-operation-history', rolled.namespaceHash, `${operationId}.json`);
+  const archive = path.join(f.collection.intakeStateDir, 'processing-chat-history', rolled.namespaceHash, `${request.requestId}.json`);
+  const indexBytes = await fs.readFile(index), archiveBytes = await fs.readFile(archive);
+  await fs.rm(archive);
+  await assert.rejects(other.canResumeOperation(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
+  await fs.writeFile(archive, archiveBytes, { mode: 0o600 });
+  const wrong = JSON.parse(indexBytes); wrong.operationId = randomUUID();
+  await fs.writeFile(index, canonicalJSON(wrong) + '\n');
+  await assert.rejects(other.canResumeOperation(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
+  wrong.operationId = operationId; wrong.bindingHash = digest('other-collection');
+  await fs.writeFile(index, canonicalJSON(wrong) + '\n');
+  await assert.rejects(other.canResumeOperation(operationId), { code: 'PROCESSING_CHAT_BINDING_CHANGED' });
+  await fs.writeFile(index, indexBytes);
+  const another = { ...beginArgs(rolled), operationId }, active = await f.registry.begin(another);
+  assert.equal(await other.canResumeOperation(operationId), false, 'archived proof cannot override current execution');
+  const again = await f.registry.finish(finishArgs(active, another));
+  await f.registry.rollover({ expectedHash: again.hash });
+  assert.deepEqual(await fs.readFile(index), indexBytes, 'terminal retries preserve the first exact immutable proof');
+  assert.equal(await other.canResumeOperation(operationId), true);
+  assert.equal(await other.canResumeOperation(randomUUID()), false);
+});
+
 test('only an internal proven pre-dispatch abort releases busy and an exact retry needs fresh CAS', async t => {
   const f = await fixture(t), bound = await f.bind(await f.reserve()), request = beginArgs(bound), busy = await f.registry.begin(request);
   const args = { expectedHash: busy.hash, generation: busy.generation, requestId: request.requestId };
@@ -290,4 +319,19 @@ test('changed policy, namespace and unsupported persisted state fail without rep
   assert.equal((await changed.read()).policyState, 'changed');
   await assert.rejects(changed.reserve({ expectedHash: reserved.hash, requestId: randomUUID(), requestHash: digest('new') }), { code: 'PROCESSING_CHAT_POLICY_CHANGED' });
   assert.deepEqual(await fs.readFile(statePath(f, reserved)), original);
+});
+
+test('known nonexecuting peer blocks preserve terminal operation ownership; unknown blocks do not', async t => {
+  const f = await fixture(t), bound = await f.bind(await f.reserve()), operationId = randomUUID();
+  const request = { ...beginArgs(bound), operationId }, busy = await f.registry.begin(request);
+  await f.registry.finish(finishArgs(busy, request));
+  const peer = await createProcessingChatState({ ...f.factory, profileId: digest('other-synthetic-profile') });
+  const reserved = await peer.reserve({ expectedHash: null, requestId: randomUUID(), requestHash: digest('peer creation') });
+  const blocked = await peer.block({ expectedHash: reserved.hash, generation: reserved.generation, reason: 'creation-not-dispatched' });
+  for (const [reason, allowed] of [['creation-not-dispatched', true], ['run-abandoned', true], ['creation-outcome-unknown', false], ['host-unavailable', false]]) {
+    await writeFixtureState(f, blocked, value => { value.block.reason = reason; });
+    assert.equal(await f.registry.canResumeOperation(operationId), allowed, reason);
+    assert.equal((await f.registry.collectionActivity()).some(item => !item.own), !allowed, reason);
+    assert.equal(await f.registry.canResumeOperation(randomUUID()), false, 'a harmless peer cannot fabricate ownership');
+  }
 });

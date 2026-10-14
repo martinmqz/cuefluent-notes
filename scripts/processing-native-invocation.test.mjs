@@ -98,10 +98,11 @@ test('Codex invocation rechecks resumed metadata in its selected tail', async t 
   }
 });
 
-test('Claude maps formal process and review controls through trusted companion and native skill attribution', async t => {
-  for (const control of ['process', 'review']) await t.test(control, async t => {
+test('Claude maps formal shortcut controls through trusted companion and native skill attribution', async t => {
+  for (const control of ['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel']) await t.test(control, async t => {
     const f = await fixture(t, 'claude');
-    f.invocation.tool = control === 'review' ? 'processing_review' : 'process_selected_captures';
+    f.invocation.tool = control.startsWith('process') ? 'process_selected_captures' : `processing_${control}`;
+    if (control.startsWith('process ')) f.invocation.arguments.scope = control.split(' ')[1];
     await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
     await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
     const skillCommand = 'cuefluent-notes:cuefluent-notes', input = f.spacer();
@@ -660,4 +661,26 @@ test('Codex incomplete nested pairs remain pending and never prove a call', asyn
     await assert.rejects(resolveProcessingInvocation(f.capability, f.context, f.invocation,
       { skillPath: f.skillPath, settleMs: 0, requireCompleted: true }), unavailable);
   });
+});
+
+test('exact Codex shortcut scope cannot be broadened by the model tool arguments', async t => {
+  const f = await fixture(t), input = f.nativeSkill();
+  input.payload.item.content[1].text = 'process chat';
+  f.invocation.tool = 'process_selected_captures';
+  await f.append([f.spacer(), input, f.nativeCall()]);
+  await assert.rejects(f.resolve(), { code: 'PROCESSING_CONTROL_SELECTION_MISMATCH' });
+});
+
+test('exact Claude shortcut scope cannot be broadened despite a valid native tool identity', async t => {
+  const f = await fixture(t, 'claude'), command = 'cuefluent-notes:cuefluent-notes';
+  f.invocation.tool = 'process_selected_captures';
+  await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+  await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\nSynthetic $ARGUMENTS\n');
+  const input = f.spacer();
+  input.message.content = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>process chat</command-args>`;
+  const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+    message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\nSynthetic process chat\n` }] } };
+  const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+  await f.append([input, companion, call]);
+  await assert.rejects(f.resolve(), { code: 'PROCESSING_CONTROL_SELECTION_MISMATCH' });
 });

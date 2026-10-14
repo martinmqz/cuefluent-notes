@@ -17,38 +17,42 @@ const event = (type, more = {}) => ({ type: 'event_msg', payload: { type, ...mor
 const item = value => event('item_completed', { thread_id: sessionId, turn_id: unitId, item: value });
 const response = payload => ({ type: 'response_item', payload: { ...payload, internal_chat_message_metadata_passthrough: metadata() } });
 
-async function claudeFixture(t, mutate = () => {}) {
+async function claudeFixture(t, mutate = () => {}, control = 'process') {
+  const callArgs = { ...args, ...(control.startsWith('process ') ? { scope: control.split(' ')[1] } : {}) };
+  const toolName = control.startsWith('process') ? 'process_selected_captures' : `processing_${control}`;
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-claude-control-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, 'native.jsonl'), skillPath = path.join(root, 'SKILL.md');
   const skillCommand = 'cuefluent-notes:cuefluent-notes', inputId = '33333333-3333-4333-8333-333333333333';
   const companionId = '44444444-4444-4444-8444-444444444444', callRecordId = '55555555-5555-4555-8555-555555555555';
   await fs.writeFile(skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic processing skill.\n');
-  const expansion = `Base directory for this skill: ${root}\n\nSynthetic processing skill.\n\n\nARGUMENTS: process`;
-  const input = `<command-message>${skillCommand}</command-message>\n<command-name>/${skillCommand}</command-name>\n<command-args>process</command-args>`;
+  const expansion = `Base directory for this skill: ${root}\n\nSynthetic processing skill.\n\n\nARGUMENTS: ${control}`;
+  const input = `<command-message>${skillCommand}</command-message>\n<command-name>/${skillCommand}</command-name>\n<command-args>${control}</command-args>`;
   const native = (type, uuid, content, extra = {}) => ({ type, uuid, timestamp: '2026-10-10T12:00:00.000Z', sessionId, cwd: root,
     version: '2.1.296', isSidechain: false, parentUuid: null, message: { role: type, content }, ...extra });
   const rows = [
     native('user', inputId, input, { promptId: unitId, turnOrigin: 'sdk' }),
     native('user', companionId, [{ type: 'text', text: expansion }], { promptId: unitId, parentUuid: inputId, isMeta: true, turnCompanion: true }),
-    native('assistant', callRecordId, [{ type: 'tool_use', id: 'dispatch-call', name: 'mcp__cuefluent_control__process_selected_captures', input: args }],
+    native('assistant', callRecordId, [{ type: 'tool_use', id: 'dispatch-call', name: `mcp__cuefluent_control__${toolName}`, input: callArgs }],
       { attributionSkill: skillCommand, attributionPlugin: 'cuefluent-notes' }),
     native('user', '66666666-6666-4666-8666-666666666666', [{ type: 'tool_result', tool_use_id: 'dispatch-call', content: result.content }],
       { promptId: unitId, sourceToolAssistantUUID: callRecordId, toolUseResult: result.content }),
     native('assistant', '77777777-7777-4777-8777-777777777777', [{ type: 'text', text: statusText }],
-      { attributionSkill: skillCommand, attributionPlugin: 'cuefluent-notes', attributionMcpServer: 'cuefluent_control', attributionMcpTool: 'process_selected_captures' }),
+      { attributionSkill: skillCommand, attributionPlugin: 'cuefluent-notes', attributionMcpServer: 'cuefluent_control', attributionMcpTool: toolName }),
   ];
   rows.at(-1).message.stop_reason = 'end_turn'; mutate(rows);
   const lines = rows.map(row => JSON.stringify(row) + '\n'); await fs.writeFile(file, lines.join(''));
   const source = { client: 'claude', sessionId, projectRoot: root, path: file, fileIdentity: stableSourceIdentity(await fs.lstat(file, { bigint: true })) };
-  const receipt = Object.freeze({ client: 'claude', sessionId, unitId, callId: 'dispatch-call', tool: 'mcp__cuefluent_control__process_selected_captures',
-    argsHash: digest(canonicalJSON(args)), sourcePath: file, sourceIdentity: source.fileIdentity,
+  const receipt = Object.freeze({ client: 'claude', sessionId, unitId, callId: 'dispatch-call', tool: `mcp__cuefluent_control__${toolName}`,
+    argsHash: digest(canonicalJSON(callArgs)), sourcePath: file, sourceIdentity: source.fileIdentity,
     requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result.content)),
     inputId, inputHash: digest(input), companionId, companionHash: digest(lines[1]), skillCommand, skillExpansionHash: digest(expansion) });
-  return { root, rows, lines, source, receipt, skillPath, trustedSkill: await loadClaudeProcessingSkill({ skillPath }), request: { source, unitId, fromByte: 0, endByte: Buffer.byteLength(lines.join('')) },
+  return { root, rows, lines, source, receipt, skillPath, trustedSkill: await loadClaudeProcessingSkill({ skillPath, control }), request: { source, unitId, fromByte: 0, endByte: Buffer.byteLength(lines.join('')) },
     resolveDispatch: async query => Object.entries(query).every(([key, value]) => receipt[key] === value) ? receipt : null };
 }
-async function fixture(t, mutate = () => {}) {
+async function fixture(t, mutate = () => {}, control = 'process') {
+  const callArgs = { ...args, ...(control.startsWith('process ') ? { scope: control.split(' ')[1] } : {}) };
+  const toolName = control.startsWith('process') ? 'process' : `processing_${control}`;
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-control-proof-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, 'session.jsonl'), skillPath = path.join(root, 'plugin', 'SKILL.md');
@@ -61,12 +65,12 @@ async function fixture(t, mutate = () => {}) {
       content: [{ type: 'input_text', text: 'Synthetic environment context.' }],
       internal_chat_message_metadata_passthrough: metadata(['environments.environment_context']) } },
     { type: 'response_item', payload: { type: 'message', id: 'native-user', role: 'user',
-      content: [{ type: 'input_text', text: 'process' }], internal_chat_message_metadata_passthrough: metadata(['user.text']) } },
+      content: [{ type: 'input_text', text: control }], internal_chat_message_metadata_passthrough: metadata(['user.text']) } },
     item({ type: 'UserMessage', id: 'native-user-view', content: [
-      { type: 'skill', name: 'cuefluent-notes', path: skillPath }, { type: 'text', text: 'process', text_elements: [] }] }),
+      { type: 'skill', name: 'cuefluent-notes', path: skillPath }, { type: 'text', text: control, text_elements: [] }] }),
     response({ type: 'function_call', id: 'native-call-item', call_id: 'dispatch-call', namespace: 'mcp__cuefluent',
-      name: 'process', arguments: JSON.stringify(args) }),
-    item({ type: 'McpToolCall', id: 'dispatch-call', server: 'cuefluent', tool: 'process', arguments: args,
+      name: toolName, arguments: JSON.stringify(callArgs) }),
+    item({ type: 'McpToolCall', id: 'dispatch-call', server: 'cuefluent', tool: toolName, arguments: callArgs,
       status: 'completed', result }),
     response({ type: 'function_call_output', id: 'native-result', call_id: 'dispatch-call', output: [
       { type: 'input_text', text: 'Wall time: 0.003 seconds\nOutput:' }, { type: 'input_text', text: result.content[0].text }] }),
@@ -80,7 +84,7 @@ async function fixture(t, mutate = () => {}) {
   const source = { client: 'codex', sessionId, projectRoot: root, path: file,
     fileIdentity: stableSourceIdentity(await fs.lstat(file, { bigint: true })) };
   const receipt = Object.freeze({ client: 'codex', sessionId, unitId, callId: 'dispatch-call',
-    tool: 'mcp__cuefluent.process', argsHash: digest(canonicalJSON(args)), sourcePath: file,
+    tool: `mcp__cuefluent.${toolName}`, argsHash: digest(canonicalJSON(callArgs)), sourcePath: file,
     sourceIdentity: source.fileIdentity, requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath,
     statusText, resultHash: digest(canonicalJSON(result)) });
   return { source, receipt, rows, request: { source, fromByte: Buffer.byteLength(lines[0]), endByte: Buffer.byteLength(lines.join('')), unitId },
@@ -195,3 +199,16 @@ test('bounded exact source inspection refuses truncated, replaced and oversized 
   assert.equal(await verifyCodexProcessingControl({ ...f.request, endByte: f.request.fromByte + 2 * 1024 * 1024 + 1 }, f), null);
   await assert.rejects(verifyCodexProcessingControl({ ...f.request, source: { ...f.source, fileIdentity: 'b'.repeat(64) } }, f), { code: 'SOURCE_CHANGED' });
 });
+
+for (const control of ['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel']) {
+  test(`exact ${control} has bounded proof in both clients; mixed corrections remain evidence`, async t => {
+    const codex = await fixture(t, () => {}, control);
+    const claude = await claudeFixture(t, () => {}, control);
+    assert.equal(isProcessingControlProof(await verifyCodexProcessingControl(codex.request, codex)), true);
+    assert.equal(isProcessingControlProof(await verifyClaudeProcessingControl(claude.request, claude)), true);
+    const mixedCodex = await fixture(t, rows => { rows[4].payload.content[0].text += '; correction: 20 minutes'; }, control);
+    const mixedClaude = await claudeFixture(t, rows => { rows[0].message.content += '\nCorrection: 20 minutes'; }, control);
+    assert.equal(await verifyCodexProcessingControl(mixedCodex.request, mixedCodex), null);
+    assert.equal(await verifyClaudeProcessingControl(mixedClaude.request, mixedClaude), null);
+  });
+}

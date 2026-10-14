@@ -33,7 +33,7 @@ test('source adapter exposes explicit versioned tools without save, approval or 
   const result = await server([initialize, { jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
   assert.equal(result.rows[0].result.serverInfo.name, 'cuefluent_control');
   const tools = result.rows[1].result.tools;
-  assert.deepEqual(tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_review']);
+  assert.deepEqual(tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_resume', 'processing_cancel', 'processing_review']);
   for (const tool of tools) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(tools[0].annotations.readOnlyHint, true); assert.equal(tools[1].annotations.readOnlyHint, false);
   assert.equal(tools[1].inputSchema.properties.selection.additionalProperties, false);
@@ -150,7 +150,8 @@ test('known processing refusals preserve their safe actionable code', async t =>
 });
 
 test('unknown output status, diagnostics and malformed request IDs are fixed failures', async t => {
-  for (const patch of [{ status: 'private content' }, { diagnostics: ['PRIVATE_CONTENT'] }, { requestId: 'not-a-native-id' }]) await t.test(Object.keys(patch)[0], async () => {
+  for (const patch of [{ status: 'private content' }, { diagnostics: ['PRIVATE_CONTENT'] }, { requestId: 'not-a-native-id' },
+    { statusDetail: 'private content' }, { statusDetail: 'accepted' }]) await t.test(`${Object.keys(patch)[0]}: ${JSON.stringify(Object.values(patch)[0])}`, async () => {
     const result = await server([initialize, tool('process_selected_captures', { collectionId: 'example', requestId: randomUUID() })], {
       requestProcessing: async args => ({ status: 'idle', nextAction: 'none', requestId: args.requestId, ...patch })
     });

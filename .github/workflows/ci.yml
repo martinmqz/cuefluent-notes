@@ -33,9 +33,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2025]
     runs-on: ${{ matrix.os }}
-    # Native Windows ACL fixtures exceeded 20 minutes while still making progress.
-    # This bounds the full job; production worker/probe deadlines stay unchanged.
-    timeout-minutes: ${{ matrix.os == 'windows-2025' && 45 || 20 }}
+    # Platform-specific budgets cover the full native suite and artifact build.
+    # Production worker/probe deadlines are independent of these job limits.
+    timeout-minutes: ${{ matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

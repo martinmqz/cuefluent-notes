@@ -14,7 +14,7 @@ one-file-per-turn rule, activity feed, or parallel recap system is required.
 
 | Request | Action and reference |
 | --- | --- |
-| Setup, “Use Cuefluent Notes”, or status | Inspect existing settings; follow [setup](references/setup.md). Installation and hook trust enable neither process. |
+| Setup, “Use Cuefluent Notes”, or configuration status | Inspect existing settings; follow [setup](references/setup.md). Installation and hook trust enable neither process. |
 | Capture selected session work | Use the deterministic [capture commands](references/workflow-cli.md#collection-controls). Native identity and bounded source selection are required; collection does not create Markdown. |
 | Process selected captures | Prefer the [reusable processing chat](references/processing-chat.md). Standalone agents can use [processing](references/processing.md) and [the command sequence](references/workflow-cli.md#processing-selected-captures) from an uncaptured context. |
 | Save or update supplied material | Use selected sources directly and the [direct-save commands](references/workflow-cli.md#direct-saves). No session capture, native identity, or onboarding is required. |
@@ -38,20 +38,36 @@ to make a requested operation succeed.
 
 ### Formal processing controls
 
-When this skill is explicitly selected with only `process`, call the available
-`cuefluent_control` tool `process_selected_captures` once. The adapter derives the
-request identity from that native call; do not invent a request ID or selection.
-For only `review`, call its `processing_review` tool once. Native clients may prefix
-these tool names. Omit `collectionId` unless already known; the adapter must resolve
-exactly one existing registration. Do not read more files, packets or notes or
-synthesize in this source chat. If the tool returns `verification-required`, end
-that exec/tool call. In a separate exec/tool call, repeat the same tool and arguments
-with its returned `retryToken` once. This handshake does not start processing or
-approve a proposal. Do not retry inside the same exec or invent a token. Never
-repeat process/review to poll progress; use `processing_status` when requested.
-After a successful control call, return only the tool's `statusText`. If the tool or
-verified source binding is unavailable, report that limitation and stop; do not
-silently fall back to inline processing or invent selection metadata.
+Select this skill and supply one exact action:
+
+| Action | Scope and behavior | Tool call |
+| --- | --- | --- |
+| `process` | Draft from pending retained captures across the existing collection, including its configured repos and clients. Resume unfinished work first. | `process_selected_captures` with no scope argument |
+| `process repo` | Draft from the current verified Git checkout; separate nested repositories are excluded. | `process_selected_captures` with `scope: "repo"` |
+| `process chat` | Draft from the invoking native chat. | `process_selected_captures` with `scope: "chat"` |
+| `resume` | Continue the saved unfinished selection and page checkpoints; do not add later captures. | `processing_resume` |
+| `status` | Show execution, bounded collection inventory, unfinished operations and drafts awaiting review. | `processing_status` |
+| `review` | Choose a pending draft if needed, then review its exact proposed changes. | `processing_review` |
+| `cancel` | Stop owned native execution before releasing unapplied operations; keep captures pending. | `processing_cancel` |
+
+For an exact action, call its available `cuefluent_control` tool once. Native
+clients may prefix tool names. The adapter derives request identity from that
+native call; do not invent a request ID or selection. Omit `collectionId` unless
+already known; the adapter must resolve exactly one existing collection binding.
+These actions preserve collection settings. `process` and `resume` prepare drafts,
+never approve or save them. Bounded work can stop for review, an unfinished
+operation, a limit or a conflict; it does not promise to drain an arbitrary backlog.
+Use `resume` for a frozen remainder and `process` for the next inventory portion.
+
+Do not read more files, packets or notes or synthesize in this source chat. If the
+tool returns `verification-required`, end that exec/tool call. In a separate
+exec/tool call, repeat the same tool and arguments with its returned `retryToken`
+once. This handshake does not start processing or approve a proposal. Do not
+retry inside the same exec or invent a token. Never repeat an action to poll;
+use `status` when requested. After a successful control call, return only the
+tool's `statusText`. If the tool or verified source binding is unavailable, report
+that limitation and stop; do not silently fall back to inline processing or
+invent selection metadata.
 
 Natural-language processing requests can use the same handoff, but mixed messages
 remain original evidence. Preserve their facts, attachments and corrections.
