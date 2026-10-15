@@ -339,7 +339,8 @@ for (const peer of [false, true]) for (const state of ['busy', 'blocked']) {
         const result = JSON.parse(response.result.content[0].text);
         assert.equal(result.status, state);
         assert.equal(result.statusDetail, state === 'busy' ? 'already-processing' : 'blocked');
-        assert(result.diagnostics.includes(peer ? 'PROCESSING_COLLECTION_BUSY' : 'PROCESSING_CHAT_BUSY'));
+        assert(result.diagnostics.includes(peer ? 'PROCESSING_COLLECTION_BUSY' : state === 'busy' ? 'PROCESSING_CHAT_BUSY' : 'PROCESSING_CHAT_OUTCOME_UNKNOWN'));
+        if (state === 'blocked') assert(!result.diagnostics.includes('PROCESSING_CHAT_BUSY'));
         assert.equal(result.chat.sessionId, status.chat.sessionId);
         assert.deepEqual(await owner.status(), status);
         assert.deepEqual(await writerSnapshot(f), before);
@@ -503,4 +504,45 @@ test('test RPC requests reject on server failure, early exit and missing respons
   const silent = rpcClient(async ({ input }) => { for await (const _ of input) { /* no response */ } }, { timeoutMs: 20 });
   try { await assert.rejects(silent.send(request), /response timed out: initialize/); }
   finally { await silent.close(); }
+});
+
+for (const tool of ['processing_resume', 'process_selected_captures']) test(`Claude MCP ${tool} after abandonment requires fresh auth and creates a new session`, async t => {
+  let launches = 0;
+  await withLaunchFixture(t, async f => {
+    const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+      CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' };
+    const original = processingRpc(f, { env }); f.defer(() => original.close());
+    await admit(original, f); await original.close();
+    const owner = await openProcessingController({ ...f.options, client: 'claude' }, { env });
+    f.defer(() => owner.close());
+    const failed = await owner.status();
+    assert.equal(failed.state, 'blocked'); assert.equal(failed.restartSupported, false);
+    await owner.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    const retired = await owner.status(); assert.equal(retired.restartSupported, true);
+    const before = await writerSnapshot(f);
+    const rpc = processingRpc(f, { env }); f.defer(() => rpc.close());
+    await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
+      protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: tool, arguments: { collectionId: f.collection.id },
+      _meta: { 'claudecode/toolUseId': 'synthetic-retired-retry' } } };
+    const denied = await rpc.send(request);
+    assert.equal(denied.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+    assert.equal(f.nativeCalls.length, 1);
+    assert.deepEqual(await writerSnapshot(f), before);
+    assert.deepEqual(await owner.status(), retired);
+    env.ANTHROPIC_AUTH_TOKEN = 'synthetic-renewed-host-token';
+    const response = await rpc.send({ ...request, id: 2 });
+    assert.equal(response.error, undefined);
+    assert.equal(JSON.parse(response.result.content[0].text).statusDetail, 'accepted');
+    await rpc.close();
+    const after = await owner.status();
+    assert.equal(after.state, 'idle'); assert.equal(f.nativeCalls.length, 2);
+    assert.notEqual(after.chat.sessionId, retired.chat.sessionId);
+    assert.equal(after.worksetId, retired.worksetId);
+    assert.equal(after.workset.worksetHash, retired.workset.worksetHash);
+    assert.equal(f.nativeCalls[1].options.env.ANTHROPIC_AUTH_TOKEN, 'synthetic-renewed-host-token');
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }, context => { if (++launches === 1) context.child.emit('close', 1, null); else success(context); });
 });

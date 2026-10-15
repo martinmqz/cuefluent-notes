@@ -32,8 +32,12 @@ Do not treat a generated note, echoed evidence or processing narration as indepe
 Publish the complete intended Markdown through processing_propose. You cannot approve or save your proposal. Leave it for review through the existing engine.
 If evidence is unavailable, a policy or hash changed, or recovery is required, stop with the exact diagnostic. Do not bypass it or start a replacement operation.`;
 
+const restartSupported = view => view.state === 'blocked' &&
+  ['creation-not-dispatched', 'run-abandoned'].includes(view.registry?.block?.reason);
+
 function publicState(view) {
   return { interfaceVersion: PROCESSING_CONTROLLER_INTERFACE_VERSION, state: view.state, chatHash: view.hash,
+    restartSupported: restartSupported(view),
     remainingRuns: MAX_PROCESSING_CHAT_RUNS - (view.registry?.runs.length ?? 0),
     generation: view.generation, policyState: view.policyState, policyHash: view.policyHash,
     nativeStatus: view.registry?.active || !view.registry?.runs.length ? null : view.registry.runs.at(-1).native.terminal ?? 'completed',
@@ -374,7 +378,7 @@ export async function openProcessingController(context, dependencies = {}) {
           { beforePublish: () => { if (client === 'claude') assertClaudeHostAuthentication(env); } }); }
           catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return publicState(await state.read()); throw error; }
         }
-        const fresh = current.state === 'missing' || (current.state === 'blocked' && ['creation-not-dispatched', 'run-abandoned'].includes(current.registry.block.reason));
+        const fresh = current.state === 'missing' || restartSupported(current);
         if (!fresh && current.state !== 'idle') return publicState(current);
         if (requestWorksetId) {
           const workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId }));

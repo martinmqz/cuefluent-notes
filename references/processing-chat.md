@@ -493,7 +493,12 @@ operation and use its ordinary resume, review or recovery commands. Abandonment
 does not mark evidence handled, save a note or prove an exclusion. Only a later
 explicit request with a new request ID can create a replacement session in the
 same namespace; it never resumes the retired native chat. Retries of the abandoned
-request are refused. A failure proven to precede `thread/start` needs no
+request are refused. After retirement, invoke `resume` to continue the saved
+selection, or `process` to apply its ordinary unfinished-selection-first behavior.
+Both require a fresh native call and current launch authentication; neither
+automatically resolves an unfinished claim or bypasses recovery. An unknown outcome
+still requires inspection; it does not establish that a client is still running.
+A failure proven to precede `thread/start` needs no
 abandonment: it can retry using freshly inspected status after the client issue is
 fixed.
 

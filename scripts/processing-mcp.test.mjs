@@ -8,8 +8,9 @@ import { PassThrough, Writable } from 'node:stream';
 import { processingFixture, proposedClaim, replaceProcessingStorage } from './test-support/processing-fixture.mjs';
 import { withReviewPreview } from './test-support/processing-review.mjs';
 import { openProcessingController } from './processing-controller.mjs';
+import { inspectProcessingShortcut } from './processing-shortcuts.mjs';
 import { processingControlAction } from './processing-control-proof.mjs';
-import { runProcessingMcp } from './processing-mcp.mjs';
+import { runProcessingMcp, processingStatusView } from './processing-mcp.mjs';
 import { readSelection, controlSelection, readCaptureHead } from './intake-store.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { inspectProcessing, readProcessingProposal } from './processing.mjs';
@@ -45,7 +46,8 @@ async function harness(t, f, overrides = {}) {
   } });
   const openCodex = async options => ({ profileId: digest('synthetic-profile'),
     async create() {
-      h.creates++; const sessionId = randomUUID();
+      h.creates++; if (h.createError) throw h.createError;
+      const sessionId = randomUUID();
       return { client: 'codex', sessionId, cwd: options.cwd, sourcePath: path.join(f.root, `${sessionId}.jsonl`),
         profileId: digest('synthetic-profile'), transport: 'codex-app-server', desktopVerified: false, toolContractHash: digest(canonicalJSON(options.tools)) };
     },
@@ -1633,4 +1635,144 @@ test('cancel drains a checkpoint transition before pinning its target and cannot
   const nextClosed = h.whenClosed(); await h.call('process_selected_captures', {}); await nextClosed;
   h.callId = 'call_2'; assert.deepEqual(body(await h.call('processing_cancel', {})), cancelled);
   assert.equal(h.dispatches, 2);
+});
+
+for (const failure of ['abandoned', 'not-dispatched']) for (const tool of ['processing_resume', 'process_selected_captures']) {
+  test(`MCP ${tool} restarts ${failure} execution without replacing its frozen workset`, async t => {
+    const f = await processingFixture(t), h = await harness(t, f);
+    h.callId = 'original-call';
+    if (failure === 'not-dispatched') h.createError = Object.assign(new Error('synthetic unavailable client'), {
+      code: 'PROCESSING_CLIENT_UNAVAILABLE', outcome: 'not-dispatched' });
+    else h.script = async () => { throw new Error('synthetic lost terminal'); };
+    const failedClosed = h.whenClosed();
+    await h.call('process_selected_captures', { collectionId: f.collection.id });
+    await failedClosed;
+    const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
+      env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
+    });
+    t.after(() => controller.close());
+    let before = await controller.status();
+    assert.equal(before.state, 'blocked');
+    if (failure === 'abandoned') before = await controller.abandon({
+      expectedChatHash: before.chatHash, requestId: before.requestId, offline: true });
+    before = await controller.status();
+    assert.equal(before.restartSupported, true);
+    if (failure === 'abandoned') {
+      await h.call('process_selected_captures', { collectionId: f.collection.id });
+      assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
+      assert.equal((await controller.status()).chatHash, before.chatHash);
+    }
+    const frozen = (await inspectProcessingShortcut(f.capability, { selection: f.selection })).worksets[0];
+    assert.equal(frozen.inputCounts.unattempted, 1);
+    h.callId = 'retired-status';
+    const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+    assert.equal(status.status, 'idle'); assert.equal(status.nextAction, 'resume');
+    assert(!status.diagnostics.includes('PROCESSING_CHAT_OUTCOME_UNKNOWN'));
+    assert(!status.diagnostics.includes('PROCESSING_CLIENT_UNAVAILABLE'));
+    const dispatches = h.dispatches;
+    h.createError = null; h.script = async call => call('processing_pending', {});
+    h.callId = 'fresh-call';
+    const retryClosed = h.whenClosed();
+    const admitted = body(await h.call(tool, { collectionId: f.collection.id }));
+    assert.equal(admitted.statusDetail, 'accepted');
+    await retryClosed;
+    const after = await controller.status();
+    assert.equal(after.state, 'idle'); assert.equal(after.restartSupported, false);
+    assert.equal(h.creates, 2); assert.equal(h.resumes, 0); assert.equal(h.dispatches, dispatches + 1);
+    assert.notEqual(after.chat.sessionId, before.chat?.sessionId);
+    assert.equal(after.worksetId, frozen.worksetId);
+    assert.equal(after.workset.worksetHash, frozen.worksetHash);
+    assert.deepEqual(after.workset.inputs, frozen.inputs);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    // Exact native call replay must not dispatch again after successful retry.
+    await h.call(tool, { collectionId: f.collection.id });
+    assert.equal(h.dispatches, dispatches + 1);
+  });
+}
+
+for (const phase of ['creation', 'dispatch']) test(`MCP refuses unknown ${phase} outcome without labelling it busy`, async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  if (phase === 'creation') h.createError = Object.assign(new Error('synthetic lost creation'), { code: 'PROCESSING_CLIENT_OUTCOME_UNKNOWN' });
+  else h.script = async () => { throw new Error('synthetic lost terminal'); };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
+  const creates = h.creates, dispatches = h.dispatches;
+  for (const tool of ['processing_resume', 'process_selected_captures']) {
+    const result = body(await h.call(tool, { collectionId: f.collection.id }));
+    assert.equal(result.status, 'blocked'); assert.equal(result.nextAction, 'inspect');
+    assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_OUTCOME_UNKNOWN']);
+    assert.equal(h.creates, creates); assert.equal(h.dispatches, dispatches);
+  }
+});
+
+test('MCP retired execution exposes the retained claim blocker without relaunch or claim changes', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async call => { await prepareFromPending(call, f); throw new Error('synthetic lost terminal after claim'); };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
+  const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
+    env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
+  });
+  t.after(() => controller.close());
+  const failed = await controller.status();
+  const retired = await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  for (const tool of ['processing_resume', 'process_selected_captures']) {
+    const result = body(await h.call(tool, { collectionId: f.collection.id }));
+    assert.equal(result.status, 'blocked'); assert.equal(result.nextAction, 'inspect');
+    assert.deepEqual(result.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
+    assert.equal((await controller.status()).chatHash, retired.chatHash);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  }
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+
+for (const reason of ['RUN_ABANDONED', 'CREATION_NOT_DISPATCHED']) {
+  test(`retryable ${reason} projects no-work and current inventory without an obsolete launch blocker`, () => {
+    const native = { state: 'blocked', restartSupported: true, diagnostics: [reason], chat: null, requestId: null, remainingRuns: 128 };
+    const shortcut = { phase: 'missing', reason: 'nothing-to-resume' };
+    const empty = processingStatusView(native, shortcut);
+    assert.equal(empty.statusDetail, 'nothing-to-resume'); assert.equal(empty.nextAction, 'none');
+    assert.deepEqual(empty.diagnostics, []);
+    const inventory = { operations: [], blockers: [], incomplete: false, counts: {
+      unclaimedRevisions: 1, claimedRevisions: 0, blockedByClaimRevisions: 0, inspectedHeads: 0, handledRevisions: 0
+    }, sourceCompleteness: 'unknown' };
+    const pending = processingStatusView(native, { phase: 'missing' }, { inventory });
+    assert.equal(pending.statusDetail, 'pending'); assert.equal(pending.nextAction, 'process');
+    assert.deepEqual(pending.diagnostics, []);
+    inventory.blockers = ['PROCESSING_RECOVERY_REQUIRED'];
+    const conflict = processingStatusView(native, shortcut, { inventory });
+    assert.equal(conflict.status, 'blocked'); assert.equal(conflict.nextAction, 'inspect');
+    assert.deepEqual(conflict.diagnostics, ['PROCESSING_RECOVERY_REQUIRED']);
+  });
+}
+
+test('MCP retired binding reports a competing active namespace and never launches alongside it', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async () => { throw new Error('synthetic lost terminal'); };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
+  const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
+    env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
+  });
+  t.after(() => controller.close());
+  const failed = await controller.status();
+  const retired = await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const peer = await harness(t, f, { controllerIdentity: { hostId: digest('synthetic-peer-host') } });
+  const gate = deferred(); peer.release = gate.resolve; peer.script = async () => gate.promise;
+  peer.callId = 'distinct-peer-call';
+  const peerClosed = peer.whenClosed();
+  const admitted = body(await peer.call('process_selected_captures', { collectionId: f.collection.id }));
+  assert.equal(admitted.statusDetail, 'accepted');
+  for (const tool of ['processing_status', 'processing_resume', 'process_selected_captures']) {
+    const result = body(await h.call(tool, { collectionId: f.collection.id }));
+    assert.equal(result.status, 'busy'); assert.equal(result.nextAction, 'wait');
+    assert(result.diagnostics.includes('PROCESSING_COLLECTION_BUSY'));
+    assert.equal(result.chat.sessionId, admitted.chat.sessionId);
+    assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
+    assert.equal((await controller.status()).chatHash, retired.chatHash);
+  }
+  gate.resolve(); await peerClosed;
 });

@@ -169,7 +169,10 @@ reused for retries of that exact request. A duplicate never dispatches again.
 `state` is `missing`, `creating`, `idle`, `busy`, `awaiting-review` or `blocked`.
 `chatHash` binds registry mutations; `policyHash` exposes the registry's accepted
 settings hash for explicit reauthorization. `remainingRuns` reports the native
-history capacity left before guarded rollover. `nativeStatus` distinguishes a completed,
+history capacity left before guarded rollover. `restartSupported` is true only for
+a blocked binding explicitly retired offline or proven not to have dispatched
+creation. It permits the normal new-request admission checks, not automatic
+execution or bypass of authentication, claims, or recovery. `nativeStatus` distinguishes a completed,
 failed or interrupted native run; null means no terminal is available for the
 current state. `operationId` points to authoritative engine
 status. For an idle chat with a recorded operation, status also returns
