@@ -672,6 +672,8 @@ All use the ordinary collection/configuration envelope.
 - `processing-reinspection-abandon`: `{expectedRecordHash}` from reinspection
   status. Only before a successor claim exists: archive the exact intent, remove
   only its matching owned copies and release the transfer blocker. The original
+  durable draft must still match before an archived copy is removed; otherwise
+  `PROCESSING_PROPOSAL_CHANGED` preserves the archive and pending intent. The original
   claim/draft and all notes and evidence remain unchanged. The same request resumes
   interrupted abandonment; it never creates or approves a replacement. Once a
   successor exists, finish transfer bookkeeping instead.

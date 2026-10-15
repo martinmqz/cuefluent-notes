@@ -185,8 +185,10 @@ direct writing and capture pruning until that exact transfer finishes. Use
 `processing-reinspection-status` to rediscover its hashes and retry arguments.
 Before the replacement claim is committed, changed evidence, note text, settings
 or storage can prevent replay. Explicit `processing-reinspection-abandon` with the
-inspected record hash archives the intent and removes only its exact owned copies;
-it leaves the original claim/proposal, notes and evidence untouched. An interrupted
+inspected record hash archives the intent and removes only its exact owned copies
+when the original durable drafts still match. If an original was edited or removed,
+it preserves the archive and reports `PROCESSING_PROPOSAL_CHANGED`. It leaves the
+original claim/proposal, notes and evidence untouched. An interrupted
 abandonment must finish abandonment. After the replacement claim is committed,
 retry finishes metadata only under current maintenance authority, even if policy
 or physical identity changed. The successor still requires its own current checks. If its binding changes before

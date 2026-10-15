@@ -312,6 +312,28 @@ for (const change of ['head', 'note', 'policy', 'binding']) test(`uncommitted tr
   assert.equal(await fingerprint(path.join(f.collection.notes.notesDir, 'direct.md')), await fingerprint(contentPath));
 });
 
+for (const change of ['missing', 'edited']) test(`abandonment preserves the archived draft when its original is ${change}`, async t => {
+  const f = await fixture(t), before = await preview(f), args = { ...f.request, expectedPreviewHash: before.previewHash };
+  await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-copies') throw new Error('interrupted'); } }), /interrupted/);
+  const status = await inspectProcessingReinspection(f.capability), request = { expectedRecordHash: status.recordHash };
+  const original = f.proposal.plan.files[0].contentPath, archived = path.join(status.retainedDrafts.directory, '0.md');
+  const edited = '# Human revised draft\n\n## Decision\n\nUse different wording.\n';
+  if (change === 'missing') await fs.unlink(original);
+  else await fs.writeFile(original, edited);
+  await assert.rejects(reinspectProcessing(f.capability, args), { code: 'PROCESSING_PROPOSAL_CHANGED' });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(abandonProcessingReinspection(f.capability, request), { code: 'PROCESSING_PROPOSAL_CHANGED' });
+    assert.equal(await fs.readFile(archived, 'utf8'), before.files[0].proposed);
+    assert.equal(await fingerprint(original), change === 'missing' ? null : digest(edited));
+    assert.equal(await fingerprint(path.join(f.collection.notes.writerStateDir, 'reinspection.json')), status.recordHash);
+    assert.deepEqual(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`)), f.originalClaim);
+    const pending = await inspectProcessingReinspection(f.capability);
+    assert.equal(pending.state, 'transfer-pending'); assert.equal(pending.abandoning, true);
+  }
+  assert.equal(await fingerprint(f.proposal.target), null);
+  assert.deepEqual(await fs.readFile(f.options.configPath), f.settings);
+});
+
 for (const phase of ['reinspection-abandon-intent', 'reinspection-abandon-copies']) test(`abandonment resumes exactly after ${phase}`, async t => {
   const f = await fixture(t), before = await preview(f), args = { ...f.request, expectedPreviewHash: before.previewHash };
   await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-copies') throw new Error('interrupted'); } }), /interrupted/);

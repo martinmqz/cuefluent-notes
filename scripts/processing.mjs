@@ -932,6 +932,9 @@ export async function abandonProcessingReinspection(capability, { expectedRecord
     await options.fault?.('reinspection-abandon-intent');
     for (const [index, copy] of value.claim.proposalIntent.value.copies.entries()) {
       const name = reinspectionDraft(args.operationId, index);
+      // The archive may be the last exact copy after a human edit or removal.
+      if ((await processingSnapshot(ctx, name)).bytes &&
+          (await processingSnapshot(ctx, copy.path)).hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
       await removeProcessingJSON(ctx, name, copy.hash);
     }
     const directory = path.dirname(await intakePath(ctx.writer, 'state', reinspectionDraft(args.operationId, 0)));
