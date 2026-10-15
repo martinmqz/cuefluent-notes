@@ -6,66 +6,54 @@ and clarifies which evidence caveats belong in a note.
 
 ## Claude processing authentication
 
-Hosts that declare managed authentication must hand the separate processor an
-explicit credential locator and its nonempty inherited value. Missing or unusable
-handoffs return `PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE` before new processing
-is admitted. The plugin does not fetch host secrets, substitute profile credentials,
-or switch providers. In host-managed mode, inherited routing and authentication own
-even absent fields. Profile provider selectors, endpoints, model environment
-values, credentials and client certificates are ignored. Only supported proxy, CA,
-timeout, output, thinking and effort defaults can fill missing fields. Supported
-structured profile model preferences still pass as settings under native policy.
-Profile credential-helper commands and otherwise unsupported provider switches
-are ignored in this mode rather than refused.
+Claude hosts declaring managed authentication through
+`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` or `CLAUDE_CODE_HOST_AUTH_ENV_VAR` now need
+an accepted credential handoff before launching a separate processor. Missing or
+unsupported handoffs return `PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE`; the plugin
+does not fetch host secrets or switch accounts. Status, pending-proposal review,
+existing activity responses and exact completed control replies remain available
+without launch credentials.
 
-Status, pending-proposal review, existing activity responses and exact completed
-control replies remain available without launch credentials. Authentication is
-required before acknowledging a finished review when starting another run.
-Credential presence permits launch but does not establish credential validity or
-expiry. Existing unknown outcomes still require recovery.
-
-If a host cannot supply the supported handoff, use an independently authenticated
-Claude terminal or the standalone workflow in an explicitly selected uncaptured
-chat. Do not unset host authentication markers to force another account. See the
-[authentication and settings contract](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/processing-chat.md#claude-launch-settings).
+The [Claude launch settings contract](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/processing-chat.md#claude-launch-settings)
+defines accepted locator names, inherited routing and profile settings. Some
+nonempty credential variables cannot serve as the locator. If the host cannot
+supply a supported handoff, use an independently authenticated Claude terminal or
+an explicitly selected uncaptured standalone chat; do not unset the managed-auth
+markers to force another account. See the upgrade warning below for model selection.
 
 ## Retained drafts after storage changes
 
-`PROCESSING_BINDING_CHANGED` means an operation no longer has authority over the
-current storage identity. Matching paths or note text are not enough to restore it.
-Unapplied claims can be explicitly cancelled with their inspected hashes at the
-same configured placement, leaving their inputs unhandled. A writer journal or
-receipt prevents cancellation; storage changes after writing starts require
-conflict resolution and preserve the writer state.
+A retained draft blocked by `PROCESSING_BINDING_CHANGED` can now be explicitly
+reinspected when it was fully inspected and published before any write transaction
+or receipt. The user chooses whether to adopt the currently inspected storage;
+the helper separately verifies unchanged placement, policy, evidence, draft text
+and destinations. Reinspection preserves the text in a new unread operation.
+It writes no notes and transfers no previous inspection or Save approval.
 
-For a fully inspected, published draft **before any write transaction or receipt**,
-the standalone reinspection workflow can preserve its exact text and create a
-replacement operation. It requires the user's explicit decision to adopt the
-currently inspected storage, unchanged configured placement and policy, exact
-source heads and lineage, retained draft bytes and original destination content.
-Changed evidence, settings, note text or unsafe paths remain conflicts.
+Follow the [reinspection workflow](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/processing.md#reinspect-a-retained-draft-after-storage-changes)
+for eligibility, the default limit of one active unpublished claim and the 1 MiB
+cancellation record limit, then use its linked CLI commands. Fresh evidence
+inspection and exact proposal approval are required before Save. A pending transfer blocks new
+processing, direct writes, writer maintenance and capture pruning until completed
+or safely abandoned. Started saves under changed storage remain conflicts;
+reinspection does not repair them.
 
-Review the read-only preview, then transfer using its exact hash. Transfer archives
-the original claim and draft text, creates a new unread claim and cancels the old
-operation without marking its inputs handled. It writes no notes and carries no
-old page acknowledgments or Save approval forward. Reinspect the replacement's
-evidence and destinations, stage its proposal and review that exact proposal before
-Save. Interrupted transfers reserve the shared writer until their metadata is
-completed or safely abandoned; never remove their state to bypass a conflict.
+Completed transfers retain draft archives indefinitely, including after Save or
+Cancel. Abandonment before a replacement claim exists instead removes only verified
+archived draft copies while preserving the original durable draft and claim archive.
+Capture pruning does not remove completed transfer archives, and capture
+`storage-status` does not count them. The workflow documents retention and
+interruption handling; these are explicit CLI controls, not automatic repair.
 
-This recovers only the selected draft. It does not migrate completed history,
-frozen worksets, charged budgets or native chat bindings. Previously handled
-revisions may appear pending in a new storage namespace: reconcile the affected
-scope before starting more backlog work. Transfer archives retain draft text
-indefinitely, including after Save or Cancel, with no automatic cleanup command.
-Capture pruning does not remove them, and capture `storage-status` does not count
-them. Missing intake selections now appear as operation conflicts in collection
-inventory, while unrelated healthy drafts remain discoverable.
-
-These are explicit CLI recovery commands, not a new skill shortcut or automatic
-repair. See the
-[reinspection requirements and limits](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/processing.md#reinspect-a-retained-draft-after-storage-changes)
-and [command contract](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/workflow-cli.md#draft-reinspection).
+Separately, exact-hash `processing-recover` can now finish metadata for recorded
+`cancelled`, `skipped` or `unchanged` outcomes after a storage identity change at
+the same configured placement. See
+[non-writing outcome recovery](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/processing.md#outcomes-and-recovery).
+Neither recovery path migrates historical handled inputs, frozen worksets, budgets
+or native chat bindings. Reconcile the affected scope before processing captures
+that appear pending in a new namespace. Collection inventory also keeps missing
+intake selections visible as conflicts while unrelated healthy drafts remain
+discoverable.
 
 ## Note content and provenance
 
@@ -103,10 +91,18 @@ v0.15.1 before resuming. Start fresh sessions and review changed hook or MCP
 permissions when prompted. Installation and hook trust grant neither collection
 nor processing consent.
 
-When upgrading from before 0.15.0, plain `process` now selects pending captures
-across the whole configured collection, including its repositories and clients,
-and can consume model usage across that scope. Use `process chat` for the previous
-per-chat scope. See
+When upgrading from v0.15.0 with host-managed Claude authentication, profile `env`
+model selections such as `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_*_MODEL` no
+longer fill missing host values. The resolved model, cost or quality can change,
+and controller status does not report that model. Check the host's model selection
+or supported structured profile model preferences under native precedence; see
+[Claude launch settings](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/processing-chat.md#claude-launch-settings).
+
+When upgrading from before 0.15.0, plain `process` now selects a bounded portion
+across the configured collection, including its repositories and clients, and can
+consume model usage across that scope. One request does not drain the backlog.
+Use `process chat` for the previous per-chat scope, `resume` for the frozen unfinished
+selection, and `process` again for later portions. See
 [shortcut scopes and continuation](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/processing-chat.md#shortcut-scopes-and-continuation).
 
 The MCP server offers `2025-11-25`, including when the host initially requests an
@@ -118,14 +114,11 @@ support leave review proposals pending. Edited or normalized preview content
 other than line endings returns `PROCESSING_REVIEW_PREVIEW_CHANGED`; reopen review
 or use the supported CLI proposal/save commands if the host cannot preserve it.
 
-This release adds private draft-transfer records and standalone reinspection
-commands. Existing settings, captures and engine operations are preserved; no
-fresh setup or state reset is required. Older helpers do not enforce the new
-transfer reservation. Keep all clients and helpers sharing a collection on this
-release; mixed-version access and downgrades are unsupported. Earlier workflow
-releases still cross the historical reader and processing-state boundaries
-documented in the installed
-[storage compatibility guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/setup.md#storage-compatibility).
+Existing settings, captures and engine operations are preserved; no fresh setup
+or state reset is required. Mixed-version access and downgrades are unsupported.
+The installed [storage compatibility guide](https://github.com/martinmqz/cuefluent-notes/blob/v0.15.1/references/setup.md#storage-compatibility)
+records the v0.15.1 transfer-reservation boundary, v0.15.0 shortcut boundary and
+earlier reader/state changes for skipped-version upgrades.
 
 Unfinished standalone operations, or older archived operations without native
 ownership proof, can block new shortcut selections across the collection. Inspect
