@@ -41,6 +41,7 @@ async function readJSON(file) {
 
 /** A pending processing transaction reserves the entire writer until reconciled. */
 export async function assertWriterAccess(stateDir, coordination = null) {
+  if (await lstatOrNull(path.join(stateDir, 'reinspection.json'))) fail('PROCESSING_REINSPECTION_REQUIRED');
   if (coordination) { validateWriterCoordination(coordination); if (coordination.binding.stateDir !== stateDir) fail('WRITER_BINDING_MISMATCH'); }
   const transactions = await directory(stateDir, 'transactions');
   const names = [];

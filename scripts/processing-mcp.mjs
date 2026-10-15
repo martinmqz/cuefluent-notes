@@ -65,6 +65,8 @@ const selectionConflicts = new Set(['WORKFLOW_POLICY_CHANGED', 'PROCESSING_HEAD_
   'PROCESSING_INPUT_ALREADY_HANDLED', 'PROCESSING_SHORTCUT_CAPACITY']);
 
 function blockedInventory(view, blockers) {
+  if (blockers.includes('PROCESSING_REINSPECTION_REQUIRED')) return { ...view, status: 'blocked', statusDetail: 'blocked',
+    nextAction: 'inspect', diagnostics: ['PROCESSING_REINSPECTION_REQUIRED'] };
   if (blockers.includes('PROCESSING_BINDING_CHANGED')) return { ...view, status: 'blocked', statusDetail: 'blocked',
     nextAction: 'inspect', diagnostics: ['PROCESSING_BINDING_CHANGED'] };
   if (blockers.length && blockers.every(code => selectionConflicts.has(code))) {

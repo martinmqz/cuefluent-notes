@@ -146,6 +146,63 @@ be reopened under that same workset index set. A separately selected operation o
 new finite workset is needed for its still-unhandled inputs, with current hashes,
 consent and admission limits. Preserve the earlier receipts and associations.
 
+## Reinspect a retained draft after storage changes
+
+A changed physical storage identity (`PROCESSING_BINDING_CHANGED`), or a replaced
+notes root/parent, invalidates the old operation's authority. Equal paths, bytes,
+inode numbers or timestamps do not establish continuity. Do not edit persisted
+bindings, refresh old hashes, remove the claim, or reuse its approval.
+
+For a fully inspected, published proposal **before any write transaction or
+receipt**, the standalone [reinspection commands](workflow-cli.md#draft-reinspection)
+can preserve its text and start a fresh operation. This applies to either client.
+The user must explicitly choose to use the currently inspected storage paths.
+A preview reports both bindings and parents, unchanged source identities and
+coverage, and original/proposed note text. It neither transfers nor saves notes.
+
+Reinspection requires the same configured placement, policy, exact selected input
+heads and lineage, old namespace associations/dispositions, retained draft bytes,
+and original destination hashes or absence. A conflicting current namespace is
+refused. Missing temporary draft files are harmless when the durable published
+copies remain intact. Changed settings, evidence, text, destinations, unsafe paths,
+pruned inputs and started writes remain conflicts; this is not a general repair.
+
+After reviewing the preview, use its exact hash with the same original hashes
+and a fresh replacement operation ID. Transfer archives the unchanged draft text,
+creates a new unread claim and cancels the old unapplied operation without marking
+its inputs handled. The old claim/proposal intent remains in its cancellation
+receipt. No note is written, no settings are changed, and no old page acknowledgment
+or Save approval transfers. Read and acknowledge the replacement's evidence pages,
+inspect its destinations, stage its returned proposal request, then review the new
+exact proposal before Save. Canceling the replacement preserves the archived text.
+Transfer archives are retained indefinitely, including after Save or Cancel; there
+is no automatic cleanup command. Reinspection status reports their location and
+expected file count. Capture `storage-status` counts capture bytes, not these draft
+archives or writer receipts.
+
+A durable transfer intent blocks new processing, ordinary operation mutation,
+direct writing and capture pruning until that exact transfer finishes. Use
+`processing-reinspection-status` to rediscover its hashes and retry arguments.
+Before the replacement claim is committed, changed evidence, note text, settings
+or storage can prevent replay. Explicit `processing-reinspection-abandon` with the
+inspected record hash archives the intent and removes only its exact owned copies;
+it leaves the original claim/proposal, notes and evidence untouched. An interrupted
+abandonment must finish abandonment. After the replacement claim is committed,
+retry finishes metadata only under current maintenance authority, even if policy
+or physical identity changed. The successor still requires its own current checks. If its binding changes before
+it has a published proposal, this draft-only workflow cannot migrate that unread
+claim; report the unresolved conflict instead of starting duplicate processing.
+Malformed state, altered owned copies, changed configured placement or unsafe
+paths remain integrity conflicts; never delete the intent or refresh its hashes.
+Exact completed retries return the historical transfer result without rewriting
+notes or reversing later edits.
+
+This workflow recovers only the selected draft. It does not migrate completed
+history, frozen worksets, charged budgets or native chat bindings to a new storage
+identity. Previously handled revisions can appear pending in the new namespace;
+do not interpret that inventory as permission to reprocess the whole collection.
+Preserve old records and reconcile the affected scope before new backlog work.
+
 ## Source completeness and knowledge outcomes
 
 Inspect each capture's `coverage`, `omissions`, terminal state and attachment

@@ -16,6 +16,9 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
   if (afterUnitId !== null) nativeId(afterUnitId);
   if (limit < 1 || limit > 100) fail('INVALID_PENDING_LIMIT');
   const ctx = await readProcessingState(capability, selection, 'explicitProcess');
+  // A transfer temporarily retains both claims. Do not arbitrate them as new
+  // work; the dedicated metadata status command can rediscover its exact intent.
+  if ((await processingSnapshot(ctx, 'reinspection.json')).bytes) fail('PROCESSING_REINSPECTION_REQUIRED');
   const claims = [];
   for (const name of await processingNames(ctx, 'claims')) {
     const saved = await processingSnapshot(ctx, name);

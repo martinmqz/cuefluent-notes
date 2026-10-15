@@ -424,6 +424,7 @@ export async function inspectWriterMaintenance(stateDirInput) {
   };
   const entries = await fs.opendir(stateDir);
   for await (const entry of entries) {
+    if (entry.name === 'reinspection.json') fail('Processing draft reinspection is pending.');
     if (/^aborted-journal-[a-f0-9]{64}\.json$/.test(entry.name)) {
       const archive = await read(entry.name);
       if (entry.name !== `aborted-journal-${archive.hash}.json`) fail('Retained journal archive changed.');

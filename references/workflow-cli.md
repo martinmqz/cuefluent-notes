@@ -640,6 +640,57 @@ hash. Completed save receipts can finish bookkeeping without modifying later use
 edits; incomplete writes require current input/policy/output checks. See
 [processing](processing.md) for durable protocol and coverage limits.
 
+## Draft reinspection
+
+Use these standalone commands only after the user's explicit decision to inspect
+and adopt the current configured storage for a retained unapplied proposal. See
+[eligibility and limits](processing.md#reinspect-a-retained-draft-after-storage-changes).
+All use the ordinary collection/configuration envelope.
+
+- `processing-reinspection-preview`: `{selection, operationId,
+  replacementOperationId, expectedClaimHash, expectedProposalHash}`. Obtain the
+  old hashes from `processing-status` and choose a fresh replacement UUID.
+  Returns `previewHash`, previous/current bindings and directories, exact
+  original/proposed text, source coverage and mappings. Read-only; no Save authority.
+- `processing-reinspect`: the same args plus `expectedPreviewHash` from that
+  reviewed preview. Rechecks the exact inputs and destinations, archives the
+  preserved text, creates an unread replacement claim, and cancels the old claim
+  without disposition. Returns `status: "transferred"`, the replacement ID and a
+  `proposal` request whose `contentPath` values refer to the private archives.
+  Follow `processing-status`, `processing-page`, `processing-ack`,
+  `processing-propose`, `processing-proposal`, then separately approved
+  `processing-save`. Transfer itself never saves notes.
+- `processing-reinspection-status`: `{operationId?}`. Without an ID, discovers
+  the one pending transfer; with the original ID, returns its pending or archived
+  record, even while a different transfer is pending (`otherPendingTransfer`).
+  `state` is `missing`, `transfer-pending` or `transferred`; present records
+  include `recordHash`, `conflict`, exact retry `args`, `canAbandon`, `abandoning`,
+  archive location/count/retention in `retainedDrafts`, and `nextAction`. This is
+  metadata-only and does not grant new consent. Completed transfer is historical,
+  not proof that its replacement remains pending or has been saved.
+
+- `processing-reinspection-abandon`: `{expectedRecordHash}` from reinspection
+  status. Only before a successor claim exists: archive the exact intent, remove
+  only its matching owned copies and release the transfer blocker. The original
+  claim/draft and all notes and evidence remain unchanged. The same request resumes
+  interrupted abandonment; it never creates or approves a replacement. Once a
+  successor exists, finish transfer bookkeeping instead.
+
+An interrupted transfer reports `PROCESSING_REINSPECTION_REQUIRED`. Before its
+replacement claim exists, retry requires the same policy, binding and evidence;
+otherwise explicitly abandon it. After the claim exists, the exact request can
+finish metadata under current maintenance authority without saving notes. During
+this interval, session pending inventory and frozen workset-input views refuse
+with that code; collection and shortcut inventory report the blocker and incomplete
+discovery. Do not treat an empty returned page as an empty queue. `PROCESSING_REINSPECTION_CHANGED` means the
+reviewed intent or current binding no longer matches; inspect before deciding.
+`PROCESSING_REINSPECTION_ABANDONING` requires finishing the exact abandonment,
+and `PROCESSING_REINSPECTION_COMMITTED` refuses abandonment once a successor or
+completion exists. Malformed or tampered state remains blocked for integrity review.
+`PROCESSING_REINSPECTION_NOT_REQUIRED` means bindings and parents still match,
+so use ordinary inspection/review. `PROCESSING_REINSPECTION_CONFLICT` means the
+selected IDs or archive destinations are already occupied; preserve their state.
+
 ## Finite processing worksets
 
 These version-1 commands use the same collection envelope, private processing

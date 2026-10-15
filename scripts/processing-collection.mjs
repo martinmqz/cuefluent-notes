@@ -44,10 +44,11 @@ async function recoverySnapshot(ctx) {
     transactions.push({ name, hash: saved.hash, operationId: value.bindingHash === ctx.bindingHash || sameProcessingPlacement(value?.claim?.binding, ctx.binding) ? nativeId(value.operationId) : null });
   }
   const journal = await processingSnapshot(ctx, 'journal.json');
+  const reinspection = await processingSnapshot(ctx, 'reinspection.json');
   const pending = await intakeSnapshot(ctx.store, 'state', 'pending.json');
   const prune = await intakeSnapshot(ctx.store, 'state', 'prune-pending.json');
-  return { transactions, journalHash: journal.hash, pendingHash: pending.hash, pruneHash: prune.hash,
-    blockers: [...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []),
+  return { transactions, journalHash: journal.hash, reinspectionHash: reinspection.hash, pendingHash: pending.hash, pruneHash: prune.hash,
+    blockers: [...(reinspection.bytes ? ['PROCESSING_REINSPECTION_REQUIRED'] : []), ...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []),
       ...(journal.bytes ? ['WRITER_RECOVERY_REQUIRED'] : []), ...(intakeJSON(pending) !== null ? ['INTAKE_RECOVERY_REQUIRED'] : []),
       ...(intakeJSON(prune) !== null ? ['PRUNE_RECOVERY_REQUIRED'] : [])] };
 }
@@ -111,8 +112,8 @@ export async function pendingCollectionProcessing(capability, { selection, scope
     operations.push({ ...operation, scopeMatch: membership.every(Boolean) ? 'full' : membership.some(Boolean) ? 'partial' : 'outside' });
   }
   const pending = []; let inspectedHeads = 0, handledRevisions = 0, visitedSessions = 0, excludedSources = 0, outsideScopeSources = 0;
-  let incomplete = false, cursor = after;
-  const clients = [...CLIENTS].sort();
+  let incomplete = recovery.reinspectionHash !== null, cursor = after;
+  const clients = incomplete ? [] : [...CLIENTS].sort();
   outer: for (const client of clients) {
     if (after && client < after.client) continue;
     if (scope === 'chat' && client !== selection.client) continue;

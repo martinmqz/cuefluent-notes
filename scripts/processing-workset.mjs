@@ -126,6 +126,7 @@ export async function prepareWorksetBatch(capability, { worksetId, expectedWorks
 }
 
 async function inspectInputStates(ctx, inputs, policyHash, operations = [], attempts = []) {
+  if ((await processingSnapshot(ctx, 'reinspection.json')).bytes) fail('PROCESSING_REINSPECTION_REQUIRED');
   const claims = await activeProcessingClaims(ctx, { allowBindingConflict: true }), items = [];
   const bindingConflict = claims.some(item => item.bindingChanged);
   for (let index = 0; index < inputs.length; index++) {
