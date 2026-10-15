@@ -54,11 +54,14 @@ export async function processingReinspectionBlocker(ctx, snapshot) {
 export async function writeProcessingJSON(ctx, name, value, expectedHash, options) {
   return writeProcessingBytes(ctx, name, Buffer.from(canonicalJSON(value) + '\n'), expectedHash, options);
 }
+export function assertProcessingMetadataSize(bytes) {
+  if (!Buffer.isBuffer(bytes)) fail('INVALID_PROCESSING_BYTES');
+  if (bytes.length > 1024 * 1024) fail('PROCESSING_METADATA_LIMIT');
+}
 export async function writeProcessingBytes(ctx, name, bytes, expectedHash, { beforePublish } = {}) {
   const before = await processingSnapshot(ctx, name);
   if (before.hash !== expectedHash) fail('PROCESSING_STATE_CHANGED');
-  if (!Buffer.isBuffer(bytes)) fail('INVALID_PROCESSING_BYTES');
-  if (bytes.length > 1024 * 1024) fail('PROCESSING_METADATA_LIMIT');
+  assertProcessingMetadataSize(bytes);
   const target = await intakePath(ctx.writer, 'state', name, { createParents: true });
   const stageName = `processing-stages/.processing-${randomUUID()}.tmp`;
   const stageGuard = async () => {

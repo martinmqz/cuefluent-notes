@@ -174,8 +174,10 @@ coverage, and original/proposed note text. It neither transfers nor saves notes.
 Reinspection requires the same configured placement, policy, exact selected input
 heads and lineage, old namespace associations/dispositions, retained draft bytes,
 and original destination hashes or absence. A conflicting current namespace is
-refused. Missing temporary draft files are harmless when the durable published
-copies remain intact. Changed settings, evidence, text, destinations, unsafe paths,
+refused. The complete cancellation record must fit the 1 MiB processing metadata
+limit; an oversized record is refused before reserving a new transfer or committing
+a replacement claim. Missing temporary draft files are harmless when the durable
+published copies remain intact. Changed settings, evidence, text, destinations, unsafe paths,
 pruned inputs and started writes remain conflicts; this is not a general repair.
 
 After reviewing the preview, use its exact hash with the same original hashes

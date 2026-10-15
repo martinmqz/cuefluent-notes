@@ -571,7 +571,7 @@ test('a shared writer reservation identifies its owning collection without sugge
   assert.equal((await inspectProcessing(other.capability, other.operationId)).claimHash, active.claimHash);
 });
 
-test('reinspection stores a large valid proposal once within the metadata bound', async t => {
+async function largeProposalFixture(t, targetBytes) {
   const f = await processingFixture(t), captures = [f];
   for (let index = 1; index < 20; index++) captures.push(await processingFixture(t, { base: f }));
   f.inputs = captures.flatMap(item => item.inputs);
@@ -587,13 +587,30 @@ test('reinspection stores a large valid proposal once within the metadata bound'
   const value = await buildProcessingProposal(await readProcessingState(f.capability, f.selection, 'explicitProcess'),
     originalClaim, { files, mappings: mappingsFor() });
   const initialSize = Buffer.byteLength(canonicalJSON({ ...originalClaim, proposalIntent: { hash: proposalHash(value), value } }) + '\n');
-  const padding = Math.floor((1000000 - initialSize) / (files.length * (captures.length + 1)));
+  const pathCopies = captures.length + 1;
+  const padding = Math.floor((targetBytes - initialSize) / (files.length * pathCopies));
   assert(padding > 0 && padding < 240);
-  for (const file of files) file.path = file.path.replace('.md', `${'x'.repeat(padding)}.md`);
+  let remaining = targetBytes - initialSize - padding * files.length * pathCopies;
+  for (const file of files) {
+    const extra = remaining >= pathCopies ? 1 : 0;
+    file.path = file.path.replace('.md', `${'x'.repeat(padding + extra)}.md`);
+    remaining -= extra * pathCopies;
+  }
+  // A content source is stored once; use its filename for the final byte-level
+  // adjustment after the repeated destination paths, without altering metadata.
+  files[0].contentPath = path.join(f.root, `large-proposal${'x'.repeat(remaining)}.md`);
+  if (remaining) await fs.copyFile(contentPath, files[0].contentPath);
   const mappings = mappingsFor();
   const proposal = await proposeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, proposal: { files, mappings } });
   await replaceRoots(f);
   const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
+  const original = await fs.readFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`));
+  assert.equal(original.length, targetBytes);
+  return { f, proposal, request, original };
+}
+
+test('reinspection stores a large valid proposal once within the metadata bound', async t => {
+  const { f, proposal, request } = await largeProposalFixture(t, 1024 * 1024 - 1024);
   const before = await previewProcessingReinspection(f.capability, request);
   await assert.rejects(reinspectProcessing(f.capability, { ...request, expectedPreviewHash: before.previewHash },
     { fault: at => { if (at === 'reinspection-intent') throw new Error('interrupted'); } }), /interrupted/);
@@ -607,4 +624,24 @@ test('reinspection stores a large valid proposal once within the metadata bound'
   assert.equal(transferred.status, 'transferred');
   assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'completed');
   assert.equal((await inspectProcessing(f.capability, transferred.replacementOperationId)).state, 'unread');
+});
+
+test('reinspection refuses an oversized cancellation before reserving or replacing a boundary-size claim', async t => {
+  const { f, proposal, request, original } = await largeProposalFixture(t, 1048576);
+  const writer = f.collection.notes.writerStateDir, settings = await fs.readFile(f.options.configPath);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(previewProcessingReinspection(f.capability, request), { code: 'PROCESSING_METADATA_LIMIT' });
+    await assert.rejects(reinspectProcessing(f.capability, { ...request, expectedPreviewHash: digest('unavailable preview') }),
+      { code: 'PROCESSING_METADATA_LIMIT' });
+  }
+  assert.deepEqual(await fs.readFile(path.join(writer, 'claims', `${f.operationId}.json`)), original);
+  assert.equal(proposalHash(JSON.parse(await fs.readFile(path.join(writer, 'proposals', f.operationId, 'record.json')))), proposal.proposalHash);
+  for (const name of ['reinspection.json', `claims/${request.replacementOperationId}.json`,
+    `processed/operations/${f.operationId}.json`, `processed/reinspection-claims/${proposal.claimHash}.json`]) {
+    await assert.rejects(fs.stat(path.join(writer, name)), { code: 'ENOENT' });
+  }
+  const claim = JSON.parse(original);
+  for (const copy of claim.proposalIntent.value.copies) assert.equal(digest(await fs.readFile(path.join(writer, copy.path))), copy.hash);
+  assert.deepEqual(await fs.readFile(f.options.configPath), settings);
+  assert.deepEqual(await fs.readdir(path.join(f.collection.notes.notesDir, path.dirname(claim.proposalIntent.value.plan.files[0].path))), []);
 });

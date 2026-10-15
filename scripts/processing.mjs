@@ -5,7 +5,7 @@ import { readSelection, readCaptureHead } from './intake-store.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { unitKey, assertNoPrune, readLineageRecord, dispositionPath, validateProcessingDisposition, tombstonePath, assertCaptureRetained } from './capture-retention.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
-import { withProcessingState, readProcessingState, processingSnapshot, processingJSON, writeProcessingJSON, writeProcessingBytes, removeProcessingJSON, processingNames, processingReinspectionBlocker } from './processing-state.mjs';
+import { withProcessingState, readProcessingState, processingSnapshot, processingJSON, writeProcessingJSON, writeProcessingBytes, removeProcessingJSON, processingNames, processingReinspectionBlocker, assertProcessingMetadataSize } from './processing-state.mjs';
 import { claimPath, proposalPath, transactionPath, operationPath, associationPath, validateClaim, validateAssociation, operationContext, inspectionProgress, sameProcessingPlacement, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { renderProcessingPacket, packetManifest, validatePageIndex, PROCESSING_PAGE_BYTES, PROCESSING_PACKET_BYTES } from './processing-packet.mjs';
@@ -340,11 +340,16 @@ function validateOperation(value, ctx, operationId) {
   }
   return value;
 }
-async function publishOperation(ctx, saved, outcome, proposal = null, receipt = null, cancelledTransactionHash = null, beforePublish) {
+function operationRecord(ctx, saved, outcome, proposal = null, receipt = null, cancelledTransactionHash = null) {
   const value = { format: 'cuefluent-processing-operation', version: 1, operationId: saved.claim.operationId, bindingHash: ctx.bindingHash,
     claim: saved.claim, claimHash: saved.hash, outcome, processedAt: receipt?.value.committedAt ?? new Date().toISOString(), proposal, writerReceiptHash: receipt?.hash ?? null,
     ...(cancelledTransactionHash === null ? {} : { cancelledTransactionHash }) };
-  validateOperation(value, ctx, value.operationId);
+  return validateOperation(value, ctx, value.operationId);
+}
+async function publishOperation(ctx, saved, outcome, proposal = null, receipt = null, cancelledTransactionHash = null, beforePublish) {
+  return publishOperationRecord(ctx, operationRecord(ctx, saved, outcome, proposal, receipt, cancelledTransactionHash), beforePublish);
+}
+async function publishOperationRecord(ctx, value, beforePublish) {
   return { value, ...(await writeProcessingJSON(ctx, operationPath(value.operationId), value, null, { beforePublish })) };
 }
 async function projectRecord(ctx, name, value, previousHash) {
@@ -692,6 +697,10 @@ async function reinspectionPreview(ctx, args) {
       !equal(claim.selection, ctx.selection)) fail('PROCESSING_SELECTION_CHANGED');
   checkedInspection(claim);
   const originalContext = { ...ctx, binding: claim.binding, bindingHash: claim.bindingHash };
+  // Completion wraps the claim. Check the full record before reserving a
+  // transfer, even when the claim itself fits the metadata bound.
+  const cancellation = operationRecord(originalContext, { claim, hash: saved.hash }, 'cancelled');
+  assertProcessingMetadataSize(Buffer.from(canonicalJSON(cancellation) + '\n'));
   const sources = await currentInputs(originalContext, claim);
   const proposal = await loadProposal(originalContext, claim, args.expectedProposalHash);
   await verifyProcessingProposal(ctx, proposal);
@@ -830,6 +839,10 @@ async function finishReinspection(ctx, record, args, options) {
   const saved = await processingSnapshot(ctx, claimPath(claim.operationId));
   if (saved.hash !== null && saved.hash !== preview.claimHash) fail('PROCESSING_CLAIM_CHANGED');
   if (!cancelled.bytes && saved.hash === null) fail('PROCESSING_CLAIM_MISSING');
+  const cancellationValue = operationRecord(oldContext, { claim, hash: preview.claimHash }, 'cancelled');
+  // Retry admission must also precede successor publication, so a pending
+  // transfer created by an earlier helper can still be abandoned on refusal.
+  assertProcessingMetadataSize(Buffer.from(canonicalJSON(cancellationValue) + '\n'));
   const next = await processingSnapshot(ctx, claimPath(replacement.operationId));
   const replacementHash = digest(canonicalJSON(replacement) + '\n');
   if (next.hash !== null && next.hash !== replacementHash) fail('PROCESSING_CLAIM_CHANGED');
@@ -860,7 +873,7 @@ async function finishReinspection(ctx, record, args, options) {
     cancellation = { ...cancelled, value: validateOperation(intakeJSON(cancelled), oldContext, claim.operationId) };
     if (cancellation.value.outcome !== 'cancelled' || cancellation.value.claimHash !== preview.claimHash ||
         !equal(cancellation.value.claim, claim) || cancellation.value.cancelledTransactionHash) fail('PROCESSING_REINSPECTION_CHANGED');
-  } else cancellation = await publishOperation(oldContext, { claim, hash: preview.claimHash }, 'cancelled');
+  } else cancellation = await publishOperationRecord(oldContext, cancellationValue);
   await options.fault?.('reinspection-cancellation');
   await finishOperation(oldContext, cancellation, options);
   await options.fault?.('reinspection-cleanup');
