@@ -190,10 +190,13 @@ Busy or blocked state must not be bypassed with another binding or writer.
 historical launch diagnostics and return null for the current `chat` and
 `requestId`; the archived registry retains those identities. A retained unfinished
 claim without a verified terminal owner reports `blocked` with
-`PROCESSING_OPERATION_OWNER_UNVERIFIED`. Abandonment does not cancel an engine
+`PROCESSING_OPERATION_OWNER_UNVERIFIED`. A direct `processing-chat-run` also
+returns that blocker before replacing the binding, even with a fresh request ID
+or explicit resume/workset arguments. Abandonment does not cancel an engine
 operation or mark its evidence handled. Inspect any surviving operation before
-continuing. Only a subsequent explicit run with a new request ID creates a
-replacement native session; the abandoned request can never dispatch again.
+continuing. Only a subsequent explicit run that passes admission with a new
+request ID creates a replacement native session; the abandoned request can never
+dispatch again.
 `offline: true` records the operator's confirmation that both the controller and
 native child are stopped, including for older records with no saved owner. It is
 not a model-selected retry flag.

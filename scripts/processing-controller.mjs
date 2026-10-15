@@ -405,8 +405,12 @@ export async function openProcessingController(context, dependencies = {}) {
           { beforePublish: () => { if (client === 'claude') assertClaudeHostAuthentication(env); } }); }
           catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return publicState(await state.read()); throw error; }
         }
-        const fresh = current.state === 'missing' || processingChatRestartSupported(current.registry);
-        if (!fresh && current.state !== 'idle') return publicState(current);
+        // A restartable native binding can still retain an unsafe engine claim.
+        // Apply the same inspection/ownership gate as status before replacement,
+        // including direct CLI runs without an explicit resume operation.
+        const admission = await publicState(current);
+        if (admission.state !== 'missing' && admission.state !== 'idle') return admission;
+        const fresh = current.state === 'missing' || admission.restartSupported;
         if (requestWorksetId) {
           const workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId }));
           if (workset.policyState !== 'current') fail('WORKFLOW_POLICY_CHANGED');

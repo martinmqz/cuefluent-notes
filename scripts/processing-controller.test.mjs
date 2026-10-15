@@ -510,7 +510,7 @@ test('metadata-only status and review survive an unavailable CLI and preserve a 
   assert.equal(h.dispatches.length, 1);
 });
 
-test('explicit offline abandonment preserves unknown claims and retires the chat for both clients', async t => {
+test('explicit offline abandonment preserves unknown claims and blocks replacement runs for both clients', async t => {
   for (const client of ['codex', 'claude']) await t.test(client, async t => {
     const f = await processingFixture(t, { client }), h = await harness(t, f, client);
     h.script = async call => { await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs }); throw new Error('synthetic lost terminal'); };
@@ -526,11 +526,47 @@ test('explicit offline abandonment preserves unknown claims and retires the chat
     assert.deepEqual(await h.controller.status(), abandoned);
     assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
     await assert.rejects(h.controller.run({ ...request, expectedChatHash: abandoned.chatHash }), { code: 'PROCESSING_CHAT_REQUEST_CONFLICT' });
-    h.script = async call => { assert.equal((await call('processing_pending', {})).operations[0].operationId, f.operationId); };
-    const next = await h.controller.run(await h.request());
-    assert.notEqual(next.chat.sessionId, blocked.chat.sessionId);
-    assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
+    const worksetId = randomUUID();
+    await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+    const stored = await registryJSON(f), events = [...h.events], creates = h.creates;
+    for (const extra of [{}, { resumeOperationId: f.operationId }, { worksetId }]) {
+      assert.deepEqual(await h.controller.run(await h.request(extra)), abandoned);
+      assert.deepEqual(await registryJSON(f), stored);
+      assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+    }
+    assert.equal(h.dispatches.length, 1); assert.equal(h.creates, creates);
+    assert.deepEqual(h.events, events);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
+});
+
+test('processing-chat-run CLI cannot replace a retired binding with an unverified claim', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  await h.controller.close();
+  h.env.CODEX_HOME = path.join(f.root, 'codex-profile'); await fs.mkdir(h.env.CODEX_HOME);
+  h.profileId = await codexProcessingProfile(h.env); h.dependencies.profileId = h.profileId;
+  h.controller = await h.open();
+  h.script = async call => {
+    await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+    throw new Error('synthetic lost terminal');
+  };
+  await assert.rejects(h.controller.run(await h.request()));
+  const failed = await h.controller.status();
+  const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const stored = await registryJSON(f), claim = await inspectProcessing(f.capability, f.operationId);
+  await h.controller.close();
+  const request = path.join(f.root, 'retired-run.json');
+  await fs.writeFile(request, canonicalJSON({ collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash,
+    args: { client: 'codex', requestId: randomUUID(), selection: f.selection, expectedChatHash: retired.chatHash } }));
+  // Never launch an installed native client if admission regresses.
+  const env = Object.fromEntries(Object.entries({ ...process.env, ...h.env }).filter(([key]) => key.toUpperCase() !== 'PATH'));
+  const { stdout } = await promisify(execFile)(process.execPath,
+    [fileURLToPath(new URL('./workflow.mjs', import.meta.url)), 'processing-chat-run', '--config', f.options.configPath, '--request', request],
+    { env: { ...env, PATH: '' }, timeout: 30_000 });
+  assert.deepEqual(JSON.parse(stdout), retired);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
 
@@ -933,10 +969,27 @@ test('retired resumed claim preserves earlier terminal ownership and refuses una
   assert.equal(retired.state, 'idle'); assert.deepEqual(retired.diagnostics, []);
   assert.equal(await h.controller.canResumeOperation(f.operationId), true);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
   h.inspectOperation = async () => { throw new Error('synthetic unreadable metadata'); };
   const unreadable = await h.controller.status();
   assert.equal(unreadable.state, 'blocked'); assert.equal(unreadable.operationState, 'unknown');
   assert.equal(unreadable.operationOutcome, null); assert.equal(unreadable.recoveryRequired, null);
   assert.deepEqual(unreadable.diagnostics, ['OPERATION_OUTCOME_UNKNOWN']);
   assert.equal(unreadable.chatHash, retired.chatHash);
+  assert.deepEqual(await h.controller.run(await h.request()), unreadable);
+  h.inspectOperation = async () => ({ ...claim, recoveryRequired: true });
+  const recovery = await h.controller.status();
+  assert.equal(recovery.state, 'blocked');
+  assert.deepEqual(recovery.diagnostics, ['PROCESSING_RECOVERY_REQUIRED']);
+  assert.deepEqual(await h.controller.run(await h.request({ resumeOperationId: f.operationId })), recovery);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+  h.inspectOperation = null;
+  h.script = async call => call('processing_status', { operationId: f.operationId });
+  const resumed = await h.controller.run(await h.request({ resumeOperationId: f.operationId }));
+  assert.equal(resumed.state, 'idle'); assert.equal(resumed.operationId, f.operationId);
+  assert.notEqual(resumed.chat.sessionId, failed.chat.sessionId);
+  assert.equal(h.dispatches.length, dispatches + 1);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
 });
