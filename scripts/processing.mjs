@@ -971,14 +971,12 @@ export async function abandonProcessingReinspection(capability, { expectedRecord
     for (const [index, copy] of value.claim.proposalIntent.value.copies.entries()) {
       const name = reinspectionDraft(args.operationId, index);
       const retained = await processingSnapshot(ctx, name);
-      if (retained.bytes) {
-        if (retained.hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
-        const original = await processingSnapshot(ctx, copy.path);
-        if (original.hash === null) {
-          await writeProcessingBytes(ctx, copy.path, retained.bytes, null);
-          await options.fault?.('reinspection-abandon-restored');
-        } else if (original.hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
-      }
+      if (retained.bytes && retained.hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
+      const original = await processingSnapshot(ctx, copy.path);
+      if (original.hash === null && retained.bytes) {
+        await writeProcessingBytes(ctx, copy.path, retained.bytes, null);
+        await options.fault?.('reinspection-abandon-restored');
+      } else if (original.hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
       await removeProcessingJSON(ctx, name, copy.hash);
     }
     const directory = path.dirname(await intakePath(ctx.writer, 'state', reinspectionDraft(args.operationId, 0)));

@@ -315,6 +315,36 @@ for (const change of ['head', 'note', 'policy', 'binding']) test(`uncommitted tr
   assert.equal(await fingerprint(path.join(f.collection.notes.notesDir, 'direct.md')), await fingerprint(contentPath));
 });
 
+for (const phase of ['reinspection-intent', 'reinspection-abandon-copies']) for (const change of ['missing', 'edited']) {
+  test(`abandonment after ${phase} preserves the reservation for ${change} original bytes without an archive`, async t => {
+    const f = await fixture(t), before = await preview(f), args = { ...f.request, expectedPreviewHash: before.previewHash };
+    const transferPhase = phase === 'reinspection-intent' ? phase : 'reinspection-copies';
+    await assert.rejects(reinspectProcessing(f.capability, args,
+      { fault: at => { if (at === transferPhase) throw new Error('interrupted'); } }), /interrupted/);
+    const status = await inspectProcessingReinspection(f.capability), request = { expectedRecordHash: status.recordHash };
+    if (phase === 'reinspection-abandon-copies') await assert.rejects(abandonProcessingReinspection(f.capability, request,
+      { fault: at => { if (at === phase) throw new Error('interrupted'); } }), /interrupted/);
+    const original = f.proposal.plan.files[0].contentPath, archived = path.join(status.retainedDrafts.directory, '0.md');
+    assert.equal(await fingerprint(archived), null);
+    const edited = '# Revised draft\n\n## Decision\n\nKeep the revision.\n';
+    if (change === 'missing') await fs.unlink(original);
+    else await fs.writeFile(original, edited);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(executeWorkflow('processing-reinspection-abandon', { collectionId: f.collection.id,
+        expectedConfigHash: f.options.expectedConfigHash, args: request }, { configPath: f.options.configPath }),
+      { code: 'PROCESSING_PROPOSAL_CHANGED' });
+      assert.equal(await fingerprint(original), change === 'missing' ? null : digest(edited));
+      assert.equal(await fingerprint(archived), null);
+      assert.equal(await fingerprint(path.join(f.collection.notes.writerStateDir, 'reinspection.json')), status.recordHash);
+      assert.deepEqual(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`)), f.originalClaim);
+      const pending = await inspectProcessingReinspection(f.capability);
+      assert.equal(pending.state, 'transfer-pending'); assert.equal(pending.abandoning, true);
+    }
+    assert.equal(await fingerprint(f.proposal.target), null);
+    assert.deepEqual(await fs.readFile(f.options.configPath), f.settings);
+  });
+}
+
 test('abandonment preserves the archived draft when its original is edited', async t => {
   const f = await fixture(t), before = await preview(f), args = { ...f.request, expectedPreviewHash: before.previewHash };
   await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-copies') throw new Error('interrupted'); } }), /interrupted/);

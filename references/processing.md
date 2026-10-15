@@ -201,8 +201,9 @@ or storage can prevent replay. Explicit `processing-reinspection-abandon` with t
 inspected record hash archives the intent and removes only its exact owned copies
 when the original durable drafts still match. A missing original is first restored
 from its matching archive; an edited original preserves both versions and reports
-`PROCESSING_PROPOSAL_CHANGED`. It leaves the original claim/proposal metadata,
-notes and evidence untouched. An interrupted
+`PROCESSING_PROPOSAL_CHANGED`. Without an archived copy, a missing or edited
+original also preserves the reservation and reports that conflict. It leaves the
+original claim/proposal metadata, notes and evidence untouched. An interrupted
 abandonment must finish abandonment. After the replacement claim is committed,
 retry finishes metadata only under current maintenance authority, even if policy
 or physical identity changed. The successor still requires its own current checks.

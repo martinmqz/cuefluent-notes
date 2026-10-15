@@ -688,6 +688,8 @@ All use the ordinary collection/configuration envelope.
   durable draft must still match before an archived copy is removed. A missing
   original is first restored from the exact archive; an edited original reports
   `PROCESSING_PROPOSAL_CHANGED` and preserves both versions and the pending intent.
+  When no archive exists, a missing or edited original keeps the intent pending
+  with the same conflict.
   The original claim and all notes and evidence remain unchanged. The same request resumes
   interrupted abandonment; it never creates or approves a replacement. Once a
   successor exists, finish transfer bookkeeping instead.
