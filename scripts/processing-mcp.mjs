@@ -73,7 +73,7 @@ function blockedInventory(view, blockers) {
     return { ...view, status: 'blocked', statusDetail: blockers.includes('PROCESSING_SHORTCUT_CAPACITY') ? 'selection-limit' : 'blocked',
       nextAction: 'cancel', diagnostics: [...new Set(blockers.map(code => ['WORKFLOW_POLICY_CHANGED', 'PROCESSING_SHORTCUT_CAPACITY'].includes(code) ? code : 'PROCESSING_SELECTION_CHANGED'))] };
   }
-  const recovery = blockers.some(code => ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED', 'INTAKE_RECOVERY_REQUIRED', 'PRUNE_RECOVERY_REQUIRED'].includes(code));
+  const recovery = blockers.some(code => ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED', 'INTAKE_RECOVERY_REQUIRED', 'PRUNE_RECOVERY_REQUIRED', 'writer-reserved-by-another-collection'].includes(code));
   return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect',
     diagnostics: recovery ? ['PROCESSING_RECOVERY_REQUIRED'] : blockers.includes('PROCESSING_OPERATION_OWNER_UNVERIFIED') ? ['PROCESSING_OPERATION_OWNER_UNVERIFIED'] : ['PROCESSING_CONTROL_FAILED'] };
 }
@@ -112,9 +112,13 @@ export function processingStatusView(native, shortcut, { inventory, sequence = f
       blockedByClaim: inventory.counts.blockedByClaimRevisions, inspected: inventory.counts.inspectedHeads,
       handled: inventory.counts.handledRevisions, incomplete: inventory.incomplete,
       unfinishedOperations: inventory.operations.length, awaitingReview: reviews.length, sourceCompleteness: inventory.sourceCompleteness };
-    if (!['creating', 'busy', 'blocked'].includes(view.status)) {
-      if (inventory.blockers.length) view = blockedInventory(view, inventory.blockers);
-      else if (reviews.length) view = { ...view, status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+    const admissionOnly = view.status === 'blocked' && view.diagnostics.length > 0 &&
+      view.diagnostics.every(code => code === 'PROCESSING_BINDING_CHANGED');
+    if (!['creating', 'busy', 'blocked'].includes(view.status) || admissionOnly) {
+      const blockingReview = inventory.blockers.filter(code => code !== 'PROCESSING_BINDING_CHANGED');
+      if (blockingReview.length) view = blockedInventory(view, blockingReview);
+      else if (reviews.length) view = { ...view, status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: [] };
+      else if (inventory.blockers.length) view = blockedInventory(view, inventory.blockers);
       else if (inventory.operations.some(item => item.scopeMatch !== 'full')) view = { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect', diagnostics: ['PROCESSING_SELECTION_CHANGED'] };
       else if (['missing', 'idle', 'completed'].includes(view.status) && inventory.operations.length && view.nextAction === 'none') {
         view = { ...view, status: 'idle', statusDetail: 'unfinished', nextAction: 'resume' };
@@ -429,8 +433,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       let status = await controller.status({ selection: source.selection });
       status = await acknowledgeFinishedReview(controller, capability, status);
       const inventory = await withStorageProbes(() => stablePendingCollectionProcessing(capability, { selection: source.selection, limit: 1 }));
-      if (inventory.blockers.length) return blockedInventory(viewOf(status), inventory.blockers);
+      const blockingReview = inventory.blockers.filter(code => code !== 'PROCESSING_BINDING_CHANGED');
+      if (blockingReview.length) return blockedInventory(viewOf(status), blockingReview);
       const proposals = authorizedReviews(inventory);
+      if (!proposals.length && inventory.blockers.length) return blockedInventory(viewOf(status), inventory.blockers);
       let proposal = proposals[0];
       if (proposals.length > 1) {
         const chosen = await elicit({ choices: proposals.map((item, index) => ({ operationId: item.operationId,

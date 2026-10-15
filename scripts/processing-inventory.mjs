@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readProcessingState, processingNames, processingSnapshot, nativeNamePage } from './processing-state.mjs';
+import { readProcessingState, processingNames, processingReinspectionBlocker, processingSnapshot, nativeNamePage } from './processing-state.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { describeProcessingOperation } from './processing.mjs';
 import { validateClaim, sameProcessingPlacement, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
@@ -18,7 +18,8 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
   const ctx = await readProcessingState(capability, selection, 'explicitProcess');
   // A transfer temporarily retains both claims. Do not arbitrate them as new
   // work; the dedicated metadata status command can rediscover its exact intent.
-  if ((await processingSnapshot(ctx, 'reinspection.json')).bytes) fail('PROCESSING_REINSPECTION_REQUIRED');
+  const reservation = await processingReinspectionBlocker(ctx);
+  if (reservation) fail(reservation);
   const claims = [];
   for (const name of await processingNames(ctx, 'claims')) {
     const saved = await processingSnapshot(ctx, name);

@@ -5,14 +5,14 @@ import { readSelection, readCaptureHead } from './intake-store.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { unitKey, assertNoPrune, readLineageRecord, dispositionPath, validateProcessingDisposition, tombstonePath, assertCaptureRetained } from './capture-retention.mjs';
 import { logicalCaptureIdentity } from './capture-contract.mjs';
-import { withProcessingState, readProcessingState, processingSnapshot, processingJSON, writeProcessingJSON, writeProcessingBytes, removeProcessingJSON, processingNames } from './processing-state.mjs';
+import { withProcessingState, readProcessingState, processingSnapshot, processingJSON, writeProcessingJSON, writeProcessingBytes, removeProcessingJSON, processingNames, processingReinspectionBlocker } from './processing-state.mjs';
 import { claimPath, proposalPath, transactionPath, operationPath, associationPath, validateClaim, validateAssociation, operationContext, inspectionProgress, sameProcessingPlacement, PROCESSING_INTERFACE_VERSION } from './processing-contract.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { renderProcessingPacket, packetManifest, validatePageIndex, PROCESSING_PAGE_BYTES, PROCESSING_PACKET_BYTES } from './processing-packet.mjs';
 import { processingPageLayout, processingPagePaths, readProcessingExtent } from './processing-page.mjs';
 import { buildProcessingProposal, validateProcessingProposal, copyProcessingProposal, verifyProcessingProposal, verifyExistingProposalParents, proposalHash } from './processing-proposal.mjs';
 import { applyPlan, recover, finalizeRecordedWriter, verifyPlanTargets, inspectDirectories, inspectExistingDirectories } from './safe-update.mjs';
-import { readWriterReceipt as writerReceipt } from './writer-protocol.mjs';
+import { readWriterReceipt as writerReceipt, PROCESSING_REINSPECTION_FILE } from './writer-protocol.mjs';
 import { syncDirectory, readBoundedBytes, lstatOrNull } from './file-io.mjs';
 import { canonicalJSON, digest, fail, keys, list, hash, nativeId, unique, choice, timestamp, integer } from './workflow-values.mjs';
 
@@ -72,13 +72,13 @@ async function currentInputs(ctx, claim) {
   }
   return sources;
 }
-async function loadClaim(ctx, operationId, expectedHash) {
-  if ((await processingSnapshot(ctx, 'reinspection.json')).bytes) fail('PROCESSING_REINSPECTION_REQUIRED');
+async function loadClaim(ctx, operationId, expectedHash, { allowBindingConflict = false } = {}) {
   nativeId(operationId); const snapshot = await processingSnapshot(ctx, claimPath(operationId));
   if (!snapshot.bytes) fail('PROCESSING_CLAIM_MISSING');
   if (expectedHash !== undefined && expectedHash !== snapshot.hash) fail('PROCESSING_CLAIM_CHANGED');
   const claim = validateClaim(intakeJSON(snapshot));
-  if (claim.operationId !== operationId || claim.bindingHash !== ctx.bindingHash || !equal(claim.binding, ctx.binding)) fail('PROCESSING_BINDING_CHANGED');
+  if (claim.operationId !== operationId || !sameProcessingPlacement(claim.binding, ctx.binding) ||
+      (!allowBindingConflict && (claim.bindingHash !== ctx.bindingHash || !equal(claim.binding, ctx.binding)))) fail('PROCESSING_BINDING_CHANGED');
   if (ctx.operation !== 'maintenance' && (!equal(claim.selection, ctx.selection) || claim.policyHash !== ctx.policyHash)) fail('PROCESSING_SELECTION_CHANGED');
   return { claim, hash: snapshot.hash };
 }
@@ -87,7 +87,8 @@ function checkedInspection(claim) {
 }
 export async function processingCollectionBlockers(ctx) {
   const blockers = [];
-  if ((await processingSnapshot(ctx, 'reinspection.json')).bytes) blockers.push('PROCESSING_REINSPECTION_REQUIRED');
+  const reservation = await processingReinspectionBlocker(ctx);
+  if (reservation) blockers.push(reservation);
   if ((await processingNames(ctx, 'transactions')).length) blockers.push('PROCESSING_RECOVERY_REQUIRED');
   if ((await processingSnapshot(ctx, 'journal.json')).bytes) blockers.push('WRITER_RECOVERY_REQUIRED');
   return blockers;
@@ -133,6 +134,12 @@ export async function activeProcessingClaims(ctx, { allowBindingConflict = false
   return claims;
 }
 
+function assertProcessingParallelism(claims, parallelism = 1) {
+  const active = claims.filter(item => !item.published);
+  if (active.length >= parallelism) budgetError('PROCESSING_RESUME_REQUIRED',
+    { current: active.length, limit: parallelism, operationIds: active.map(item => item.claim.operationId) });
+}
+
 function assembleProcessingClaim(ctx, operationId, sources, maxPacketBytes) {
   const packet = renderProcessingPacket(sources, { maxBytes: maxPacketBytes }), descriptors = sources.map(source => source.input);
   const workload = { packetBytes: packet.bytes, renderedPageBytes: packet.pages.reduce((total, page) => total + page.bytes, 0),
@@ -163,9 +170,9 @@ export async function prepareProcessingInState(ctx, { operationId, inputs, recon
   for (const { claim } of claims) {
     if (claim.inputs.some(input => inputs.some(ref => unitKey(ref.identity) === unitKey(input.identity)))) fail('PROCESSING_INPUT_CLAIMED');
   }
-  const queued = claims.filter(item => item.claim.proposalIntent).length, active = claims.filter(item => !item.published).length;
+  const queued = claims.filter(item => item.claim.proposalIntent).length;
   if (queued >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued, limit: 5, operationIds: claims.filter(item => item.claim.proposalIntent).map(item => item.claim.operationId) });
-  if (active >= parallelism) budgetError('PROCESSING_RESUME_REQUIRED', { current: active, limit: parallelism, operationIds: claims.filter(item => !item.published).map(item => item.claim.operationId) });
+  assertProcessingParallelism(claims, parallelism);
   const sources = [], associations = [];
   for (const reference of inputs) {
     const current = await activatedInput(ctx, reference);
@@ -463,11 +470,13 @@ async function assertUnappliedTransaction(ctx, claim, claimHash, tx, expectedHas
 }
 
 export async function completeProcessing(capability, { selection, operationId, expectedClaimHash, expectedRecoveryHash, outcome }, options = {}) {
-  choice(outcome, ['unchanged', 'skipped', 'cancelled']);
+  choice(outcome, ['unchanged', 'skipped', 'cancelled']); hash(expectedClaimHash);
   if (expectedRecoveryHash !== undefined) { hash(expectedRecoveryHash); if (outcome !== 'cancelled') fail('INVALID_PROCESSING_REQUEST'); }
   return withProcessingState(capability, await selected(selection), outcome === 'cancelled' ? 'maintenance' : explicit, async ctx => {
     await requireIncomplete(ctx, operationId);
-    const saved = await loadClaim(ctx, operationId, expectedClaimHash);
+    const saved = await loadClaim(ctx, operationId, expectedClaimHash, { allowBindingConflict: outcome === 'cancelled' });
+    if (outcome === 'cancelled') ctx = { ...ctx, binding: saved.claim.binding, bindingHash: saved.claim.bindingHash };
+    if (outcome === 'cancelled' && await readWriterReceipt(ctx, operationId)) fail('PROCESSING_RECOVERY_REQUIRED');
     let cancelledTransactionHash = null;
     if (outcome === 'cancelled' && expectedRecoveryHash !== undefined) {
       const tx = await transactionSnapshot(ctx, operationId);
@@ -487,11 +496,16 @@ export async function completeProcessing(capability, { selection, operationId, e
 export async function recoverProcessing(capability, { operationId, expectedRecoveryHash }, options = {}) {
   nativeId(operationId); hash(expectedRecoveryHash);
   return withProcessingState(capability, null, 'maintenance', async ctx => {
-    if ((await processingSnapshot(ctx, 'reinspection.json')).bytes) fail('PROCESSING_REINSPECTION_REQUIRED');
     const record = await processingSnapshot(ctx, operationPath(operationId));
     if (record.bytes) {
       if (record.hash !== expectedRecoveryHash) fail('PROCESSING_RECOVERY_CHANGED');
-      return finishOperation(ctx, { ...record, value: intakeJSON(record) }, options);
+      const value = intakeJSON(record);
+      if (value?.outcome === 'cancelled') {
+        validateClaim(value.claim);
+        if (!sameProcessingPlacement(value.claim.binding, ctx.binding)) fail('PROCESSING_BINDING_CHANGED');
+        ctx = { ...ctx, binding: value.claim.binding, bindingHash: value.claim.bindingHash };
+      }
+      return finishOperation(ctx, { ...record, value }, options);
     }
     const tx = await transactionSnapshot(ctx, operationId);
     if (!tx.value || tx.hash !== expectedRecoveryHash) fail('PROCESSING_RECOVERY_CHANGED');
@@ -539,9 +553,10 @@ async function describeOperation(ctx, operationId, expectedAdmission, collection
     }
   }
   const inspection = basis ? inspectionProgress(basis) : null;
-  let conflict = bindingChanged ? 'PROCESSING_BINDING_CHANGED' : claim && claim.policyHash !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : null;
+  let conflict = completed && !saved.hash && !tx.hash ? null : bindingChanged ? 'PROCESSING_BINDING_CHANGED' : claim && claim.policyHash !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : null;
   const blockers = [];
-  const currentBlockers = collectionBlockers ?? await processingCollectionBlockers(ctx);
+  const currentBlockers = saved.hash || tx.hash
+    ? (collectionBlockers ?? await processingCollectionBlockers(ctx)).filter(code => code !== 'PROCESSING_BINDING_CHANGED') : [];
   if (claim && !completed && !tx.hash) {
     if (!conflict) {
       try { await checkCurrentInputMetadata(ctx, claim); }
@@ -555,10 +570,12 @@ async function describeOperation(ctx, operationId, expectedAdmission, collection
   }
   const transferPending = currentBlockers.includes('PROCESSING_REINSPECTION_REQUIRED');
   if (transferPending && !blockers.includes('PROCESSING_REINSPECTION_REQUIRED')) blockers.unshift('PROCESSING_REINSPECTION_REQUIRED');
-  const state = transferPending ? 'blocked' : bindingChanged ? 'conflicted' : completed ? 'completed' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
+  const state = completed ? 'completed' : transferPending ? 'blocked' : bindingChanged ? 'conflicted' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
     : claim?.proposalIntent ? 'draft-staging' : inspection?.state ?? 'missing';
   const recoveryRequired = Boolean(tx.hash || (completed && saved.hash));
-  const nextAction = transferPending ? { command: 'processing-reinspection-status' } : bindingChanged ? { command: null, reason: 'resolve-conflict' }
+  const nextAction = !saved.hash && !tx.hash ? null : transferPending ? { command: 'processing-reinspection-status' }
+    : bindingChanged && !completed ? { command: 'processing-complete', outcome: 'cancelled', reason: 'retire-conflicted-claim', ...(tx.hash ? { expectedRecoveryHash: tx.hash } : {}) }
+    : bindingChanged && completed.outcome !== 'cancelled' ? { command: null, reason: 'resolve-conflict' }
     : recoveryRequired ? { command: 'processing-recover' }
     : completed ? null
     : conflict ? { command: null, reason: 'resolve-conflict' }
@@ -586,6 +603,22 @@ export async function inspectProcessing(capability, operationId) {
   await ctx.guard(); return result;
 }
 
+async function proposalReviewFiles(ctx, proposal) {
+  const files = []; let total = 0;
+  for (const [index, file] of proposal.plan.files.entries()) {
+    const draft = await processingSnapshot(ctx, proposal.copies[index].path);
+    if (draft.hash !== file.expectedContentHash) fail('PROCESSING_PROPOSAL_CHANGED');
+    const original = await readBoundedBytes(path.join(proposal.plan.root, file.path), { maxBytes: 2 * 1024 * 1024, missing: true, noFollow: true });
+    if ((original === null ? null : digest(original)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');
+    total += draft.bytes.length + (original?.length ?? 0);
+    if (total > 4 * 1024 * 1024) fail('PROCESSING_REVIEW_LIMIT');
+    const decode = bytes => bytes === null ? null : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    files.push({ path: file.path, expectedHash: file.expectedHash, contentHash: file.expectedContentHash,
+      original: decode(original), proposed: decode(draft.bytes) });
+  }
+  return files;
+}
+
 /** Exact, bounded review material for a selected immutable proposal. Delivery is
  * read-only and does not acknowledge evidence or authorize the writer. Consumers
  * must not replace these inspected hashes while waiting for a user's decision. */
@@ -597,18 +630,7 @@ export async function readProcessingProposal(capability, { selection, operationI
     checkedInspection(claim); const sources = await currentInputs(ctx, claim); await assertNoTransaction(ctx);
     const proposal = await loadProposal(ctx, claim, expectedProposalHash);
     await verifyProcessingProposal(ctx, proposal); await verifyExistingProposalParents(proposal);
-    const files = []; let total = 0;
-    for (const [index, file] of proposal.plan.files.entries()) {
-      const draft = await processingSnapshot(ctx, proposal.copies[index].path);
-      if (draft.hash !== file.expectedContentHash) fail('PROCESSING_PROPOSAL_CHANGED');
-      const original = await readBoundedBytes(path.join(proposal.plan.root, file.path), { maxBytes: 2 * 1024 * 1024, missing: true, noFollow: true });
-      if ((original === null ? null : digest(original)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');
-      total += draft.bytes.length + (original?.length ?? 0);
-      if (total > 4 * 1024 * 1024) fail('PROCESSING_REVIEW_LIMIT');
-      const decode = bytes => bytes === null ? null : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-      files.push({ path: file.path, expectedHash: file.expectedHash, contentHash: file.expectedContentHash,
-        original: decode(original), proposed: decode(draft.bytes) });
-    }
+    const files = await proposalReviewFiles(ctx, proposal);
     await verifyExistingProposalParents(proposal); await verifyPlanTargets(proposal.plan);
     if ((await processingSnapshot(ctx, claimPath(operationId))).hash !== saved.hash) fail('PROCESSING_CLAIM_CHANGED');
     await ctx.guard();
@@ -621,7 +643,8 @@ export async function readProcessingProposal(capability, { selection, operationI
   });
 }
 
-const reinspectionPending = 'reinspection.json';
+const reinspectionPending = PROCESSING_REINSPECTION_FILE;
+const reinspectionClaim = claimHash => `processed/reinspection-claims/${hash(claimHash)}.json`;
 const abandonedReinspection = recordHash => `processed/abandoned-reinspections/${hash(recordHash)}.json`;
 const reinspectionRecord = id => `processed/reinspections/${nativeId(id)}.json`;
 const reinspectionDraft = (id, index) => `processed/reinspection-drafts/${nativeId(id)}/${index}.md`;
@@ -632,11 +655,11 @@ function reinspectionArgs(args) {
   hash(args.expectedClaimHash); hash(args.expectedProposalHash);
 }
 
-function retainedProposalRequest(proposal, writer, operationId) {
+function retainedProposalRequest(proposal, writer, operationId, contentPath = index => `proposals/${operationId}/${index}.md`) {
   return { mode: proposal.plan.mode,
     ...(proposal.plan.mode === 'derived' ? { expectedManifestHash: proposal.plan.expectedManifestHash } : {}),
     files: proposal.plan.files.map((file, index) => ({ path: file.path, expectedHash: file.expectedHash,
-      contentPath: path.join(writer, `proposals/${operationId}/${index}.md`), expectedContentHash: file.expectedContentHash })),
+      contentPath: path.join(writer, contentPath(index)), expectedContentHash: file.expectedContentHash })),
     mappings: structuredClone(proposal.mappings) };
 }
 
@@ -692,31 +715,21 @@ async function reinspectionPreview(ctx, args) {
   for (const other of claims.filter(item => item.claim.operationId !== args.operationId)) {
     if (other.claim.inputs.some(input => claim.inputs.some(old => unitKey(old.identity) === unitKey(input.identity)))) fail('PROCESSING_INPUT_CLAIMED');
   }
-  if (claims.filter(item => item.claim.operationId !== args.operationId && !item.published).length >= 5) fail('PROCESSING_RESUME_REQUIRED');
+  assertProcessingParallelism(claims.filter(item => item.claim.operationId !== args.operationId));
+  const { claim: replacement } = assembleProcessingClaim(ctx, args.replacementOperationId,
+    current.map(({ input, capture }) => ({ input, capture })), PROCESSING_PACKET_BYTES);
   const preview = { format: 'cuefluent-processing-reinspection-preview', version: 1,
     operationId: args.operationId, replacementOperationId: args.replacementOperationId,
     claimHash: saved.hash, proposalHash: args.expectedProposalHash, binding: ctx.binding, bindingHash: ctx.bindingHash,
     policyHash: ctx.policyHash, inputs, candidateHash: proposalHash(candidate), directories: candidate.directories,
     createDirectories: candidate.plan.createDirectories ?? null,
-    packet: assembleProcessingClaim(ctx, args.replacementOperationId,
-      current.map(({ input, capture }) => ({ input, capture })), PROCESSING_PACKET_BYTES).claim.packet };
-  const files = []; let total = 0;
-  for (const [index, file] of proposal.plan.files.entries()) {
-    const draft = await processingSnapshot(ctx, proposal.copies[index].path);
-    if (draft.hash !== file.expectedContentHash) fail('PROCESSING_PROPOSAL_CHANGED');
-    const original = await readBoundedBytes(path.join(proposal.plan.root, file.path), { maxBytes: 2 * 1024 * 1024, missing: true, noFollow: true });
-    if ((original === null ? null : digest(original)) !== file.expectedHash) fail('PROCESSING_OUTPUT_CHANGED');
-    total += draft.bytes.length + (original?.length ?? 0);
-    if (total > 4 * 1024 * 1024) fail('PROCESSING_REVIEW_LIMIT');
-    const decode = bytes => bytes === null ? null : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-    files.push({ path: file.path, expectedHash: file.expectedHash, contentHash: file.expectedContentHash,
-      original: decode(original), proposed: decode(draft.bytes) });
-  }
+    packet: replacement.packet };
+  const files = await proposalReviewFiles(ctx, proposal);
   await verifyExistingProposalParents(candidate); await verifyPlanTargets(candidate.plan);
   if ((await processingSnapshot(ctx, claimPath(args.operationId))).hash !== saved.hash) fail('PROCESSING_CLAIM_CHANGED');
   await ctx.guard();
   if (!equal(reinspectionCandidate(claim, preview), candidate)) fail('PROCESSING_REINSPECTION_CHANGED');
-  return { preview, claim, proposal, sources, current, files };
+  return { preview, claim, proposal, sources, replacement, files };
 }
 
 /** Explicitly inspect present storage; never assert continuity from matching
@@ -751,9 +764,35 @@ function reinspectionCandidate(claim, preview) {
   return candidate;
 }
 
+async function readReinspection(ctx, snapshot) {
+  const value = intakeJSON(snapshot);
+  keys(value, ['format', 'version', 'preview', 'previewHash', 'claim', 'replacement']);
+  keys(value.claim, ['path', 'hash']);
+  if (value.version !== 2 || value.claim.path !== reinspectionClaim(value.claim.hash) ||
+      value.claim.hash !== value.preview?.claimHash) fail('PROCESSING_REINSPECTION_CHANGED');
+  const original = await processingSnapshot(ctx, value.claim.path);
+  if (original.hash !== value.claim.hash) fail('PROCESSING_CLAIM_CHANGED');
+  return { ...value, claim: intakeJSON(original) };
+}
+function storedReinspection(value) {
+  return { ...value, claim: { path: reinspectionClaim(value.preview.claimHash), hash: value.preview.claimHash } };
+}
+function reinspectionRecordArgs(value) {
+  const preview = value?.preview;
+  const args = { selection: value?.claim?.selection, operationId: preview?.operationId,
+    replacementOperationId: preview?.replacementOperationId, expectedClaimHash: preview?.claimHash,
+    expectedProposalHash: preview?.proposalHash, expectedPreviewHash: value?.previewHash };
+  reinspectionArgs(args); hash(args.expectedPreviewHash);
+  return args;
+}
+async function assertReinspectionWriterIdle(ctx, operationIds) {
+  if ((await processingNames(ctx, 'transactions')).length || (await processingSnapshot(ctx, 'journal.json')).bytes) fail('PROCESSING_RECOVERY_REQUIRED');
+  for (const id of operationIds) if (await readWriterReceipt(ctx, id)) fail('PROCESSING_RECOVERY_REQUIRED');
+}
+
 function validateReinspection(value, ctx, args, { recorded = false } = {}) {
   keys(value, ['format', 'version', 'preview', 'previewHash', 'claim', 'replacement']);
-  if (value.format !== 'cuefluent-processing-reinspection' || value.version !== 1) fail('PROCESSING_REINSPECTION_CHANGED');
+  if (value.format !== 'cuefluent-processing-reinspection' || value.version !== 2) fail('PROCESSING_REINSPECTION_CHANGED');
   const { preview, claim, replacement } = value;
   validateClaim(claim); const proposal = claim.proposalIntent?.value; validateClaim(replacement); validateProcessingProposal(proposal, claim);
   keys(preview, ['format', 'version', 'operationId', 'replacementOperationId', 'claimHash', 'proposalHash', 'binding', 'bindingHash', 'policyHash', 'inputs', 'candidateHash', 'directories', 'createDirectories', 'packet']);
@@ -780,8 +819,7 @@ async function finishReinspection(ctx, record, args, options) {
   const value = validateReinspection(record.value, ctx, args, { recorded: true }), { claim, replacement, preview } = value;
   const proposal = claim.proposalIntent.value, candidate = reinspectionCandidate(claim, preview);
   if ((await processingSnapshot(ctx, abandonedReinspection(record.hash))).bytes) fail('PROCESSING_REINSPECTION_ABANDONING');
-  if ((await processingNames(ctx, 'transactions')).length || (await processingSnapshot(ctx, 'journal.json')).bytes) fail('PROCESSING_RECOVERY_REQUIRED');
-  for (const id of [claim.operationId, replacement.operationId]) if (await readWriterReceipt(ctx, id)) fail('PROCESSING_RECOVERY_REQUIRED');
+  await assertReinspectionWriterIdle(ctx, [claim.operationId, replacement.operationId]);
   if ((await processingSnapshot(ctx, operationPath(replacement.operationId))).bytes ||
       (await processingSnapshot(ctx, proposalPath(replacement.operationId))).bytes) fail('PROCESSING_REINSPECTION_CHANGED');
   const oldContext = { ...ctx, binding: claim.binding, bindingHash: claim.bindingHash };
@@ -825,7 +863,7 @@ async function finishReinspection(ctx, record, args, options) {
   await options.fault?.('reinspection-cleanup');
   const receiptName = reinspectionRecord(claim.operationId), archived = await processingSnapshot(ctx, receiptName);
   if (archived.hash !== null && archived.hash !== record.hash) fail('PROCESSING_REINSPECTION_CHANGED');
-  if (!archived.bytes) await writeProcessingJSON(ctx, receiptName, value, null);
+  if (!archived.bytes) await writeProcessingJSON(ctx, receiptName, storedReinspection(value), null);
   await options.fault?.('reinspection-archive');
   await removeProcessingJSON(ctx, reinspectionPending, record.hash);
   return reinspectionResult(value);
@@ -835,10 +873,8 @@ function reinspectionResult(value) {
   const proposal = value.claim.proposalIntent.value;
   return { interfaceVersion: PROCESSING_INTERFACE_VERSION, operationId: value.claim.operationId,
     replacementOperationId: value.replacement.operationId, previewHash: value.previewHash, status: 'transferred',
-    proposal: { ...retainedProposalRequest(proposal, value.replacement.binding.notes.writerStateDir, value.replacement.operationId),
-      files: proposal.plan.files.map((file, index) => ({ path: file.path, expectedHash: file.expectedHash,
-        contentPath: path.join(value.replacement.binding.notes.writerStateDir, reinspectionDraft(value.claim.operationId, index)),
-        expectedContentHash: file.expectedContentHash })) },
+    proposal: retainedProposalRequest(proposal, value.replacement.binding.notes.writerStateDir, value.replacement.operationId,
+      index => reinspectionDraft(value.claim.operationId, index)),
     nextAction: 'inspect-replacement-operation', savesNotes: false };
 }
 
@@ -848,21 +884,23 @@ export async function reinspectProcessing(capability, args, options = {}) {
   reinspectionArgs(args); hash(args.expectedPreviewHash);
   return withProcessingState(capability, await selected(args.selection), 'maintenance', async ctx => {
     const pending = await processingSnapshot(ctx, reinspectionPending);
-    if (pending.bytes && intakeJSON(pending)?.preview?.operationId === args.operationId) return finishReinspection(ctx, { ...pending, value: intakeJSON(pending) }, args, options);
+    if (pending.bytes && intakeJSON(pending)?.preview?.operationId === args.operationId) return finishReinspection(ctx, { ...pending, value: await readReinspection(ctx, pending) }, args, options);
     const archived = await processingSnapshot(ctx, reinspectionRecord(args.operationId));
-    if (archived.bytes) return reinspectionResult(validateReinspection(intakeJSON(archived), ctx, args, { recorded: true }));
+    if (archived.bytes) return reinspectionResult(validateReinspection(await readReinspection(ctx, archived), ctx, args, { recorded: true }));
     if (pending.bytes) fail('PROCESSING_REINSPECTION_REQUIRED');
     await assertWorkflowStorage(capability, ctx.selection, explicit);
-    const inspected = await reinspectionPreview(ctx, args), { preview, claim } = inspected;
+    const { preview, claim, replacement } = await reinspectionPreview(ctx, args);
     if (digest(canonicalJSON(preview)) !== args.expectedPreviewHash) fail('PROCESSING_REINSPECTION_CHANGED');
-    const { claim: replacement } = assembleProcessingClaim(ctx, args.replacementOperationId,
-      inspected.current.map(({ input, capture }) => ({ input, capture })), PROCESSING_PACKET_BYTES);
-    const value = validateReinspection({ format: 'cuefluent-processing-reinspection', version: 1,
+    const value = validateReinspection({ format: 'cuefluent-processing-reinspection', version: 2,
       preview, previewHash: args.expectedPreviewHash, claim, replacement }, ctx, args);
-    const record = { value, ...(await writeProcessingJSON(ctx, reinspectionPending, value, null)) };
+    const originalName = reinspectionClaim(args.expectedClaimHash), original = await processingSnapshot(ctx, originalName);
+    if (original.hash !== null && original.hash !== args.expectedClaimHash) fail('PROCESSING_CLAIM_CHANGED');
+    if (!original.bytes) await writeProcessingJSON(ctx, originalName, claim, null);
+    await options.fault?.('reinspection-source');
+    const record = { value, ...(await writeProcessingJSON(ctx, reinspectionPending, storedReinspection(value), null)) };
     await options.fault?.('reinspection-intent');
     return finishReinspection(ctx, record, args, options);
-  });
+  }, { allowReinspection: true });
 }
 
 /** Metadata-only rediscovery of the one pending transfer, or one named receipt.
@@ -871,6 +909,11 @@ export async function inspectProcessingReinspection(capability, { operationId } 
   if (operationId !== undefined) nativeId(operationId);
   const ctx = await readProcessingState(capability, null, 'maintenance');
   const pending = await processingSnapshot(ctx, reinspectionPending);
+  if (operationId === undefined && await processingReinspectionBlocker(ctx, pending) === 'writer-reserved-by-another-collection') {
+    await ctx.guard();
+    return { interfaceVersion: PROCESSING_INTERFACE_VERSION, state: 'reserved',
+      blocker: 'writer-reserved-by-another-collection', nextAction: 'inspect-owning-collection', savesNotes: false };
+  }
   let snapshot = pending, name = reinspectionPending;
   if (!pending.bytes || (operationId !== undefined && intakeJSON(pending)?.preview?.operationId !== operationId)) {
     if (operationId === undefined) { await ctx.guard(); return { interfaceVersion: PROCESSING_INTERFACE_VERSION, state: 'missing' }; }
@@ -878,12 +921,8 @@ export async function inspectProcessingReinspection(capability, { operationId } 
     if (!snapshot.bytes) { await ctx.guard(); return { interfaceVersion: PROCESSING_INTERFACE_VERSION, state: 'missing' }; }
   }
   const isPending = name === reinspectionPending;
-  const value = intakeJSON(snapshot), preview = value?.preview;
-  if (operationId !== undefined && preview?.operationId !== operationId) fail('PROCESSING_REINSPECTION_CONFLICT');
-  const args = { selection: value?.claim?.selection, operationId: preview?.operationId,
-    replacementOperationId: preview?.replacementOperationId, expectedClaimHash: preview?.claimHash,
-    expectedProposalHash: preview?.proposalHash, expectedPreviewHash: value?.previewHash };
-  reinspectionArgs(args); hash(args.expectedPreviewHash);
+  const value = await readReinspection(ctx, snapshot), preview = value.preview;
+  const args = reinspectionRecordArgs(value);
   if (!sameProcessingPlacement(preview.binding, ctx.binding)) fail('PROCESSING_BINDING_CHANGED');
   validateReinspection(value, { ...ctx, selection: args.selection }, args, { recorded: true });
   const successor = await processingSnapshot(ctx, claimPath(value.replacement.operationId));
@@ -914,27 +953,29 @@ export async function abandonProcessingReinspection(capability, { expectedRecord
       if (archive.hash === expectedRecordHash) return { interfaceVersion: PROCESSING_INTERFACE_VERSION, status: 'abandoned', recordHash: expectedRecordHash, savesNotes: false };
       fail('PROCESSING_REINSPECTION_CHANGED');
     }
-    const value = intakeJSON(pending), preview = value?.preview;
-    const args = { selection: value?.claim?.selection, operationId: preview?.operationId,
-      replacementOperationId: preview?.replacementOperationId, expectedClaimHash: preview?.claimHash,
-      expectedProposalHash: preview?.proposalHash, expectedPreviewHash: value?.previewHash };
-    reinspectionArgs(args); hash(args.expectedPreviewHash);
+    const value = await readReinspection(ctx, pending);
+    const args = reinspectionRecordArgs(value);
     validateReinspection(value, { ...ctx, selection: args.selection }, args, { recorded: true });
     if ((await processingSnapshot(ctx, claimPath(args.operationId))).hash !== args.expectedClaimHash) fail('PROCESSING_CLAIM_CHANGED');
     for (const name of [claimPath(args.replacementOperationId), proposalPath(args.replacementOperationId),
       operationPath(args.operationId), operationPath(args.replacementOperationId), reinspectionRecord(args.operationId)]) {
       if ((await processingSnapshot(ctx, name)).bytes) fail('PROCESSING_REINSPECTION_COMMITTED');
     }
-    if ((await processingNames(ctx, 'transactions')).length || (await processingSnapshot(ctx, 'journal.json')).bytes) fail('PROCESSING_RECOVERY_REQUIRED');
-    for (const id of [args.operationId, args.replacementOperationId]) if (await readWriterReceipt(ctx, id)) fail('PROCESSING_RECOVERY_REQUIRED');
+    await assertReinspectionWriterIdle(ctx, [args.operationId, args.replacementOperationId]);
     if (archive.hash !== null && archive.hash !== pending.hash) fail('PROCESSING_REINSPECTION_CHANGED');
     if (!archive.bytes) await writeProcessingBytes(ctx, archiveName, pending.bytes, null);
     await options.fault?.('reinspection-abandon-intent');
     for (const [index, copy] of value.claim.proposalIntent.value.copies.entries()) {
       const name = reinspectionDraft(args.operationId, index);
-      // The archive may be the last exact copy after a human edit or removal.
-      if ((await processingSnapshot(ctx, name)).bytes &&
-          (await processingSnapshot(ctx, copy.path)).hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
+      const retained = await processingSnapshot(ctx, name);
+      if (retained.bytes) {
+        if (retained.hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
+        const original = await processingSnapshot(ctx, copy.path);
+        if (original.hash === null) {
+          await writeProcessingBytes(ctx, copy.path, retained.bytes, null);
+          await options.fault?.('reinspection-abandon-restored');
+        } else if (original.hash !== copy.hash) fail('PROCESSING_PROPOSAL_CHANGED');
+      }
       await removeProcessingJSON(ctx, name, copy.hash);
     }
     const directory = path.dirname(await intakePath(ctx.writer, 'state', reinspectionDraft(args.operationId, 0)));
@@ -944,5 +985,5 @@ export async function abandonProcessingReinspection(capability, { expectedRecord
     await options.fault?.('reinspection-abandon-copies');
     await removeProcessingJSON(ctx, reinspectionPending, expectedRecordHash);
     return { interfaceVersion: PROCESSING_INTERFACE_VERSION, status: 'abandoned', recordHash: expectedRecordHash, savesNotes: false };
-  });
+  }, { allowReinspection: true });
 }

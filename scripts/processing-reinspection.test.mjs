@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { processingFixture, proposedClaim, inspectedClaim } from './test-support/processing-fixture.mjs';
+import { replaceProcessingStorage, processingFixture, proposedClaim, inspectedClaim } from './test-support/processing-fixture.mjs';
 import { verifyWorkflowStorage, workflowProcessingBinding } from './workflow-storage.mjs';
 import { previewProcessingReinspection, reinspectProcessing, inspectProcessingReinspection, abandonProcessingReinspection,
   prepareProcessing, inspectProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing,
@@ -17,15 +17,16 @@ import { openWorkflowIntake, withIntakeLock } from './intake-io.mjs';
 import { publishCapture } from './intake-store.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
 import { pendingCollectionProcessing } from './processing-collection.mjs';
-import { inspectFrozenProcessingInputs } from './processing-workset.mjs';
-import { selectProcessingShortcut, inspectProcessingShortcut } from './processing-shortcuts.mjs';
+import { inspectFrozenProcessingInputs, createProcessingWorkset, prepareWorksetBatch } from './processing-workset.mjs';
+import { selectProcessingShortcut, inspectProcessingShortcut, cancelProcessingShortcut } from './processing-shortcuts.mjs';
 import { processingControlStatusView } from './processing-control-server.mjs';
 import { processingStatusView } from './processing-mcp.mjs';
+import { readProcessingState } from './processing-state.mjs';
+import { buildProcessingProposal, proposalHash } from './processing-proposal.mjs';
 
 async function replaceRoots(f) {
   for (const root of [f.collection.rawDir, f.collection.intakeStateDir, f.collection.notes.writerStateDir, f.collection.notes.notesDir]) {
-    await fs.rename(root, `${root}-original`);
-    await fs.cp(`${root}-original`, root, { recursive: true, preserveTimestamps: true });
+    await replaceProcessingStorage(root);
   }
   f.capability = await verifyWorkflowStorage(f.options);
 }
@@ -63,6 +64,9 @@ test('explicit reinspection preserves the durable draft and history, then requir
   assert.equal(await fingerprint(f.proposal.target), null);
   const old = JSON.parse(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'processed', 'operations', `${f.operationId}.json`)));
   assert.equal(old.outcome, 'cancelled'); assert.deepEqual(old.claim, JSON.parse(f.originalClaim));
+  const historical = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(historical.state, 'completed'); assert.equal(historical.conflict, null);
+  assert.equal(historical.nextAction, null); assert.deepEqual(historical.blockers, []);
   const successor = await inspectProcessing(f.capability, transferred.replacementOperationId);
   assert.equal(successor.state, 'unread'); assert.equal(successor.proposalHash, null);
   assert.equal(successor.inspection.acknowledgedPages, 0);
@@ -189,7 +193,7 @@ for (const client of ['codex', 'claude']) test(`${client} draft with only a chan
   const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
   await assert.rejects(previewProcessingReinspection(f.capability, request), { code: 'PROCESSING_REINSPECTION_NOT_REQUIRED' });
   const root = f.collection.notes.notesDir;
-  await fs.rename(root, `${root}-old`); await fs.cp(`${root}-old`, root, { recursive: true, preserveTimestamps: true });
+  await replaceProcessingStorage(root, '-old');
   const before = await previewProcessingReinspection(f.capability, request);
   assert.deepEqual(before.previousBinding, before.currentBinding);
   assert.notDeepEqual(before.previousDirectories, before.currentDirectories);
@@ -207,7 +211,7 @@ test('a second binding change after transfer intent refuses replay and preserves
   await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-intent') throw new Error('interrupted'); } }), /interrupted/);
   const journal = path.join(f.collection.notes.writerStateDir, 'reinspection.json'), bytes = await fs.readFile(journal);
   const root = f.collection.rawDir;
-  await fs.rename(root, `${root}-again`); await fs.cp(`${root}-again`, root, { recursive: true, preserveTimestamps: true });
+  await replaceProcessingStorage(root, '-again');
   f.capability = await verifyWorkflowStorage(f.options);
   assert.equal((await inspectProcessingReinspection(f.capability)).conflict, 'PROCESSING_BINDING_CHANGED');
   await assert.rejects(reinspectProcessing(f.capability, args), { code: 'PROCESSING_REINSPECTION_CHANGED' });
@@ -292,8 +296,7 @@ for (const change of ['head', 'note', 'policy', 'binding']) test(`uncommitted tr
     f.config.routes[0].processing.mode = 'prompted'; const bytes = JSON.stringify(f.config);
     await fs.writeFile(f.options.configPath, bytes); f.options.expectedConfigHash = digest(bytes);
   } else {
-    const root = f.collection.rawDir; await fs.rename(root, `${root}-again`);
-    await fs.cp(`${root}-again`, root, { recursive: true, preserveTimestamps: true });
+    const root = f.collection.rawDir; await replaceProcessingStorage(root, '-again');
   }
   f.capability = await verifyWorkflowStorage(f.options);
   await assert.rejects(reinspectProcessing(f.capability, args), { code: {
@@ -312,19 +315,18 @@ for (const change of ['head', 'note', 'policy', 'binding']) test(`uncommitted tr
   assert.equal(await fingerprint(path.join(f.collection.notes.notesDir, 'direct.md')), await fingerprint(contentPath));
 });
 
-for (const change of ['missing', 'edited']) test(`abandonment preserves the archived draft when its original is ${change}`, async t => {
+test('abandonment preserves the archived draft when its original is edited', async t => {
   const f = await fixture(t), before = await preview(f), args = { ...f.request, expectedPreviewHash: before.previewHash };
   await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-copies') throw new Error('interrupted'); } }), /interrupted/);
   const status = await inspectProcessingReinspection(f.capability), request = { expectedRecordHash: status.recordHash };
   const original = f.proposal.plan.files[0].contentPath, archived = path.join(status.retainedDrafts.directory, '0.md');
   const edited = '# Human revised draft\n\n## Decision\n\nUse different wording.\n';
-  if (change === 'missing') await fs.unlink(original);
-  else await fs.writeFile(original, edited);
+  await fs.writeFile(original, edited);
   await assert.rejects(reinspectProcessing(f.capability, args), { code: 'PROCESSING_PROPOSAL_CHANGED' });
   for (let attempt = 0; attempt < 2; attempt++) {
     await assert.rejects(abandonProcessingReinspection(f.capability, request), { code: 'PROCESSING_PROPOSAL_CHANGED' });
     assert.equal(await fs.readFile(archived, 'utf8'), before.files[0].proposed);
-    assert.equal(await fingerprint(original), change === 'missing' ? null : digest(edited));
+    assert.equal(await fingerprint(original), digest(edited));
     assert.equal(await fingerprint(path.join(f.collection.notes.writerStateDir, 'reinspection.json')), status.recordHash);
     assert.deepEqual(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`)), f.originalClaim);
     const pending = await inspectProcessingReinspection(f.capability);
@@ -332,6 +334,102 @@ for (const change of ['missing', 'edited']) test(`abandonment preserves the arch
   }
   assert.equal(await fingerprint(f.proposal.target), null);
   assert.deepEqual(await fs.readFile(f.options.configPath), f.settings);
+});
+
+test('abandonment restores a missing original from its exact archive and resumes interrupted restoration', async t => {
+  const f = await fixture(t), before = await preview(f), args = { ...f.request, expectedPreviewHash: before.previewHash };
+  await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-copies') throw new Error('interrupted'); } }), /interrupted/);
+  const status = await inspectProcessingReinspection(f.capability), request = { expectedRecordHash: status.recordHash };
+  const original = f.proposal.plan.files[0].contentPath, archived = path.join(status.retainedDrafts.directory, '0.md');
+  await fs.unlink(original);
+  await assert.rejects(reinspectProcessing(f.capability, args), { code: 'PROCESSING_PROPOSAL_CHANGED' });
+  await assert.rejects(abandonProcessingReinspection(f.capability, request,
+    { fault: at => { if (at === 'reinspection-abandon-restored') throw new Error('interrupted'); } }), /interrupted/);
+  assert.equal(await fs.readFile(original, 'utf8'), before.files[0].proposed);
+  assert.equal(await fs.readFile(archived, 'utf8'), before.files[0].proposed);
+  assert.equal((await abandonProcessingReinspection(f.capability, request)).status, 'abandoned');
+  assert.equal(await fingerprint(archived), null);
+  assert.equal((await inspectProcessingReinspection(f.capability)).state, 'missing');
+  assert.equal((await preview(f)).previewHash, before.previewHash);
+  assert.equal(await fingerprint(f.proposal.target), null);
+  assert.deepEqual(await fs.readFile(f.options.configPath), f.settings);
+});
+
+test('an interrupted original-claim archive is inert and reusable, but changed archived bytes refuse transfer', async t => {
+  const f = await fixture(t), before = await preview(f), args = { ...f.request, expectedPreviewHash: before.previewHash };
+  await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-source') throw new Error('interrupted'); } }), /interrupted/);
+  assert.equal((await inspectProcessingReinspection(f.capability)).state, 'missing');
+  await assert.rejects(reinspectProcessing(f.capability, args, { fault: at => { if (at === 'reinspection-intent') throw new Error('interrupted'); } }), /interrupted/);
+  const marker = JSON.parse(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'reinspection.json')));
+  const archive = path.join(f.collection.notes.writerStateDir, marker.claim.path);
+  const original = await fs.readFile(archive);
+  assert.equal(digest(original), args.expectedClaimHash);
+  await fs.writeFile(archive, canonicalJSON({ altered: true }) + '\n');
+  await assert.rejects(reinspectProcessing(f.capability, args), { code: 'PROCESSING_CLAIM_CHANGED' });
+  assert.equal(await fingerprint(f.proposal.target), null);
+});
+
+test('a transfer reservation leaves missing and unrelated completed operations historical', async t => {
+  const f = await processingFixture(t), cancelled = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: cancelled.claimHash, outcome: 'cancelled' });
+  const oldId = f.operationId;
+  f.operationId = randomUUID(); f.args.operationId = f.operationId;
+  const proposal = await proposedClaim(f);
+  await replaceRoots(f);
+  const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
+  const before = await previewProcessingReinspection(f.capability, request);
+  await assert.rejects(reinspectProcessing(f.capability, { ...request, expectedPreviewHash: before.previewHash },
+    { fault: at => { if (at === 'reinspection-intent') throw new Error('interrupted'); } }), /interrupted/);
+  for (const [id, state] of [[randomUUID(), 'missing'], [oldId, 'completed']]) {
+    const actual = await inspectProcessing(f.capability, id);
+    assert.equal(actual.state, state); assert.equal(actual.nextAction, null);
+    assert.equal(actual.conflict, null); assert.deepEqual(actual.blockers, []);
+  }
+});
+
+test('a transfer uses the same default admission bound as normal preparation', async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  const other = await processingFixture(t, { base: f });
+  const active = await prepareProcessing(f.capability, { ...other.args, inputs: other.inputs });
+  await replaceProcessingStorage(f.collection.notes.notesDir);
+  const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
+  await assert.rejects(previewProcessingReinspection(f.capability, request), error => {
+    assert.equal(error.code, 'PROCESSING_RESUME_REQUIRED');
+    assert.equal(error.details.limit, 1); assert.deepEqual(error.details.operationIds, [other.operationId]); return true;
+  });
+  assert.equal(await fingerprint(path.join(f.collection.notes.writerStateDir, 'reinspection.json')), null);
+  await completeProcessing(f.capability, { ...other.args, expectedClaimHash: active.claimHash, outcome: 'cancelled' });
+  assert((await previewProcessingReinspection(f.capability, request)).previewHash);
+});
+
+test('a reserved shortcut refuses cancellation without dropping worksets or changing its checkpoint', async t => {
+  const f = await processingFixture(t);
+  const shortcut = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() });
+  const workset = shortcut.worksets[0];
+  const prepared = await prepareWorksetBatch(f.capability, { worksetId: workset.worksetId,
+    expectedWorksetHash: workset.worksetHash, indexes: [0] });
+  // Publish this workset draft, then transfer it and interrupt after the successor
+  // commits. The checkpoint still owns the workset while projection is blocked.
+  const inspected = await inspectAll(f, prepared.operationId);
+  const proposal = await proposedClaim({ ...f, operationId: prepared.operationId,
+    args: { ...f.args, operationId: prepared.operationId } }, { claim: inspected });
+  await replaceProcessingStorage(f.collection.notes.notesDir);
+  const request = { selection: f.selection, operationId: prepared.operationId, replacementOperationId: randomUUID(),
+    expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
+  const before = await previewProcessingReinspection(f.capability, request);
+  await assert.rejects(reinspectProcessing(f.capability, { ...request, expectedPreviewHash: before.previewHash },
+    { fault: at => { if (at === 'reinspection-claim') throw new Error('interrupted'); } }), /interrupted/);
+  const blocked = await inspectProcessingShortcut(f.capability, { selection: f.selection });
+  assert(blocked.blockers.includes('PROCESSING_REINSPECTION_REQUIRED'));
+  await assert.rejects(cancelProcessingShortcut(f.capability, { selection: f.selection, expectedCheckpointHash: blocked.checkpointHash },
+    { assertStopped: async () => {}, canResumeOperation: async () => true }), { code: 'PROCESSING_REINSPECTION_REQUIRED' });
+  const after = await inspectProcessingShortcut(f.capability, { selection: f.selection });
+  assert.equal(after.checkpointHash, blocked.checkpointHash); assert.equal(after.phase, blocked.phase);
+  await assert.rejects(createProcessingWorkset(f.capability, { selection: f.selection, worksetId: randomUUID(), inputs: f.inputs }),
+    { code: 'PROCESSING_REINSPECTION_REQUIRED' });
+  await assert.rejects(prepareWorksetBatch(f.capability, { worksetId: workset.worksetId,
+    expectedWorksetHash: prepared.workset.worksetHash, indexes: [0] }), { code: 'PROCESSING_REINSPECTION_REQUIRED' });
+  assert.equal((await inspectProcessing(f.capability, request.replacementOperationId)).outcome, null);
 });
 
 for (const phase of ['reinspection-abandon-intent', 'reinspection-abandon-copies']) test(`abandonment resumes exactly after ${phase}`, async t => {
@@ -357,8 +455,7 @@ for (const change of ['policy', 'binding']) test(`committed transfer finishes me
     f.config.routes[0].processing.mode = 'prompted'; const bytes = JSON.stringify(f.config);
     await fs.writeFile(f.options.configPath, bytes); f.options.expectedConfigHash = digest(bytes);
   } else {
-    const root = f.collection.rawDir; await fs.rename(root, `${root}-again`);
-    await fs.cp(`${root}-again`, root, { recursive: true, preserveTimestamps: true });
+    const root = f.collection.rawDir; await replaceProcessingStorage(root, '-again');
   }
   f.capability = await verifyWorkflowStorage(f.options);
   assert.equal((await inspectProcessingReinspection(f.capability)).nextAction, 'processing-reinspect');
@@ -371,13 +468,13 @@ test('existing shortcut and completed original project the transfer blocker and 
   const f = await processingFixture(t);
   await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() });
   const proposal = await proposedClaim(f), root = f.collection.notes.notesDir;
-  await fs.rename(root, `${root}-old`); await fs.cp(`${root}-old`, root, { recursive: true, preserveTimestamps: true });
+  await replaceProcessingStorage(root, '-old');
   const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
   const before = await previewProcessingReinspection(f.capability, request);
   await assert.rejects(reinspectProcessing(f.capability, { ...request, expectedPreviewHash: before.previewHash },
     { fault: at => { if (at === 'reinspection-cancellation') throw new Error('interrupted'); } }), /interrupted/);
   const original = await inspectProcessing(f.capability, f.operationId);
-  assert.equal(original.state, 'blocked'); assert(original.blockers.includes('PROCESSING_REINSPECTION_REQUIRED'));
+  assert.equal(original.state, 'completed'); assert(original.blockers.includes('PROCESSING_REINSPECTION_REQUIRED'));
   assert.deepEqual(original.nextAction, { command: 'processing-reinspection-status' });
   const shortcut = await inspectProcessingShortcut(f.capability, { selection: f.selection });
   assert(shortcut.blockers.includes('PROCESSING_REINSPECTION_REQUIRED')); assert.equal(shortcut.nextRun, null);
@@ -396,6 +493,16 @@ test('one draft can be reproposed while another old draft remains and its archiv
   const transferred = await reinspectProcessing(f.capability, args), inspected = await inspectAll(f, transferred.replacementOperationId);
   await proposeProcessing(f.capability, { selection: f.selection, operationId: transferred.replacementOperationId,
     expectedClaimHash: inspected.claimHash, proposal: transferred.proposal });
+  for (const inventory of [await pendingCollectionProcessing(f.capability, { selection: f.selection }),
+    await pendingProcessing(f.capability, { selection: f.selection })]) {
+    const healthy = inventory.operations.find(item => item.operationId === transferred.replacementOperationId);
+    assert.equal(healthy.state, 'awaiting-review'); assert.deepEqual(healthy.blockers, []);
+  }
+  const inventory = await pendingCollectionProcessing(f.capability, { selection: f.selection });
+  const status = processingStatusView({ state: 'missing', requestId: null },
+    { phase: 'ready', operations: [], worksets: [], blockers: ['PROCESSING_BINDING_CHANGED'] }, { inventory });
+  assert.equal(status.status, 'awaiting-review'); assert.equal(status.nextAction, 'review');
+  assert.deepEqual(status.diagnostics, []);
   const requestB = { ...b.args, replacementOperationId: randomUUID(), expectedClaimHash: bp.claimHash, expectedProposalHash: bp.proposalHash };
   const previewB = await previewProcessingReinspection(f.capability, requestB);
   await assert.rejects(reinspectProcessing(f.capability, { ...requestB, expectedPreviewHash: previewB.previewHash },
@@ -406,15 +513,54 @@ test('one draft can be reproposed while another old draft remains and its archiv
   assert.deepEqual(await reinspectProcessing(f.capability, args), transferred);
 });
 
+test('a shared writer reservation identifies its owning collection without suggesting local recovery', async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  const other = await processingFixture(t);
+  other.collection.id = 'another-collection'; other.options.collectionId = other.collection.id;
+  other.collection.notes = { ...f.collection.notes };
+  other.config.routes[0].collectionId = other.collection.id;
+  const config = JSON.stringify(other.config);
+  await fs.writeFile(other.options.configPath, config); other.options.expectedConfigHash = digest(config);
+  other.capability = await verifyWorkflowStorage(other.options);
+  const active = await prepareProcessing(other.capability, { ...other.args, inputs: other.inputs });
+  await replaceProcessingStorage(f.collection.notes.notesDir);
+  const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
+  const before = await previewProcessingReinspection(f.capability, request);
+  await assert.rejects(reinspectProcessing(f.capability, { ...request, expectedPreviewHash: before.previewHash },
+    { fault: at => { if (at === 'reinspection-intent') throw new Error('interrupted'); } }), /interrupted/);
+  const operation = await inspectProcessing(other.capability, other.operationId);
+  assert.equal(operation.state, 'blocked'); assert(operation.blockers.includes('writer-reserved-by-another-collection'));
+  assert.notEqual(operation.nextAction?.command, 'processing-reinspection-status');
+  const status = await inspectProcessingReinspection(other.capability);
+  assert.equal(status.state, 'reserved'); assert.equal(status.blocker, 'writer-reserved-by-another-collection');
+  assert.equal(status.nextAction, 'inspect-owning-collection'); assert.equal(status.args, undefined);
+  const inventory = await pendingCollectionProcessing(other.capability, { selection: other.selection });
+  assert(inventory.blockers.includes('writer-reserved-by-another-collection'));
+  await assert.rejects(completeProcessing(other.capability, { ...other.args, expectedClaimHash: active.claimHash, outcome: 'cancelled' }),
+    { code: 'PROCESSING_REINSPECTION_REQUIRED' });
+  assert.equal((await inspectProcessing(other.capability, other.operationId)).claimHash, active.claimHash);
+});
+
 test('reinspection stores a large valid proposal once within the metadata bound', async t => {
   const f = await processingFixture(t), captures = [f];
-  for (let index = 1; index < 12; index++) captures.push(await processingFixture(t, { base: f }));
+  for (let index = 1; index < 20; index++) captures.push(await processingFixture(t, { base: f }));
   f.inputs = captures.flatMap(item => item.inputs);
   const claim = await inspectedClaim(f, { budget: { maxInputs: 20, maxPacketBytes: 64 * 1024 } });
   const contentPath = path.join(f.root, 'large-proposal.md'); await fs.writeFile(contentPath, '# Rollout\n\n## Decision\n\nKeep it paused.\n');
-  const files = Array.from({ length: 100 }, (_, i) => ({ path: `${String(i).padStart(3, '0')}-${'topic-'.repeat(30)}.md`,
+  const files = Array.from({ length: 100 }, (_, i) => ({ path: `${'group-'.repeat(10)}/${String(i).padStart(3, '0')}-topic.md`,
     contentPath, expectedHash: null, expectedContentHash: digest('# Rollout\n\n## Decision\n\nKeep it paused.\n') }));
-  const mappings = captures.map(item => ({ identity: item.identity, paths: files.map(file => file.path) }));
+  const mappingsFor = () => captures.map(item => ({ identity: item.identity, paths: files.map(file => file.path) }));
+  await fs.mkdir(path.join(f.collection.notes.notesDir, path.dirname(files[0].path)));
+  // Source-path lengths differ by OS. Size the synthetic filenames to keep the
+  // original claim valid near 1 MiB on every host, without changing runtime limits.
+  const originalClaim = JSON.parse(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`)));
+  const value = await buildProcessingProposal(await readProcessingState(f.capability, f.selection, 'explicitProcess'),
+    originalClaim, { files, mappings: mappingsFor() });
+  const initialSize = Buffer.byteLength(canonicalJSON({ ...originalClaim, proposalIntent: { hash: proposalHash(value), value } }) + '\n');
+  const padding = Math.floor((1000000 - initialSize) / (files.length * (captures.length + 1)));
+  assert(padding > 0 && padding < 240);
+  for (const file of files) file.path = file.path.replace('.md', `${'x'.repeat(padding)}.md`);
+  const mappings = mappingsFor();
   const proposal = await proposeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, proposal: { files, mappings } });
   await replaceRoots(f);
   const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
@@ -422,8 +568,13 @@ test('reinspection stores a large valid proposal once within the metadata bound'
   await assert.rejects(reinspectProcessing(f.capability, { ...request, expectedPreviewHash: before.previewHash },
     { fault: at => { if (at === 'reinspection-intent') throw new Error('interrupted'); } }), /interrupted/);
   const bytes = await fs.readFile(path.join(f.collection.notes.writerStateDir, 'reinspection.json')), record = JSON.parse(bytes);
-  const proposalBytes = Buffer.byteLength(canonicalJSON(record.claim.proposalIntent.value));
-  assert(bytes.length < 1024 * 1024); assert(bytes.length + 2 * proposalBytes > 1024 * 1024);
+  const original = await fs.readFile(path.join(f.collection.notes.writerStateDir, record.claim.path));
+  assert.equal(digest(original), proposal.claimHash);
+  assert(bytes.length < 1024 * 1024); assert(original.length < 1024 * 1024);
+  assert(original.length > 950 * 1024, `claim must exercise the near-limit case: ${original.length} bytes`);
   const status = await inspectProcessingReinspection(f.capability);
-  await abandonProcessingReinspection(f.capability, { expectedRecordHash: status.recordHash });
+  const transferred = await reinspectProcessing(f.capability, status.args);
+  assert.equal(transferred.status, 'transferred');
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'completed');
+  assert.equal((await inspectProcessing(f.capability, transferred.replacementOperationId)).state, 'unread');
 });

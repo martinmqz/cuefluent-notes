@@ -1,11 +1,12 @@
 import path from 'node:path';
+import { PROCESSING_REINSPECTION_FILE } from './writer-protocol.mjs';
 import { lstatOrNull } from './file-io.mjs';
 import { inside } from './workflow-paths.mjs';
 import { assertWorkflowStorage } from './workflow-storage.mjs';
 import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
 import { readSelection, readCaptureHead } from './intake-store.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
-import { readProcessingState, nativeNamePage, processingNames, processingSnapshot } from './processing-state.mjs';
+import { readProcessingState, nativeNamePage, processingNames, processingSnapshot, processingReinspectionBlocker } from './processing-state.mjs';
 import { activeProcessingClaims, describeProcessingOperation } from './processing.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
 import { PROCESSING_INTERFACE_VERSION, claimPath, sameProcessingPlacement } from './processing-contract.mjs';
@@ -44,11 +45,11 @@ async function recoverySnapshot(ctx) {
     transactions.push({ name, hash: saved.hash, operationId: value.bindingHash === ctx.bindingHash || sameProcessingPlacement(value?.claim?.binding, ctx.binding) ? nativeId(value.operationId) : null });
   }
   const journal = await processingSnapshot(ctx, 'journal.json');
-  const reinspection = await processingSnapshot(ctx, 'reinspection.json');
+  const reinspection = await processingSnapshot(ctx, PROCESSING_REINSPECTION_FILE);
   const pending = await intakeSnapshot(ctx.store, 'state', 'pending.json');
   const prune = await intakeSnapshot(ctx.store, 'state', 'prune-pending.json');
   return { transactions, journalHash: journal.hash, reinspectionHash: reinspection.hash, pendingHash: pending.hash, pruneHash: prune.hash,
-    blockers: [...(reinspection.bytes ? ['PROCESSING_REINSPECTION_REQUIRED'] : []), ...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []),
+    blockers: [...(reinspection.bytes ? [await processingReinspectionBlocker(ctx, reinspection)] : []), ...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []),
       ...(journal.bytes ? ['WRITER_RECOVERY_REQUIRED'] : []), ...(intakeJSON(pending) !== null ? ['INTAKE_RECOVERY_REQUIRED'] : []),
       ...(intakeJSON(prune) !== null ? ['PRUNE_RECOVERY_REQUIRED'] : [])] };
 }

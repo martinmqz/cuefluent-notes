@@ -509,6 +509,10 @@ remain visible as `conflicted` with `PROCESSING_BINDING_CHANGED`. Their revision
 are `blocked-by-claim`; `PROCESSING_BINDING_CHANGED` also blocks all new preparation
 in the collection, including unrelated pending revisions. This metadata view does
 not establish storage continuity or authorize a save under the changed binding.
+It does not block review of a healthy current-binding proposal. An unapplied stale
+claim's next action is exact `processing-complete` cancellation; completed history
+does not retain a binding conflict after cleanup. A transfer reservation does not
+turn missing or completed operations into active work.
 For unchanged bindings, both views check every claimed input's
 head/tombstone/association metadata regardless of inventory pagination. A binding
 conflict stops those input checks. Collection-wide transaction, writer, intake and prune
@@ -632,6 +636,9 @@ shared claims. A discovery result grants no permission to save notes.
    To cancel a pending transaction, supply its recovery hash from
    `processing-status`. This works only before a writer journal or receipt exists;
    staged/applied writes remain recovery conflicts. Cancellation preserves notes.
+   At unchanged configured placement, cancellation also permits a changed physical
+   binding: it records the original namespace and writes no dispositions. Exact
+   cancellation receipts can resume metadata cleanup with `processing-recover`.
 
 Do not prepare or synthesize another copy when a claim/proposal is already pending.
 `processing-status`: `{operationId}` returns current operation/recovery state.
@@ -659,7 +666,10 @@ All use the ordinary collection/configuration envelope.
   `proposal` request whose `contentPath` values refer to the private archives.
   Follow `processing-status`, `processing-page`, `processing-ack`,
   `processing-propose`, `processing-proposal`, then separately approved
-  `processing-save`. Transfer itself never saves notes.
+  `processing-save`. Transfer itself never saves notes and respects default
+  parallelism of one unpublished claim. Original claim metadata and draft bytes
+  are archived separately. Completed transfers retain both indefinitely;
+  abandonment retains the claim archive and removes only verified draft copies.
 - `processing-reinspection-status`: `{operationId?}`. Without an ID, discovers
   the one pending transfer; with the original ID, returns its pending or archived
   record, even while a different transfer is pending (`otherPendingTransfer`).
@@ -668,13 +678,17 @@ All use the ordinary collection/configuration envelope.
   archive location/count/retention in `retainedDrafts`, and `nextAction`. This is
   metadata-only and does not grant new consent. Completed transfer is historical,
   not proof that its replacement remains pending or has been saved.
+  Without an ID, a different collection's writer reservation instead returns
+  `state: "reserved"`, `blocker: "writer-reserved-by-another-collection"` and
+  `nextAction: "inspect-owning-collection"`, with no local retry args.
 
 - `processing-reinspection-abandon`: `{expectedRecordHash}` from reinspection
   status. Only before a successor claim exists: archive the exact intent, remove
   only its matching owned copies and release the transfer blocker. The original
-  durable draft must still match before an archived copy is removed; otherwise
-  `PROCESSING_PROPOSAL_CHANGED` preserves the archive and pending intent. The original
-  claim/draft and all notes and evidence remain unchanged. The same request resumes
+  durable draft must still match before an archived copy is removed. A missing
+  original is first restored from the exact archive; an edited original reports
+  `PROCESSING_PROPOSAL_CHANGED` and preserves both versions and the pending intent.
+  The original claim and all notes and evidence remain unchanged. The same request resumes
   interrupted abandonment; it never creates or approves a replacement. Once a
   successor exists, finish transfer bookkeeping instead.
 

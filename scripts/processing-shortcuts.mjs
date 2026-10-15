@@ -67,7 +67,7 @@ async function project(capability, saved) {
   const inspectOrBlock = async run => {
     try { return await run(); }
     catch (error) {
-      if (error.code !== 'PROCESSING_REINSPECTION_REQUIRED') throw error;
+      if (!['PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection'].includes(error.code)) throw error;
       projectionBlockers.push(error.code); return null;
     }
   };
@@ -140,7 +140,7 @@ export async function selectProcessingShortcut(capability, { selection, requestI
   const ctx = await readProcessingState(capability, selection, 'explicitProcess');
   let saved = await load(ctx), previous = await project(capability, saved);
   const projectedHash = saved.hash;
-  if (previous.blockers?.includes('PROCESSING_REINSPECTION_REQUIRED')) return { ...previous, nextRun: null, reason: 'recovery' };
+  if (previous.blockers?.some(code => ['PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection'].includes(code))) return { ...previous, nextRun: null, reason: 'recovery' };
   if (saved.value?.phase === 'cancelling') fail('PROCESSING_CANCELLATION_PENDING');
   const continuing = saved.value && saved.value.phase !== 'cancelled' &&
     (saved.value.phase === 'discovering' || previous.nextRun || previous.continuationNeeded || previous.reviews.length || previous.blockers.length || previous.counts.unavailable);
@@ -243,6 +243,7 @@ export async function cancelProcessingShortcut(capability, { selection, expected
   if (saved.value.phase === 'cancelled') return project(capability, saved);
   await assertStopped();
   const before = await project(capability, saved);
+  if (before.blockers?.some(code => ['PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection'].includes(code))) fail('PROCESSING_REINSPECTION_REQUIRED');
   // Refusal must leave the previous phase intact. Recheck after publication for
   // races, but do not start durable cancellation with a known uncancellable op.
   for (const operation of before.operations) {
@@ -304,7 +305,7 @@ export async function beginProcessingShortcutControl(capability, { selection, re
       policyHash: ctx.policyHash, selection, action, argsHash, targetRequestId: current.value?.id ?? null, response: null };
     const written = await writeProcessingJSON(ctx, file, value, null);
     return { ...value, controlHash: written.hash };
-  });
+  }, { allowReinspection: true });
 }
 export async function finishProcessingShortcutControl(capability, control, response, { beforePublish } = {}) {
   // response is the bounded public projection, not arbitrary model text.
@@ -316,7 +317,7 @@ export async function finishProcessingShortcutControl(capability, control, respo
     if (!equal(intakeJSON(saved), value)) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT');
     if (value.response !== null) { if (!equal(value.response, response)) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT'); return; }
     await writeProcessingJSON(ctx, file, { ...value, response: structuredClone(response) }, saved.hash, { beforePublish });
-  });
+  }, { allowReinspection: true });
 }
 
 // Called under the intake lock used by native reserve/begin. Cancelling writes

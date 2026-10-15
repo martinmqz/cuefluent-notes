@@ -153,6 +153,14 @@ notes root/parent, invalidates the old operation's authority. Equal paths, bytes
 inode numbers or timestamps do not establish continuity. Do not edit persisted
 bindings, refresh old hashes, remove the claim, or reuse its approval.
 
+An unapplied claim, including unread or partially inspected work, can be explicitly
+cancelled with its exact inspected claim hash at the same configured placement.
+Cancellation records the old binding, releases the claim and writes no input
+dispositions. If a transaction exists, its exact recovery hash is also required;
+a writer journal or receipt still requires recovery. Completed operations remain
+historical results, not active binding conflicts. A stale claim blocks new admission,
+but does not prevent inspection or review of another current-binding operation.
+
 For a fully inspected, published proposal **before any write transaction or
 receipt**, the standalone [reinspection commands](workflow-cli.md#draft-reinspection)
 can preserve its text and start a fresh operation. This applies to either client.
@@ -168,7 +176,9 @@ copies remain intact. Changed settings, evidence, text, destinations, unsafe pat
 pruned inputs and started writes remain conflicts; this is not a general repair.
 
 After reviewing the preview, use its exact hash with the same original hashes
-and a fresh replacement operation ID. Transfer archives the unchanged draft text,
+and a fresh replacement operation ID. Transfer respects the default limit of one
+active, unpublished claim; finish or cancel other active inspection work first.
+It archives the unchanged draft text and the exact original claim separately,
 creates a new unread claim and cancels the old unapplied operation without marking
 its inputs handled. The old claim/proposal intent remains in its cancellation
 receipt. No note is written, no settings are changed, and no old page acknowledgment
@@ -186,18 +196,25 @@ direct writing and capture pruning until that exact transfer finishes. Use
 Before the replacement claim is committed, changed evidence, note text, settings
 or storage can prevent replay. Explicit `processing-reinspection-abandon` with the
 inspected record hash archives the intent and removes only its exact owned copies
-when the original durable drafts still match. If an original was edited or removed,
-it preserves the archive and reports `PROCESSING_PROPOSAL_CHANGED`. It leaves the
-original claim/proposal, notes and evidence untouched. An interrupted
+when the original durable drafts still match. A missing original is first restored
+from its matching archive; an edited original preserves both versions and reports
+`PROCESSING_PROPOSAL_CHANGED`. It leaves the original claim/proposal metadata,
+notes and evidence untouched. An interrupted
 abandonment must finish abandonment. After the replacement claim is committed,
 retry finishes metadata only under current maintenance authority, even if policy
-or physical identity changed. The successor still requires its own current checks. If its binding changes before
-it has a published proposal, this draft-only workflow cannot migrate that unread
-claim; report the unresolved conflict instead of starting duplicate processing.
+or physical identity changed. The successor still requires its own current checks.
+If its binding changes before it has a published proposal, explicitly cancel that
+exact claim before selecting fresh work; this workflow cannot migrate an unread claim.
 Malformed state, altered owned copies, changed configured placement or unsafe
 paths remain integrity conflicts; never delete the intent or refresh its hashes.
 Exact completed retries return the historical transfer result without rewriting
 notes or reversing later edits.
+
+A reservation owned by another collection sharing the writer reports
+`writer-reserved-by-another-collection`. Inspect the owning collection's transfer;
+the current collection cannot finish or abandon it. Missing and completed operations
+remain missing or completed while a transfer is pending. Shortcut cancellation
+refuses the reservation rather than dropping worksets whose status is unavailable.
 
 This workflow recovers only the selected draft. It does not migrate completed
 history, frozen worksets, charged budgets or native chat bindings to a new storage

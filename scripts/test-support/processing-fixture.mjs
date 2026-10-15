@@ -9,6 +9,16 @@ import { createCapture } from '../capture-contract.mjs';
 import { digest } from '../workflow-values.mjs';
 import { fingerprint } from '../safe-update.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing } from '../processing.mjs';
+import { privacyIdentity, protectNewDirectory } from '../storage-platform.mjs';
+
+/** Replace a synthetic storage root while retaining its private ACL contract.
+ * fs.cp does not copy Windows ACLs; protect the empty replacement before copying. */
+export async function replaceProcessingStorage(root, suffix = '-original') {
+  await fs.rename(root, `${root}${suffix}`);
+  await fs.mkdir(root, { mode: 0o700 });
+  if (process.platform === 'win32') await protectNewDirectory(root, await privacyIdentity());
+  await fs.cp(`${root}${suffix}`, root, { recursive: true, preserveTimestamps: true });
+}
 
 export async function processingFixture(t, { base, client = 'codex', terminal = client === 'claude' ? 'unconfirmed' : 'completed', omissions = [], text = 'Synthetic meeting: keep the rollout paused.', evidence, nativeIdentity } = {}) {
   const f = base ?? await storageFixture(t, { fullSetup: false });

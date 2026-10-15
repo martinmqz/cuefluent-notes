@@ -5,6 +5,11 @@ import { lstatOrNull, readBoundedBytes, sameFileIdentity, syncDirectory } from '
 import { keys, nativeId, hash, timestamp, canonicalJSON, digest, fail, list } from './workflow-values.mjs';
 
 const LIMIT = 2 * 1024 * 1024;
+export const PROCESSING_REINSPECTION_FILE = 'reinspection.json';
+export const hasProcessingReinspection = async stateDir => Boolean(await lstatOrNull(path.join(stateDir, PROCESSING_REINSPECTION_FILE)));
+export async function assertNoProcessingReinspection(stateDir) {
+  if (await hasProcessingReinspection(stateDir)) fail('PROCESSING_REINSPECTION_REQUIRED');
+}
 const equal = (a, b) => canonicalJSON(a) === canonicalJSON(b);
 export function validateWriterBinding(value) {
   keys(value, ['operationId', 'proposalHash', 'inputsHash', 'collectionHash', 'root', 'stateDir']);
@@ -41,7 +46,7 @@ async function readJSON(file) {
 
 /** A pending processing transaction reserves the entire writer until reconciled. */
 export async function assertWriterAccess(stateDir, coordination = null) {
-  if (await lstatOrNull(path.join(stateDir, 'reinspection.json'))) fail('PROCESSING_REINSPECTION_REQUIRED');
+  await assertNoProcessingReinspection(stateDir);
   if (coordination) { validateWriterCoordination(coordination); if (coordination.binding.stateDir !== stateDir) fail('WRITER_BINDING_MISMATCH'); }
   const transactions = await directory(stateDir, 'transactions');
   const names = [];

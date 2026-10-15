@@ -3,7 +3,7 @@ import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflo
 import { logicalCaptureIdentity } from './capture-contract.mjs';
 import { unitKey, readTombstone, dispositionPath, validateProcessingDisposition } from './capture-retention.mjs';
 import { intakeSnapshot, intakeJSON } from './intake-io.mjs';
-import { readProcessingState, withProcessingState, processingSnapshot, writeProcessingJSON, processingNamePage } from './processing-state.mjs';
+import { readProcessingState, withProcessingState, processingReinspectionBlocker, processingSnapshot, writeProcessingJSON, processingNamePage } from './processing-state.mjs';
 import { claimPath, operationPath, PROCESSING_INTERFACE_VERSION, validateProcessingSelection } from './processing-contract.mjs';
 import { describeProcessingOperation, prepareProcessingInState, processingBudget, activeProcessingClaims, processingCollectionBlockers } from './processing.mjs';
 import { keys, nativeId, hash, integer, list, unique, timestamp, canonicalJSON, digestId, fail } from './workflow-values.mjs';
@@ -126,7 +126,8 @@ export async function prepareWorksetBatch(capability, { worksetId, expectedWorks
 }
 
 async function inspectInputStates(ctx, inputs, policyHash, operations = [], attempts = []) {
-  if ((await processingSnapshot(ctx, 'reinspection.json')).bytes) fail('PROCESSING_REINSPECTION_REQUIRED');
+  const reservation = await processingReinspectionBlocker(ctx);
+  if (reservation) fail(reservation);
   const claims = await activeProcessingClaims(ctx, { allowBindingConflict: true }), items = [];
   const bindingConflict = claims.some(item => item.bindingChanged);
   for (let index = 0; index < inputs.length; index++) {
@@ -141,7 +142,7 @@ async function inspectInputStates(ctx, inputs, policyHash, operations = [], atte
     const pruned = Boolean(await readTombstone(ctx.store, input.identity));
     const attempt = attempts.find(item => item.indexes.includes(index));
     const blocked = (attempt?.policyHash ?? policyHash) !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
-      : bindingConflict ? 'PROCESSING_BINDING_CHANGED' : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
+      : (owner ? owners[0].bindingChanged : bindingConflict) ? 'PROCESSING_BINDING_CHANGED' : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
     const elsewhere = done && done.operationId !== operation?.operationId;
     // Input disposition is current; operation outcomes remain historical. A
     // cancelled attempt must not hide a later exact save or a new claim owner.
