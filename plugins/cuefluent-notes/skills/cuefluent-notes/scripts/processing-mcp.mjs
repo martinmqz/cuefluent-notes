@@ -16,6 +16,7 @@ import { inspectProcessing } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
+import { assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
@@ -64,11 +65,15 @@ const selectionConflicts = new Set(['WORKFLOW_POLICY_CHANGED', 'PROCESSING_HEAD_
   'PROCESSING_INPUT_ALREADY_HANDLED', 'PROCESSING_SHORTCUT_CAPACITY']);
 
 function blockedInventory(view, blockers) {
+  if (blockers.includes('PROCESSING_REINSPECTION_REQUIRED')) return { ...view, status: 'blocked', statusDetail: 'blocked',
+    nextAction: 'inspect', diagnostics: ['PROCESSING_REINSPECTION_REQUIRED'] };
+  if (blockers.includes('PROCESSING_BINDING_CHANGED')) return { ...view, status: 'blocked', statusDetail: 'blocked',
+    nextAction: 'inspect', diagnostics: ['PROCESSING_BINDING_CHANGED'] };
   if (blockers.length && blockers.every(code => selectionConflicts.has(code))) {
     return { ...view, status: 'blocked', statusDetail: blockers.includes('PROCESSING_SHORTCUT_CAPACITY') ? 'selection-limit' : 'blocked',
       nextAction: 'cancel', diagnostics: [...new Set(blockers.map(code => ['WORKFLOW_POLICY_CHANGED', 'PROCESSING_SHORTCUT_CAPACITY'].includes(code) ? code : 'PROCESSING_SELECTION_CHANGED'))] };
   }
-  const recovery = blockers.some(code => ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED', 'INTAKE_RECOVERY_REQUIRED', 'PRUNE_RECOVERY_REQUIRED'].includes(code));
+  const recovery = blockers.some(code => ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED', 'INTAKE_RECOVERY_REQUIRED', 'PRUNE_RECOVERY_REQUIRED', 'writer-reserved-by-another-collection'].includes(code));
   return { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect',
     diagnostics: recovery ? ['PROCESSING_RECOVERY_REQUIRED'] : blockers.includes('PROCESSING_OPERATION_OWNER_UNVERIFIED') ? ['PROCESSING_OPERATION_OWNER_UNVERIFIED'] : ['PROCESSING_CONTROL_FAILED'] };
 }
@@ -107,9 +112,13 @@ export function processingStatusView(native, shortcut, { inventory, sequence = f
       blockedByClaim: inventory.counts.blockedByClaimRevisions, inspected: inventory.counts.inspectedHeads,
       handled: inventory.counts.handledRevisions, incomplete: inventory.incomplete,
       unfinishedOperations: inventory.operations.length, awaitingReview: reviews.length, sourceCompleteness: inventory.sourceCompleteness };
-    if (!['creating', 'busy', 'blocked'].includes(view.status)) {
-      if (inventory.blockers.length) view = blockedInventory(view, inventory.blockers);
-      else if (reviews.length) view = { ...view, status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+    const admissionOnly = view.status === 'blocked' && view.diagnostics.length > 0 &&
+      view.diagnostics.every(code => code === 'PROCESSING_BINDING_CHANGED');
+    if (!['creating', 'busy', 'blocked'].includes(view.status) || admissionOnly) {
+      const blockingReview = inventory.blockers.filter(code => code !== 'PROCESSING_BINDING_CHANGED');
+      if (blockingReview.length) view = blockedInventory(view, blockingReview);
+      else if (reviews.length) view = { ...view, status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: [] };
+      else if (inventory.blockers.length) view = blockedInventory(view, inventory.blockers);
       else if (inventory.operations.some(item => item.scopeMatch !== 'full')) view = { ...view, status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect', diagnostics: ['PROCESSING_SELECTION_CHANGED'] };
       else if (['missing', 'idle', 'completed'].includes(view.status) && inventory.operations.length && view.nextAction === 'none') {
         view = { ...view, status: 'idle', statusDetail: 'unfinished', nextAction: 'resume' };
@@ -281,9 +290,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (selection && canonicalJSON({ ...selection, unitId: selection.unitId ?? null }) !== canonicalJSON(source.selection)) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
     const replay = await replayControl(source); if (replay) return replay;
-    const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, { selection: source.selection,
-      requestId, action: mode, argsHash: source.argsHash }));
-    controls.set(source, control); if (control.response) return control.response;
+    const args = { selection: source.selection, requestId, action: mode, argsHash: source.argsHash };
+    // Shortcut replies also survive without a capture-exclusion receipt. Exact
+    // completed redelivery needs no launch credential and must not create state.
+    const prior = await withStorageProbes(() => readProcessingShortcutControl(capability, args));
+    if (prior?.response) { controls.set(source, prior); return prior.response; }
     const existing = await activeJob(key, source, signal); if (existing) return existing;
     let announce, rejectAdmission, releaseDispatch, rejectDispatch;
     const admission = new Promise((resolve, reject) => { announce = resolve; rejectAdmission = reject; });
@@ -303,8 +314,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     let current, shortcut;
     try {
       signal?.throwIfAborted(); current = await controller.status({ selection: source.selection });
-      current = await acknowledgeFinishedReview(controller, capability, current);
-      if (await controller.hasRequest(requestId)) { await controller.close(); return viewOf(current); }
+      if (await controller.hasRequest(requestId)) {
+        current = await acknowledgeFinishedReview(controller, capability, current, { persist: false });
+        await controller.close(); return viewOf(current);
+      }
       const activity = await controller.collectionActivity(), competing = activity.find(item => !item.own);
       if (competing) {
         await controller.close();
@@ -314,6 +327,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         return ['creating', 'busy'].includes(other.status) ? alreadyProcessing(other) : other;
       }
       if (['creating', 'busy', 'blocked'].includes(current.state)) { await controller.close(); return alreadyProcessing(viewOf(current)); }
+      // Existing activity is a read-only result. Require launch credentials only
+      // after those exits, before control admission or review acknowledgement.
+      if (client === 'claude') assertClaudeHostAuthentication(env);
+      const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, args));
+      controls.set(source, control); if (control.response) { await controller.close(); return control.response; }
+      current = await acknowledgeFinishedReview(controller, capability, current);
       shortcut = await withStorageProbes(() => selectProcessingShortcut(capability, { selection: source.selection, requestId, scope, mode }, { canResumeOperation: id => controller.canResumeOperation(id) }));
       if (!shortcut.nextRun) { await controller.close(); return processingStatusView(current, shortcut); }
       if (current.remainingRuns === 0) { await controller.close(); return processingStatusView(current, shortcut); }
@@ -414,8 +433,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       let status = await controller.status({ selection: source.selection });
       status = await acknowledgeFinishedReview(controller, capability, status);
       const inventory = await withStorageProbes(() => stablePendingCollectionProcessing(capability, { selection: source.selection, limit: 1 }));
-      if (inventory.blockers.length) return blockedInventory(viewOf(status), inventory.blockers);
+      const blockingReview = inventory.blockers.filter(code => code !== 'PROCESSING_BINDING_CHANGED');
+      if (blockingReview.length) return blockedInventory(viewOf(status), blockingReview);
       const proposals = authorizedReviews(inventory);
+      if (!proposals.length && inventory.blockers.length) return blockedInventory(viewOf(status), inventory.blockers);
       let proposal = proposals[0];
       if (proposals.length > 1) {
         const chosen = await elicit({ choices: proposals.map((item, index) => ({ operationId: item.operationId,

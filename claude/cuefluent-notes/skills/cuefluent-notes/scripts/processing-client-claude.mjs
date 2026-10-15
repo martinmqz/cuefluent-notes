@@ -2,7 +2,7 @@ import path from 'node:path';
 import { spawn as nativeSpawn } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import { fail, keys, list, nativeId, object, safeErrorCode, string, unique } from './workflow-values.mjs';
-import { validateClaudeRestrictedSettings } from './processing-claude-settings.mjs';
+import { validateClaudeRestrictedSettings, claudeProcessingEnvironment, assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
 
 const SERVER = 'cuefluent_engine';
 const MAX_PROMPT_BYTES = 64 * 1024, MAX_FRAME_BYTES = 2 * 1024 * 1024;
@@ -55,13 +55,9 @@ export function createClaudeProcessingClient(options, { env: baseEnv = process.e
   // Explicit replacement maps and engine overrides retain strict validation;
   // serialized requests cannot supply the host dependency environment.
   const inheritedEnv = options.env === undefined ? baseEnv : environment(options.env);
-  const env = { ...inheritedEnv, ...engineEnv };
+  assertClaudeHostAuthentication(inheritedEnv);
+  const env = claudeProcessingEnvironment(inheritedEnv, engineEnv);
   const settings = validateClaudeRestrictedSettings(options.settings === undefined ? { disableAllHooks: true } : options.settings);
-  // This explicitly requested native controller owns a separate restricted run.
-  // Do not inherit the enclosing Claude session's nested-launch sentinel.
-  for (const name of Object.keys(env)) {
-    if (name === 'CLAUDECODE' || (process.platform === 'win32' && name.toUpperCase() === 'CLAUDECODE')) delete env[name];
-  }
   const server = { command: engine.command, args: [...engine.args] };
   const mcp = JSON.stringify({ mcpServers: { [SERVER]: server } });
   if (Buffer.byteLength(mcp) > 128 * 1024) fail('INVALID_PROCESSING_CLIENT');

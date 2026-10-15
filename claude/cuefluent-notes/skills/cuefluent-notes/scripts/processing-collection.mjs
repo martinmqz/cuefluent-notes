@@ -1,14 +1,15 @@
 import path from 'node:path';
+import { PROCESSING_REINSPECTION_FILE } from './writer-protocol.mjs';
 import { lstatOrNull } from './file-io.mjs';
 import { inside } from './workflow-paths.mjs';
 import { assertWorkflowStorage } from './workflow-storage.mjs';
 import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
 import { readSelection, readCaptureHead } from './intake-store.mjs';
 import { intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
-import { readProcessingState, nativeNamePage, processingNames, processingSnapshot } from './processing-state.mjs';
+import { readProcessingState, nativeNamePage, processingNames, processingSnapshot, processingReinspectionBlocker } from './processing-state.mjs';
 import { activeProcessingClaims, describeProcessingOperation } from './processing.mjs';
 import { pendingProcessing } from './processing-inventory.mjs';
-import { PROCESSING_INTERFACE_VERSION, claimPath } from './processing-contract.mjs';
+import { PROCESSING_INTERFACE_VERSION, claimPath, sameProcessingPlacement } from './processing-contract.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { CLIENTS, PROCESSING_SCOPES, validateProcessingCursor, choice, nativeId, hash, integer, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
@@ -41,13 +42,14 @@ async function recoverySnapshot(ctx) {
     if (!saved.bytes) fail('PROCESSING_INVENTORY_CHANGED');
     const value = intakeJSON(saved);
     hash(value?.bindingHash);
-    transactions.push({ name, hash: saved.hash, operationId: value.bindingHash === ctx.bindingHash ? nativeId(value.operationId) : null });
+    transactions.push({ name, hash: saved.hash, operationId: value.bindingHash === ctx.bindingHash || sameProcessingPlacement(value?.claim?.binding, ctx.binding) ? nativeId(value.operationId) : null });
   }
   const journal = await processingSnapshot(ctx, 'journal.json');
+  const reinspection = await processingSnapshot(ctx, PROCESSING_REINSPECTION_FILE);
   const pending = await intakeSnapshot(ctx.store, 'state', 'pending.json');
   const prune = await intakeSnapshot(ctx.store, 'state', 'prune-pending.json');
-  return { transactions, journalHash: journal.hash, pendingHash: pending.hash, pruneHash: prune.hash,
-    blockers: [...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []),
+  return { transactions, journalHash: journal.hash, reinspectionHash: reinspection.hash, pendingHash: pending.hash, pruneHash: prune.hash,
+    blockers: [...(reinspection.bytes ? [await processingReinspectionBlocker(ctx, reinspection)] : []), ...(transactions.length ? ['PROCESSING_RECOVERY_REQUIRED'] : []),
       ...(journal.bytes ? ['WRITER_RECOVERY_REQUIRED'] : []), ...(intakeJSON(pending) !== null ? ['INTAKE_RECOVERY_REQUIRED'] : []),
       ...(intakeJSON(prune) !== null ? ['PRUNE_RECOVERY_REQUIRED'] : [])] };
 }
@@ -85,32 +87,54 @@ export async function pendingCollectionProcessing(capability, { selection, scope
     if (sources.has(key)) return sources.get(key);
     if (sources.size >= 256) fail('PROCESSING_INVENTORY_CAPACITY');
     const saved = await readSelection(ctx.store, identity);
-    if (!saved.state) fail('PROCESSING_SOURCE_SELECTION_MISSING');
+    const sourceIdentity = { client: identity.client, sessionId: identity.sessionId };
+    if (!saved.state) {
+      // Retained writer claims can outlive their intake selections. Absence is
+      // not source authorization; keep it in the snapshot for the final recheck.
+      if (saved.hash !== null) fail('PROCESSING_SOURCE_SELECTION_MISSING');
+      const result = { identity: sourceIdentity, selected: null, hash: null, authorized: false };
+      sources.set(key, result); return result;
+    }
     const selected = await normalizeWorkflowSelection({ client: identity.client, sessionId: identity.sessionId,
       cwd: saved.state.source.projectRoot });
     let authorized = true;
     try { await assertWorkflowStorage(capability, selected, 'explicitProcess'); }
     catch (error) { if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error; authorized = false; }
-    const result = { selected, hash: saved.hash, authorized };
+    const result = { identity: sourceIdentity, selected, hash: saved.hash, authorized };
     sources.set(key, result); return result;
   }
-  const recovery = await recoverySnapshot(ctx), { blockers } = recovery, operations = [];
+  const recovery = await recoverySnapshot(ctx), blockers = [...recovery.blockers], operations = [];
   const claimNames = await processingNames(ctx, 'claims');
-  const operationIds = new Set((await activeProcessingClaims(ctx)).map(({ claim }) => claim.operationId));
+  const claims = await activeProcessingClaims(ctx, { allowBindingConflict: true });
+  if (claims.some(item => item.bindingChanged)) blockers.push('PROCESSING_BINDING_CHANGED');
+  const operationIds = new Set(claims.map(({ claim }) => claim.operationId));
   for (const tx of recovery.transactions) if (tx.operationId !== null) operationIds.add(tx.operationId);
   for (const operationId of operationIds) {
     const { claim: _claim, ...operation } = await describeProcessingOperation(ctx, operationId, null, blockers);
     const membership = [];
+    let missingSelection = false;
     for (const input of operation.inputs) {
       const saved = await source(input.identity);
+      if (!saved.selected) missingSelection = true;
       membership.push(saved.authorized && await matches(saved.selected) &&
         (selectedScope.kind !== 'chat' || selectionIncludesIdentity(selectedScope, input.identity)));
+    }
+    if (missingSelection && !operation.outcome) {
+      const previousConflict = operation.conflict;
+      operation.conflict ??= 'PROCESSING_SOURCE_SELECTION_MISSING';
+      operation.blockers.push('PROCESSING_SOURCE_SELECTION_MISSING');
+      // Preserve existing cancellation/recovery guidance, but never offer an
+      // otherwise healthy draft or inspection as authorized without its source.
+      if (!operation.recoveryRequired && operation.state !== 'blocked') {
+        operation.state = 'conflicted';
+        if (!previousConflict) operation.nextAction = { command: null, reason: 'resolve-conflict' };
+      }
     }
     operations.push({ ...operation, scopeMatch: membership.every(Boolean) ? 'full' : membership.some(Boolean) ? 'partial' : 'outside' });
   }
   const pending = []; let inspectedHeads = 0, handledRevisions = 0, visitedSessions = 0, excludedSources = 0, outsideScopeSources = 0;
-  let incomplete = false, cursor = after;
-  const clients = [...CLIENTS].sort();
+  let incomplete = recovery.reinspectionHash !== null, cursor = after;
+  const clients = incomplete ? [] : [...CLIENTS].sort();
   outer: for (const client of clients) {
     if (after && client < after.client) continue;
     if (scope === 'chat' && client !== selection.client) continue;
@@ -128,6 +152,7 @@ export async function pendingCollectionProcessing(capability, { selection, scope
       // enumerate existing session metadata and must not silently lose an entry.
       if (scope === 'chat' && (await readSelection(ctx.store, { client, sessionId })).state === null) continue;
       const saved = await source({ client, sessionId });
+      if (!saved.selected) fail('PROCESSING_INVENTORY_CHANGED');
       if (!saved.authorized || !await matches(saved.selected)) {
         if (!saved.authorized) excludedSources++; else outsideScopeSources++;
         cursor = { scopeHash, client, sessionId, unitId: null }; continue;
@@ -141,7 +166,7 @@ export async function pendingCollectionProcessing(capability, { selection, scope
     if (page.incomplete) { incomplete = true; break; }
   }
   for (const saved of sources.values()) {
-    const { client, sessionId } = saved.selected;
+    const { client, sessionId } = saved.identity;
     if ((await readSelection(ctx.store, { client, sessionId })).hash !== saved.hash) fail('PROCESSING_INVENTORY_CHANGED');
     if (saved.authorized) await assertWorkflowStorage(capability, saved.selected, 'explicitProcess');
   }

@@ -556,7 +556,7 @@ export async function createProcessingChatState(options) {
         return write(tx, saved, next, 'inspect');
       });
     },
-    async acknowledgeReview(args) {
+    async acknowledgeReview(args, { beforePublish } = {}) {
       args = structuredClone(args);
       keys(args, ['expectedHash', 'generation', 'requestId', 'operationId']); expected(args.expectedHash); generation(args.generation);
       nativeId(args.requestId); nativeId(args.operationId);
@@ -576,8 +576,11 @@ export async function createProcessingChatState(options) {
       keys(verified, [...Object.keys(target), 'state', 'recoveryRequired', 'outcome']);
       const { state, recoveryRequired, outcome, ...identity } = verified;
       if (!equal(identity, target) || state !== 'completed' || recoveryRequired !== false || !['saved', 'unchanged', 'skipped', 'cancelled'].includes(outcome)) fail('PROCESSING_CHAT_REVIEW_UNRESOLVED');
-      return locked((tx, saved) => {
+      return locked(async (tx, saved) => {
         current(saved, args.expectedHash, args.generation);
+        // Trusted runtime preflight follows completion proof and the fresh hash
+        // check, but still precedes any acknowledgement mutation.
+        await beforePublish?.();
         const next = structuredClone(saved.value);
         next.runs.find(run => run.request.requestId === args.requestId).reviewResolved = true;
         next.state = 'idle';

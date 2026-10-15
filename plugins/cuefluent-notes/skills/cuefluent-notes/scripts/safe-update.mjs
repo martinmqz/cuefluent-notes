@@ -8,7 +8,7 @@ import { absolute, within, lstatOrNull as existsStat, isMain, readBoundedBytes, 
 import { GUIDE_VERSION, MAX_BYTES, inspectMarkdown, reviewVocabulary, markdownFailureReason } from './check-notes.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { canonicalJSON } from './workflow-values.mjs';
-import { assertWriterAccess, validateWriterCoordination, publishWriterReceipt, readWriterReceipt } from './writer-protocol.mjs';
+import { assertWriterAccess, validateWriterCoordination, publishWriterReceipt, readWriterReceipt, hasProcessingReinspection } from './writer-protocol.mjs';
 import { NOTE_CATEGORIES, isNoteCategory } from './note-organization.mjs';
 import { assertInspectedNoteTransition } from './note-generation.mjs';
 
@@ -404,6 +404,7 @@ async function completeCoordinatedWrite(journal, stateDir, options) {
 /** Metadata only; maintenance must never read note bodies or follow source paths. */
 export async function inspectWriterMaintenance(stateDirInput) {
   const stateDir = await directory(stateDirInput);
+  if (await hasProcessingReinspection(stateDir)) fail('Processing draft reinspection is pending.');
   const read = async name => {
     const file = await stateFile(stateDir, name);
     const opened = await openGuarded(file, { missing: true, maxBytes: MAX_BYTES, singleLink: true });

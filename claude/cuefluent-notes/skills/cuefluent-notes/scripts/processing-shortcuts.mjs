@@ -63,6 +63,14 @@ async function project(capability, saved) {
     operations: [], worksets: [], nextRun: null, incomplete: false, sourceCompleteness: 'unknown' };
   const operations = [];
   for (const operationId of value.operationIds) operations.push(await inspectProcessing(capability, operationId));
+  const projectionBlockers = [];
+  const inspectOrBlock = async run => {
+    try { return await run(); }
+    catch (error) {
+      if (!['PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection'].includes(error.code)) throw error;
+      projectionBlockers.push(error.code); return null;
+    }
+  };
   const worksets = [], items = new Map(value.inputs.map(input => [refKey(input), { input, state: 'unattempted' }]));
   // A crash may publish a deterministic workset before its checkpoint pointer.
   // Include that exact selection in inspection and cancellation, without moving
@@ -70,12 +78,13 @@ async function project(capability, saved) {
   let unlinkedWorkset = null;
   if (value.worksetIds.length < 10) {
     try {
-      unlinkedWorkset = await inspectProcessingWorkset(capability, { worksetId: worksetIdFor(value.id, value.worksetIds.length) });
-      if (!equal(unlinkedWorkset.budget, runBudget) || unlinkedWorkset.unscannedRemainder !== value.incomplete) fail('PROCESSING_WORKSET_CONFLICT');
+      unlinkedWorkset = await inspectOrBlock(() => inspectProcessingWorkset(capability, { worksetId: worksetIdFor(value.id, value.worksetIds.length) }));
+      if (unlinkedWorkset && (!equal(unlinkedWorkset.budget, runBudget) || unlinkedWorkset.unscannedRemainder !== value.incomplete)) fail('PROCESSING_WORKSET_CONFLICT');
     } catch (error) { if (error.code !== 'PROCESSING_WORKSET_MISSING') throw error; }
   }
   for (const worksetId of [...value.worksetIds, ...(unlinkedWorkset ? [unlinkedWorkset.worksetId] : [])]) {
-    const workset = unlinkedWorkset?.worksetId === worksetId ? unlinkedWorkset : await inspectProcessingWorkset(capability, { worksetId });
+    const workset = unlinkedWorkset?.worksetId === worksetId ? unlinkedWorkset : await inspectOrBlock(() => inspectProcessingWorkset(capability, { worksetId }));
+    if (!workset) continue;
     if (!equal(workset.selection, value.selection) || workset.inputs.some(input => !items.has(refKey(input)))) fail('PROCESSING_SELECTION_CHANGED');
     worksets.push(workset);
     for (const item of workset.items) items.set(refKey(workset.inputs[item.index]), { ...item, input: workset.inputs[item.index] });
@@ -84,13 +93,13 @@ async function project(capability, saved) {
   const covered = new Set(worksets.flatMap(workset => workset.inputs.map(refKey)));
   const uncovered = value.inputs.filter(input => !covered.has(refKey(input)));
   if (uncovered.length) {
-    for (const item of await inspectFrozenProcessingInputs(capability, { inputs: uncovered, policyHash: value.policyHash })) {
+    for (const item of await inspectOrBlock(() => inspectFrozenProcessingInputs(capability, { inputs: uncovered, policyHash: value.policyHash })) ?? []) {
       items.set(refKey(uncovered[item.index]), { ...item, input: uncovered[item.index] });
     }
   }
   const unfinished = operations.filter(item => !item.outcome || item.recoveryRequired);
-  const blockers = unfinished.flatMap(item => [...(item.blockers ?? []), ...(item.conflict ? [item.conflict] : []),
-    ...(item.recoveryRequired ? ['PROCESSING_RECOVERY_REQUIRED'] : [])]);
+  const blockers = [...projectionBlockers, ...unfinished.flatMap(item => [...(item.blockers ?? []), ...(item.conflict ? [item.conflict] : []),
+    ...(item.recoveryRequired ? ['PROCESSING_RECOVERY_REQUIRED'] : [])])];
   const reviews = unfinished.filter(item => item.state === 'awaiting-review');
   const last = worksets.at(-1);
   const resumed = unfinished.find(item => value.operationIds.includes(item.operationId));
@@ -108,8 +117,8 @@ async function project(capability, saved) {
   if (continuationNeeded && value.worksetIds.length >= 10) blockers.push('PROCESSING_SHORTCUT_CAPACITY');
   return { interfaceVersion: 1, checkpointHash: saved.hash, requestId: value.id, phase: value.phase, scope: value.scope,
     policyHash: value.policyHash, selection: value.selection, operations, worksets, counts,
-    blockers: [...new Set(blockers)], reviews, nextRun: blockers.length ? null : nextRun, incomplete: value.incomplete,
-    remainingInputs: pending.map(item => reference(item.input)), unlinkedWorksetId: unlinkedWorkset?.worksetId ?? null, continuationNeeded,
+    blockers: [...new Set(blockers)], reviews, nextRun: blockers.length ? null : nextRun, incomplete: value.incomplete || projectionBlockers.length > 0,
+    remainingInputs: pending.map(item => reference(item.input)), unlinkedWorksetId: unlinkedWorkset?.worksetId ?? null, continuationNeeded: !projectionBlockers.length && continuationNeeded,
     sourceCompleteness: 'unknown' };
 }
 
@@ -131,6 +140,7 @@ export async function selectProcessingShortcut(capability, { selection, requestI
   const ctx = await readProcessingState(capability, selection, 'explicitProcess');
   let saved = await load(ctx), previous = await project(capability, saved);
   const projectedHash = saved.hash;
+  if (previous.blockers?.some(code => ['PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection'].includes(code))) return { ...previous, nextRun: null, reason: 'recovery' };
   if (saved.value?.phase === 'cancelling') fail('PROCESSING_CANCELLATION_PENDING');
   const continuing = saved.value && saved.value.phase !== 'cancelled' &&
     (saved.value.phase === 'discovering' || previous.nextRun || previous.continuationNeeded || previous.reviews.length || previous.blockers.length || previous.counts.unavailable);
@@ -233,6 +243,7 @@ export async function cancelProcessingShortcut(capability, { selection, expected
   if (saved.value.phase === 'cancelled') return project(capability, saved);
   await assertStopped();
   const before = await project(capability, saved);
+  if (before.blockers?.some(code => ['PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection'].includes(code))) fail('PROCESSING_REINSPECTION_REQUIRED');
   // Refusal must leave the previous phase intact. Recheck after publication for
   // races, but do not start durable cancellation with a known uncancellable op.
   for (const operation of before.operations) {
@@ -294,7 +305,7 @@ export async function beginProcessingShortcutControl(capability, { selection, re
       policyHash: ctx.policyHash, selection, action, argsHash, targetRequestId: current.value?.id ?? null, response: null };
     const written = await writeProcessingJSON(ctx, file, value, null);
     return { ...value, controlHash: written.hash };
-  });
+  }, { allowReinspection: true });
 }
 export async function finishProcessingShortcutControl(capability, control, response, { beforePublish } = {}) {
   // response is the bounded public projection, not arbitrary model text.
@@ -306,7 +317,7 @@ export async function finishProcessingShortcutControl(capability, control, respo
     if (!equal(intakeJSON(saved), value)) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT');
     if (value.response !== null) { if (!equal(value.response, response)) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT'); return; }
     await writeProcessingJSON(ctx, file, { ...value, response: structuredClone(response) }, saved.hash, { beforePublish });
-  });
+  }, { allowReinspection: true });
 }
 
 // Called under the intake lock used by native reserve/begin. Cancelling writes

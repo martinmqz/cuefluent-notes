@@ -504,8 +504,18 @@ published draft or approval. `nextAction.command` names a CLI operation when one
 applies; null with `reason` means review or conflict resolution requires judgment.
 These hints do not supply missing request fields, approval, or refreshed hashes.
 `freshness: "metadata-only"` is not a declaration that every input/output is current.
-Both views check every claimed input's head/tombstone/association metadata regardless
-of inventory pagination. Collection-wide transaction, writer, intake and prune
+Claims at unchanged configured collection paths with changed physical identities
+remain visible as `conflicted` with `PROCESSING_BINDING_CHANGED`. Their revisions
+are `blocked-by-claim`; `PROCESSING_BINDING_CHANGED` also blocks all new preparation
+in the collection, including unrelated pending revisions. This metadata view does
+not establish storage continuity or authorize a save under the changed binding.
+It does not block review of a healthy current-binding proposal. An unapplied stale
+claim's next action is exact `processing-complete` cancellation; completed history
+does not retain a binding conflict after cleanup. A transfer reservation does not
+turn missing or completed operations into active work.
+For unchanged bindings, both views check every claimed input's
+head/tombstone/association metadata regardless of inventory pagination. A binding
+conflict stops those input checks. Collection-wide transaction, writer, intake and prune
 blockers suppress actionable hints. A fully inspected packet asks for a proposal
 **or a disposition**; inspection alone implies no new knowledge. `selection`,
 `claimHash`, and exact public `inputs` are top-level fields. Inventory omits the
@@ -626,6 +636,9 @@ shared claims. A discovery result grants no permission to save notes.
    To cancel a pending transaction, supply its recovery hash from
    `processing-status`. This works only before a writer journal or receipt exists;
    staged/applied writes remain recovery conflicts. Cancellation preserves notes.
+   At unchanged configured placement, cancellation also permits a changed physical
+   binding: it records the original namespace and writes no dispositions. Exact
+   cancellation receipts can resume metadata cleanup with `processing-recover`.
 
 Do not prepare or synthesize another copy when a claim/proposal is already pending.
 `processing-status`: `{operationId}` returns current operation/recovery state.
@@ -633,6 +646,68 @@ Do not prepare or synthesize another copy when a claim/proposal is already pendi
 hash. Completed save receipts can finish bookkeeping without modifying later user
 edits; incomplete writes require current input/policy/output checks. See
 [processing](processing.md) for durable protocol and coverage limits.
+
+## Draft reinspection
+
+Use these standalone commands only after the user's explicit decision to inspect
+and adopt the current configured storage for a retained unapplied proposal. See
+[eligibility and limits](processing.md#reinspect-a-retained-draft-after-storage-changes).
+All use the ordinary collection/configuration envelope.
+
+- `processing-reinspection-preview`: `{selection, operationId,
+  replacementOperationId, expectedClaimHash, expectedProposalHash}`. Obtain the
+  old hashes from `processing-status` and choose a fresh replacement UUID.
+  Returns `previewHash`, previous/current bindings and directories, exact
+  original/proposed text, source coverage and mappings. Read-only; no Save authority.
+- `processing-reinspect`: the same args plus `expectedPreviewHash` from that
+  reviewed preview. Rechecks the exact inputs and destinations, archives the
+  preserved text, creates an unread replacement claim, and cancels the old claim
+  without disposition. Returns `status: "transferred"`, the replacement ID and a
+  `proposal` request whose `contentPath` values refer to the private archives.
+  Follow `processing-status`, `processing-page`, `processing-ack`,
+  `processing-propose`, `processing-proposal`, then separately approved
+  `processing-save`. Transfer itself never saves notes and respects default
+  parallelism of one unpublished claim. Original claim metadata and draft bytes
+  are archived separately. Completed transfers retain both indefinitely;
+  abandonment retains the claim archive and removes only verified draft copies.
+- `processing-reinspection-status`: `{operationId?}`. Without an ID, discovers
+  the one pending transfer; with the original ID, returns its pending or archived
+  record, even while a different transfer is pending (`otherPendingTransfer`).
+  `state` is `missing`, `transfer-pending` or `transferred`; present records
+  include `recordHash`, `conflict`, exact retry `args`, `canAbandon`, `abandoning`,
+  archive location/count/retention in `retainedDrafts`, and `nextAction`. This is
+  metadata-only and does not grant new consent. Completed transfer is historical,
+  not proof that its replacement remains pending or has been saved.
+  Without an ID, a different collection's writer reservation instead returns
+  `state: "reserved"`, `blocker: "writer-reserved-by-another-collection"` and
+  `nextAction: "inspect-owning-collection"`, with no local retry args.
+
+- `processing-reinspection-abandon`: `{expectedRecordHash}` from reinspection
+  status. Only before a successor claim exists: archive the exact intent, remove
+  only its matching owned copies and release the transfer blocker. The original
+  durable draft must still match before an archived copy is removed. A missing
+  original is first restored from the exact archive; an edited original reports
+  `PROCESSING_PROPOSAL_CHANGED` and preserves both versions and the pending intent.
+  When no archive exists, a missing or edited original keeps the intent pending
+  with the same conflict.
+  The original claim and all notes and evidence remain unchanged. The same request resumes
+  interrupted abandonment; it never creates or approves a replacement. Once a
+  successor exists, finish transfer bookkeeping instead.
+
+An interrupted transfer reports `PROCESSING_REINSPECTION_REQUIRED`. Before its
+replacement claim exists, retry requires the same policy, binding and evidence;
+otherwise explicitly abandon it. After the claim exists, the exact request can
+finish metadata under current maintenance authority without saving notes. During
+this interval, session pending inventory and frozen workset-input views refuse
+with that code; collection and shortcut inventory report the blocker and incomplete
+discovery. Do not treat an empty returned page as an empty queue. `PROCESSING_REINSPECTION_CHANGED` means the
+reviewed intent or current binding no longer matches; inspect before deciding.
+`PROCESSING_REINSPECTION_ABANDONING` requires finishing the exact abandonment,
+and `PROCESSING_REINSPECTION_COMMITTED` refuses abandonment once a successor or
+completion exists. Malformed or tampered state remains blocked for integrity review.
+`PROCESSING_REINSPECTION_NOT_REQUIRED` means bindings and parents still match,
+so use ordinary inspection/review. `PROCESSING_REINSPECTION_CONFLICT` means the
+selected IDs or archive destinations are already occupied; preserve their state.
 
 ## Finite processing worksets
 
