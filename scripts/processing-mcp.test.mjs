@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { PassThrough, Writable } from 'node:stream';
-import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
+import { processingFixture, proposedClaim, replaceProcessingStorage } from './test-support/processing-fixture.mjs';
 import { withReviewPreview } from './test-support/processing-review.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { processingControlAction } from './processing-control-proof.mjs';
@@ -1396,6 +1396,37 @@ test('routine intake contention does not block read-only inventory or review dis
     assert.equal(review.statusDetail, 'pending'); assert.equal(h.forms.length, 0);
     assert.equal((await h.call('process_selected_captures', {})).error.message, 'INTAKE_BLOCKED');
   } finally { await fs.rmdir(lock); }
+});
+
+test('MCP review offers a healthy replacement while another retained draft lacks its source selection', async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  const other = await processingFixture(t, { base: f });
+  await proposedClaim(other, { name: 'meetings/second.md' });
+  await replaceProcessingStorage(f.collection.intakeStateDir);
+  f.capability = await verifyWorkflowStorage(f.options);
+  f.store = await openWorkflowIntake(f.capability, f.selection, 'collect');
+  const { previewProcessingReinspection, reinspectProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing } = await import('./processing.mjs');
+  const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
+  const preview = await previewProcessingReinspection(f.capability, request);
+  const transfer = await reinspectProcessing(f.capability, { ...request, expectedPreviewHash: preview.previewHash });
+  const args = { selection: f.selection, operationId: transfer.replacementOperationId };
+  let claim = (await inspectProcessing(f.capability, args.operationId)).claim;
+  for (let page = 0; page < claim.packet.pages.length; page++) {
+    const read = await readProcessingPage(f.capability, { ...args, expectedClaimHash: claim.claimHash, page });
+    claim = await acknowledgeProcessingPages(f.capability, { ...args, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
+  }
+  await proposeProcessing(f.capability, { ...args, expectedClaimHash: claim.claimHash, proposal: transfer.proposal });
+  await fs.unlink(path.join(f.collection.intakeStateDir, 'sessions', other.identity.client, `${other.identity.sessionId}.json`));
+  const h = await harness(t, f);
+  const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
+  assert.equal(status.status, 'awaiting-review'); assert.equal(status.nextAction, 'review');
+  const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
+  const form = await next;
+  assert(form.params.requestedSchema.properties.changes.default.includes('Keep the rollout paused.'));
+  h.answer(form, { action: 'accept', content: { decision: 'save' } });
+  body(await review);
+  assert.equal((await inspectProcessing(f.capability, args.operationId)).outcome, 'saved');
+  assert.equal((await inspectProcessing(f.capability, other.operationId)).state, 'conflicted');
 });
 
 test('status preserves execution with explicit incomplete inventory after bounded concurrent-change retries', async t => {

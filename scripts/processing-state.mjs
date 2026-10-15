@@ -7,6 +7,8 @@ import { withWorkflowWriterLocks } from './capture-maintenance.mjs';
 import { lstatOrNull, removeOwnedStage, syncDirectory, isOwnedStage } from './file-io.mjs';
 import { canonicalJSON, fail, isNativeId } from './workflow-values.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
+import { assertNoProcessingReinspection, PROCESSING_REINSPECTION_FILE } from './writer-protocol.mjs';
+import { sameProcessingPlacement } from './processing-contract.mjs';
 
 export async function readProcessingState(capability, selection, operation) {
   const { collection, store, configHash, binding, hash } = await openProcessingIntake(capability, selection, operation);
@@ -15,11 +17,12 @@ export async function readProcessingState(capability, selection, operation) {
   return { capability, collection, policyHash: configHash, binding, bindingHash: hash,
     store, metadataStore, writer, selection, operation, guard: () => assertWorkflowStorage(capability, selection, operation) };
 }
-export async function withProcessingState(capability, selection, operation, run) {
+export async function withProcessingState(capability, selection, operation, run, { allowReinspection = false } = {}) {
   const ctx = await readProcessingState(capability, selection, operation);
   return withIntakeLock(ctx.store, tx => withWorkflowWriterLocks(tx, [ctx.collection.notes.writerStateDir], async (owned, held) => {
     const guard = async (privatePaths = []) => {
       await owned(); await assertWorkflowStorage(capability, selection, operation);
+      if (!allowReinspection) await assertNoProcessingReinspection(ctx.collection.notes.writerStateDir);
       if (privatePaths.length) await assertPrivatePaths(capability, privatePaths);
     };
     Object.assign(ctx, { tx, guard, owned, writerGuard: held.get(ctx.collection.notes.writerStateDir) });
@@ -38,14 +41,27 @@ export async function processingSnapshot(ctx, name) {
 }
 export const processingJSON = async (ctx, name) => intakeJSON(await processingSnapshot(ctx, name));
 
+/** Advisory ownership only; the shared mutation guard refuses every reservation,
+ * including malformed metadata. Another collection cannot recover this intent. */
+export async function processingReinspectionBlocker(ctx, snapshot) {
+  snapshot ??= await processingSnapshot(ctx, PROCESSING_REINSPECTION_FILE);
+  if (!snapshot.bytes) return null;
+  const owner = intakeJSON(snapshot)?.preview?.binding;
+  return typeof owner?.collectionId === 'string' && !sameProcessingPlacement(owner, ctx.binding)
+    ? 'writer-reserved-by-another-collection' : 'PROCESSING_REINSPECTION_REQUIRED';
+}
+
 export async function writeProcessingJSON(ctx, name, value, expectedHash, options) {
   return writeProcessingBytes(ctx, name, Buffer.from(canonicalJSON(value) + '\n'), expectedHash, options);
+}
+export function assertProcessingMetadataSize(bytes) {
+  if (!Buffer.isBuffer(bytes)) fail('INVALID_PROCESSING_BYTES');
+  if (bytes.length > 1024 * 1024) fail('PROCESSING_METADATA_LIMIT');
 }
 export async function writeProcessingBytes(ctx, name, bytes, expectedHash, { beforePublish } = {}) {
   const before = await processingSnapshot(ctx, name);
   if (before.hash !== expectedHash) fail('PROCESSING_STATE_CHANGED');
-  if (!Buffer.isBuffer(bytes)) fail('INVALID_PROCESSING_BYTES');
-  if (bytes.length > 1024 * 1024) fail('PROCESSING_METADATA_LIMIT');
+  assertProcessingMetadataSize(bytes);
   const target = await intakePath(ctx.writer, 'state', name, { createParents: true });
   const stageName = `processing-stages/.processing-${randomUUID()}.tmp`;
   const stageGuard = async () => {

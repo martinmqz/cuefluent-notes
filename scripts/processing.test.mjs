@@ -196,7 +196,7 @@ test('collections sharing a writer cannot consume each other’s identical nativ
   const cb = await prepareProcessing(b.capability, { ...b.args, inputs: b.inputs });
   await completeProcessing(a.capability, { ...a.args, expectedClaimHash: ca.claimHash, outcome: 'skipped' });
   assert.equal((await inspectProcessing(b.capability, b.operationId)).claim.claimHash, cb.claimHash);
-  await assert.rejects(inspectProcessing(b.capability, a.operationId), /OPERATION_CHANGED/);
+  await assert.rejects(inspectProcessing(b.capability, a.operationId), { code: 'PROCESSING_BINDING_CHANGED' });
   await completeProcessing(b.capability, { ...b.args, expectedClaimHash: cb.claimHash, outcome: 'cancelled' });
   assert((await prepareProcessing(b.capability, { ...b.args, operationId: randomUUID(), inputs: b.inputs })).claimHash);
 });

@@ -159,6 +159,11 @@ material missing evidence stays explicit and can leave a conclusion unresolved.
 Loading the skill, reading a destination, or staging a proposal does not save it.
 Do not create a note merely to mark work handled.
 
+For a retained unapplied draft blocked by changed storage identities, follow
+[explicit reinspection](references/processing.md#reinspect-a-retained-draft-after-storage-changes).
+It preserves draft text but requires fresh evidence inspection and proposal review;
+never rewrite the old binding or reuse its Save approval.
+
 Claims and proposals survive sessions. Inspect an existing operation before retrying;
 reuse its identity and reviewed content. After a partial write, use exact-hash
 processing recovery. Never delete claims, receipts, locks, or journals, select another

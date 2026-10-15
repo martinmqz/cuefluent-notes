@@ -12,7 +12,8 @@ import { pendingProcessing } from './processing-inventory.mjs';
 import { selectProcessingShortcut, inspectProcessingShortcut } from './processing-shortcuts.mjs';
 import { pendingCollectionProcessing } from './processing-collection.mjs';
 import { prepareProcessing, readProcessingPage, acknowledgeProcessingPages, proposeProcessing, saveProcessing,
-  completeProcessing, inspectProcessing, recoverProcessing, readProcessingProposal } from './processing.mjs';
+  completeProcessing, inspectProcessing, recoverProcessing, readProcessingProposal,
+  previewProcessingReinspection, reinspectProcessing, inspectProcessingReinspection, abandonProcessingReinspection } from './processing.mjs';
 import { captureStorageStatus, previewCapturePrune, applyCapturePrune, recoverCapturePrune, abandonCapturePrune } from './capture-maintenance.mjs';
 import { inspectIntakeRecovery, applyIntakeRecovery } from './intake-recovery.mjs';
 import { fingerprint, inspectDirectories, inspectExistingDirectories, inspectState, recover } from './safe-update.mjs';
@@ -47,6 +48,10 @@ const commands = {
   'processing-complete': { required: ['selection', 'operationId', 'expectedClaimHash', 'outcome'], optional: ['expectedRecoveryHash'], run: completeProcessing },
   'processing-status': { required: ['operationId'], run: (cap, args) => inspectProcessing(cap, args.operationId) },
   'processing-recover': { required: ['operationId', 'expectedRecoveryHash'], run: recoverProcessing },
+  'processing-reinspection-preview': { required: ['selection', 'operationId', 'replacementOperationId', 'expectedClaimHash', 'expectedProposalHash'], run: previewProcessingReinspection },
+  'processing-reinspect': { required: ['selection', 'operationId', 'replacementOperationId', 'expectedClaimHash', 'expectedProposalHash', 'expectedPreviewHash'], run: reinspectProcessing },
+  'processing-reinspection-abandon': { required: ['expectedRecordHash'], run: abandonProcessingReinspection },
+  'processing-reinspection-status': { required: [], optional: ['operationId'], run: inspectProcessingReinspection },
   'storage-status': { required: [], run: cap => captureStorageStatus(cap) },
   'prune-preview': { required: ['identities'], optional: ['before'], run: previewCapturePrune },
   'prune-apply': { required: ['reviewed'], run: (cap, args) => applyCapturePrune(cap, args.reviewed) },
