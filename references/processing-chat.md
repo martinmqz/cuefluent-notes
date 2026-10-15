@@ -58,13 +58,15 @@ The locator is an environment-variable name matching
 `^[A-Za-z_][A-Za-z0-9_]{0,255}$`, not a credential value or file path. Supported
 standard credential names are `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
 `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_FOUNDRY_API_KEY`,
-`ANTHROPIC_FOUNDRY_AUTH_TOKEN` and `AWS_BEARER_TOKEN_BEDROCK`. A host-specific
-credential variable is also accepted if it is not a reserved control or known
-non-credential configuration variable and its nonblank inherited value survives
+`ANTHROPIC_FOUNDRY_AUTH_TOKEN` and `AWS_BEARER_TOKEN_BEDROCK`. Other recognized
+provider, connection or model settings are refused as locators, even when they
+contain credentials. This includes `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
+and `GOOGLE_APPLICATION_CREDENTIALS`.
+
+A host-specific credential variable outside that recognized set is also accepted
+if it is not a reserved control and its nonblank inherited value survives
 child-environment preparation. Names are case-sensitive except on Windows.
-Known configuration variables, including `AWS_SECRET_ACCESS_KEY`,
-`AWS_SESSION_TOKEN` and `GOOGLE_APPLICATION_CREDENTIALS`, cannot serve as this
-locator. Neither can host/profile/process controls such as `PATH`, `HOME`,
+Refused controls include host/profile/process variables such as `PATH`, `HOME`,
 `CLAUDE_CONFIG_DIR` or the two managed-auth markers, unsupported provider switches,
 or the removed `CLAUDECODE` and `CUEFLUENT_ENGINE_*` fields. A refused locator
 reports the same diagnostic; use the independently authenticated workflow below
@@ -80,7 +82,7 @@ A disabled managed-host flag alone keeps ordinary profile projection. Credential
 presence only permits launch; it does not verify authentication, expiry, or a host
 refresh channel.
 
-When upgrading from v0.15.0, a managed-host handoff no longer fills missing model
+When upgrading from v0.14.1–v0.15.0, a managed-host handoff no longer fills missing model
 environment values such as `ANTHROPIC_MODEL` or `ANTHROPIC_DEFAULT_*_MODEL` from
 the user profile. The host may therefore resolve a different model, with different
 cost or quality. Controller status does not report the resolved model. Use the

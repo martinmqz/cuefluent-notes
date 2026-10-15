@@ -91,7 +91,7 @@ v0.15.1 before resuming. Start fresh sessions and review changed hook or MCP
 permissions when prompted. Installation and hook trust grant neither collection
 nor processing consent.
 
-When upgrading from v0.15.0 with host-managed Claude authentication, profile `env`
+When upgrading from v0.14.1–v0.15.0 with host-managed Claude authentication, profile `env`
 model selections such as `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_*_MODEL` no
 longer fill missing host values. The resolved model, cost or quality can change,
 and controller status does not report that model. Check the host's model selection
