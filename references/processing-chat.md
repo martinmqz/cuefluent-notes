@@ -496,11 +496,13 @@ same namespace; it never resumes the retired native chat. Retries of the abandon
 request are refused. After retirement, invoke `resume` to continue the saved
 selection, or `process` to apply its ordinary unfinished-selection-first behavior.
 Both require a fresh native call and current launch authentication; neither
-automatically resolves an unfinished claim or bypasses recovery. An unknown outcome
+automatically resolves an unfinished claim or bypasses recovery. Status clears
+the retired chat and request identifiers and any historical launch diagnostic.
+A retained unfinished claim without verified terminal ownership instead reports
+`PROCESSING_OPERATION_OWNER_UNVERIFIED` and requires inspection. An unknown outcome
 still requires inspection; it does not establish that a client is still running.
-A failure proven to precede `thread/start` needs no
-abandonment: it can retry using freshly inspected status after the client issue is
-fixed.
+A failure proven to precede `thread/start` needs no abandonment: it can retry using
+freshly inspected status after the client issue is fixed.
 
 After a settings change, `processing-chat-reauthorize` explicitly accepts the
 current policy for the registry using its inspected hash and previous policy

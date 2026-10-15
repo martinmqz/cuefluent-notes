@@ -29,6 +29,7 @@ const diagnostic = Object.freeze({ CREATION_NOT_DISPATCHED: 'PROCESSING_CLIENT_U
   OPERATION_OUTCOME_UNKNOWN: 'PROCESSING_OPERATION_OUTCOME_UNKNOWN', WORKSET_OUTCOME_UNKNOWN: 'WORKSET_OUTCOME_UNKNOWN',
   PROCESSING_COLLECTION_BUSY: 'PROCESSING_COLLECTION_BUSY',
   PROCESSING_RECOVERY_REQUIRED: 'PROCESSING_RECOVERY_REQUIRED',
+  PROCESSING_OPERATION_OWNER_UNVERIFIED: 'PROCESSING_OPERATION_OWNER_UNVERIFIED',
   PROCESSING_EXCLUSION_UNVERIFIED: 'PROCESSING_EXCLUSION_UNVERIFIED' });
 const unfinished = value => value.state === 'idle' && value.operationState !== undefined &&
   (value.operationState !== 'completed' || value.recoveryRequired);
@@ -79,13 +80,7 @@ function blockedInventory(view, blockers) {
 }
 
 function shortcutView(native, shortcut) {
-  // Retirement/proven non-dispatch ends the native blocker, not engine work.
-  // Project current selection/claim blockers instead of masking them with the
-  // historical launch diagnostic. This display never authorizes a dispatch.
-  const view = viewOf(native.state === 'blocked' && native.restartSupported === true ? {
-    ...native, state: 'idle', nativeStatus: null,
-    diagnostics: (native.diagnostics ?? []).filter(code => !['RUN_ABANDONED', 'CREATION_NOT_DISPATCHED'].includes(code)),
-  } : native);
+  const view = viewOf(native);
   if (shortcut.scope) view.scope = shortcut.scope.kind;
   if (shortcut.counts) view.progress = { ...shortcut.counts, incomplete: shortcut.incomplete };
   if (['busy', 'creating', 'blocked'].includes(view.status)) return view;
@@ -268,7 +263,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     try {
       let native = await acknowledgeFinishedReview(controller, capability, await controller.status({ selection: source.selection }), { persist: false });
       const peer = (await controller.collectionActivity()).find(item => !item.own);
-      if (peer && (!['creating', 'busy', 'blocked'].includes(native.state) || native.restartSupported === true)) native = {
+      if (peer && !['creating', 'busy', 'blocked'].includes(native.state)) native = {
         state: peer.state, requestId: peer.requestId,
         chat: peer.sessionId ? { client: peer.client, sessionId: peer.sessionId } : null,
         diagnostics: ['PROCESSING_COLLECTION_BUSY'] };
@@ -335,7 +330,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (['creating', 'busy'].includes(current.state)) { await controller.close(); return alreadyProcessing(viewOf(current)); }
       // Only the controller's validated retry states may reach fresh admission.
       // Unknown outcomes stay blocked; being blocked is not evidence of a live run.
-      if (current.state === 'blocked' && current.restartSupported !== true) { await controller.close(); return viewOf(current); }
+      if (current.state === 'blocked') { await controller.close(); return viewOf(current); }
       // Existing activity is a read-only result. Require launch credentials only
       // after those exits, before control admission or review acknowledgement.
       if (client === 'claude') assertClaudeHostAuthentication(env);

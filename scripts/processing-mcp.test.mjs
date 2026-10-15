@@ -1652,11 +1652,13 @@ for (const failure of ['abandoned', 'not-dispatched']) for (const tool of ['proc
     });
     t.after(() => controller.close());
     let before = await controller.status();
-    assert.equal(before.state, 'blocked');
+    assert.equal(before.state, failure === 'abandoned' ? 'blocked' : 'idle');
+    const retiredSession = before.chat?.sessionId;
     if (failure === 'abandoned') before = await controller.abandon({
       expectedChatHash: before.chatHash, requestId: before.requestId, offline: true });
     before = await controller.status();
     assert.equal(before.restartSupported, true);
+    assert.equal(before.chat, null); assert.equal(before.requestId, null);
     if (failure === 'abandoned') {
       await h.call('process_selected_captures', { collectionId: f.collection.id });
       assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
@@ -1679,7 +1681,7 @@ for (const failure of ['abandoned', 'not-dispatched']) for (const tool of ['proc
     const after = await controller.status();
     assert.equal(after.state, 'idle'); assert.equal(after.restartSupported, false);
     assert.equal(h.creates, 2); assert.equal(h.resumes, 0); assert.equal(h.dispatches, dispatches + 1);
-    assert.notEqual(after.chat.sessionId, before.chat?.sessionId);
+    assert.notEqual(after.chat.sessionId, retiredSession);
     assert.equal(after.worksetId, frozen.worksetId);
     assert.equal(after.workset.worksetHash, frozen.worksetHash);
     assert.deepEqual(after.workset.inputs, frozen.inputs);
@@ -1717,7 +1719,7 @@ test('MCP retired execution exposes the retained claim blocker without relaunch 
   const failed = await controller.status();
   const retired = await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
   const claim = await inspectProcessing(f.capability, f.operationId);
-  for (const tool of ['processing_resume', 'process_selected_captures']) {
+  for (const tool of ['processing_status', 'processing_review', 'processing_resume', 'process_selected_captures']) {
     const result = body(await h.call(tool, { collectionId: f.collection.id }));
     assert.equal(result.status, 'blocked'); assert.equal(result.nextAction, 'inspect');
     assert.deepEqual(result.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
@@ -1725,29 +1727,70 @@ test('MCP retired execution exposes the retained claim blocker without relaunch 
     assert.equal((await controller.status()).chatHash, retired.chatHash);
     assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
   }
+  assert.equal((await h.call('processing_cancel', {})).error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal((await controller.status()).chatHash, retired.chatHash);
+  assert.equal(h.forms.length, 0); assert.equal(h.dispatches, 1);
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
 
-for (const reason of ['RUN_ABANDONED', 'CREATION_NOT_DISPATCHED']) {
-  test(`retryable ${reason} projects no-work and current inventory without an obsolete launch blocker`, () => {
-    const native = { state: 'blocked', restartSupported: true, diagnostics: [reason], chat: null, requestId: null, remainingRuns: 128 };
-    const shortcut = { phase: 'missing', reason: 'nothing-to-resume' };
-    const empty = processingStatusView(native, shortcut);
-    assert.equal(empty.statusDetail, 'nothing-to-resume'); assert.equal(empty.nextAction, 'none');
-    assert.deepEqual(empty.diagnostics, []);
-    const inventory = { operations: [], blockers: [], incomplete: false, counts: {
-      unclaimedRevisions: 1, claimedRevisions: 0, blockedByClaimRevisions: 0, inspectedHeads: 0, handledRevisions: 0
-    }, sourceCompleteness: 'unknown' };
-    const pending = processingStatusView(native, { phase: 'missing' }, { inventory });
-    assert.equal(pending.statusDetail, 'pending'); assert.equal(pending.nextAction, 'process');
-    assert.deepEqual(pending.diagnostics, []);
-    inventory.blockers = ['PROCESSING_RECOVERY_REQUIRED'];
-    const conflict = processingStatusView(native, shortcut, { inventory });
-    assert.equal(conflict.status, 'blocked'); assert.equal(conflict.nextAction, 'inspect');
-    assert.deepEqual(conflict.diagnostics, ['PROCESSING_RECOVERY_REQUIRED']);
+for (const failure of ['abandoned', 'not-dispatched']) test(`MCP review and cancel of ${failure} workset have no retired identifiers or errors`, async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  if (failure === 'not-dispatched') h.createError = Object.assign(new Error('synthetic unavailable client'), {
+    code: 'PROCESSING_CLIENT_UNAVAILABLE', outcome: 'not-dispatched' });
+  else h.script = async () => { throw new Error('synthetic lost terminal'); };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', {}); await closed;
+  const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
+    env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
   });
-}
+  t.after(() => controller.close());
+  const failed = await controller.status();
+  if (failure === 'abandoned') await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const retired = await controller.status();
+  const before = await inspectProcessingShortcut(f.capability, { selection: f.selection });
+  for (const tool of ['processing_status', 'processing_review', 'processing_cancel', 'processing_status', 'processing_review']) {
+    const result = body(await h.call(tool, {}));
+    assert.equal(result.status, 'idle'); assert.deepEqual(result.diagnostics, []);
+    assert.equal(result.chat, null); assert.equal(result.requestId, null);
+    if (tool === 'processing_cancel') assert.equal(result.statusDetail, 'cancelled');
+  }
+  const after = await inspectProcessingShortcut(f.capability, { selection: f.selection });
+  assert.equal(after.phase, 'cancelled');
+  assert.deepEqual(after.worksets, before.worksets);
+  assert.equal((await controller.status()).chatHash, retired.chatHash);
+  assert.equal(h.forms.length, 0); assert.equal(h.creates, 1);
+  assert.equal(h.dispatches, failure === 'abandoned' ? 1 : 0);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('MCP retired native run still exposes its retained proposal for review without retirement diagnostics', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async call => { await proposeThroughTools(f)(call); throw new Error('synthetic lost terminal after proposal'); };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', {}); await closed;
+  const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
+    env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
+  });
+  t.after(() => controller.close());
+  const failed = await controller.status();
+  const retired = await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  const status = body(await h.call('processing_status', {}));
+  assert.equal(status.status, 'awaiting-review'); assert.equal(status.nextAction, 'review');
+  assert.deepEqual(status.diagnostics, []); assert.equal(status.chat, null); assert.equal(status.requestId, null);
+  const next = h.nextForm(), review = h.call('processing_review', {});
+  const form = await next;
+  assert(form.params.requestedSchema.properties.changes.default.includes(claim.proposalHash));
+  h.answer(form, { action: 'accept', content: { decision: 'later' } });
+  const result = body(await review);
+  assert.equal(result.status, 'awaiting-review'); assert.deepEqual(result.diagnostics, []);
+  assert.equal(result.chat, null); assert.equal(result.requestId, null);
+  assert.equal((await controller.status()).chatHash, retired.chatHash);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
 
 test('MCP retired binding reports a competing active namespace and never launches alongside it', async t => {
   const f = await processingFixture(t), h = await harness(t, f);

@@ -169,13 +169,15 @@ reused for retries of that exact request. A duplicate never dispatches again.
 `state` is `missing`, `creating`, `idle`, `busy`, `awaiting-review` or `blocked`.
 `chatHash` binds registry mutations; `policyHash` exposes the registry's accepted
 settings hash for explicit reauthorization. `remainingRuns` reports the native
-history capacity left before guarded rollover. `restartSupported` is true only for
-a blocked binding explicitly retired offline or proven not to have dispatched
-creation. It permits the normal new-request admission checks, not automatic
-execution or bypass of authentication, claims, or recovery. `nativeStatus` distinguishes a completed,
-failed or interrupted native run; null means no terminal is available for the
-current state. `operationId` points to authoritative engine
-status. For an idle chat with a recorded operation, status also returns
+history capacity left before guarded rollover, or the full replacement-session
+capacity for a retired binding. `restartSupported` is true only for a binding
+explicitly retired offline or proven not to have dispatched creation. Such a
+binding reports `idle` unless its retained operation requires inspection. It
+permits the normal new-request admission checks, not automatic execution or
+bypass of authentication, claims, or recovery. `nativeStatus` distinguishes a
+completed, failed or interrupted native run; null means no terminal is available
+for the current state. `operationId` points to authoritative engine status. For an
+idle chat with a recorded operation, status also returns
 `operationState`, `operationOutcome` and `recoveryRequired` from a metadata-only
 engine inspection; a completed native turn does not imply completed engine work.
 When that inspection is unavailable, `operationState` is `unknown`, both outcome
@@ -184,13 +186,17 @@ These fields concern the latest recorded operation, not a collection inventory.
 `chat` identifies the native session, while `desktopVisibility` remains
 `unverified`. Neither `idle` nor a native completed turn means a note was saved.
 Busy or blocked state must not be bypassed with another binding or writer.
-`processing-chat-abandon` archives the exact binding and returns blocked status
-with `RUN_ABANDONED`. It does not cancel an engine operation or mark its evidence
-handled. Inspect any surviving operation before continuing. Only a subsequent
-explicit run with a new request ID creates a replacement native session; the
-abandoned request can never dispatch again. `offline: true` records the operator's
-confirmation that both the controller and native child are stopped, including
-for older records with no saved owner. It is not a model-selected retry flag.
+`processing-chat-abandon` archives the exact binding. Retired bindings omit
+historical launch diagnostics and return null for the current `chat` and
+`requestId`; the archived registry retains those identities. A retained unfinished
+claim without a verified terminal owner reports `blocked` with
+`PROCESSING_OPERATION_OWNER_UNVERIFIED`. Abandonment does not cancel an engine
+operation or mark its evidence handled. Inspect any surviving operation before
+continuing. Only a subsequent explicit run with a new request ID creates a
+replacement native session; the abandoned request can never dispatch again.
+`offline: true` records the operator's confirmation that both the controller and
+native child are stopped, including for older records with no saved owner. It is
+not a model-selected retry flag.
 
 The installed `cuefluent_control` MCP server exposes these strict tools:
 

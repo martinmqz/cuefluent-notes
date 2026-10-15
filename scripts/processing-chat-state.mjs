@@ -27,6 +27,8 @@ const nativeToken = value => {
 };
 const nullableId = value => { if (value !== null) nativeId(value); };
 const STATES = ['creating', 'idle', 'busy', 'awaiting-review', 'blocked'];
+export const processingChatRestartSupported = registry => registry?.state === 'blocked' &&
+  ['creation-not-dispatched', 'run-abandoned'].includes(registry.block?.reason);
 const BLOCKS = ['creation-outcome-unknown', 'dispatch-outcome-unknown', 'operation-outcome-unknown', 'host-unavailable', 'session-unavailable', 'binding-conflict', 'creation-not-dispatched', 'run-abandoned'];
 
 function namespaceValue(value) {
@@ -279,7 +281,7 @@ export async function createProcessingChatState(options) {
     await guard(); return records;
   }
   const executing = value => ['creating', 'busy'].includes(value.state) ||
-    (value.state === 'blocked' && !['creation-not-dispatched', 'run-abandoned'].includes(value.block.reason));
+    (value.state === 'blocked' && !processingChatRestartSupported(value));
   async function collectionActivity() {
     const activity = [];
     for (const { own, value } of await collectionRegistries()) {
@@ -408,7 +410,7 @@ export async function createProcessingChatState(options) {
       keys(args, ['expectedHash', 'requestId', 'requestHash'], ['owner']); expected(args.expectedHash); nativeId(args.requestId); hash(args.requestHash);
       return locked(async (tx, saved) => {
         if ((await intakeSnapshot(store, 'state', abandonedPath(args.requestId), { maxBytes: MAX_BYTES })).bytes) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
-        const retryable = saved.value?.state === 'blocked' && ['creation-not-dispatched', 'run-abandoned'].includes(saved.value.block.reason);
+        const retryable = processingChatRestartSupported(saved.value);
         if (saved.value !== null && !retryable) {
           if (saved.value.policyHash !== initial.configHash) fail('PROCESSING_CHAT_POLICY_CHANGED');
           if (saved.value.creation.requestId === args.requestId) {

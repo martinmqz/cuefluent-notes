@@ -519,6 +519,7 @@ for (const tool of ['processing_resume', 'process_selected_captures']) test(`Cla
     assert.equal(failed.state, 'blocked'); assert.equal(failed.restartSupported, false);
     await owner.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
     const retired = await owner.status(); assert.equal(retired.restartSupported, true);
+    assert.equal(retired.chat, null); assert.equal(retired.requestId, null);
     const before = await writerSnapshot(f);
     const rpc = processingRpc(f, { env }); f.defer(() => rpc.close());
     await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
@@ -539,7 +540,7 @@ for (const tool of ['processing_resume', 'process_selected_captures']) test(`Cla
     await rpc.close();
     const after = await owner.status();
     assert.equal(after.state, 'idle'); assert.equal(f.nativeCalls.length, 2);
-    assert.notEqual(after.chat.sessionId, retired.chat.sessionId);
+    assert.notEqual(after.chat.sessionId, failed.chat.sessionId);
     assert.equal(after.worksetId, retired.worksetId);
     assert.equal(after.workset.worksetHash, retired.workset.worksetHash);
     assert.equal(f.nativeCalls[1].options.env.ANTHROPIC_AUTH_TOKEN, 'synthetic-renewed-host-token');

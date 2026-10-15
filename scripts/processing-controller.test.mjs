@@ -520,6 +520,10 @@ test('explicit offline abandonment preserves unknown claims and retires the chat
     await assert.rejects(h.controller.abandon({ expectedChatHash: 'f'.repeat(64), requestId: request.requestId, offline: true }), { code: 'PROCESSING_CHAT_STATE_CHANGED' });
     const abandoned = await h.controller.abandon({ expectedChatHash: blocked.chatHash, requestId: request.requestId, offline: true });
     assert.equal(abandoned.state, 'blocked');
+    assert.deepEqual(abandoned.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    assert.equal(abandoned.chat, null); assert.equal(abandoned.requestId, null);
+    assert.equal(abandoned.resumeSupported, false);
+    assert.deepEqual(await h.controller.status(), abandoned);
     assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
     await assert.rejects(h.controller.run({ ...request, expectedChatHash: abandoned.chatHash }), { code: 'PROCESSING_CHAT_REQUEST_CONFLICT' });
     h.script = async call => { assert.equal((await call('processing_pending', {})).operations[0].operationId, f.operationId); };
@@ -889,4 +893,50 @@ test('missing Claude host auth preserves a finished review and its expected chat
   assert.equal(h.dispatches.length, 1);
   // Read-only review remains usable without launch credentials.
   assert.equal((await h.controller.reviewContext({ expectedChatHash: review.chatHash, requestId: review.requestId })).operationId, f.operationId);
+});
+
+
+test('retired controller projects fresh capacity and clears historical launch identifiers', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  for (let i = 0; i < 3; i++) await h.controller.run(await h.request());
+  const settled = await h.controller.status();
+  assert.equal(settled.remainingRuns, 125);
+  h.script = async () => { throw new Error('synthetic lost terminal'); };
+  const request = await h.request();
+  await assert.rejects(h.controller.run(request));
+  const failed = await h.controller.status();
+  const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  assert.equal(retired.state, 'idle'); assert.equal(retired.remainingRuns, 128);
+  assert.equal(retired.restartSupported, true); assert.equal(retired.nativeStatus, null);
+  assert.equal(retired.chat, null); assert.equal(retired.requestId, null);
+  assert.deepEqual(retired.diagnostics, []); assert.deepEqual(await h.controller.status(), retired);
+  const stored = await registryJSON(f);
+  assert.equal(stored.active.requestId, request.requestId);
+  assert.equal(stored.session.sessionId, settled.chat.sessionId); assert.equal(stored.runs.length, 3);
+  h.script = async call => call('processing_pending', {});
+  const restarted = await h.controller.run(await h.request());
+  assert.equal(restarted.remainingRuns, 127); assert.equal(restarted.restartSupported, false);
+  assert.notEqual(restarted.chat.sessionId, settled.chat.sessionId);
+  assert.equal((await registryJSON(f)).runs.length, 1);
+});
+
+
+test('retired resumed claim preserves earlier terminal ownership and refuses unavailable metadata', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+  await h.controller.run(await h.request());
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  h.script = async () => { throw new Error('synthetic lost terminal on resume'); };
+  await assert.rejects(h.controller.run(await h.request({ resumeOperationId: f.operationId })));
+  const failed = await h.controller.status();
+  const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  assert.equal(retired.state, 'idle'); assert.deepEqual(retired.diagnostics, []);
+  assert.equal(await h.controller.canResumeOperation(f.operationId), true);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  h.inspectOperation = async () => { throw new Error('synthetic unreadable metadata'); };
+  const unreadable = await h.controller.status();
+  assert.equal(unreadable.state, 'blocked'); assert.equal(unreadable.operationState, 'unknown');
+  assert.equal(unreadable.operationOutcome, null); assert.equal(unreadable.recoveryRequired, null);
+  assert.deepEqual(unreadable.diagnostics, ['OPERATION_OUTCOME_UNKNOWN']);
+  assert.equal(unreadable.chatHash, retired.chatHash);
 });
