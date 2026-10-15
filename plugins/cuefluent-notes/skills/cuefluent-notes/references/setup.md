@@ -247,6 +247,23 @@ The following historical boundaries still matter when skipping releases. Keep
 all helpers sharing a collection on the same release, including both clients
 when used; a worker can process registrations from either client.
 
+v0.15.1 adds retained-draft transfer state and the shared writer's
+`reinspection.json` reservation. Helpers through v0.15.0 do not enforce that
+reservation and can write notes or perform maintenance during a pending transfer.
+Upgrade every shared helper before using
+[draft reinspection](processing.md#reinspect-a-retained-draft-after-storage-changes).
+Mixed-version access and downgrading after using this state are unsupported;
+preserve the reservation and finish or safely abandon the exact transfer with
+the matching helper.
+
+v0.15.0 adds private shortcut checkpoints and control receipts, plus collection-wide
+ownership checks for native processing. Earlier helpers do not implement these
+controls. Mixed-version access and downgrading after using them are unsupported.
+Plain `process` also changed from chat scope to bounded collection scope; use
+`process chat` for the previous scope and follow
+[shortcut continuation](processing-chat.md#shortcut-scopes-and-continuation)
+for unfinished selections and later backlog portions.
+
 v0.13.0 changed reader rules, including Claude reader-rules revision 2, Codex
 per-kind tool budgets and verified processing-control exclusions, and added
 processing state for worksets and reusable chats. Old and new helpers can produce

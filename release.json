@@ -1,33 +1,33 @@
 {
-  "version": "0.15.0",
+  "version": "0.15.1",
   "archives": [
     {
-      "name": "cuefluent-notes-0.15.0-codex-hooks.zip",
+      "name": "cuefluent-notes-0.15.1-codex-hooks.zip",
       "client": "codex",
       "variant": "hooks",
-      "sha256": "53cf0a62c8a6e20973194230838506286d075b4eb1de5375ca14f45007f276e1",
-      "inventorySha256": "e56dea2c843f40c32c331d9a76b259eba2a03b0835119b4b63e2f17831247eed"
+      "sha256": "57ff823244f55e127e8ebff48103c8da75134bfe952befc9df0644367317dea6",
+      "inventorySha256": "122e265af3e58d9162c2d1269f09182583d077b5f2e17363cf152d6d47eb8855"
     },
     {
-      "name": "cuefluent-notes-0.15.0-codex-manual.zip",
+      "name": "cuefluent-notes-0.15.1-codex-manual.zip",
       "client": "codex",
       "variant": "manual",
-      "sha256": "9a8dcf9e18a0fdfd8d2eeef1c4bdca2d371c20f31426c52f9229ad1a3c51d79c",
-      "inventorySha256": "fe94ba9c0907b88c4fddd153ac5d94ca1c3c0c0572848efcc83350a5620e096a"
+      "sha256": "1ea1551c37bead99ad7d724887a3dd16482ee71bfe5a982746c648eccc125ea5",
+      "inventorySha256": "5cdfd210f509930b5cb4a614c25a4db1a0f6b129dbbb0485b04c533a67079b5f"
     },
     {
-      "name": "cuefluent-notes-0.15.0-claude-hooks.zip",
+      "name": "cuefluent-notes-0.15.1-claude-hooks.zip",
       "client": "claude",
       "variant": "hooks",
-      "sha256": "e5ed09824d2406fd05bfce3beabfc36ef637d36d2c07e807f4b93a5bbff43008",
-      "inventorySha256": "c7c1f57ac566f4196c3c041562ea1cd6a176d383b16ab4976104edc39dac927e"
+      "sha256": "1ff6eb4af7dc82a48ce1714da2d7db188b8ca924cf65f2705e1c9b8b6620490a",
+      "inventorySha256": "09a0d49fbfb5d50dc762f94514e34789475c2549cd3578903b0aad0e63ee71a6"
     },
     {
-      "name": "cuefluent-notes-0.15.0-claude-manual.zip",
+      "name": "cuefluent-notes-0.15.1-claude-manual.zip",
       "client": "claude",
       "variant": "manual",
-      "sha256": "a72d7e122f502f951dd584d2b03344dc4287565e26e39ad652ec31c94bc10788",
-      "inventorySha256": "9065f33a3f25555b4d478e7cdc83e893e097669db52bdc550dd857d808ffc6dc"
+      "sha256": "c59196e2f63e44e04bcf3d39cf8c3588c565ba3eb95ecc5f1094d51ec0a24874",
+      "inventorySha256": "fe689f687a4ae9adc1a787326be4fd7fbb9f1f0885869c24fc5cfa1f3fc7ce02"
     }
   ]
 }
