@@ -1398,7 +1398,7 @@ test('routine intake contention does not block read-only inventory or review dis
   } finally { await fs.rmdir(lock); }
 });
 
-test('MCP review offers a healthy replacement while another retained draft needs reinspection', async t => {
+test('MCP review offers a healthy replacement while another retained draft lacks its source selection', async t => {
   const f = await processingFixture(t), proposal = await proposedClaim(f);
   const other = await processingFixture(t, { base: f });
   await proposedClaim(other, { name: 'meetings/second.md' });
@@ -1416,6 +1416,7 @@ test('MCP review offers a healthy replacement while another retained draft needs
     claim = await acknowledgeProcessingPages(f.capability, { ...args, expectedClaimHash: read.claimHash, pages: [{ index: page, hash: read.hash }] });
   }
   await proposeProcessing(f.capability, { ...args, expectedClaimHash: claim.claimHash, proposal: transfer.proposal });
+  await fs.unlink(path.join(f.collection.intakeStateDir, 'sessions', other.identity.client, `${other.identity.sessionId}.json`));
   const h = await harness(t, f);
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'awaiting-review'); assert.equal(status.nextAction, 'review');

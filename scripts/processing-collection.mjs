@@ -87,13 +87,20 @@ export async function pendingCollectionProcessing(capability, { selection, scope
     if (sources.has(key)) return sources.get(key);
     if (sources.size >= 256) fail('PROCESSING_INVENTORY_CAPACITY');
     const saved = await readSelection(ctx.store, identity);
-    if (!saved.state) fail('PROCESSING_SOURCE_SELECTION_MISSING');
+    const sourceIdentity = { client: identity.client, sessionId: identity.sessionId };
+    if (!saved.state) {
+      // Retained writer claims can outlive their intake selections. Absence is
+      // not source authorization; keep it in the snapshot for the final recheck.
+      if (saved.hash !== null) fail('PROCESSING_SOURCE_SELECTION_MISSING');
+      const result = { identity: sourceIdentity, selected: null, hash: null, authorized: false };
+      sources.set(key, result); return result;
+    }
     const selected = await normalizeWorkflowSelection({ client: identity.client, sessionId: identity.sessionId,
       cwd: saved.state.source.projectRoot });
     let authorized = true;
     try { await assertWorkflowStorage(capability, selected, 'explicitProcess'); }
     catch (error) { if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error; authorized = false; }
-    const result = { selected, hash: saved.hash, authorized };
+    const result = { identity: sourceIdentity, selected, hash: saved.hash, authorized };
     sources.set(key, result); return result;
   }
   const recovery = await recoverySnapshot(ctx), blockers = [...recovery.blockers], operations = [];
@@ -105,10 +112,23 @@ export async function pendingCollectionProcessing(capability, { selection, scope
   for (const operationId of operationIds) {
     const { claim: _claim, ...operation } = await describeProcessingOperation(ctx, operationId, null, blockers);
     const membership = [];
+    let missingSelection = false;
     for (const input of operation.inputs) {
       const saved = await source(input.identity);
+      if (!saved.selected) missingSelection = true;
       membership.push(saved.authorized && await matches(saved.selected) &&
         (selectedScope.kind !== 'chat' || selectionIncludesIdentity(selectedScope, input.identity)));
+    }
+    if (missingSelection && !operation.outcome) {
+      const previousConflict = operation.conflict;
+      operation.conflict ??= 'PROCESSING_SOURCE_SELECTION_MISSING';
+      operation.blockers.push('PROCESSING_SOURCE_SELECTION_MISSING');
+      // Preserve existing cancellation/recovery guidance, but never offer an
+      // otherwise healthy draft or inspection as authorized without its source.
+      if (!operation.recoveryRequired && operation.state !== 'blocked') {
+        operation.state = 'conflicted';
+        if (!previousConflict) operation.nextAction = { command: null, reason: 'resolve-conflict' };
+      }
     }
     operations.push({ ...operation, scopeMatch: membership.every(Boolean) ? 'full' : membership.some(Boolean) ? 'partial' : 'outside' });
   }
@@ -132,6 +152,7 @@ export async function pendingCollectionProcessing(capability, { selection, scope
       // enumerate existing session metadata and must not silently lose an entry.
       if (scope === 'chat' && (await readSelection(ctx.store, { client, sessionId })).state === null) continue;
       const saved = await source({ client, sessionId });
+      if (!saved.selected) fail('PROCESSING_INVENTORY_CHANGED');
       if (!saved.authorized || !await matches(saved.selected)) {
         if (!saved.authorized) excludedSources++; else outsideScopeSources++;
         cursor = { scopeHash, client, sessionId, unitId: null }; continue;
@@ -145,7 +166,7 @@ export async function pendingCollectionProcessing(capability, { selection, scope
     if (page.incomplete) { incomplete = true; break; }
   }
   for (const saved of sources.values()) {
-    const { client, sessionId } = saved.selected;
+    const { client, sessionId } = saved.identity;
     if ((await readSelection(ctx.store, { client, sessionId })).hash !== saved.hash) fail('PROCESSING_INVENTORY_CHANGED');
     if (saved.authorized) await assertWorkflowStorage(capability, saved.selected, 'explicitProcess');
   }

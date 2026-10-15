@@ -167,6 +167,13 @@ Completed operations remain historical results, not active binding conflicts. A
 stale claim blocks new admission, but does not prevent inspection or review of
 another current-binding operation.
 
+If an unfinished retained operation's current intake selection is missing,
+collection inventory keeps its claim and proposal hashes visible with a source-selection conflict.
+It cannot be offered for review or processing without current source authorization.
+Existing safe cancellation or recovery guidance remains available, and unrelated
+healthy operations remain discoverable. Missing metadata does not authorize
+reconstructing a selection from the retained claim.
+
 For a fully inspected, published proposal **before any write transaction or
 receipt**, the standalone [reinspection commands](workflow-cli.md#draft-reinspection)
 can preserve its text and start a fresh operation. This applies to either client.

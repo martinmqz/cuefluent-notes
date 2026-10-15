@@ -4,9 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
-import { processingFixture, inspectedClaim, proposedClaim } from './test-support/processing-fixture.mjs';
+import { processingFixture, inspectedClaim, proposedClaim, replaceProcessingStorage } from './test-support/processing-fixture.mjs';
 import { pendingCollectionProcessing, processingScope } from './processing-collection.mjs';
-import { prepareProcessing, completeProcessing, saveProcessing } from './processing.mjs';
+import { prepareProcessing, completeProcessing, saveProcessing, readProcessingProposal } from './processing.mjs';
 import { createProcessingWorkset, prepareWorksetBatch } from './processing-workset.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { executeWorkflow } from './workflow.mjs';
@@ -288,4 +288,63 @@ test('lock churn does not invalidate a metadata read; changed recovery state rec
   });
   const changed = await stablePendingCollectionProcessing(f.capability, request(f));
   assert(recoveryInjected); assert(changed.blockers.includes('INTAKE_RECOVERY_REQUIRED'));
+});
+
+for (const replaced of [false, true]) test(`missing source selections preserve ${replaced ? 'replaced-intake' : 'current'} operations in collection inventory`, async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  const healthy = await processingFixture(t, { base: f });
+  await proposedClaim(healthy, { name: 'meetings/healthy.md' });
+  if (replaced) {
+    await replaceProcessingStorage(f.collection.intakeStateDir);
+    for (const name of await fs.readdir(f.collection.intakeStateDir)) {
+      await fs.rm(path.join(f.collection.intakeStateDir, name), { recursive: true, force: true });
+    }
+    f.capability = await verifyWorkflowStorage(f.options);
+  } else await fs.unlink(path.join(f.collection.intakeStateDir, 'sessions', f.identity.client, `${f.identity.sessionId}.json`));
+  const before = await privateBytes(f), settings = await fs.readFile(f.options.configPath);
+  const inventory = await executeWorkflow('processing-inventory', { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: request(f) }, f.options);
+  const retained = inventory.operations.find(item => item.operationId === f.operationId);
+  assert.equal(retained.state, 'conflicted'); assert.equal(retained.scopeMatch, 'outside');
+  assert.equal(retained.claimHash, proposal.claimHash); assert.equal(retained.proposalHash, proposal.proposalHash);
+  assert.equal(retained.conflict, replaced ? 'PROCESSING_BINDING_CHANGED' : 'PROCESSING_SOURCE_SELECTION_MISSING');
+  assert(retained.blockers.includes('PROCESSING_SOURCE_SELECTION_MISSING'));
+  assert(!inventory.pending.some(item => item.identity.sessionId === f.identity.sessionId));
+  if (replaced) {
+    assert.equal(retained.nextAction.command, 'processing-complete'); assert.equal(retained.nextAction.outcome, 'cancelled');
+  } else {
+    assert.deepEqual(retained.nextAction, { command: null, reason: 'resolve-conflict' });
+    assert.equal(inventory.operations.find(item => item.operationId === healthy.operationId).state, 'awaiting-review');
+    assert.equal(inventory.operations.find(item => item.operationId === healthy.operationId).scopeMatch, 'full');
+  }
+  await assert.rejects(readProcessingProposal(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash,
+    expectedProposalHash: proposal.proposalHash }), { code: replaced ? 'PROCESSING_BINDING_CHANGED' : 'PROCESSING_SOURCE_SELECTION_MISSING' });
+  assert.deepEqual(await privateBytes(f), before); assert.deepEqual(await fs.readFile(f.options.configPath), settings);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  if (replaced) assert.equal((await completeProcessing(f.capability, { ...f.args,
+    expectedClaimHash: proposal.claimHash, outcome: 'cancelled' })).status, 'cancelled');
+});
+
+test('a restored missing selection invalidates collection inventory before it can grant scope membership', async t => {
+  const f = await processingFixture(t); await proposedClaim(f);
+  const file = path.join(f.collection.intakeStateDir, 'sessions', f.identity.client, `${f.identity.sessionId}.json`);
+  const original = await fs.readFile(file); await fs.unlink(file);
+  const opendir = fs.opendir.bind(fs); let restored = false;
+  t.mock.method(fs, 'opendir', async (name, ...args) => {
+    if (name === path.dirname(file) && !restored) {
+      restored = true; await fs.writeFile(file, original, { mode: 0o600 });
+    }
+    return opendir(name, ...args);
+  });
+  await assert.rejects(pendingCollectionProcessing(f.capability, request(f)), { code: 'PROCESSING_INVENTORY_CHANGED' });
+  assert.equal(restored, true);
+});
+
+test('malformed selection bytes are not treated as an absent source during collection inventory', async t => {
+  const f = await processingFixture(t); await proposedClaim(f);
+  const file = path.join(f.collection.intakeStateDir, 'sessions', f.identity.client, `${f.identity.sessionId}.json`);
+  await fs.writeFile(file, 'null');
+  const before = await privateBytes(f);
+  await assert.rejects(pendingCollectionProcessing(f.capability, request(f)), { code: 'PROCESSING_SOURCE_SELECTION_MISSING' });
+  assert.deepEqual(await privateBytes(f), before);
 });
