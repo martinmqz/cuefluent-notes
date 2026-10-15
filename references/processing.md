@@ -156,7 +156,10 @@ bindings, refresh old hashes, remove the claim, or reuse its approval.
 An unapplied claim, including unread or partially inspected work, can be explicitly
 cancelled with its exact inspected claim hash at the same configured placement.
 Cancellation records the old binding, releases the claim and writes no input
-dispositions. If a transaction exists, its exact recovery hash is also required.
+dispositions. If this claim has an unapplied transaction, its exact recovery hash
+is also required. Another operation's transaction or another collection's pending
+transfer must be reconciled first; status directs callers to inspect collection
+recovery or the owning collection instead of suggesting cancellation.
 A writer journal or receipt prevents cancellation. If the storage binding has
 changed after writing started, status reports `resolve-conflict` without a
 cancellation or recovery command; preserve the writer state for reconciliation.

@@ -543,7 +543,7 @@ test('one draft can be reproposed while another old draft remains and its archiv
   assert.deepEqual(await reinspectProcessing(f.capability, args), transferred);
 });
 
-test('a shared writer reservation identifies its owning collection without suggesting local recovery', async t => {
+for (const stale of [false, true]) test(`a shared writer reservation directs ${stale ? 'stale' : 'current'} claims to its owning collection`, async t => {
   const f = await processingFixture(t), proposal = await proposedClaim(f);
   const other = await processingFixture(t);
   other.collection.id = 'another-collection'; other.options.collectionId = other.collection.id;
@@ -553,6 +553,10 @@ test('a shared writer reservation identifies its owning collection without sugge
   await fs.writeFile(other.options.configPath, config); other.options.expectedConfigHash = digest(config);
   other.capability = await verifyWorkflowStorage(other.options);
   const active = await prepareProcessing(other.capability, { ...other.args, inputs: other.inputs });
+  if (stale) {
+    await replaceProcessingStorage(other.collection.rawDir);
+    other.capability = await verifyWorkflowStorage(other.options);
+  }
   await replaceProcessingStorage(f.collection.notes.notesDir);
   const request = { ...f.args, replacementOperationId: randomUUID(), expectedClaimHash: proposal.claimHash, expectedProposalHash: proposal.proposalHash };
   const before = await previewProcessingReinspection(f.capability, request);
@@ -560,7 +564,8 @@ test('a shared writer reservation identifies its owning collection without sugge
     { fault: at => { if (at === 'reinspection-intent') throw new Error('interrupted'); } }), /interrupted/);
   const operation = await inspectProcessing(other.capability, other.operationId);
   assert.equal(operation.state, 'blocked'); assert(operation.blockers.includes('writer-reserved-by-another-collection'));
-  assert.notEqual(operation.nextAction?.command, 'processing-reinspection-status');
+  assert.deepEqual(operation.nextAction, { command: null, reason: 'inspect-owning-collection' });
+  assert.equal(operation.conflict, stale ? 'PROCESSING_BINDING_CHANGED' : null);
   const status = await inspectProcessingReinspection(other.capability);
   assert.equal(status.state, 'reserved'); assert.equal(status.blocker, 'writer-reserved-by-another-collection');
   assert.equal(status.nextAction, 'inspect-owning-collection'); assert.equal(status.args, undefined);
@@ -569,6 +574,15 @@ test('a shared writer reservation identifies its owning collection without sugge
   await assert.rejects(completeProcessing(other.capability, { ...other.args, expectedClaimHash: active.claimHash, outcome: 'cancelled' }),
     { code: 'PROCESSING_REINSPECTION_REQUIRED' });
   assert.equal((await inspectProcessing(other.capability, other.operationId)).claimHash, active.claimHash);
+  const pending = await inspectProcessingReinspection(f.capability);
+  await abandonProcessingReinspection(f.capability, { expectedRecordHash: pending.recordHash });
+  if (stale) {
+    const available = await inspectProcessing(other.capability, other.operationId);
+    assert.equal(available.nextAction.command, 'processing-complete');
+    assert.equal(available.nextAction.outcome, 'cancelled');
+    assert.equal((await completeProcessing(other.capability, { ...other.args,
+      expectedClaimHash: active.claimHash, outcome: 'cancelled' })).status, 'cancelled');
+  }
 });
 
 async function largeProposalFixture(t, targetBytes) {

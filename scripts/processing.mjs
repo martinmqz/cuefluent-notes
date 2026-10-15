@@ -575,14 +575,22 @@ async function describeOperation(ctx, operationId, expectedAdmission, collection
     blockers.push(...currentBlockers);
   }
   const transferPending = currentBlockers.includes('PROCESSING_REINSPECTION_REQUIRED');
-  if (transferPending && !blockers.includes('PROCESSING_REINSPECTION_REQUIRED')) blockers.unshift('PROCESSING_REINSPECTION_REQUIRED');
-  const state = completed ? 'completed' : transferPending ? 'blocked' : bindingChanged ? 'conflicted' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
+  const foreignTransferPending = currentBlockers.includes('writer-reserved-by-another-collection');
+  const otherTransactionPending = currentBlockers.includes('PROCESSING_RECOVERY_REQUIRED') &&
+    (!tx.hash || (await processingNames(ctx, 'transactions')).some(name => name !== transactionPath(operationId)));
+  for (const code of [transferPending && 'PROCESSING_REINSPECTION_REQUIRED', foreignTransferPending && 'writer-reserved-by-another-collection',
+    otherTransactionPending && 'PROCESSING_RECOVERY_REQUIRED']) {
+    if (code && !blockers.includes(code)) blockers.push(code);
+  }
+  const state = completed ? 'completed' : transferPending || foreignTransferPending ? 'blocked' : bindingChanged ? 'conflicted' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
     : claim?.proposalIntent ? 'draft-staging' : inspection?.state ?? 'missing';
   const recoveryRequired = Boolean(tx.hash || (completed && saved.hash));
   const changedBindingWritePending = bindingChanged && !completed &&
     (currentBlockers.includes('WRITER_RECOVERY_REQUIRED') || Boolean(await readWriterReceipt(ctx, operationId)));
   const nextAction = !saved.hash && !tx.hash ? null : transferPending ? { command: 'processing-reinspection-status' }
+    : foreignTransferPending ? { command: null, reason: 'inspect-owning-collection' }
     : changedBindingWritePending ? { command: null, reason: 'resolve-conflict' }
+    : otherTransactionPending ? { command: null, reason: 'inspect-collection-recovery' }
     : bindingChanged && !completed ? { command: 'processing-complete', outcome: 'cancelled', reason: 'retire-conflicted-claim', ...(tx.hash ? { expectedRecoveryHash: tx.hash } : {}) }
     : bindingChanged && completed.outcome === 'saved' ? { command: null, reason: 'resolve-conflict' }
     : recoveryRequired ? { command: 'processing-recover' }

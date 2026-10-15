@@ -272,3 +272,39 @@ test('binding conflict blocks collection admission and frozen status without cre
   assert.equal(frozen.nextRun, null); assert.equal(frozen.counts.unattempted, 0);
   assert(frozen.blockers.includes('PROCESSING_BINDING_CHANGED'));
 });
+
+test('stale-claim cancellation waits for another operation transaction but retains exact own-transaction cancellation', async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  const other = await processingFixture(t, { base: f }), otherProposal = await proposedClaim(other, { name: 'meetings/other.md' });
+  await assert.rejects(saveProcessing(other.capability, { ...other.args, expectedClaimHash: otherProposal.claimHash,
+    approvedProposalHash: otherProposal.proposalHash },
+    { fault: at => { if (at === 'write-intent') throw new Error('interrupted'); } }), /interrupted/);
+  await replaceRoot(f, 'writer');
+  const files = [`claims/${f.operationId}.json`, `claims/${other.operationId}.json`,
+    `transactions/${other.operationId}.json`, `proposals/${f.operationId}/record.json`,
+    `proposals/${other.operationId}/record.json`].map(name => path.join(f.collection.notes.writerStateDir, name));
+  files.push(proposal.plan.files[0].contentPath, otherProposal.plan.files[0].contentPath, f.options.configPath);
+  const before = await Promise.all(files.map(file => fingerprint(file)));
+  const direct = await inspectProcessing(f.capability, f.operationId);
+  const cli = await executeWorkflow('processing-status', { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: { operationId: f.operationId } }, { configPath: f.options.configPath });
+  const session = await pendingProcessing(f.capability, { selection: f.selection });
+  const collection = await pendingCollectionProcessing(f.capability, { selection: f.selection });
+  for (const status of [direct, cli, session.operations[0], collection.operations.find(item => item.operationId === f.operationId)]) {
+    assert.equal(status.conflict, 'PROCESSING_BINDING_CHANGED');
+    assert(status.blockers.includes('PROCESSING_RECOVERY_REQUIRED'));
+    assert.deepEqual(status.nextAction, { command: null, reason: 'inspect-collection-recovery' });
+  }
+  await assert.rejects(completeProcessing(f.capability, { ...f.args,
+    expectedClaimHash: proposal.claimHash, outcome: 'cancelled' }), { code: 'PROCESSING_RECOVERY_REQUIRED' });
+  assert.deepEqual(await Promise.all(files.map(file => fingerprint(file))), before);
+  const owner = await inspectProcessing(f.capability, other.operationId);
+  assert.deepEqual(owner.nextAction, { command: 'processing-complete', outcome: 'cancelled',
+    reason: 'retire-conflicted-claim', expectedRecoveryHash: owner.recoveryHash });
+  await completeProcessing(f.capability, { ...other.args, expectedClaimHash: otherProposal.claimHash,
+    expectedRecoveryHash: owner.recoveryHash, outcome: 'cancelled' });
+  const available = await inspectProcessing(f.capability, f.operationId);
+  assert.equal(available.nextAction.command, 'processing-complete'); assert.equal(available.nextAction.outcome, 'cancelled');
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash, outcome: 'cancelled' });
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
