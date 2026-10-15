@@ -573,7 +573,10 @@ async function describeOperation(ctx, operationId, expectedAdmission, collection
   const state = completed ? 'completed' : transferPending ? 'blocked' : bindingChanged ? 'conflicted' : tx.hash ? 'recovery-required' : conflict ? 'conflicted' : blockers.length ? 'blocked' : published ? 'awaiting-review'
     : claim?.proposalIntent ? 'draft-staging' : inspection?.state ?? 'missing';
   const recoveryRequired = Boolean(tx.hash || (completed && saved.hash));
+  const changedBindingWritePending = bindingChanged && !completed &&
+    (currentBlockers.includes('WRITER_RECOVERY_REQUIRED') || Boolean(await readWriterReceipt(ctx, operationId)));
   const nextAction = !saved.hash && !tx.hash ? null : transferPending ? { command: 'processing-reinspection-status' }
+    : changedBindingWritePending ? { command: null, reason: 'resolve-conflict' }
     : bindingChanged && !completed ? { command: 'processing-complete', outcome: 'cancelled', reason: 'retire-conflicted-claim', ...(tx.hash ? { expectedRecoveryHash: tx.hash } : {}) }
     : bindingChanged && completed.outcome !== 'cancelled' ? { command: null, reason: 'resolve-conflict' }
     : recoveryRequired ? { command: 'processing-recover' }

@@ -13,6 +13,8 @@ import { createProcessingWorkset, inspectProcessingWorkset } from './processing-
 import { selectProcessingShortcut, inspectProcessingShortcut } from './processing-shortcuts.mjs';
 import { processingControlStatusView } from './processing-control-server.mjs';
 import { processingStatusView } from './processing-mcp.mjs';
+import { executeWorkflow } from './workflow.mjs';
+import { fingerprint } from './safe-update.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
 // Real directory replacement changes physical identity on every platform. No
@@ -114,6 +116,34 @@ for (const kind of ['intake', 'raw', 'writer']) for (const delivered of [false, 
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
 }
+
+for (const phase of ['afterStage', 'afterJournalRemoval']) test(`changed binding after ${phase} offers no cancellation or recovery command`, async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  await assert.rejects(saveProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash,
+    approvedProposalHash: proposal.proposalHash }, { fault: at => { if (at === phase) throw new Error('interrupted'); } }), /interrupted/);
+  await replaceRoot(f, 'writer');
+  const files = ['journal.json', `processed/writes/${f.operationId}/record.json`,
+    `claims/${f.operationId}.json`, `transactions/${f.operationId}.json`].map(name => path.join(f.collection.notes.writerStateDir, name));
+  files.push(proposal.target);
+  const before = await Promise.all(files.map(file => fingerprint(file)));
+  assert.equal(before[0] !== null, phase === 'afterStage');
+  assert.equal(before[1] !== null, phase === 'afterJournalRemoval');
+  const direct = await inspectProcessing(f.capability, f.operationId);
+  const cli = await executeWorkflow('processing-status', { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args: { operationId: f.operationId } }, { configPath: f.options.configPath });
+  const session = await pendingProcessing(f.capability, { selection: f.selection });
+  const collection = await pendingCollectionProcessing(f.capability, { selection: f.selection });
+  for (const status of [direct, cli, session.operations[0], collection.operations[0]]) {
+    assert.equal(status.state, 'conflicted'); assert.equal(status.conflict, 'PROCESSING_BINDING_CHANGED');
+    assert.equal(status.pendingTransaction, true); assert.equal(status.recoveryRequired, true);
+    assert.deepEqual(status.nextAction, { command: null, reason: 'resolve-conflict' });
+  }
+  await assert.rejects(completeProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash,
+    expectedRecoveryHash: direct.recoveryHash, outcome: 'cancelled' }), { code: 'PROCESSING_RECOVERY_REQUIRED' });
+  await assert.rejects(recoverProcessing(f.capability, { operationId: f.operationId,
+    expectedRecoveryHash: direct.recoveryHash }), { code: 'PROCESSING_TRANSACTION_CHANGED' });
+  assert.deepEqual(await Promise.all(files.map(file => fingerprint(file))), before);
+});
 
 for (const phase of ['write-intent', 'operation-receipt']) test(`changed binding keeps ${phase} visible as conflict without an unsafe recovery hint`, async t => {
   const f = await processingFixture(t), proposal = await proposedClaim(f);

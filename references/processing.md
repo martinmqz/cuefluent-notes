@@ -156,10 +156,13 @@ bindings, refresh old hashes, remove the claim, or reuse its approval.
 An unapplied claim, including unread or partially inspected work, can be explicitly
 cancelled with its exact inspected claim hash at the same configured placement.
 Cancellation records the old binding, releases the claim and writes no input
-dispositions. If a transaction exists, its exact recovery hash is also required;
-a writer journal or receipt still requires recovery. Completed operations remain
-historical results, not active binding conflicts. A stale claim blocks new admission,
-but does not prevent inspection or review of another current-binding operation.
+dispositions. If a transaction exists, its exact recovery hash is also required.
+A writer journal or receipt prevents cancellation. If the storage binding has
+changed after writing started, status reports `resolve-conflict` without a
+cancellation or recovery command; preserve the writer state for reconciliation.
+Completed operations remain historical results, not active binding conflicts. A
+stale claim blocks new admission, but does not prevent inspection or review of
+another current-binding operation.
 
 For a fully inspected, published proposal **before any write transaction or
 receipt**, the standalone [reinspection commands](workflow-cli.md#draft-reinspection)
