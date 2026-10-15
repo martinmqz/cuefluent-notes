@@ -117,6 +117,69 @@ for (const kind of ['intake', 'raw', 'writer']) for (const delivered of [false, 
   });
 }
 
+for (const outcome of ['skipped', 'unchanged']) for (const kind of ['intake', 'raw', 'writer']) {
+  for (const phase of ['operation-receipt', 'disposition']) test(`recover ${outcome} after ${phase} and changed ${kind} storage`, async t => {
+    const f = await processingFixture(t), proposal = await proposedClaim(f);
+    const writer = f.collection.notes.writerStateDir, settings = await fs.readFile(f.options.configPath);
+    const original = JSON.parse(await fs.readFile(path.join(writer, 'claims', `${f.operationId}.json`)));
+    await assert.rejects(completeProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash, outcome },
+      { fault: at => { if (at === phase) throw new Error('interrupted'); } }), /interrupted/);
+    const recordPath = path.join(writer, 'processed', 'operations', `${f.operationId}.json`);
+    const record = await fs.readFile(recordPath), recoveryHash = digest(record);
+    await replaceRoot(f, kind);
+    const binding = await workflowProcessingBinding(f.capability);
+    const oldDisposition = path.join(writer, dispositionPath(f.identity, f.inputs[0].headHash, original.bindingHash));
+    const currentDisposition = path.join(writer, dispositionPath(f.identity, f.inputs[0].headHash, binding.hash));
+    const partialHash = await fingerprint(oldDisposition);
+    assert.equal(partialHash !== null, phase === 'disposition');
+    const status = await inspectProcessing(f.capability, f.operationId);
+    assert.equal(status.conflict, 'PROCESSING_BINDING_CHANGED');
+    assert.equal(status.recoveryRequired, true);
+    await assert.rejects(recoverProcessing(f.capability, { operationId: f.operationId, expectedRecoveryHash: digest('wrong') }),
+      { code: 'PROCESSING_RECOVERY_CHANGED' });
+    const request = { collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash,
+      args: { operationId: f.operationId, expectedRecoveryHash: recoveryHash } };
+    const recovered = await executeWorkflow('processing-recover', request, { configPath: f.options.configPath });
+    assert.equal(recovered.status, outcome); assert.equal(recovered.receiptHash, recoveryHash);
+    assert.deepEqual(status.nextAction, { command: 'processing-recover' });
+    const disposition = JSON.parse(await fs.readFile(oldDisposition));
+    assert.equal(disposition.bindingHash, original.bindingHash); assert.equal(disposition.outcome, outcome);
+    if (partialHash) assert.equal(await fingerprint(oldDisposition), partialHash);
+    const completionPath = path.join(writer, 'processed', 'completions', `${f.operationId}.json`);
+    const completion = await fs.readFile(completionPath);
+    assert.equal(JSON.parse(completion).bindingHash, original.bindingHash);
+    assert.deepEqual(await executeWorkflow('processing-recover', request, { configPath: f.options.configPath }), recovered);
+    assert.deepEqual(await fs.readFile(completionPath), completion);
+    assert.deepEqual(await fs.readFile(recordPath), record);
+    await assert.rejects(fs.stat(currentDisposition), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(path.join(writer, 'claims', `${f.operationId}.json`)), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(path.join(writer, 'proposals', f.operationId)), { code: 'ENOENT' });
+    const done = await inspectProcessing(f.capability, f.operationId);
+    assert.equal(done.conflict, null); assert.equal(done.nextAction, null);
+    await prepareProcessing(f.capability, { ...f.args, operationId: randomUUID(), inputs: f.inputs });
+    assert.deepEqual(await fs.readFile(f.options.configPath), settings);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+test('a recorded saved outcome still refuses recovery after storage identity changes', async t => {
+  const f = await processingFixture(t), proposal = await proposedClaim(f);
+  await assert.rejects(saveProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash,
+    approvedProposalHash: proposal.proposalHash },
+    { fault: at => { if (at === 'operation-receipt') throw new Error('interrupted'); } }), /interrupted/);
+  await replaceRoot(f, 'writer');
+  const status = await inspectProcessing(f.capability, f.operationId);
+  assert.deepEqual(status.nextAction, { command: null, reason: 'resolve-conflict' });
+  const files = [`processed/operations/${f.operationId}.json`, `transactions/${f.operationId}.json`,
+    `processed/writes/${f.operationId}/record.json`, `claims/${f.operationId}.json`]
+    .map(name => path.join(f.collection.notes.writerStateDir, name));
+  files.push(proposal.target, f.options.configPath);
+  const before = await Promise.all(files.map(file => fingerprint(file)));
+  await assert.rejects(recoverProcessing(f.capability, { operationId: f.operationId, expectedRecoveryHash: status.recoveryHash }),
+    { code: 'PROCESSING_OPERATION_CHANGED' });
+  assert.deepEqual(await Promise.all(files.map(file => fingerprint(file))), before);
+});
+
 for (const phase of ['afterStage', 'afterJournalRemoval']) test(`changed binding after ${phase} offers no cancellation or recovery command`, async t => {
   const f = await processingFixture(t), proposal = await proposedClaim(f);
   await assert.rejects(saveProcessing(f.capability, { ...f.args, expectedClaimHash: proposal.claimHash,

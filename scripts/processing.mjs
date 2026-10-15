@@ -496,8 +496,9 @@ export async function completeProcessing(capability, { selection, operationId, e
 }
 
 /** Recovery requires an exact reviewed transaction or operation-record hash.
- * A saved receipt permits metadata-only completion under maintenance authority.
- * Without it, the old consent, inputs and approved proposal must still match. */
+ * Recorded non-writing outcomes retain their original metadata namespace.
+ * Saved outcomes retain writer-binding checks; without a writer receipt, the
+ * transaction still requires its old consent, inputs and approved proposal. */
 export async function recoverProcessing(capability, { operationId, expectedRecoveryHash }, options = {}) {
   nativeId(operationId); hash(expectedRecoveryHash);
   return withProcessingState(capability, null, 'maintenance', async ctx => {
@@ -505,7 +506,7 @@ export async function recoverProcessing(capability, { operationId, expectedRecov
     if (record.bytes) {
       if (record.hash !== expectedRecoveryHash) fail('PROCESSING_RECOVERY_CHANGED');
       const value = intakeJSON(record);
-      if (value?.outcome === 'cancelled') {
+      if (['cancelled', 'skipped', 'unchanged'].includes(value?.outcome)) {
         validateClaim(value.claim);
         if (!sameProcessingPlacement(value.claim.binding, ctx.binding)) fail('PROCESSING_BINDING_CHANGED');
         ctx = { ...ctx, binding: value.claim.binding, bindingHash: value.claim.bindingHash };
@@ -583,7 +584,7 @@ async function describeOperation(ctx, operationId, expectedAdmission, collection
   const nextAction = !saved.hash && !tx.hash ? null : transferPending ? { command: 'processing-reinspection-status' }
     : changedBindingWritePending ? { command: null, reason: 'resolve-conflict' }
     : bindingChanged && !completed ? { command: 'processing-complete', outcome: 'cancelled', reason: 'retire-conflicted-claim', ...(tx.hash ? { expectedRecoveryHash: tx.hash } : {}) }
-    : bindingChanged && completed.outcome !== 'cancelled' ? { command: null, reason: 'resolve-conflict' }
+    : bindingChanged && completed.outcome === 'saved' ? { command: null, reason: 'resolve-conflict' }
     : recoveryRequired ? { command: 'processing-recover' }
     : completed ? null
     : conflict ? { command: null, reason: 'resolve-conflict' }

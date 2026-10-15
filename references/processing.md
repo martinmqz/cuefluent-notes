@@ -371,10 +371,15 @@ full output/source/directory verification precedes receipt publication; a receip
 is never published first and validated afterward.
 
 Use `inspectProcessing` to obtain the current recovery hash, then
-`recoverProcessing` with that exact hash. Without a writer receipt, recovery needs
-unchanged consent, selected heads, proposal content and writer checks. With a
-saved receipt, a freshly verified maintenance capability can finish metadata only:
-it reads no raw/source bodies and writes no Markdown. Later user edits remain
+`recoverProcessing` with that exact hash. A durable `skipped`, `unchanged` or
+`cancelled` operation can finish metadata cleanup under its recorded binding after
+storage identities change, provided the configured collection and paths still
+match. Dispositions stay in the recorded namespace; this does not migrate handled
+inputs into the new binding or authorize saved-note recovery across bindings.
+For an unapplied writer transaction, recovery needs unchanged consent, selected
+heads, proposal content and writer checks. With a saved receipt, a freshly verified
+maintenance capability can finish metadata only: it reads no raw/source bodies and
+writes no Markdown. Later user edits remain
 intact. Unpublished writer metadata lives under `metadata-stages/`, and processing
 metadata/proposal stages live under `processing-stages/`,
 separate from authoritative claims, proposals and transactions. Abandoned stages
