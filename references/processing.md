@@ -200,13 +200,16 @@ receipt. No note is written, no settings are changed, and no old page acknowledg
 or Save approval transfers. Read and acknowledge the replacement's evidence pages,
 inspect its destinations, stage its returned proposal request, then review the new
 exact proposal before Save. Canceling the replacement preserves the archived text.
-Transfer archives are retained indefinitely, including after Save or Cancel; there
-is no automatic cleanup command. Reinspection status reports their location and
+Completed transfer archives are retained indefinitely, including after Save or
+Cancel; there is no automatic cleanup command. Abandoning an uncommitted transfer
+instead retains its claim archive and removes only verified draft copies under
+the preservation rules below. Reinspection status reports archive location and
 expected file count. Capture `storage-status` counts capture bytes, not these draft
 archives or writer receipts.
 
 A durable transfer intent blocks new processing, ordinary operation mutation,
-direct writing and capture pruning until that exact transfer finishes. Use
+direct writing, writer maintenance and capture pruning until that exact transfer
+finishes or is safely abandoned. Use
 `processing-reinspection-status` to rediscover its hashes and retry arguments.
 Before the replacement claim is committed, changed evidence, note text, settings
 or storage can prevent replay. Explicit `processing-reinspection-abandon` with the

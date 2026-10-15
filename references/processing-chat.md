@@ -54,14 +54,40 @@ control replies can still replay. No model is started and no evidence is claimed
 The plugin does not fetch host secrets, replace them from user settings, or switch
 to another provider.
 
+The locator is an environment-variable name matching
+`^[A-Za-z_][A-Za-z0-9_]{0,255}$`, not a credential value or file path. Supported
+standard credential names are `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_FOUNDRY_API_KEY`,
+`ANTHROPIC_FOUNDRY_AUTH_TOKEN` and `AWS_BEARER_TOKEN_BEDROCK`. Other recognized
+provider, connection or model settings are refused as locators, even when they
+contain credentials. This includes `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
+and `GOOGLE_APPLICATION_CREDENTIALS`.
+
+A host-specific credential variable outside that recognized set is also accepted
+if it is not a reserved control and its nonblank inherited value survives
+child-environment preparation. Names are case-sensitive except on Windows.
+Refused controls include host/profile/process variables such as `PATH`, `HOME`,
+`CLAUDE_CONFIG_DIR` or the two managed-auth markers, unsupported provider switches,
+or the removed `CLAUDECODE` and `CUEFLUENT_ENGINE_*` fields. A refused locator
+reports the same diagnostic; use the independently authenticated workflow below
+rather than renaming or copying credentials to bypass the check.
+
 In host-managed mode, inherited routing and authentication own even absent fields.
-Profile provider selectors, endpoints, credentials, client certificates and
-credential-helper commands are ignored. Supported proxy, CA, timeout and output,
-thinking and effort defaults can fill missing connection/tuning fields; inherited
+Profile provider selectors, endpoints, model environment values, credentials,
+client certificates and credential-helper commands are ignored. Supported proxy,
+CA, timeout and output, thinking and effort defaults can fill missing
+connection/tuning fields; inherited
 host values win. Supported structured model preferences still pass as settings.
 A disabled managed-host flag alone keeps ordinary profile projection. Credential
 presence only permits launch; it does not verify authentication, expiry, or a host
 refresh channel.
+
+When upgrading from v0.14.1–v0.15.0, a managed-host handoff no longer fills missing model
+environment values such as `ANTHROPIC_MODEL` or `ANTHROPIC_DEFAULT_*_MODEL` from
+the user profile. The host may therefore resolve a different model, with different
+cost or quality. Controller status does not report the resolved model. Use the
+host's supported model configuration or supported structured profile model
+preferences under native precedence; do not rely on the ignored profile `env` keys.
 
 Use the [standalone workflow](processing.md) in an explicitly selected uncaptured
 chat whose normal authentication works, or invoke processing from an independently
