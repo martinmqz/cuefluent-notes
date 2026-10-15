@@ -326,9 +326,24 @@ export async function createProcessingChatState(options) {
     }
   }
 
+  async function terminalOperationOwner(operationId, records) {
+    for (const { value } of records) {
+      if (value.runs.some(run => ownsOperation(run, operationId)) || await archivedOperation(operationId, value.namespace)) {
+        await guard(); return true;
+      }
+    }
+    await guard(); return false;
+  }
+
   return Object.freeze({
     async read() { return withStorageProbes(async () => view(await snapshot())); },
     async collectionActivity() { return withStorageProbes(collectionActivity); },
+    async hasTerminalOperationOwner(operationId) {
+      nativeId(operationId);
+      // Historical proof is independent of whether another namespace is busy.
+      // This metadata query grants no permission to resume alongside that owner.
+      return withStorageProbes(async () => terminalOperationOwner(operationId, await collectionRegistries()));
+    },
     async canResumeOperation(operationId) {
       nativeId(operationId);
       return withStorageProbes(async () => {
@@ -336,12 +351,7 @@ export async function createProcessingChatState(options) {
         // A claim alone says nothing about a standalone agent's liveness.
         // Only a recorded terminal native run supplies automatic resume authority.
         if (records.some(({ value }) => executing(value))) return false;
-        for (const { value } of records) {
-          if (value.runs.some(run => ownsOperation(run, operationId)) || await archivedOperation(operationId, value.namespace)) {
-            await guard(); return true;
-          }
-        }
-        await guard(); return false;
+        return terminalOperationOwner(operationId, records);
       });
     },
     async findRequest(requestId) {

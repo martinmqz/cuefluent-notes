@@ -293,16 +293,20 @@ test('archived operation proof is bounded, namespace-bound and refuses missing o
   const indexBytes = await fs.readFile(index), archiveBytes = await fs.readFile(archive);
   await fs.rm(archive);
   await assert.rejects(other.canResumeOperation(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
+  await assert.rejects(other.hasTerminalOperationOwner(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
   await fs.writeFile(archive, archiveBytes, { mode: 0o600 });
   const wrong = JSON.parse(indexBytes); wrong.operationId = randomUUID();
   await fs.writeFile(index, canonicalJSON(wrong) + '\n');
   await assert.rejects(other.canResumeOperation(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
+  await assert.rejects(other.hasTerminalOperationOwner(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
   wrong.operationId = operationId; wrong.bindingHash = digest('other-collection');
   await fs.writeFile(index, canonicalJSON(wrong) + '\n');
   await assert.rejects(other.canResumeOperation(operationId), { code: 'PROCESSING_CHAT_BINDING_CHANGED' });
+  await assert.rejects(other.hasTerminalOperationOwner(operationId), { code: 'PROCESSING_CHAT_BINDING_CHANGED' });
   await fs.writeFile(index, indexBytes);
   const another = { ...beginArgs(rolled), operationId }, active = await f.registry.begin(another);
   assert.equal(await other.canResumeOperation(operationId), false, 'archived proof cannot override current execution');
+  assert.equal(await other.hasTerminalOperationOwner(operationId), true, 'current execution does not erase archived terminal proof');
   const again = await f.registry.finish(finishArgs(active, another));
   await f.registry.rollover({ expectedHash: again.hash });
   assert.deepEqual(await fs.readFile(index), indexBytes, 'terminal retries preserve the first exact immutable proof');
@@ -340,7 +344,7 @@ test('changed policy, namespace and unsupported persisted state fail without rep
   assert.deepEqual(await fs.readFile(statePath(f, reserved)), original);
 });
 
-test('known nonexecuting peer blocks preserve terminal operation ownership; unknown blocks do not', async t => {
+test('peer execution gates resume independently of terminal operation ownership', async t => {
   const f = await fixture(t), bound = await f.bind(await f.reserve()), operationId = randomUUID();
   const request = { ...beginArgs(bound), operationId }, busy = await f.registry.begin(request);
   await f.registry.finish(finishArgs(busy, request));
@@ -350,7 +354,9 @@ test('known nonexecuting peer blocks preserve terminal operation ownership; unkn
   for (const [reason, allowed] of [['creation-not-dispatched', true], ['run-abandoned', true], ['creation-outcome-unknown', false], ['host-unavailable', false]]) {
     await writeFixtureState(f, blocked, value => { value.block.reason = reason; });
     assert.equal(await f.registry.canResumeOperation(operationId), allowed, reason);
+    assert.equal(await f.registry.hasTerminalOperationOwner(operationId), true, reason);
     assert.equal((await f.registry.collectionActivity()).some(item => !item.own), !allowed, reason);
     assert.equal(await f.registry.canResumeOperation(randomUUID()), false, 'a harmless peer cannot fabricate ownership');
+    assert.equal(await f.registry.hasTerminalOperationOwner(randomUUID()), false, 'peer state cannot fabricate terminal proof');
   }
 });

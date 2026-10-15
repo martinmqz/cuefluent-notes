@@ -189,7 +189,7 @@ export async function openProcessingController(context, dependencies = {}) {
         if (operation.recoveryRequired) {
           result.state = 'blocked'; result.diagnostics = ['PROCESSING_RECOVERY_REQUIRED'];
         } else if (!operation.outcome && operation.state !== 'awaiting-review' &&
-            !await state.canResumeOperation(result.operationId)) {
+            !await state.hasTerminalOperationOwner(result.operationId)) {
           result.state = 'blocked'; result.resumeSupported = false;
           result.diagnostics = ['PROCESSING_OPERATION_OWNER_UNVERIFIED'];
         }

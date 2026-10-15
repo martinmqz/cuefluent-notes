@@ -1792,9 +1792,20 @@ test('MCP retired native run still exposes its retained proposal for review with
   assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
-test('MCP retired binding reports a competing active namespace and never launches alongside it', async t => {
+for (const retainedClaim of [false, true]) test(`MCP retired binding ${retainedClaim ? 'with terminal-owned claim' : 'without claim'} reports a competing active namespace without relaunch`, async t => {
   const f = await processingFixture(t), h = await harness(t, f);
-  h.script = async () => { throw new Error('synthetic lost terminal'); };
+  if (retainedClaim) {
+    h.script = async call => prepareFromPending(call, f);
+    const firstClosed = h.whenClosed();
+    await h.call('process_selected_captures', {}); await firstClosed;
+  }
+  h.script = async call => {
+    if (retainedClaim) {
+      const claim = await call('processing_status', { operationId: f.operationId });
+      await call('processing_page', { operationId: f.operationId, expectedClaimHash: claim.claimHash, page: 0 });
+    }
+    throw new Error('synthetic lost terminal');
+  };
   const closed = h.whenClosed();
   await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
   const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
@@ -1803,6 +1814,12 @@ test('MCP retired binding reports a competing active namespace and never launche
   t.after(() => controller.close());
   const failed = await controller.status();
   const retired = await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  assert.equal(retired.state, 'idle');
+  const claim = await inspectProcessing(f.capability, f.operationId), dispatches = h.dispatches;
+  if (retainedClaim) {
+    assert.equal(retired.operationId, f.operationId);
+    assert.equal(await controller.canResumeOperation(f.operationId), true);
+  }
   const peer = await harness(t, f, { controllerIdentity: { hostId: digest('synthetic-peer-host') } });
   const gate = deferred(); peer.release = gate.resolve; peer.script = async () => gate.promise;
   peer.callId = 'distinct-peer-call';
@@ -1814,8 +1831,21 @@ test('MCP retired binding reports a competing active namespace and never launche
     assert.equal(result.status, 'busy'); assert.equal(result.nextAction, 'wait');
     assert(result.diagnostics.includes('PROCESSING_COLLECTION_BUSY'));
     assert.equal(result.chat.sessionId, admitted.chat.sessionId);
-    assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
+    assert.equal(h.creates, 1); assert.equal(h.dispatches, dispatches);
     assert.equal((await controller.status()).chatHash, retired.chatHash);
   }
+  assert.equal(await controller.canResumeOperation(f.operationId), false);
+  await assert.rejects(controller.run({ requestId: randomUUID(), selection: f.selection,
+    expectedChatHash: retired.chatHash, ...(retainedClaim ? { resumeOperationId: f.operationId } : {}) }), { code: 'PROCESSING_COLLECTION_BUSY' });
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal((await controller.status()).chatHash, retired.chatHash);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   gate.resolve(); await peerClosed;
+  if (retainedClaim) {
+    assert.equal(await controller.canResumeOperation(f.operationId), true);
+    const status = body(await h.call('processing_status', {}));
+    assert.equal(status.status, 'idle'); assert.equal(status.nextAction, 'resume');
+    assert.deepEqual(status.diagnostics, []);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  }
 });
