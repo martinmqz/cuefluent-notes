@@ -6,10 +6,11 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { processingFixture } from './test-support/processing-fixture.mjs';
+import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { createProcessingWorkset, inspectProcessingWorkset, prepareWorksetBatch } from './processing-workset.mjs';
-import { prepareProcessing, completeProcessing, inspectProcessing } from './processing.mjs';
+import { prepareProcessing, completeProcessing, inspectProcessing, saveProcessing, recoverProcessing } from './processing.mjs';
+import { pendingProcessing } from './processing-inventory.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { unitKey } from './capture-retention.mjs';
 import { codexProcessingProfile } from './processing-client-codex.mjs';
@@ -1424,6 +1425,77 @@ for (const client of ['codex', 'claude']) for (const history of ['workset', 'res
     assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
+}
+
+for (const client of ['codex', 'claude']) for (const kind of ['plain', 'workset']) {
+  for (const peer of [false, true]) for (const duringStartup of [false, true]) {
+    test(`${client} retired ${kind} preserves claim-released recovery for ${peer ? 'peer' : 'own'} admission ${duringStartup ? 'during startup' : 'before admission'}`, async t => {
+      const f = await processingFixture(t, { client }), other = await processingFixture(t, { base: f, client });
+      const h = await harness(t, f, client), worksetId = kind === 'workset' ? randomUUID() : null;
+      const binding = worksetId ? { worksetId } : {};
+      if (worksetId) await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+      h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+      await assert.rejects(h.controller.run(await h.request(binding)));
+      const failed = await h.controller.status();
+      const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+      const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
+      assert.equal(stored.active.operationId, null);
+      await h.controller.close();
+      const transaction = path.join(f.collection.notes.writerStateDir, 'transactions', `${other.operationId}.json`);
+      let target, noteBytes, transactionBytes;
+      const interruptSave = async () => {
+        const proposal = await proposedClaim(other); target = proposal.target;
+        await assert.rejects(saveProcessing(other.capability, { ...other.args,
+          expectedClaimHash: proposal.claimHash, approvedProposalHash: proposal.proposalHash }, {
+          fault: phase => { if (phase === 'claim-release') throw new Error('synthetic claim-release crash'); }
+        }), /synthetic claim-release crash/);
+        assert.deepEqual(await fs.readdir(path.join(f.collection.notes.writerStateDir, 'claims')), []);
+        transactionBytes = await fs.readFile(transaction); noteBytes = await fs.readFile(target);
+        const inventory = await pendingProcessing(f.capability, { selection: f.selection, limit: 1 });
+        assert.deepEqual(inventory.operations, []);
+        assert.deepEqual(inventory.blockers, ['PROCESSING_RECOVERY_REQUIRED']);
+      };
+      const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+      let opens = 0;
+      const controller = await openProcessingController({ ...f.options, client }, {
+        ...h.dependencies, ...(peer ? { hostId: digest('synthetic-recovery-peer') } : {}),
+        async [opener](...args) { opens++; if (duringStartup) await interruptSave(); return open(...args); }
+      });
+      t.after(() => controller.close());
+      if (!duringStartup) await interruptSave();
+      const request = { requestId: randomUUID(), selection: f.selection, expectedChatHash: peer ? null : retired.chatHash,
+        ...(!peer ? binding : {}) };
+      h.script = async call => call('processing_pending', {});
+      if (peer) {
+        await assert.rejects(controller.run(request), { code: 'PROCESSING_COLLECTION_BUSY' });
+        const activity = await controller.collectionActivity();
+        assert.equal(activity.length, 1); assert.equal(activity[0].state, 'blocked'); assert.equal(activity[0].own, false);
+        assert.equal((await controller.status()).state, 'missing');
+      } else {
+        const blocked = await controller.run(request);
+        assert.equal(blocked.state, 'blocked'); assert.equal(blocked.chatHash, retired.chatHash);
+        assert.deepEqual(blocked.diagnostics, ['PROCESSING_RECOVERY_REQUIRED']); assert.equal(blocked.resumeSupported, false);
+        assert.deepEqual(await controller.status(), blocked);
+      }
+      assert.equal(opens, duringStartup ? 1 : 0); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+      assert.deepEqual(await registryJSON(f), stored);
+      assert.deepEqual(await fs.readFile(transaction), transactionBytes); assert.deepEqual(await fs.readFile(target), noteBytes);
+      if (worksetId) {
+        const workset = await inspectProcessingWorkset(f.capability, { worksetId });
+        assert.deepEqual(workset.operations, []); assert.deepEqual(workset.blockers, ['PROCESSING_RECOVERY_REQUIRED']);
+        assert.equal(workset.chargedBatches, 0); assert.deepEqual(workset.inputs, f.inputs);
+      }
+      // Complete the actual synthetic transaction, rather than deleting its intent.
+      const recovery = await inspectProcessing(other.capability, other.operationId);
+      assert.equal((await recoverProcessing(other.capability, { operationId: other.operationId,
+        expectedRecoveryHash: recovery.recoveryHash })).status, 'saved');
+      assert.deepEqual(await controller.collectionActivity(), []);
+      const clear = await controller.status();
+      assert.equal(clear.state, peer ? 'missing' : 'idle'); assert.deepEqual(clear.diagnostics, []);
+      assert.deepEqual(await registryJSON(f), stored); assert.deepEqual(await fs.readFile(target), noteBytes);
+      await assert.rejects(fs.readFile(transaction), { code: 'ENOENT' });
+    });
+  }
 }
 
 for (const client of ['codex', 'claude']) for (const blocker of ['claim', 'reservation']) {

@@ -298,9 +298,14 @@ export async function createProcessingChatState(options) {
     const request = value.active;
     try {
       let operations;
-      if (request.worksetId) operations = (await inspectProcessingWorkset(capability, { worksetId: request.worksetId })).operations;
-      else {
-        const selected = request.selection ? (await pendingProcessing(capability, { selection: request.selection, limit: 1 })).operations : [];
+      if (request.worksetId) {
+        const workset = await inspectProcessingWorkset(capability, { worksetId: request.worksetId });
+        if (workset.blockers.length) return 'blocked';
+        operations = workset.operations;
+      } else {
+        const inventory = request.selection ? await pendingProcessing(capability, { selection: request.selection, limit: 1 }) : null;
+        if (inventory?.blockers.length) return 'blocked';
+        const selected = inventory?.operations ?? [];
         const discovered = new Map(selected.map(operation => [operation.operationId, operation]));
         // A pin cannot hide other selected claims, and a cross-session resume
         // can pin a claim outside this run's original selection.

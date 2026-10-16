@@ -772,8 +772,10 @@ atomic snapshot. Workset IDs are UUIDs. Nothing automatically extends a workset.
   admitted under current consent can still proceed; each operation reports its own
   state. Reports per-input states, operation states, charged and
   remaining budgets, `operationCounts`, `outcomeCounts`, `inputCounts`, `remainingSelected`, and
-  `budgetExhausted`. Operation counts are not note counts; input counts are not
-  global queue totals. Each count group is a separate dimension with disjoint
+  `budgetExhausted`. Collection-wide `blockers` remain visible even when no
+  operations remain in the workset; an empty operation list does not prove that
+  writer recovery is complete. Operation counts are not note counts; input counts
+  are not global queue totals. Each count group is a separate dimension with disjoint
   buckets; do not sum groups together. Operation progress distinguishes recovery,
   terminal, review, blocked, admission-pending and inspection. Outcomes distinguish
   saved, unchanged, skipped and cancelled; cancelled is terminal but **unhandled**.

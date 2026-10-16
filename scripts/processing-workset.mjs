@@ -201,7 +201,7 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
       : item.conflict || ['blocked', 'conflicted'].includes(item.state) ? 'blocked' : item.state === 'awaiting-review' ? 'awaitingReview' : 'inProgress';
     inputCounts[bucket]++;
   }
-  return { ...summary, items, operations, operationCounts, outcomeCounts, inputCounts,
+  return { ...summary, items, operations, blockers: collectionBlockers, operationCounts, outcomeCounts, inputCounts,
     remainingSelected: inputCounts.unattempted + inputCounts.blocked + inputCounts.cancelled,
     remainingPacketBytes: value.budget.maxPacketBytes - summary.chargedPacketBytes,
     budgetExhausted: summary.chargedBatches >= value.budget.maxBatches || summary.chargedPacketBytes >= value.budget.maxPacketBytes,

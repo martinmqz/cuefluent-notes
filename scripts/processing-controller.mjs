@@ -220,6 +220,7 @@ export async function openProcessingController(context, dependencies = {}) {
       inspected = true;
       try {
         result.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: result.worksetId }));
+        if (result.workset.blockers.length) unknown('PROCESSING_RECOVERY_REQUIRED');
         for (const operation of result.workset.operations) operations.set(operation.operationId, operation);
       } catch (error) {
         result.workset = null; unknown(writerReservationDiagnostic(error) ?? 'WORKSET_OUTCOME_UNKNOWN');
@@ -228,6 +229,7 @@ export async function openProcessingController(context, dependencies = {}) {
       inspected = true;
       try {
         const inventory = await withStorageProbes(() => pendingProcessing(capability, { selection: view.registry.active.selection, limit: 1 }));
+        if (inventory.blockers.length) unknown('PROCESSING_RECOVERY_REQUIRED');
         // Operations cover the complete selected session, independently of the
         // bounded capture-head page. No evidence bodies are read here.
         for (const operation of inventory.operations) operations.set(operation.operationId, operation);
