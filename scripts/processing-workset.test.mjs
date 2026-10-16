@@ -357,6 +357,7 @@ test('workset status reads collection blockers once for multiple operations and 
   t.mock.method(fs, 'opendir', async (name, ...args) => { if (name === transactions) scans++; return opendir(name, ...args); });
   const status = await inspectProcessingWorkset(f.capability, { worksetId });
   assert.equal(scans, 1); assert.equal(status.operations.length, 2);
+  assert.deepEqual(status.blockers, ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED']);
   for (const operation of status.operations) assert.deepEqual(operation.blockers, ['PROCESSING_RECOVERY_REQUIRED', 'WRITER_RECOVERY_REQUIRED']);
 });
 

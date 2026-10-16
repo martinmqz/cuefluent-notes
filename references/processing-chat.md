@@ -1,10 +1,11 @@
 # Processing in a reusable chat
 
-The installed plugin can hand an explicit processing request to a dedicated native
-Codex or Claude session. It reuses one session per collection, client, machine and
-client profile. Several source projects can use that session. The existing engine
-still owns evidence, claims, proposals, approvals, writer transactions and recovery.
-Cuefluent does not need to be installed or running.
+The installed plugin can hand an explicit processing request to a dedicated
+native Codex or Claude session. It reuses one session per collection, client,
+machine and client profile. Claude also separates sessions by the selected
+authentication mode. Several source projects can use that session. The existing
+engine still owns evidence, claims, proposals, approvals, writer transactions
+and recovery. Cuefluent does not need to be installed or running.
 
 This path requires the matching native client executable on PATH and its normal
 authentication. The native client resolves the model under the restricted
@@ -12,47 +13,119 @@ processing launch settings, including the supported Claude preferences described
 below. Persistent status does not yet report the resolved model. The plugin does
 not choose a provider or model independently of that configuration, install a
 client, change authentication or run on a schedule. A desktop installation alone
-does not establish that its CLI is available. Native protocol
-support is checked at runtime; unsupported clients fail without inline processing.
-Desktop sidebar visibility and navigation require separate live verification.
-Status, review and registry recovery read the local client profile and stored
-state without launching a native client. A native executable is needed only when
-a request actually creates or resumes a processing run.
+does not establish that its CLI is available. Native protocol support is checked
+at runtime; unsupported clients fail without inline processing. Desktop sidebar
+visibility and navigation require separate live verification. Status, review and
+registry recovery read the local client profile and stored state without
+launching a native client. A native executable is needed only when a request
+actually creates or resumes a processing run.
 
 ## Claude launch settings
+
+### Select the processor's authentication
+
+The selected Claude CLI profile can use regular native account login or a
+supported provider configuration; Foundry is not required. Codex retains its
+native profile authentication and provider selection. Cuefluent does not read
+either client's credential store or start a sign-in flow.
+
+Claude defaults to `CUEFLUENT_CLAUDE_AUTHENTICATION=inherit` (also the behavior
+when unset). It preserves the calling host's authentication rules below. Some
+Desktop versions deliberately remove their managed credential from subprocesses,
+so that credential cannot authenticate the separate processor.
+
+To explicitly use an already authenticated Claude CLI profile instead, set
+`CUEFLUENT_CLAUDE_AUTHENTICATION` to `native-profile` in Claude's environment.
+For one local project, merge the following into that project's
+`.claude/settings.local.json`, preserving its other settings and keeping the
+file out of Git. For all your projects, use the selected user profile's
+`settings.json` instead. These are Claude session settings, not a per-plugin
+settings field; see [Claude's settings
+scopes](https://code.claude.com/docs/en/settings#settings-files-and-who-they-affect).
+
+```json
+{
+  "env": {
+    "CUEFLUENT_CLAUDE_AUTHENTICATION": "native-profile"
+  }
+}
+```
+
+Restart the affected source session and reconnect its MCP server. Select the
+intended CLI profile in the environment that launches Claude with
+`CLAUDE_CONFIG_DIR` if needed; leaving it unset uses the native default. The
+user must first confirm which account and provider that profile uses: matching
+provider names alone do not prove matching accounts. This is a setup choice,
+never an automatic fallback or a processing-tool argument. Do not enable it
+merely because a processing call failed.
+
+This mode uses the profile's stored native login or supported provider settings
+in its user `settings.json` `env`. Provider values exported by a shell, terminal
+or Desktop are ignored. A working CLI with those exports does not verify this
+mode: use the native client's account/provider display outside project-specific
+configuration, with the intended profile and those exports absent. Otherwise an
+export-only provider can be lost and an existing native login selected instead.
+Do not inspect credential values or start processing to verify setup.
+
+In `native-profile` mode, the processor removes inherited Desktop credentials,
+provider selectors, endpoints, model environment overrides and credential-chain
+locators before loading the selected CLI user settings. Its normal native login
+or configured provider credential chain supplies authentication. The plugin does
+not copy host credentials, read the host credential file, disable subprocess
+scrubbing, or run shell startup files. Native credential-chain executables must
+be available on the calling environment's `PATH`. Supported connection and
+tuning defaults remain available; selected user settings take precedence in this
+mode. The existing restricted-tool and credential-helper limitations below still
+apply.
+
+Authentication modes have separate native processing-session bindings. Changing
+the mode cannot resume a chat created with the other mode, transfer a claim, or
+clear interrupted work. Existing claims and proposals remain guarded by their
+original ownership and recovery requirements. CLI status and recovery commands
+must use the same authentication mode and `CLAUDE_CONFIG_DIR` selection as the
+original run; another namespace can report `missing` while the original remains
+blocked. An already-open controller rejects reads and controls after a mode change
+with `PROCESSING_CLIENT_IDENTITY_CHANGED`; reopen the helper to select the new
+namespace. Status and review do not launch a model or require a fresh credential.
+An unrecognized or ambiguous mode reports `PROCESSING_CLIENT_AUTHENTICATION_INVALID`
+without dispatching; status, review and cancel also require correcting that
+setting first.
+
+### Inherited authentication and supported settings
 
 Restricted Claude processing retains its existing native authentication and
 supported provider, deployment and connection environment settings. Before each
 eligible run, including session reuse, it reads the selected user profile's
 `settings.json` (`~/.claude/settings.json`, or the profile chosen by
 `CLAUDE_CONFIG_DIR`). A CLI launch outside Claude applies supported user `env`
-values over inherited shell values, as native user settings do. A verified Claude
-chat handoff, or a CLI launched from Claude with its native `CLAUDECODE` nesting
-hint, preserves values already supplied by the host environment, using the user
-profile only for missing values, except for host-managed routing described below.
-The hint changes environment precedence only;
-it supplies no session identity or permission. This keeps exported project account,
-endpoint and model selections intact. Supported profile model preferences,
-mappings and allowlists are passed as restricted settings;
-native managed policy and environment-model precedence remain in force.
+values over inherited shell values, as native user settings do. A verified
+Claude chat handoff, or a CLI launched from Claude with its native `CLAUDECODE`
+nesting hint, preserves values already supplied by the host environment, using
+the user profile only for missing values, except for host-managed routing
+described below. The hint changes environment precedence only; it supplies no
+session identity or permission. This keeps exported project account, endpoint
+and model selections intact. Supported profile model preferences, mappings and
+allowlists are passed as restricted settings; native managed policy and
+environment-model precedence remain in force.
 
 The user file is reread before each eligible run, but an inherited host value
 still wins. The plugin cannot tell whether that value came from the old user
 settings or an intentional project override. Rotating a profile credential does
 not replace an inherited credential in a running MCP server. Restart the source
-client and reconnect its plugin MCP server so the updated host environment reaches
-the next request; do not discard the processing registry or captures. An ordinary
-CLI launch without a host override picks up the new profile value on its next run.
+client and reconnect its plugin MCP server so the updated host environment
+reaches the next request; do not discard the processing registry or captures. An
+ordinary CLI launch without a host override picks up the new profile value on
+its next run.
 
 Some hosts declare managed authentication with
-`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` or `CLAUDE_CODE_HOST_AUTH_ENV_VAR`.
-A managed host must provide an explicit credential locator and its nonempty
+`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` or `CLAUDE_CODE_HOST_AUTH_ENV_VAR`. A
+managed host must provide an explicit credential locator and its nonempty
 inherited value to the separate processor. Missing, empty or unusable handoffs
 report `PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE` before acknowledging a finished
-review, freezing a new shortcut workset, or reserving a native run. Exact completed
-control replies can still replay. No model is started and no evidence is claimed.
-The plugin does not fetch host secrets, replace them from user settings, or switch
-to another provider.
+review, freezing a new shortcut workset, or reserving a native run. Exact
+completed control replies can still replay. No model is started and no evidence
+is claimed. The plugin does not fetch host secrets, replace them from user
+settings, or switch to another provider.
 
 The locator is an environment-variable name matching
 `^[A-Za-z_][A-Za-z0-9_]{0,255}$`, not a credential value or file path. Supported
@@ -67,35 +140,36 @@ A host-specific credential variable outside that recognized set is also accepted
 if it is not a reserved control and its nonblank inherited value survives
 child-environment preparation. Names are case-sensitive except on Windows.
 Refused controls include host/profile/process variables such as `PATH`, `HOME`,
-`CLAUDE_CONFIG_DIR` or the two managed-auth markers, unsupported provider switches,
-or the removed `CLAUDECODE` and `CUEFLUENT_ENGINE_*` fields. A refused locator
-reports the same diagnostic; use the independently authenticated workflow below
-rather than renaming or copying credentials to bypass the check.
+`CLAUDE_CONFIG_DIR` or the two managed-auth markers, unsupported provider
+switches, or the removed `CLAUDECODE` and `CUEFLUENT_ENGINE_*` fields. A refused
+locator reports the same diagnostic; use the independently authenticated
+workflow below rather than renaming or copying credentials to bypass the check.
 
-In host-managed mode, inherited routing and authentication own even absent fields.
-Profile provider selectors, endpoints, model environment values, credentials,
-client certificates and credential-helper commands are ignored. Supported proxy,
-CA, timeout and output, thinking and effort defaults can fill missing
-connection/tuning fields; inherited
-host values win. Supported structured model preferences still pass as settings.
-A disabled managed-host flag alone keeps ordinary profile projection. Credential
-presence only permits launch; it does not verify authentication, expiry, or a host
-refresh channel.
+In host-managed mode, inherited routing and authentication own even absent
+fields. Profile provider selectors, endpoints, model environment values,
+credentials, client certificates and credential-helper commands are ignored.
+Supported proxy, CA, timeout and output, thinking and effort defaults can fill
+missing connection/tuning fields; inherited host values win. Supported
+structured model preferences still pass as settings. A disabled managed-host
+flag alone keeps ordinary profile projection. Credential presence only permits
+launch; it does not verify authentication, expiry, or a host refresh channel.
 
-When upgrading from v0.14.1–v0.15.0, a managed-host handoff no longer fills missing model
-environment values such as `ANTHROPIC_MODEL` or `ANTHROPIC_DEFAULT_*_MODEL` from
-the user profile. The host may therefore resolve a different model, with different
-cost or quality. Controller status does not report the resolved model. Use the
-host's supported model configuration or supported structured profile model
-preferences under native precedence; do not rely on the ignored profile `env` keys.
+When upgrading from v0.14.1–v0.15.0, a managed-host handoff no longer fills
+missing model environment values such as `ANTHROPIC_MODEL` or
+`ANTHROPIC_DEFAULT_*_MODEL` from the user profile. The host may therefore
+resolve a different model, with different cost or quality. Controller status
+does not report the resolved model. Use the host's supported model configuration
+or supported structured profile model preferences under native precedence; do
+not rely on the ignored profile `env` keys.
 
-Use the [standalone workflow](processing.md) in an explicitly selected uncaptured
-chat whose normal authentication works, or invoke processing from an independently
-authenticated Claude terminal. Do not unset host routing or authentication markers
-inside the failing host to force a different account. Status and pending-proposal
-review do not need this launch credential. A run that already failed with an
-unknown outcome still requires the existing recovery controls below; this
-preflight does not clear it.
+If the host cannot delegate its authentication, explicitly select a working CLI
+profile as above, use the [standalone workflow](processing.md) in an uncaptured
+chat whose normal authentication works, or invoke processing from an
+independently authenticated Claude terminal. Do not manually unset host routing
+or authentication markers to force a different account. With a valid
+authentication-mode setting, status and pending-proposal review do not need this
+launch credential. A run that already failed with an unknown outcome still
+requires the existing recovery controls below; this preflight does not clear it.
 
 The projection restores supported first-party/gateway, Foundry, Bedrock/Mantle
 and Vertex environment settings. Connection controls include uppercase and
@@ -105,44 +179,47 @@ and feature toggles are ignored, without interpreting every `CLAUDE_CODE_USE_*`
 name as a provider. The known unsupported provider selectors
 `CLAUDE_CODE_USE_ANTHROPIC_AWS` and `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD` are
 refused when enabled in projected user `env`. Host-managed routing ignores those
-unused provider switches. Other unrecognized file environment keys
-are not restored; use the standalone workflow when the native setup depends on
-them. Execution controls such as file-based `PATH`, `NODE_OPTIONS` and engine
+unused provider switches. Other unrecognized file environment keys are not
+restored; use the standalone workflow when the native setup depends on them.
+Execution controls such as file-based `PATH`, `NODE_OPTIONS` and engine
 authorization are never restored.
 
 Stored structured effort preferences (`effortLevel` and `modelSettings`) are not
 restored. Their user-profile semantics differ from launch-level settings, so the
-processor does not translate them into a global effort override. To select effort
-for restricted processing, supply `CLAUDE_CODE_EFFORT_LEVEL` through the host
-environment or the supported user-profile `env` settings. Otherwise the native
-client resolves effort without those stored preferences; see its
-[effort configuration](https://code.claude.com/docs/en/model-config#adjust-effort-level).
+processor does not translate them into a global effort override. To select
+effort for restricted processing, supply `CLAUDE_CODE_EFFORT_LEVEL` through the
+host environment or the supported user-profile `env` settings. Otherwise the
+native client resolves effort without those stored preferences; see its [effort
+configuration](https://code.claude.com/docs/en/model-config#adjust-effort-level).
 
 Authentication values remain in process memory and environment, never command
 arguments, proposal receipts or plugin diagnostics. A missing user settings file
-retains the inherited environment. The processor does not discover project
-settings, restore Claude's credential-helper command settings, restore unrelated
-profile settings, or modify authentication. Project-specific configuration must
-already be supplied through the calling host's environment; project-specific
-structured settings are not read. Hooks, plugins, slash commands and arbitrary
-tools remain disabled; native runtime verification still requires the sole
-selected engine and its exact tool set.
+retains the environment after the explicit authentication-mode selection. The
+processor does not discover project settings, restore Claude's credential-helper
+command settings, restore unrelated profile settings, or modify authentication.
+In `inherit` mode, project-specific configuration must already be supplied
+through the calling host's environment; `native-profile` instead requires the
+selected user profile's supported provider settings. Project-specific structured
+settings are not read. Hooks, plugins, slash commands and arbitrary tools remain
+disabled; native runtime verification still requires the sole selected engine
+and its exact tool set.
 
 The inherited `CLAUDE_CONFIG_DIR` stays unset when unset, and keeps its exact
 spelling when set. Changing it can change native credential-store selection even
-when it names the same physical folder. The registry and exclusion lookup use the
-verified canonical profile. Profile aliases are rechecked before dispatch and
-engine calls, but are not locked across native startup; a changed or unverifiable
-profile stops processing without granting an exclusion or replacing state.
+when it names the same physical folder. The registry and exclusion lookup use
+the verified canonical profile. Profile aliases are rechecked before dispatch
+and engine calls, but are not locked across native startup; a changed or
+unverifiable profile stops processing without granting an exclusion or replacing
+state.
 
 `PROCESSING_CLIENT_SETTINGS_INVALID`, `PROCESSING_CLIENT_SETTINGS_UNAVAILABLE`
-and `PROCESSING_CLIENT_SETTINGS_LIMIT` stop before native admission when settings
-are malformed, inaccessible, changing or over their bounded limits. The `env`
-shape and entry-count checks still apply in host-managed mode, while value checks
-apply only to eligible fields. File size, JSON/duplicate-key, structural and
-supported model checks apply in both modes. Ask the user
-to resolve the selected native settings in the client without printing settings
-or credential values. Keep existing processing state intact.
+and `PROCESSING_CLIENT_SETTINGS_LIMIT` stop before native admission when
+settings are malformed, inaccessible, changing or over their bounded limits. The
+`env` shape and entry-count checks still apply in host-managed mode, while value
+checks apply only to eligible fields. File size, JSON/duplicate-key, structural
+and supported model checks apply in both modes. Ask the user to resolve the
+selected native settings in the client without printing settings or credential
+values. Keep existing processing state intact.
 `PROCESSING_CLIENT_SETTINGS_UNSUPPORTED`
 reports a configured Claude credential-helper command outside host-managed mode
 or an unsupported enabled provider switch in projected user `env`. The native provider SDK still owns its ordinary authentication;
@@ -278,6 +355,9 @@ both clients. `process repo` uses the nearest verified Git checkout and excludes
 separate nested repositories. `process chat` selects the invoking native session.
 The invoking chat proves the request; it is not the default evidence boundary.
 These actions never create a new route or change collection settings.
+For worksets and operation resumes, the worker receives the invoking source
+separately from its evidence binding. The engine's exact bound inputs retain
+their original sessions and clients, even when another chat requests the run.
 
 Selection begins with metadata, preserves exact head hashes, and resumes existing
 unfinished operations with a verified stopped native owner before admitting more
@@ -471,6 +551,11 @@ terminal whose engine state could not be inspected remains blocked with
 `PROCESSING_OPERATION_OUTCOME_UNKNOWN`; reconciliation inspects that operation
 without restarting the native turn.
 
+For Claude CLI recovery, preserve the original run's
+`CUEFLUENT_CLAUDE_AUTHENTICATION` and `CLAUDE_CONFIG_DIR` selection, including an
+unset profile locator. Claude's settings-file `env` is not automatically present
+when running the Node CLI directly in a terminal; explicitly select the same
+mode and profile. Do not change namespaces to bypass a blocked run.
 Use `processing-chat-status` and the exact guarded
 `processing-chat-reconcile` command. Codex can reconcile a sealed completed,
 failed or interrupted native unit after verifying its terminal and unchanged
@@ -493,9 +578,22 @@ operation and use its ordinary resume, review or recovery commands. Abandonment
 does not mark evidence handled, save a note or prove an exclusion. Only a later
 explicit request with a new request ID can create a replacement session in the
 same namespace; it never resumes the retired native chat. Retries of the abandoned
-request are refused. A failure proven to precede `thread/start` needs no
-abandonment: it can retry using freshly inspected status after the client issue is
-fixed.
+request are refused. After retirement, invoke `resume` to continue the saved
+selection, or `process` to apply its ordinary unfinished-selection-first behavior.
+Both require a fresh native call and current launch authentication; neither
+automatically resolves an unfinished claim or bypasses recovery. Status clears
+the retired chat and request identifiers and any historical launch diagnostic.
+A retained unfinished claim without verified terminal ownership instead reports
+`PROCESSING_OPERATION_OWNER_UNVERIFIED` and requires inspection. Published proposals
+remain `awaiting-review`; resolve them before starting another native run. Engine
+reinspection reservations and unfinished input conflicts also block new runs,
+even when the claim has a verified terminal owner. Collection-wide recovery also
+blocks retired-session replacement after the last claim is released, until its
+transaction cleanup completes. `PROCESSING_OPERATION_CONFLICT` requires inspecting
+the retained operation for its exact conflict before any explicit resolution. An unknown outcome still requires inspection; it does not
+establish that a client is still running.
+A failure proven to precede `thread/start` needs no abandonment: it can retry using
+freshly inspected status after the client issue is fixed.
 
 After a settings change, `processing-chat-reauthorize` explicitly accepts the
 current policy for the registry using its inspected hash and previous policy

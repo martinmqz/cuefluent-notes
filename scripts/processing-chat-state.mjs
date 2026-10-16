@@ -9,6 +9,8 @@ import { lstatOrNull } from './file-io.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { assertProcessingShortcutExecution } from './processing-shortcuts.mjs';
 import { inspectProcessing } from './processing.mjs';
+import { inspectProcessingWorkset } from './processing-workset.mjs';
+import { pendingProcessing } from './processing-inventory.mjs';
 import { validateProcessingSelection } from './processing-contract.mjs';
 import { CLIENTS, canonicalJSON, digest, fail, keys, hash, nativeId, string, choice, integer, list, unique, object } from './workflow-values.mjs';
 
@@ -27,6 +29,15 @@ const nativeToken = value => {
 };
 const nullableId = value => { if (value !== null) nativeId(value); };
 const STATES = ['creating', 'idle', 'busy', 'awaiting-review', 'blocked'];
+export const processingChatRestartSupported = registry => registry?.state === 'blocked' &&
+  ['creation-not-dispatched', 'run-abandoned'].includes(registry.block?.reason);
+// Engine blockers and unfinished conflicts remain authoritative even when a
+// retained claim has a terminal native owner and no transaction of its own.
+export function processingChatOperationBlocker(operation) {
+  if (operation.blockers?.includes('PROCESSING_REINSPECTION_REQUIRED')) return 'PROCESSING_REINSPECTION_REQUIRED';
+  if (operation.recoveryRequired || operation.blockers?.length) return 'PROCESSING_RECOVERY_REQUIRED';
+  return !operation.outcome && operation.conflict ? 'PROCESSING_OPERATION_CONFLICT' : null;
+}
 const BLOCKS = ['creation-outcome-unknown', 'dispatch-outcome-unknown', 'operation-outcome-unknown', 'host-unavailable', 'session-unavailable', 'binding-conflict', 'creation-not-dispatched', 'run-abandoned'];
 
 function namespaceValue(value) {
@@ -130,10 +141,12 @@ function validateState(value, namespace, bindingHash) {
  * client/hostId/profileId/sessionId/requestId/inputHash plus nativeRun, all freshly
  * bound by the host. verifyReview(input) returns its request fields plus state:
  * completed, recoveryRequired:false and the authoritative engine outcome. Callers
- * must establish those proofs outside this registry.
+ * must establish those proofs outside this registry. verifyRestart(view) is a
+ * metadata-only check under the intake lock; true permits replacing a retired
+ * active binding. Missing or negative proof preserves that binding unchanged.
  */
 export async function createProcessingChatState(options) {
-  keys(options, ['capability', 'configPath', 'client', 'hostId', 'profileId', 'verifySession', 'verifyRun', 'verifyReview'], ['verifyAbort', 'verifyAbandon', 'verifyAdvance', 'reuseHost']);
+  keys(options, ['capability', 'configPath', 'client', 'hostId', 'profileId', 'verifySession', 'verifyRun', 'verifyReview'], ['verifyAbort', 'verifyAbandon', 'verifyAdvance', 'verifyRestart', 'reuseHost']);
   let { capability, configPath, client, hostId, profileId, verifySession, verifyRun, verifyReview } = options;
   choice(client, CLIENTS); hash(hostId); hash(profileId);
   if ([verifySession, verifyRun, verifyReview].some(verify => typeof verify !== 'function')) fail('PROCESSING_CHAT_VERIFIER_REQUIRED');
@@ -279,20 +292,60 @@ export async function createProcessingChatState(options) {
     await guard(); return records;
   }
   const executing = value => ['creating', 'busy'].includes(value.state) ||
-    (value.state === 'blocked' && !['creation-not-dispatched', 'run-abandoned'].includes(value.block.reason));
+    (value.state === 'blocked' && !processingChatRestartSupported(value));
+  async function retiredActivityState(value, records) {
+    if (!processingChatRestartSupported(value) || !value.active) return null;
+    const request = value.active;
+    try {
+      let operations;
+      if (request.worksetId) {
+        const workset = await inspectProcessingWorkset(capability, { worksetId: request.worksetId });
+        if (workset.blockers.length) return 'blocked';
+        operations = workset.operations;
+      } else {
+        const inventory = request.selection ? await pendingProcessing(capability, { selection: request.selection, limit: 1 }) : null;
+        if (inventory?.blockers.length) return 'blocked';
+        const selected = inventory?.operations ?? [];
+        const discovered = new Map(selected.map(operation => [operation.operationId, operation]));
+        // A pin cannot hide other selected claims, and a cross-session resume
+        // can pin a claim outside this run's original selection.
+        if (request.operationId && !discovered.has(request.operationId)) {
+          discovered.set(request.operationId, await inspectProcessing(capability, request.operationId));
+        }
+        operations = [...discovered.values()];
+      }
+      let reviewPending = false;
+      for (const operation of operations) {
+        if (processingChatOperationBlocker(operation)) return 'blocked';
+        if (!operation.outcome && !operation.admissionPending) {
+          if (operation.state === 'awaiting-review') reviewPending = true;
+          else if (!await terminalOperationOwner(operation.operationId, records)) return 'blocked';
+        }
+      }
+      return reviewPending ? 'awaiting-review' : null;
+    } catch {
+      // An unreadable retired peer has not proved its claims safe to resume.
+      // Keep it visible as blocked without attributing its route/metadata error
+      // to the caller. Collection registry validation and guard still fail normally.
+      return 'blocked';
+    }
+  }
   async function collectionActivity() {
-    const activity = [];
-    for (const { own, value } of await collectionRegistries()) {
+    const activity = [], records = await collectionRegistries();
+    for (const { own, value } of records) {
       if (value.state === 'awaiting-review') {
         const operation = await inspectProcessing(capability, value.runs.at(-1).reviewOperationId);
         // A completed engine outcome is authoritative even if its old native
         // client has not yet acknowledged review. This read does not rewrite it.
         if (operation.state === 'completed' && operation.outcome && !operation.recoveryRequired) continue;
       }
-      if (value.state === 'awaiting-review' || executing(value)) {
-        activity.push({ own, state: value.state, client: value.namespace.client,
-          sessionId: value.session?.sessionId ?? null,
-          requestId: value.active?.requestId ?? value.runs.at(-1)?.request.requestId ?? value.creation.requestId });
+      // Retirement removes native execution, not a retained claim's ownership
+      // requirement. Admission repeats this inspection under the intake lock.
+      const retiredState = own ? null : await retiredActivityState(value, records);
+      if (value.state === 'awaiting-review' || executing(value) || retiredState) {
+        activity.push({ own, state: retiredState ?? value.state, client: value.namespace.client,
+          sessionId: retiredState ? null : value.session?.sessionId ?? null,
+          requestId: retiredState ? null : value.active?.requestId ?? value.runs.at(-1)?.request.requestId ?? value.creation.requestId });
       }
     }
     await guard(); return activity;
@@ -324,9 +377,24 @@ export async function createProcessingChatState(options) {
     }
   }
 
+  async function terminalOperationOwner(operationId, records) {
+    for (const { value } of records) {
+      if (value.runs.some(run => ownsOperation(run, operationId)) || await archivedOperation(operationId, value.namespace)) {
+        await guard(); return true;
+      }
+    }
+    await guard(); return false;
+  }
+
   return Object.freeze({
     async read() { return withStorageProbes(async () => view(await snapshot())); },
     async collectionActivity() { return withStorageProbes(collectionActivity); },
+    async hasTerminalOperationOwner(operationId) {
+      nativeId(operationId);
+      // Historical proof is independent of whether another namespace is busy.
+      // This metadata query grants no permission to resume alongside that owner.
+      return withStorageProbes(async () => terminalOperationOwner(operationId, await collectionRegistries()));
+    },
     async canResumeOperation(operationId) {
       nativeId(operationId);
       return withStorageProbes(async () => {
@@ -334,12 +402,7 @@ export async function createProcessingChatState(options) {
         // A claim alone says nothing about a standalone agent's liveness.
         // Only a recorded terminal native run supplies automatic resume authority.
         if (records.some(({ value }) => executing(value))) return false;
-        for (const { value } of records) {
-          if (value.runs.some(run => ownsOperation(run, operationId)) || await archivedOperation(operationId, value.namespace)) {
-            await guard(); return true;
-          }
-        }
-        await guard(); return false;
+        return terminalOperationOwner(operationId, records);
       });
     },
     async findRequest(requestId) {
@@ -408,7 +471,7 @@ export async function createProcessingChatState(options) {
       keys(args, ['expectedHash', 'requestId', 'requestHash'], ['owner']); expected(args.expectedHash); nativeId(args.requestId); hash(args.requestHash);
       return locked(async (tx, saved) => {
         if ((await intakeSnapshot(store, 'state', abandonedPath(args.requestId), { maxBytes: MAX_BYTES })).bytes) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
-        const retryable = saved.value?.state === 'blocked' && ['creation-not-dispatched', 'run-abandoned'].includes(saved.value.block.reason);
+        const retryable = processingChatRestartSupported(saved.value);
         if (saved.value !== null && !retryable) {
           if (saved.value.policyHash !== initial.configHash) fail('PROCESSING_CHAT_POLICY_CHANGED');
           if (saved.value.creation.requestId === args.requestId) {
@@ -419,6 +482,10 @@ export async function createProcessingChatState(options) {
           return view(saved, existingAction(saved.value));
         }
         current(saved, args.expectedHash); if (!saved.value) await countBindings(); await noOtherExecution();
+        // Startup can yield long enough for a standalone preparer to publish a
+        // claim. Recheck the retained owner before erasing it, under this lock.
+        if (retryable && saved.value.active && (typeof options.verifyRestart !== 'function' ||
+            await options.verifyRestart(view(saved)) !== true)) return view(saved, 'inspect-existing');
         return write(tx, saved, { format: 'cuefluent-processing-chat', version: PROCESSING_CHAT_STATE_VERSION,
           namespace: { ...namespace }, bindingHash: initial.hash, policyHash: initial.configHash, generation: (saved.value?.generation ?? 0) + 1, revision: saved.value?.revision ?? 0,
           state: 'creating', creation: { requestId: args.requestId, requestHash: args.requestHash, ...(args.owner ? { owner: args.owner } : {}) }, session: null, active: null, runs: [], block: null }, 'create');

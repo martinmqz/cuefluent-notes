@@ -6,13 +6,17 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { processingFixture } from './test-support/processing-fixture.mjs';
+import { processingFixture, proposedClaim } from './test-support/processing-fixture.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { createProcessingWorkset, inspectProcessingWorkset, prepareWorksetBatch } from './processing-workset.mjs';
-import { prepareProcessing, completeProcessing, inspectProcessing } from './processing.mjs';
+import { prepareProcessing, completeProcessing, inspectProcessing, saveProcessing, recoverProcessing } from './processing.mjs';
+import { pendingProcessing } from './processing-inventory.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { unitKey } from './capture-retention.mjs';
 import { codexProcessingProfile } from './processing-client-codex.mjs';
+import { createCapture } from './capture-contract.mjs';
+import { controlSelection, readSelection, publishCapture } from './intake-store.mjs';
+import { withIntakeLock } from './intake-io.mjs';
 
 const deferred = () => {
   let resolve, reject;
@@ -25,11 +29,11 @@ async function registryJSON(f) {
   assert.equal(files.length, 1);
   return JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
 }
-async function harness(t, f, client = 'codex') {
+async function harness(t, f, client = 'codex', env = {}) {
   const profileRoot = path.join(f.root, 'synthetic-profile'); await fs.mkdir(profileRoot);
   const h = { creates: 0, resumes: 0, dispatches: [], closes: 0, bridgeCloses: 0, events: [],
     script: async call => call('processing_pending', {}), resultStatus: 'completed', failCreate: false,
-    env: { CLAUDE_CONFIG_DIR: profileRoot }, profileId: digest('synthetic-codex-profile') };
+    env: { CLAUDE_CONFIG_DIR: profileRoot, ...env }, profileId: digest('synthetic-codex-profile') };
   const dependencies = { env: h.env, ...(client === 'codex' ? { profileId: h.profileId } : {}), hostId: digest('synthetic-controller-host'),
     async beforeExecution(event) {
       const state = await registryJSON(f);
@@ -122,13 +126,32 @@ const unchanged = f => async call => {
   const claim = await inspectAll(call, f);
   await call('processing_complete', { operationId: f.operationId, expectedClaimHash: claim.claimHash });
 };
-const propose = f => async call => {
-  const claim = await inspectAll(call, f);
+const propose = (f, inspected = null) => async call => {
+  const claim = inspected ?? await inspectAll(call, f);
   return call('processing_propose', { operationId: f.operationId, expectedClaimHash: claim.claimHash,
     proposal: { files: [{ path: 'meetings/rollout.md', expectedHash: null,
       content: '# Rollout meeting\n\n## Decision\n\nKeep the rollout paused.\n' }],
     mappings: [{ identity: f.identity, paths: ['meetings/rollout.md'] }] } });
 };
+
+async function assertRetiredPeerBlocked(t, f, h, expectedState = 'blocked') {
+  const stored = await registryJSON(f);
+  for (const client of ['codex', 'claude']) {
+    const profileRoot = path.join(f.root, `peer-profile-${randomUUID()}`); await fs.mkdir(profileRoot);
+    const peer = await openProcessingController({ ...f.options, client }, {
+      ...h.dependencies, profileId: digest(profileRoot), env: { CLAUDE_CONFIG_DIR: profileRoot },
+      async openCodex() { assert.fail('a retired peer claim must block before native startup'); },
+      createClaude() { assert.fail('a retired peer claim must block before native startup'); }
+    });
+    t.after(() => peer.close());
+    const activity = await peer.collectionActivity();
+    assert.equal(activity.length, 1); assert.equal(activity[0].own, false); assert.equal(activity[0].state, expectedState);
+    await assert.rejects(peer.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }),
+      { code: 'PROCESSING_COLLECTION_BUSY' });
+    assert.deepEqual(await registryJSON(f), stored);
+    await peer.close();
+  }
+}
 
 test('Codex controller reuses one chat across three requests and reopening; exact duplicate does not dispatch', async t => {
   const f = await processingFixture(t), h = await harness(t, f);
@@ -260,6 +283,73 @@ test('a proposal stops at review; only exact engine completion unlocks the exist
   assert.equal(h.creates, 1); assert.equal(h.dispatches.length, 2);
   const stored = await registryJSON(f);
   assert.equal(stored.runs[0].reviewResolved, true);
+});
+
+for (const mode of ['inherit', 'native-profile']) test(`Claude existing-controller paths reject changed ${mode} identity without requiring credentials`, async t => {
+  const f = await processingFixture(t, { client: 'claude' });
+  const h = await harness(t, f, 'claude', { CUEFLUENT_CLAUDE_AUTHENTICATION: mode });
+  h.script = propose(f);
+  const review = await h.controller.run(await h.request());
+  const args = { expectedChatHash: review.chatHash, requestId: review.requestId };
+  // Losing a host credential does not change mode or prevent read/review controls.
+  h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+  h.env.CLAUDE_CODE_HOST_AUTH_ENV_VAR = 'ANTHROPIC_AUTH_TOKEN';
+  assert.equal((await h.controller.status()).state, 'awaiting-review');
+  assert.equal((await h.controller.reviewContext(args)).operationId, f.operationId);
+  assert.equal(await h.controller.hasRequest(review.requestId), true);
+  assert.equal((await h.controller.run(await h.request())).state, 'awaiting-review');
+  const before = await registryJSON(f), operation = await inspectProcessing(f.capability, f.operationId);
+  h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = mode === 'inherit' ? 'native-profile' : 'inherit';
+  const controls = {
+    status: () => h.controller.status(),
+    collectionActivity: () => h.controller.collectionActivity(),
+    canResumeOperation: () => h.controller.canResumeOperation(f.operationId),
+    hasRequest: () => h.controller.hasRequest(review.requestId),
+    reviewContext: () => h.controller.reviewContext(args),
+    finishReview: () => h.controller.finishReview({ ...args, operationId: f.operationId }),
+    stop: () => h.controller.stop(args),
+    abandon: () => h.controller.abandon({ ...args, offline: true }),
+    reconcile: () => h.controller.reconcile(args),
+    reauthorize: () => h.controller.reauthorize({ expectedChatHash: review.chatHash, previousPolicyHash: review.policyHash }),
+    rollover: () => h.controller.rollover({ expectedChatHash: review.chatHash }),
+    run: () => h.controller.run({ ...args, requestId: randomUUID(), selection: f.selection }),
+  };
+  for (const [name, invoke] of Object.entries(controls)) await t.test(name, async () => {
+    await assert.rejects(invoke(), { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+    assert.deepEqual(await registryJSON(f), before);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), operation);
+  });
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: operation.claimHash, outcome: 'skipped' });
+  await assert.rejects(h.controller.finishReview({ ...args, operationId: f.operationId }), { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+  assert.deepEqual(await registryJSON(f), before, 'completed engine outcome cannot acknowledge the old namespace');
+  h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = mode;
+  assert.equal((await h.controller.finishReview({ ...args, operationId: f.operationId })).state, 'idle');
+  assert.equal(h.dispatches.length, 1);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = mode === 'inherit' ? 'native-profile' : 'inherit';
+  await h.controller.close(); // Cleanup must remain possible after identity loss.
+});
+
+test('Claude active stop refuses a changed mode before signalling its original worker', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+  const entered = deferred(), release = deferred(); let aborted = false;
+  h.script = async (_call, request) => {
+    request.signal.addEventListener('abort', () => { aborted = true; release.resolve(); }, { once: true });
+    entered.resolve(); await release.promise;
+  };
+  const request = await h.request(), run = h.controller.run(request);
+  try {
+    await entered.promise;
+    const busy = await h.controller.status(), before = await registryJSON(f);
+    h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = 'native-profile';
+    await assert.rejects(h.controller.stop({ expectedChatHash: busy.chatHash, requestId: request.requestId }),
+      { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+    assert.equal(aborted, false); assert.deepEqual(await registryJSON(f), before);
+    delete h.env.CUEFLUENT_CLAUDE_AUTHENTICATION;
+    h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+    const stopped = await h.controller.stop({ expectedChatHash: busy.chatHash, requestId: request.requestId });
+    assert.equal(stopped.state, 'idle'); assert.equal(aborted, true);
+  } finally { delete h.env.CUEFLUENT_CLAUDE_AUTHENTICATION; release.resolve(); await run; }
 });
 
 test('explicit reconciliation finishes a sealed native result without another dispatch or claim change', async t => {
@@ -510,7 +600,7 @@ test('metadata-only status and review survive an unavailable CLI and preserve a 
   assert.equal(h.dispatches.length, 1);
 });
 
-test('explicit offline abandonment preserves unknown claims and retires the chat for both clients', async t => {
+test('explicit offline abandonment preserves unknown claims and blocks replacement runs for both clients', async t => {
   for (const client of ['codex', 'claude']) await t.test(client, async t => {
     const f = await processingFixture(t, { client }), h = await harness(t, f, client);
     h.script = async call => { await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs }); throw new Error('synthetic lost terminal'); };
@@ -520,13 +610,54 @@ test('explicit offline abandonment preserves unknown claims and retires the chat
     await assert.rejects(h.controller.abandon({ expectedChatHash: 'f'.repeat(64), requestId: request.requestId, offline: true }), { code: 'PROCESSING_CHAT_STATE_CHANGED' });
     const abandoned = await h.controller.abandon({ expectedChatHash: blocked.chatHash, requestId: request.requestId, offline: true });
     assert.equal(abandoned.state, 'blocked');
+    assert.deepEqual(abandoned.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    assert.equal(abandoned.chat, null); assert.equal(abandoned.requestId, null);
+    assert.equal(abandoned.resumeSupported, false);
+    assert.deepEqual(await h.controller.status(), abandoned);
     assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
     await assert.rejects(h.controller.run({ ...request, expectedChatHash: abandoned.chatHash }), { code: 'PROCESSING_CHAT_REQUEST_CONFLICT' });
-    h.script = async call => { assert.equal((await call('processing_pending', {})).operations[0].operationId, f.operationId); };
-    const next = await h.controller.run(await h.request());
-    assert.notEqual(next.chat.sessionId, blocked.chat.sessionId);
-    assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
+    const worksetId = randomUUID();
+    await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+    const stored = await registryJSON(f), events = [...h.events], creates = h.creates;
+    for (const extra of [{}, { resumeOperationId: f.operationId }, { worksetId }]) {
+      assert.deepEqual(await h.controller.run(await h.request(extra)), abandoned);
+      assert.deepEqual(await registryJSON(f), stored);
+      assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+    }
+    assert.equal(h.dispatches.length, 1); assert.equal(h.creates, creates);
+    assert.deepEqual(h.events, events);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
+});
+
+test('processing-chat-run CLI cannot replace a retired binding with an unverified claim', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  await h.controller.close();
+  h.env.CODEX_HOME = path.join(f.root, 'codex-profile'); await fs.mkdir(h.env.CODEX_HOME);
+  h.profileId = await codexProcessingProfile(h.env); h.dependencies.profileId = h.profileId;
+  h.controller = await h.open();
+  h.script = async call => {
+    await call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+    throw new Error('synthetic lost terminal');
+  };
+  await assert.rejects(h.controller.run(await h.request()));
+  const failed = await h.controller.status();
+  const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const stored = await registryJSON(f), claim = await inspectProcessing(f.capability, f.operationId);
+  await h.controller.close();
+  const request = path.join(f.root, 'retired-run.json');
+  await fs.writeFile(request, canonicalJSON({ collectionId: f.collection.id, expectedConfigHash: f.options.expectedConfigHash,
+    args: { client: 'codex', requestId: randomUUID(), selection: f.selection, expectedChatHash: retired.chatHash } }));
+  // Never launch an installed native client if admission regresses.
+  const env = Object.fromEntries(Object.entries({ ...process.env, ...h.env }).filter(([key]) => key.toUpperCase() !== 'PATH'));
+  const { stdout } = await promisify(execFile)(process.execPath,
+    [fileURLToPath(new URL('./workflow.mjs', import.meta.url)), 'processing-chat-run', '--config', f.options.configPath, '--request', request],
+    { env: { ...env, PATH: '' }, timeout: 30_000 });
+  assert.deepEqual(JSON.parse(stdout), retired);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
 
@@ -597,13 +728,18 @@ test('frozen runs cannot start another operation until the current one has a dur
   assert.equal(resumed.workset.inputCounts.handled, 2); assert.equal(h.creates, 1); assert.equal(h.resumes, 1);
 });
 
-test('frozen proposal review uses its original operation selection when invoked from a different chat', async t => {
+for (const client of ['codex', 'claude']) test(`${client} frozen proposal handoff and review retain evidence scope across invoking chats`, async t => {
   const a = await processingFixture(t), b = await processingFixture(t, { base: a, client: 'claude' });
   const worksetId = randomUUID();
   await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs] });
-  const h = await harness(t, a);
+  const h = await harness(t, a, client);
   h.script = async call => {
     const pending = await call('processing_pending');
+    const prompt = h.dispatches.at(-1).input;
+    assert.doesNotMatch(prompt, /^Selection:/m, 'invoking chat must not be presented as the evidence filter');
+    assert.deepEqual(JSON.parse(prompt.match(/^Invoking source: (.+)$/m)?.[1]), b.selection);
+    assert.deepEqual(JSON.parse(prompt.match(/^Evidence scope: (.+)$/m)?.[1]), { worksetId: pending.workset.worksetId });
+    assert.deepEqual(pending.workset.selection, a.selection);
     let claim = await call('processing_prepare', pending.nextPreparation);
     const operationId = claim.operationId;
     for (let page = 0; page < claim.packet.pages.length; page++) {
@@ -621,12 +757,16 @@ test('frozen proposal review uses its original operation selection when invoked 
   assert.deepEqual(await fs.readdir(a.collection.notes.notesDir), []);
 });
 
-test('explicit legacy-operation resume preserves exact selection and does not admit fresh evidence', async t => {
+for (const client of ['codex', 'claude']) test(`${client} legacy-operation handoff preserves exact selection across invoking chats`, async t => {
   const a = await processingFixture(t), b = await processingFixture(t, { base: a });
   await prepareProcessing(a.capability, { ...a.args, inputs: a.inputs });
-  const h = await harness(t, a);
+  const h = await harness(t, a, client);
   h.script = async call => {
     const pending = await call('processing_pending');
+    const prompt = h.dispatches.at(-1).input;
+    assert.doesNotMatch(prompt, /^Selection:/m, 'invoking chat must not be presented as the evidence filter');
+    assert.deepEqual(JSON.parse(prompt.match(/^Invoking source: (.+)$/m)?.[1]), b.selection);
+    assert.deepEqual(JSON.parse(prompt.match(/^Evidence scope: (.+)$/m)?.[1]), { resumeOperationId: pending.operations[0].operationId });
     assert.equal(pending.operations[0].operationId, a.operationId); assert.deepEqual(pending.pending, []);
     await assert.rejects(call('processing_prepare', { operationId: a.operationId, inputs: a.inputs }), { code: 'PROCESSING_RESUME_REQUIRED' });
     const read = await call('processing_page', { operationId: a.operationId, expectedClaimHash: pending.operations[0].claimHash, page: 0 });
@@ -766,6 +906,25 @@ test('unavailable frozen inputs do not block independent work and are not descri
   assert.equal(next.reason, 'workset-remainder-unavailable'); assert.equal(h.dispatches.length, 1);
 });
 
+for (const foreign of [false, true]) test(`final workset inspection preserves ${foreign ? 'foreign' : 'own'} reservation diagnostics and native completion`, async t => {
+  const f = await processingFixture(t), h = await harness(t, f), worksetId = randomUUID();
+  const workset = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+  const bytes = foreign ? canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n' : '{}\n';
+  const code = foreign ? 'PROCESSING_RECOVERY_REQUIRED' : 'PROCESSING_REINSPECTION_REQUIRED';
+  h.script = async () => {};
+  h.afterNativeResult = () => fs.writeFile(reservation, bytes, { mode: 0o600 });
+  const result = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(result.workset, null); assert.deepEqual(result.diagnostics, [code]);
+  assert.equal(result.nativeStatus, 'completed'); assert.equal(result.state, 'idle');
+  assert.equal((await registryJSON(f)).runs.length, 1);
+  assert.deepEqual((await h.controller.status()).diagnostics, [code]);
+  assert.equal(await fs.readFile(reservation, 'utf8'), bytes);
+  await fs.unlink(reservation);
+  assert.equal((await h.controller.status()).workset.worksetHash, workset.worksetHash);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
 test('final workset metadata failure preserves the committed native outcome', async t => {
   const f = await processingFixture(t), worksetId = randomUUID();
   await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
@@ -889,4 +1048,673 @@ test('missing Claude host auth preserves a finished review and its expected chat
   assert.equal(h.dispatches.length, 1);
   // Read-only review remains usable without launch credentials.
   assert.equal((await h.controller.reviewContext({ expectedChatHash: review.chatHash, requestId: review.requestId })).operationId, f.operationId);
+});
+
+
+test('retired controller projects fresh capacity and clears historical launch identifiers', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  for (let i = 0; i < 3; i++) await h.controller.run(await h.request());
+  const settled = await h.controller.status();
+  assert.equal(settled.remainingRuns, 125);
+  h.script = async () => { throw new Error('synthetic lost terminal'); };
+  const request = await h.request();
+  await assert.rejects(h.controller.run(request));
+  const failed = await h.controller.status();
+  const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  assert.equal(retired.state, 'idle'); assert.equal(retired.remainingRuns, 128);
+  assert.equal(retired.restartSupported, true); assert.equal(retired.nativeStatus, null);
+  assert.equal(retired.chat, null); assert.equal(retired.requestId, null);
+  assert.deepEqual(retired.diagnostics, []); assert.deepEqual(await h.controller.status(), retired);
+  const stored = await registryJSON(f);
+  assert.equal(stored.active.requestId, request.requestId);
+  assert.equal(stored.session.sessionId, settled.chat.sessionId); assert.equal(stored.runs.length, 3);
+  h.script = async call => call('processing_pending', {});
+  const restarted = await h.controller.run(await h.request());
+  assert.equal(restarted.remainingRuns, 127); assert.equal(restarted.restartSupported, false);
+  assert.notEqual(restarted.chat.sessionId, settled.chat.sessionId);
+  assert.equal((await registryJSON(f)).runs.length, 1);
+});
+
+
+for (const client of ['codex', 'claude']) test(`${client} retired unpinned discovery preserves actionable inventory errors`, async t => {
+  for (const blocker of ['WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection']) await t.test(blocker, async t => {
+    const code = blocker === 'writer-reserved-by-another-collection' ? 'PROCESSING_RECOVERY_REQUIRED' : blocker;
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    if (client === 'codex') {
+      await h.controller.close();
+      h.env.CODEX_HOME = path.join(f.root, 'codex-profile'); await fs.mkdir(h.env.CODEX_HOME);
+      h.profileId = await codexProcessingProfile(h.env); h.dependencies.profileId = h.profileId;
+      h.controller = await h.open();
+    }
+    h.script = async () => { throw new Error('synthetic lost terminal before prepare'); };
+    const request = await h.request(); await assert.rejects(h.controller.run(request));
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: request.requestId, offline: true });
+    const stored = await registryJSON(f);
+    assert.equal(stored.active.operationId, null); assert.equal(stored.active.worksetId, null);
+    const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    const reservationBytes = blocker === 'writer-reserved-by-another-collection'
+      ? canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n' : '{}\n';
+    if (code === 'WORKFLOW_NOT_AUTHORIZED') {
+      await h.controller.close();
+      f.config.routes[0].excluded = true;
+      const bytes = JSON.stringify(f.config);
+      await fs.writeFile(f.options.configPath, bytes);
+      f.options.expectedConfigHash = digest(bytes);
+      h.controller = await h.open();
+    } else {
+      // Even an incomplete transfer intent reserves the writer until inspected.
+      await fs.writeFile(reservation, reservationBytes, { mode: 0o600 });
+    }
+    const settings = await fs.readFile(f.options.configPath);
+    await assert.rejects(h.controller.status(), { code });
+    await assert.rejects(h.controller.run({ ...request, requestId: randomUUID(), expectedChatHash: retired.chatHash }), { code });
+    const statusRequest = path.join(f.root, 'status-request.json');
+    await fs.writeFile(statusRequest, canonicalJSON({ collectionId: f.collection.id,
+      expectedConfigHash: f.options.expectedConfigHash, args: { client } }));
+    await assert.rejects(promisify(execFile)(process.execPath,
+      [fileURLToPath(new URL('./workflow.mjs', import.meta.url)), 'processing-chat-status', '--config', f.options.configPath, '--request', statusRequest],
+      { env: { ...process.env, ...h.env } }), error => {
+      assert.equal(error.code, 1); assert.deepEqual(JSON.parse(error.stderr), { error: code }); return true;
+    });
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await fs.readFile(f.options.configPath), settings);
+    if (code !== 'WORKFLOW_NOT_AUTHORIZED') assert.equal(await fs.readFile(reservation, 'utf8'), reservationBytes);
+    assert.equal(h.creates, client === 'codex' ? 1 : 0); assert.equal(h.dispatches.length, 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+});
+
+for (const client of ['codex', 'claude']) for (const foreign of [false, true]) {
+  test(`${client} retired unpinned workset preserves ${foreign ? 'foreign' : 'own'} reservation diagnostics`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    const worksetId = randomUUID();
+    const workset = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+    h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+    const request = await h.request({ worksetId }); await assert.rejects(h.controller.run(request));
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    const stored = await registryJSON(f);
+    assert.equal(stored.active.operationId, null); assert.equal(stored.active.worksetId, worksetId);
+    const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    // An incomplete own intent still reserves the writer; foreign ownership is explicit.
+    const bytes = foreign ? canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n' : '{}\n';
+    await fs.writeFile(reservation, bytes, { mode: 0o600 });
+    const code = foreign ? 'PROCESSING_RECOVERY_REQUIRED' : 'PROCESSING_REINSPECTION_REQUIRED';
+    const blocked = await h.controller.status();
+    assert.equal(blocked.state, 'blocked'); assert.deepEqual(blocked.diagnostics, [code]);
+    assert.equal(blocked.resumeSupported, false); assert.equal(blocked.worksetId, worksetId);
+    assert.equal(blocked.operationId, null); assert.equal(blocked.chat, null); assert.equal(blocked.requestId, null);
+    assert.deepEqual(await h.controller.run({ ...request, requestId: randomUUID(), expectedChatHash: retired.chatHash }), blocked);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.equal(await fs.readFile(reservation, 'utf8'), bytes);
+    assert.equal(h.dispatches.length, 1);
+    await assertRetiredPeerBlocked(t, f, h);
+    await fs.unlink(reservation);
+    const clear = await h.controller.status();
+    assert.equal(clear.state, 'idle'); assert.deepEqual(clear.diagnostics, []);
+    assert.equal(clear.workset.worksetHash, workset.worksetHash);
+    assert.deepEqual(clear.workset.inputs, workset.inputs);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+for (const client of ['codex', 'claude']) test(`${client} excluded retired peer stays visible without rejecting an authorized route's activity read`, async t => {
+  const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+  h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+  await assert.rejects(h.controller.run(await h.request()));
+  const failed = await h.controller.status();
+  await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const stored = await registryJSON(f);
+  assert.equal(stored.active.operationId, null); assert.equal(stored.active.worksetId, null);
+  await h.controller.close();
+  const project = path.join(f.root, 'authorized-peer-project'); await fs.mkdir(project);
+  f.config.routes.push({ ...f.config.routes[0], id: 'authorized-peer', projectRoot: project });
+  f.config.routes[0].excluded = true;
+  const settings = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, settings);
+  f.options.expectedConfigHash = digest(settings);
+  h.controller = await h.open();
+  // Own selection errors retain their precise diagnostic; peers get a blocker.
+  await assert.rejects(h.controller.status(), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+  await assertRetiredPeerBlocked(t, { ...f, selection: { ...f.selection, cwd: project, sessionId: randomUUID() } }, h);
+  assert.equal(await fs.readFile(f.options.configPath, 'utf8'), settings);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal(h.dispatches.length, 1);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+for (const client of ['codex', 'claude']) test(`${client} retired cross-session resume preserves its binding and refuses unavailable metadata`, async t => {
+  const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+  const other = await processingFixture(t, { base: f, client });
+  h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+  await h.controller.run(await h.request());
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  assert.equal((await h.controller.status({ selection: other.selection })).resumeSupported, false);
+  h.script = async () => { throw new Error('synthetic lost terminal on resume'); };
+  await assert.rejects(h.controller.run(await h.request({ selection: other.selection, resumeOperationId: f.operationId })));
+  const failed = await h.controller.status();
+  const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  assert.equal(retired.state, 'idle'); assert.deepEqual(retired.diagnostics, []);
+  assert.equal(await h.controller.canResumeOperation(f.operationId), true);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
+  assert.equal(stored.runs.at(-1).request.selection.sessionId, f.selection.sessionId);
+  assert.equal(stored.active.selection.sessionId, other.selection.sessionId);
+  assert.equal(stored.active.resumeOperationId, f.operationId);
+  const status = await h.controller.status({ selection: other.selection });
+  assert.equal(status.state, 'idle'); assert.equal(status.resumeSupported, true);
+  assert.deepEqual(status.diagnostics, []);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+  h.inspectOperation = async () => { throw new Error('synthetic unreadable metadata'); };
+  const unreadable = await h.controller.status();
+  assert.equal(unreadable.state, 'blocked'); assert.equal(unreadable.operationState, 'unknown');
+  assert.equal(unreadable.operationOutcome, null); assert.equal(unreadable.recoveryRequired, null);
+  assert.deepEqual(unreadable.diagnostics, ['OPERATION_OUTCOME_UNKNOWN']);
+  assert.equal(unreadable.chatHash, retired.chatHash);
+  assert.deepEqual(await h.controller.run(await h.request()), unreadable);
+  h.inspectOperation = async () => ({ ...claim, recoveryRequired: true });
+  const recovery = await h.controller.status();
+  assert.equal(recovery.state, 'blocked');
+  assert.deepEqual(recovery.diagnostics, ['PROCESSING_RECOVERY_REQUIRED']);
+  assert.deepEqual(await h.controller.run(await h.request({ resumeOperationId: f.operationId })), recovery);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+  h.inspectOperation = null;
+  h.script = async call => call('processing_status', { operationId: f.operationId });
+  const resumed = await h.controller.run(await h.request({ selection: other.selection, resumeOperationId: f.operationId }));
+  assert.equal(resumed.state, 'idle'); assert.equal(resumed.operationId, f.operationId);
+  assert.notEqual(resumed.chat.sessionId, failed.chat.sessionId);
+  assert.equal(h.dispatches.length, dispatches + 1);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal((await inspectProcessing(f.capability, other.operationId)).state, 'missing');
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+for (const client of ['codex', 'claude']) for (const worksetAdvance of [false, true]) {
+  test(`${client} retirement refuses a claim left before ${worksetAdvance ? 'workset advance' : 'first operation'} pin`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    let binding = {}, unpinnedId, pinnedId = null, pinFailed = false;
+    if (worksetAdvance) {
+      const other = await processingFixture(t, { base: f, client }), worksetId = randomUUID();
+      await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: [...f.inputs, ...other.inputs] });
+      binding = { worksetId };
+    }
+    h.script = async call => {
+      if (worksetAdvance) {
+        const first = await call('processing_pending', { limit: 1 });
+        pinnedId = (await completeBound(call, first.nextPreparation)).operationId;
+      }
+      const preparation = worksetAdvance ? (await call('processing_pending', { limit: 1 })).nextPreparation
+        : { operationId: f.operationId, inputs: f.inputs };
+      unpinnedId = preparation.operationId;
+      const rename = fs.rename;
+      const mock = t.mock.method(fs, 'rename', async (from, to) => {
+        if (path.dirname(to) === path.join(f.collection.intakeStateDir, 'processing-chats')) {
+          const next = JSON.parse(await fs.readFile(from, 'utf8'));
+          if (next.state === 'busy' && next.active.operationId === unpinnedId) {
+            pinFailed = true; mock.mock.restore();
+            throw Object.assign(new Error('synthetic controller loss before operation pin'), { code: 'EIO' });
+          }
+        }
+        return rename(from, to);
+      });
+      await call('processing_prepare', preparation);
+    };
+    await assert.rejects(h.controller.run(await h.request(binding)));
+    assert.equal(pinFailed, true);
+    assert.equal((await registryJSON(f)).active.operationId, pinnedId);
+    const claim = await inspectProcessing(f.capability, unpinnedId);
+    assert(claim.claimHash); assert.equal(claim.outcome, null);
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    assert.equal(retired.state, 'blocked');
+    assert.equal(retired.operationId, unpinnedId);
+    assert.deepEqual(retired.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    const stored = await registryJSON(f), creates = h.creates;
+    assert.deepEqual(await h.controller.status(), retired);
+    assert.deepEqual(await h.controller.run(await h.request(binding)), retired);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await inspectProcessing(f.capability, unpinnedId), claim);
+    assert.equal(h.creates, creates); assert.equal(h.dispatches.length, 1);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+for (const client of ['codex', 'claude']) for (const terminalOwner of [false, true]) {
+  test(`${client} retired proposal blocks own and peer admission with terminal owner ${terminalOwner}`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    let inspected = null;
+    if (terminalOwner) {
+      h.script = async call => { inspected = await inspectAll(call, f); };
+      await h.controller.run(await h.request());
+    }
+    h.script = async call => { await propose(f, inspected)(call); throw new Error('synthetic lost terminal after proposal'); };
+    await assert.rejects(h.controller.run(await h.request(terminalOwner ? { resumeOperationId: f.operationId } : {})));
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    assert.equal(retired.state, 'awaiting-review'); assert.equal(retired.operationId, f.operationId);
+    assert.equal(retired.operationState, 'awaiting-review'); assert.equal(retired.resumeSupported, false);
+    assert.deepEqual(retired.diagnostics, []); assert.equal(retired.requestId, null); assert.equal(retired.chat, null);
+    const stored = await registryJSON(f), claim = await inspectProcessing(f.capability, f.operationId);
+    const dispatches = h.dispatches.length, creates = h.creates;
+    assert.deepEqual(await h.controller.run(await h.request()), retired);
+    await assertRetiredPeerBlocked(t, f, h, 'awaiting-review');
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+    assert.equal(h.dispatches.length, dispatches); assert.equal(h.creates, creates);
+    await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'skipped' });
+    assert.equal((await h.controller.status()).state, 'idle');
+    h.script = async call => call('processing_pending', {});
+    assert.equal((await h.controller.run(await h.request())).state, 'idle');
+    assert.equal(h.dispatches.length, dispatches + 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+async function retiredTerminalClaim(t, client = 'codex') {
+  const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+  h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+  const done = await h.controller.run(await h.request());
+  await h.controller.rollover({ expectedChatHash: done.chatHash });
+  h.script = async call => { await call('processing_status', { operationId: f.operationId }); throw new Error('synthetic lost terminal'); };
+  await assert.rejects(h.controller.run(await h.request({ resumeOperationId: f.operationId })));
+  const failed = await h.controller.status();
+  await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  return { f, h, claim: await inspectProcessing(f.capability, f.operationId) };
+}
+
+async function additionalSelectedCapture(f) {
+  // Sort after the pinned input so a one-head inventory page cannot discover
+  // this claim by accident. Operation discovery must cover the whole selection.
+  const identity = { ...f.identity, unitId: 'ffffffff-ffff-ffff-ffff-ffffffffffff' };
+  const scopeId = randomUUID(), previous = await readSelection(f.store, identity);
+  const proof = { ...f.publishArgs.proof, ...identity };
+  const selected = await withIntakeLock(f.store, tx => controlSelection(tx, {
+    source: f.source, expectedHash: previous.hash, authorize: async () => true,
+    request: { id: scopeId, operation: 'capture-current', ...identity, expectedRevision: previous.state.revision,
+      scope: { unitIds: [identity.unitId], start: proof.start, end: null } }
+  }));
+  const capture = createCapture({ ...f.capture, identity });
+  const published = await withIntakeLock(f.store, tx => publishCapture(tx, {
+    ...f.publishArgs, capture, proof, scopeId, selectionHash: selected.hash,
+    scan: { ...f.publishArgs.scan, accounted: f.publishArgs.scan.accounted.map(item => ({ ...item, unitId: identity.unitId })) },
+    checkpoint: f.publishArgs.checkpoint ? { ...f.publishArgs.checkpoint, scopeId } : null
+  }));
+  return { selection: f.selection, operationId: randomUUID(), inputs: [{ identity, headHash: published.headHash }] };
+}
+
+for (const client of ['codex', 'claude']) for (const completedPin of [false, true]) for (const duringStartup of [false, true]) {
+  test(`${client} retired pin does not hide a second selected claim with ${completedPin ? 'completed' : 'terminal-owned'} pin ${duringStartup ? 'during startup' : 'before admission'}`, async t => {
+    const { f, h, claim: initialClaim } = await retiredTerminalClaim(t, client);
+    // A completed pinned claim no longer occupies the synthesis slot, but the
+    // retired native binding still points to it when another claim is prepared.
+    if (completedPin) await completeProcessing(f.capability, { ...f.args, expectedClaimHash: initialClaim.claimHash, outcome: 'cancelled' });
+    const claim = await inspectProcessing(f.capability, f.operationId);
+    const additional = await additionalSelectedCapture(f), retired = await h.controller.status();
+    assert.equal(retired.state, 'idle'); assert.equal(retired.operationId, f.operationId);
+    assert.equal(await h.controller.canResumeOperation(f.operationId), true);
+    const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
+    let extraClaim, opens = 0;
+    const prepare = async () => { extraClaim = await prepareProcessing(f.capability, { ...additional, parallelism: 2 }); };
+    await h.controller.close();
+    const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+    h.dependencies[opener] = async (...args) => { opens++; if (duringStartup) await prepare(); return open(...args); };
+    h.controller = await h.open();
+    if (!duringStartup) await prepare();
+    const blocked = await h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: retired.chatHash });
+    assert.equal(blocked.state, 'blocked'); assert.equal(blocked.operationId, additional.operationId);
+    assert.deepEqual(blocked.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    assert.equal(blocked.resumeSupported, false); assert.equal(blocked.chatHash, retired.chatHash);
+    assert.deepEqual(await h.controller.status(), blocked);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+    assert.equal((await inspectProcessing(f.capability, additional.operationId)).claimHash, extraClaim.claimHash);
+    assert.equal(opens, duringStartup ? 1 : 0); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+    await completeProcessing(f.capability, { selection: f.selection, operationId: additional.operationId,
+      expectedClaimHash: extraClaim.claimHash, outcome: 'cancelled' });
+    assert.equal((await h.controller.status()).state, 'idle');
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+for (const client of ['codex', 'claude']) for (const duringStartup of [false, true]) {
+  test(`${client} pinned retired claim preserves head conflict ${duringStartup ? 'during startup' : 'before admission'}`, async t => {
+    const { f, h, claim } = await retiredTerminalClaim(t, client);
+    const retired = await h.controller.status(), stored = await registryJSON(f);
+    const creates = h.creates, dispatches = h.dispatches.length;
+    const file = path.join(f.collection.intakeStateDir, 'heads', client, f.identity.sessionId, `${f.identity.unitId}.json`);
+    const headBytes = await fs.readFile(file), head = JSON.parse(headBytes);
+    const changed = canonicalJSON({ ...head, generation: head.generation + 1, previousHash: digest(headBytes) }) + '\n';
+    const publish = () => fs.writeFile(file, changed);
+    await h.controller.close();
+    const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+    let opens = 0;
+    h.dependencies[opener] = async (...args) => { opens++; if (duringStartup) await publish(); return open(...args); };
+    h.controller = await h.open();
+    if (!duringStartup) await publish();
+    const blocked = await h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: retired.chatHash });
+    assert.equal(blocked.state, 'blocked'); assert.deepEqual(blocked.diagnostics, ['PROCESSING_OPERATION_CONFLICT']);
+    assert.equal(blocked.chatHash, retired.chatHash); assert.equal(blocked.operationId, f.operationId);
+    assert.equal(blocked.operationState, 'conflicted'); assert.equal(blocked.resumeSupported, false);
+    assert.deepEqual(await h.controller.status(), blocked);
+    const pending = await inspectProcessing(f.capability, f.operationId);
+    assert.equal(pending.conflict, 'PROCESSING_HEAD_CHANGED'); assert.equal(pending.recoveryRequired, false);
+    assert.deepEqual(pending.blockers, []); assert.equal(pending.claimHash, claim.claimHash);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await registryJSON(f), stored); assert.equal(await fs.readFile(file, 'utf8'), changed);
+    assert.equal(opens, duringStartup ? 1 : 0); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+    // Explicit disposition, rather than refreshing the inspected input, releases the claim.
+    await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+    h.dependencies[opener] = open; await h.controller.close(); h.controller = await h.open();
+    h.script = async call => call('processing_pending', {});
+    assert.equal((await h.controller.run(await h.request())).state, 'idle');
+    assert.equal(h.dispatches.length, dispatches + 1);
+    assert.equal(await fs.readFile(file, 'utf8'), changed);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+for (const client of ['codex', 'claude']) for (const foreign of [false, true]) for (const duringStartup of [false, true]) {
+  test(`${client} pinned retired claim blocks ${foreign ? 'foreign' : 'own'} reservation ${duringStartup ? 'during startup' : 'before admission'}`, async t => {
+    const { f, h, claim } = await retiredTerminalClaim(t, client);
+    const retired = await h.controller.status(), stored = await registryJSON(f);
+    const creates = h.creates, dispatches = h.dispatches.length;
+    const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    const { binding } = JSON.parse(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`), 'utf8'));
+    const bytes = canonicalJSON({ preview: { binding: foreign ? { ...binding, collectionId: 'other' } : binding } }) + '\n';
+    const code = foreign ? 'PROCESSING_RECOVERY_REQUIRED' : 'PROCESSING_REINSPECTION_REQUIRED';
+    const publish = () => fs.writeFile(reservation, bytes, { mode: 0o600 });
+    await h.controller.close();
+    const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+    let opens = 0;
+    h.dependencies[opener] = async (...args) => { opens++; if (duringStartup) await publish(); return open(...args); };
+    h.controller = await h.open();
+    if (!duringStartup) await publish();
+    const blocked = await h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: retired.chatHash });
+    assert.equal(blocked.state, 'blocked'); assert.deepEqual(blocked.diagnostics, [code]);
+    assert.equal(blocked.chatHash, retired.chatHash); assert.equal(blocked.operationId, f.operationId);
+    assert.deepEqual(await h.controller.status(), blocked);
+    const pending = await inspectProcessing(f.capability, f.operationId);
+    assert.equal(pending.recoveryRequired, false); assert.equal(pending.claimHash, claim.claimHash);
+    assert.deepEqual(pending.blockers, [foreign ? 'writer-reserved-by-another-collection' : code]);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await registryJSON(f), stored); assert.equal(await fs.readFile(reservation, 'utf8'), bytes);
+    assert.equal(opens, duringStartup ? 1 : 0); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+    await fs.unlink(reservation); h.dependencies[opener] = open;
+    await h.controller.close(); h.controller = await h.open();
+    h.script = async call => call('processing_status', { operationId: f.operationId });
+    assert.equal((await h.controller.run(await h.request())).state, 'idle');
+    assert.equal(h.dispatches.length, dispatches + 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+for (const client of ['codex', 'claude']) for (const history of ['workset', 'resume']) {
+  test(`${client} retired plain run preserves null bindings after terminal ${history} history`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    const worksetId = randomUUID();
+    if (history === 'workset') {
+      await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+      h.script = async call => completeBound(call, (await call('processing_pending', {})).nextPreparation);
+      await h.controller.run(await h.request({ worksetId }));
+    } else {
+      h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+      await h.controller.run(await h.request());
+      h.script = async call => call('processing_status', { operationId: f.operationId });
+      await h.controller.run(await h.request({ resumeOperationId: f.operationId }));
+      const claim = await inspectProcessing(f.capability, f.operationId);
+      await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+    }
+    const other = await processingFixture(t, { base: f, client });
+    let pinFailed = false;
+    h.script = async call => {
+      const rename = fs.rename;
+      const mock = t.mock.method(fs, 'rename', async (from, to) => {
+        if (path.dirname(to) === path.join(f.collection.intakeStateDir, 'processing-chats')) {
+          const next = JSON.parse(await fs.readFile(from, 'utf8'));
+          if (next.state === 'busy' && next.active.operationId === other.operationId) {
+            pinFailed = true; mock.mock.restore();
+            throw Object.assign(new Error('synthetic loss before plain operation pin'), { code: 'EIO' });
+          }
+        }
+        return rename(from, to);
+      });
+      await call('processing_prepare', { operationId: other.operationId, inputs: other.inputs });
+    };
+    await assert.rejects(h.controller.run(await h.request({ selection: other.selection })));
+    assert.equal(pinFailed, true);
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    assert.equal(retired.worksetId, null); assert.equal(retired.resumeOperationId, null);
+    assert.equal(retired.state, 'blocked'); assert.equal(retired.operationId, other.operationId);
+    assert.deepEqual(retired.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    const stored = await registryJSON(f), claim = await inspectProcessing(f.capability, other.operationId);
+    const creates = h.creates, dispatches = h.dispatches.length;
+    assert.deepEqual(await h.controller.run(await h.request({ selection: other.selection })), retired);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await inspectProcessing(f.capability, other.operationId), claim);
+    assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+for (const client of ['codex', 'claude']) for (const kind of ['plain', 'workset']) {
+  for (const peer of [false, true]) for (const duringStartup of [false, true]) {
+    test(`${client} retired ${kind} preserves claim-released recovery for ${peer ? 'peer' : 'own'} admission ${duringStartup ? 'during startup' : 'before admission'}`, async t => {
+      const f = await processingFixture(t, { client }), other = await processingFixture(t, { base: f, client });
+      const h = await harness(t, f, client), worksetId = kind === 'workset' ? randomUUID() : null;
+      const binding = worksetId ? { worksetId } : {};
+      if (worksetId) await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+      h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+      await assert.rejects(h.controller.run(await h.request(binding)));
+      const failed = await h.controller.status();
+      const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+      const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
+      assert.equal(stored.active.operationId, null);
+      await h.controller.close();
+      const transaction = path.join(f.collection.notes.writerStateDir, 'transactions', `${other.operationId}.json`);
+      let target, noteBytes, transactionBytes;
+      const interruptSave = async () => {
+        const proposal = await proposedClaim(other); target = proposal.target;
+        await assert.rejects(saveProcessing(other.capability, { ...other.args,
+          expectedClaimHash: proposal.claimHash, approvedProposalHash: proposal.proposalHash }, {
+          fault: phase => { if (phase === 'claim-release') throw new Error('synthetic claim-release crash'); }
+        }), /synthetic claim-release crash/);
+        assert.deepEqual(await fs.readdir(path.join(f.collection.notes.writerStateDir, 'claims')), []);
+        transactionBytes = await fs.readFile(transaction); noteBytes = await fs.readFile(target);
+        const inventory = await pendingProcessing(f.capability, { selection: f.selection, limit: 1 });
+        assert.deepEqual(inventory.operations, []);
+        assert.deepEqual(inventory.blockers, ['PROCESSING_RECOVERY_REQUIRED']);
+      };
+      const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+      let opens = 0;
+      const controller = await openProcessingController({ ...f.options, client }, {
+        ...h.dependencies, ...(peer ? { hostId: digest('synthetic-recovery-peer') } : {}),
+        async [opener](...args) { opens++; if (duringStartup) await interruptSave(); return open(...args); }
+      });
+      t.after(() => controller.close());
+      if (!duringStartup) await interruptSave();
+      const request = { requestId: randomUUID(), selection: f.selection, expectedChatHash: peer ? null : retired.chatHash,
+        ...(!peer ? binding : {}) };
+      h.script = async call => call('processing_pending', {});
+      if (peer) {
+        await assert.rejects(controller.run(request), { code: 'PROCESSING_COLLECTION_BUSY' });
+        const activity = await controller.collectionActivity();
+        assert.equal(activity.length, 1); assert.equal(activity[0].state, 'blocked'); assert.equal(activity[0].own, false);
+        assert.equal((await controller.status()).state, 'missing');
+      } else {
+        const blocked = await controller.run(request);
+        assert.equal(blocked.state, 'blocked'); assert.equal(blocked.chatHash, retired.chatHash);
+        assert.deepEqual(blocked.diagnostics, ['PROCESSING_RECOVERY_REQUIRED']); assert.equal(blocked.resumeSupported, false);
+        assert.deepEqual(await controller.status(), blocked);
+      }
+      assert.equal(opens, duringStartup ? 1 : 0); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+      assert.deepEqual(await registryJSON(f), stored);
+      assert.deepEqual(await fs.readFile(transaction), transactionBytes); assert.deepEqual(await fs.readFile(target), noteBytes);
+      if (worksetId) {
+        const workset = await inspectProcessingWorkset(f.capability, { worksetId });
+        assert.deepEqual(workset.operations, []); assert.deepEqual(workset.blockers, ['PROCESSING_RECOVERY_REQUIRED']);
+        assert.equal(workset.chargedBatches, 0); assert.deepEqual(workset.inputs, f.inputs);
+      }
+      // Complete the actual synthetic transaction, rather than deleting its intent.
+      const recovery = await inspectProcessing(other.capability, other.operationId);
+      assert.equal((await recoverProcessing(other.capability, { operationId: other.operationId,
+        expectedRecoveryHash: recovery.recoveryHash })).status, 'saved');
+      assert.deepEqual(await controller.collectionActivity(), []);
+      const clear = await controller.status();
+      assert.equal(clear.state, peer ? 'missing' : 'idle'); assert.deepEqual(clear.diagnostics, []);
+      assert.deepEqual(await registryJSON(f), stored); assert.deepEqual(await fs.readFile(target), noteBytes);
+      await assert.rejects(fs.readFile(transaction), { code: 'ENOENT' });
+    });
+  }
+}
+
+for (const client of ['codex', 'claude']) for (const blocker of ['claim', 'reservation']) {
+  test(`${client} same-namespace ${blocker} appearing during startup prevents retired binding replacement`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+    await assert.rejects(h.controller.run(await h.request()));
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
+    await h.controller.close();
+    const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+    const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    const reservationBytes = canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n';
+    let opens = 0, claim;
+    h.dependencies[opener] = async (...args) => {
+      opens++;
+      if (blocker === 'claim') claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+      else await fs.writeFile(reservation, reservationBytes, { mode: 0o600 });
+      return open(...args);
+    };
+    h.controller = await h.open();
+    h.script = async call => call('processing_pending', {});
+    const request = await h.request();
+    if (blocker === 'reservation') {
+      await assert.rejects(h.controller.run(request), { code: 'PROCESSING_RECOVERY_REQUIRED' });
+      assert.equal(await fs.readFile(reservation, 'utf8'), reservationBytes);
+    } else {
+      const result = await h.controller.run(request);
+      assert.equal(result.state, 'blocked'); assert.equal(result.chatHash, retired.chatHash);
+      assert.deepEqual(result.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+      assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
+    }
+    assert.equal(opens, 1); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+    assert.deepEqual(await registryJSON(f), stored);
+    // Resolve only this synthetic blocker, then retry the unchanged retired row.
+    if (blocker === 'claim') await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+    else await fs.unlink(reservation);
+    h.dependencies[opener] = open;
+    await h.controller.close(); h.controller = await h.open();
+    assert.equal((await h.controller.run(await h.request())).state, 'idle');
+    assert.equal(h.dispatches.length, dispatches + 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+test('peer claim appearing during native startup is rechecked before reserving a replacement', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+  await assert.rejects(h.controller.run(await h.request()));
+  const failed = await h.controller.status();
+  await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const stored = await registryJSON(f), profileId = digest('synthetic-racing-peer');
+  let opens = 0, claim;
+  const peer = await openProcessingController({ ...f.options, client: 'codex' }, {
+    ...h.dependencies, profileId,
+    async openCodex() {
+      opens++; claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+      return { profileId, async create() { assert.fail('late peer claim must block native creation'); }, async close() {} };
+    }
+  });
+  t.after(() => peer.close());
+  assert.deepEqual(await peer.collectionActivity(), []);
+  await assert.rejects(peer.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }),
+    { code: 'PROCESSING_COLLECTION_BUSY' });
+  assert.equal(opens, 1); assert.equal((await peer.status()).state, 'missing');
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+  assert.deepEqual(await peer.collectionActivity(), []);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('retired status retries one concurrent registry change and reads operation metadata once per attempt', async t => {
+  const { f, h, claim } = await retiredTerminalClaim(t);
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const file = path.join(directory, (await fs.readdir(directory))[0]);
+  let reads = 0;
+  h.inspectOperation = async () => {
+    if (++reads === 1) {
+      const value = await registryJSON(f); value.generation++;
+      await fs.writeFile(file, canonicalJSON(value) + '\n');
+    }
+    return claim;
+  };
+  const status = await h.controller.status();
+  assert.equal(status.state, 'idle'); assert.equal(status.operationState, claim.state);
+  assert.equal(reads, 2);
+  assert.equal(status.chatHash, digest(await fs.readFile(file)));
+  reads = 0; h.inspectOperation = async () => { reads++; return claim; };
+  assert.deepEqual(await h.controller.status(), status);
+  assert.equal(reads, 1); assert.equal(h.dispatches.length, 2);
+});
+
+test('retired run preserves collection-busy activity without a fallible second projection', async t => {
+  const { f, h, claim } = await retiredTerminalClaim(t);
+  const before = await h.controller.status(), stored = await registryJSON(f);
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const file = path.join(directory, (await fs.readdir(directory))[0]);
+  const profileId = digest('competing synthetic profile');
+  const peer = await openProcessingController({ ...f.options, client: 'codex' }, {
+    ...h.dependencies, profileId,
+    async openCodex() { return { profileId,
+      async create() { throw new Error('synthetic creation outcome unknown'); }, async close() {} }; }
+  });
+  t.after(() => peer.close());
+  await assert.rejects(peer.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }));
+  const activity = (await h.controller.collectionActivity()).filter(item => !item.own);
+  assert.equal(activity.length, 1);
+  let reads = 0;
+  h.inspectOperation = async () => {
+    if (++reads > 1) await fs.writeFile(file, 'synthetic concurrent invalid registry');
+    return claim;
+  };
+  await assert.rejects(h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash }), error => {
+    assert.equal(error.code, 'PROCESSING_COLLECTION_BUSY');
+    assert.deepEqual(error.activity, activity);
+    assert.equal(error.processingChat.state, 'blocked');
+    assert.equal(error.processingChat.resumeSupported, false);
+    return true;
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.dispatches.length, 2);
+});
+
+for (const invalid of ['corrupt', 'binding']) test(`retired status preserves ${invalid} archive failure without masking run refusal`, async t => {
+  const { f, h, claim } = await retiredTerminalClaim(t);
+  const registry = await registryJSON(f), namespaceHash = digest(canonicalJSON(registry.namespace));
+  const file = path.join(f.collection.intakeStateDir, 'processing-chat-operation-history', namespaceHash, `${f.operationId}.json`);
+  const before = await h.controller.status();
+  const value = JSON.parse(await fs.readFile(file, 'utf8'));
+  if (invalid === 'binding') value.bindingHash = digest('different synthetic collection');
+  else value.operationId = randomUUID();
+  await fs.writeFile(file, canonicalJSON(value) + '\n');
+  const code = invalid === 'binding' ? 'PROCESSING_CHAT_BINDING_CHANGED' : 'INVALID_PROCESSING_CHAT_STATE';
+  await assert.rejects(h.controller.status(), { code });
+  await assert.rejects(h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash }), { code });
+  // A separate earlier refusal must survive even if status projection is broken.
+  await assert.rejects(h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: 'f'.repeat(64) }),
+    { code: 'PROCESSING_CHAT_STATE_CHANGED' });
+  assert.deepEqual(await registryJSON(f), registry);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.dispatches.length, 2);
 });

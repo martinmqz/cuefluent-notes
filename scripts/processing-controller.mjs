@@ -3,15 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
-import { createProcessingChatState, MAX_PROCESSING_CHAT_RUNS } from './processing-chat-state.mjs';
+import { createProcessingChatState, MAX_PROCESSING_CHAT_RUNS, processingChatRestartSupported, processingChatOperationBlocker } from './processing-chat-state.mjs';
 import { createProcessingEngineTools } from './processing-engine-tools.mjs';
 import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
 import { openCodexProcessingClient, codexProcessingProfile } from './processing-client-codex.mjs';
 import { createClaudeProcessingClient } from './processing-client-claude.mjs';
-import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment, assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
+import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment, claudeAuthenticationMode, assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { inspectProcessingWorkset } from './processing-workset.mjs';
 import { inspectProcessing } from './processing.mjs';
+import { pendingProcessing } from './processing-inventory.mjs';
 import { processingExecutionCallbacks } from './processing-execution-receipts.mjs';
 import { reconcileCompletedProcessingExecution } from './processing-chat-recovery.mjs';
 import { ownProcessIdentity, probeProcess, ownerIsGone } from './process-identity.mjs';
@@ -32,18 +33,26 @@ Do not treat a generated note, echoed evidence or processing narration as indepe
 Publish the complete intended Markdown through processing_propose. You cannot approve or save your proposal. Leave it for review through the existing engine.
 If evidence is unavailable, a policy or hash changed, or recovery is required, stop with the exact diagnostic. Do not bypass it or start a replacement operation.`;
 
-function publicState(view) {
-  return { interfaceVersion: PROCESSING_CONTROLLER_INTERFACE_VERSION, state: view.state, chatHash: view.hash,
-    remainingRuns: MAX_PROCESSING_CHAT_RUNS - (view.registry?.runs.length ?? 0),
+function writerReservationDiagnostic(error) {
+  return error?.code === 'writer-reserved-by-another-collection' ? 'PROCESSING_RECOVERY_REQUIRED'
+    : error?.code === 'PROCESSING_REINSPECTION_REQUIRED' ? error.code : null;
+}
+
+function nativeState(view) {
+  const retired = processingChatRestartSupported(view.registry);
+  const request = view.registry?.active ?? view.registry?.runs.at(-1)?.request;
+  return { interfaceVersion: PROCESSING_CONTROLLER_INTERFACE_VERSION, state: retired ? 'idle' : view.state, chatHash: view.hash,
+    restartSupported: retired,
+    remainingRuns: MAX_PROCESSING_CHAT_RUNS - (retired ? 0 : view.registry?.runs.length ?? 0),
     generation: view.generation, policyState: view.policyState, policyHash: view.policyHash,
     nativeStatus: view.registry?.active || !view.registry?.runs.length ? null : view.registry.runs.at(-1).native.terminal ?? 'completed',
-    chat: view.registry?.session ? { client: view.registry.namespace.client, sessionId: view.registry.session.sessionId } : null,
-    resumeOperationId: view.registry?.active?.resumeOperationId ?? view.registry?.runs.at(-1)?.request.resumeOperationId ?? null,
-    worksetId: view.registry?.active?.worksetId ?? view.registry?.runs.at(-1)?.request.worksetId ?? null,
-    requestId: view.registry?.active?.requestId ?? view.registry?.runs.at(-1)?.request.requestId ?? null,
+    chat: !retired && view.registry?.session ? { client: view.registry.namespace.client, sessionId: view.registry.session.sessionId } : null,
+    resumeOperationId: request?.resumeOperationId ?? null,
+    worksetId: request?.worksetId ?? null,
+    requestId: retired ? null : request?.requestId ?? null,
     operationId: view.registry?.active ? view.registry.active.operationId
       : view.registry?.runs.at(-1)?.reviewOperationId ?? view.registry?.runs.at(-1)?.request.operationId ?? null,
-    diagnostics: [...(view.registry?.block ? [view.registry.block.reason.toUpperCase().replaceAll('-', '_')] : []),
+    diagnostics: retired ? [] : [...(view.registry?.block ? [view.registry.block.reason.toUpperCase().replaceAll('-', '_')] : []),
       ...(view.registry?.runs.at(-1)?.diagnostics ?? [])],
     desktopVisibility: 'unverified' };
 }
@@ -59,7 +68,16 @@ export async function openProcessingController(context, dependencies = {}) {
   const options = { configPath: context.configPath, collectionId: context.collectionId, expectedConfigHash: context.expectedConfigHash };
   const capability = await verifyWorkflowStorage(options);
   const collection = await withStorageProbes(() => assertWorkflowStorage(capability));
+  const claudeAuthentication = client === 'claude' ? claudeAuthenticationMode(env) : null;
   const claudeProfile = client === 'claude' ? await resolveClaudeProfile(env) : null;
+  function assertIdentity() {
+    if (client !== 'claude') return;
+    if (claudeAuthenticationMode(env) !== claudeAuthentication) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
+  }
+  function assertAuthentication() {
+    assertIdentity();
+    if (client === 'claude') assertClaudeProcessingAuthentication(env);
+  }
   const execution = dependencies.beforeExecution && dependencies.afterExecution && dependencies.guardExecution
     ? dependencies : processingExecutionCallbacks({ capability,
       claudeConfigDir: claudeProfile });
@@ -101,7 +119,8 @@ export async function openProcessingController(context, dependencies = {}) {
   }
   let bridge = null, transport = null;
   const profileId = dependencies.profileId ?? (client === 'codex' ? await codexProcessingProfile(env)
-    : digest(canonicalJSON({ home: claudeProfile, platform: process.platform })));
+    : digest(canonicalJSON({ home: claudeProfile, platform: process.platform,
+      ...(claudeAuthentication === 'native-profile' ? { authentication: claudeAuthentication } : {}) })));
   hash(profileId);
   async function ensureTransport() {
     if (transport && client === 'codex') return;
@@ -112,6 +131,7 @@ export async function openProcessingController(context, dependencies = {}) {
           onEngineTool: call => engineCall(call.tool.slice('cuefluent_'.length), call.arguments) }, { env });
         if (transport.profileId !== profileId) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
       } else {
+        assertAuthentication();
         // Resolve native user provider settings before reserving or dispatching.
         // A reused session gets a fresh environment without restoring unrelated
         // profile behavior, modifying settings or putting credentials in argv.
@@ -142,6 +162,7 @@ export async function openProcessingController(context, dependencies = {}) {
     },
     verifyAbort: async target => abortProven && target.requestId === requestId,
     verifyAbandon: async owner => !owner || !await ownerMayBeLive({ owner }),
+    verifyRestart: async view => (await publicState(view)).state === 'idle',
     verifyAdvance: async target => {
       if (target.requestId !== requestId || target.worksetId !== requestWorksetId) return false;
       const workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: target.worksetId }));
@@ -154,6 +175,7 @@ export async function openProcessingController(context, dependencies = {}) {
   async function guardRole() {
     if (!running || !requestSelection || !current) fail('PROCESSING_CHAT_NOT_RUNNING');
     if (client === 'claude') {
+      assertIdentity();
       if (await resolveClaudeProfile(env) !== claudeProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
     }
     await withStorageProbes(() => assertWorkflowStorage(capability, requestSelection, 'explicitProcess'));
@@ -173,11 +195,108 @@ export async function openProcessingController(context, dependencies = {}) {
     }
     return !ownerIsGone(owner, await (dependencies.probeProcess ?? probeProcess)(owner.pid));
   }
+  async function publicState(view, { inspectOperation = false, selection = null } = {}) {
+    const result = nativeState(view), operations = new Map();
+    let inspected = false;
+    const unknown = diagnostic => {
+      result.diagnostics = [...new Set([...result.diagnostics, diagnostic])];
+      if (result.restartSupported) { result.state = 'blocked'; result.resumeSupported = false; }
+    };
+    const projectOperation = operation => {
+      result.operationId = operation.operationId;
+      result.operationState = operation.state;
+      result.operationOutcome = operation.outcome;
+      result.recoveryRequired = operation.recoveryRequired;
+      if (selection !== null) {
+        const old = operation.selection;
+        const request = view.registry?.active ?? view.registry?.runs.at(-1)?.request;
+        result.resumeSupported = (request?.worksetId || request?.resumeOperationId) ? true : Boolean(old && old.client === selection.client && old.sessionId === selection.sessionId &&
+          old.cwd === selection.cwd && (!selection.unitId || old.unitId === selection.unitId) &&
+          operation.inputs.every(input => selectionIncludesIdentity(selection, input.identity)));
+      }
+    };
+    // A prepare can publish its claim before the native registry records its ID.
+    // Inspect the retained workset or original plain selection, even after a
+    // pin: another claim can outlive the run's last recorded operation. Reuse
+    // discovered metadata while still inspecting a pin outside that selection.
+    if (result.worksetId !== null && (inspectOperation || result.restartSupported)) {
+      inspected = true;
+      try {
+        result.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: result.worksetId }));
+        if (result.workset.blockers.length) unknown('PROCESSING_RECOVERY_REQUIRED');
+        for (const operation of result.workset.operations) operations.set(operation.operationId, operation);
+      } catch (error) {
+        result.workset = null; unknown(writerReservationDiagnostic(error) ?? 'WORKSET_OUTCOME_UNKNOWN');
+      }
+    } else if (result.restartSupported && view.registry.active?.selection) {
+      inspected = true;
+      try {
+        const inventory = await withStorageProbes(() => pendingProcessing(capability, { selection: view.registry.active.selection, limit: 1 }));
+        if (inventory.blockers.length) unknown('PROCESSING_RECOVERY_REQUIRED');
+        // Operations cover the complete selected session, independently of the
+        // bounded capture-head page. No evidence bodies are read here.
+        for (const operation of inventory.operations) operations.set(operation.operationId, operation);
+      } catch (error) {
+        // Discovery refusals identify a policy or writer blocker, not an
+        // unknown operation outcome. Keep their actionable public codes.
+        if (error.code === 'WORKFLOW_NOT_AUTHORIZED') throw error;
+        const reservation = writerReservationDiagnostic(error);
+        if (reservation && result.operationId === null) fail(reservation);
+        // Pinned operations retain their ordinary blocked status during a
+        // reservation; discovery cannot turn that status into a thrown error.
+        unknown(reservation ?? 'OPERATION_OUTCOME_UNKNOWN');
+      }
+    }
+    if ((result.restartSupported || (inspectOperation && result.state === 'idle')) && result.operationId !== null) {
+      inspected = true;
+      try {
+        const operation = await withStorageProbes(() => dependencies.inspectOperation
+          ? dependencies.inspectOperation(result.operationId)
+          : operations.get(result.operationId) ?? inspectProcessing(capability, result.operationId));
+        operations.set(operation.operationId, operation); projectOperation(operation);
+      } catch {
+        Object.assign(result, { operationState: 'unknown', operationOutcome: null, recoveryRequired: null });
+        unknown('OPERATION_OUTCOME_UNKNOWN');
+      }
+    }
+    if (result.restartSupported) {
+      for (const operation of operations.values()) {
+        if (result.operationId === null && !operation.outcome && !operation.admissionPending) projectOperation(operation);
+        const blocker = processingChatOperationBlocker(operation);
+        if (blocker) {
+          projectOperation(operation); result.state = 'blocked'; result.resumeSupported = false;
+          result.diagnostics = [blocker]; break;
+        }
+        // A proposal ends synthesis, not review. Retirement cannot authorize
+        // another turn while it awaits disposition, even with a prior owner.
+        if (!operation.outcome && !operation.admissionPending && operation.state === 'awaiting-review') {
+          if (result.state === 'idle') {
+            projectOperation(operation); result.state = 'awaiting-review'; result.resumeSupported = false;
+          }
+          continue;
+        }
+        // Ownership/archive errors are registry failures, not unknown engine
+        // outcomes. Let them reach the caller without relabelling them.
+        if (!operation.outcome && !operation.admissionPending &&
+            !await state.hasTerminalOperationOwner(operation.operationId)) {
+          projectOperation(operation); result.state = 'blocked'; result.resumeSupported = false;
+          result.diagnostics = ['PROCESSING_OPERATION_OWNER_UNVERIFIED']; break;
+        }
+      }
+    }
+    if (result.state === 'blocked' || ('workset' in result && result.workset?.policyState !== 'current')) result.resumeSupported = false;
+    if (inspected && (await state.read()).hash !== view.hash) fail('PROCESSING_CHAT_STATE_CHANGED');
+    return result;
+  }
   return Object.freeze({
-    async collectionActivity() { return state.collectionActivity(); },
-    async canResumeOperation(id) { return state.canResumeOperation(id); },
-    async hasRequest(id) { nativeId(id); return (await state.findRequest(id)) !== null; },
+    // This namespace check needs no credential and is also used before an MCP
+    // caller freezes an owned job's selection or creates a cancellation receipt.
+    assertIdentity,
+    async collectionActivity() { assertIdentity(); return state.collectionActivity(); },
+    async canResumeOperation(id) { assertIdentity(); return state.canResumeOperation(id); },
+    async hasRequest(id) { assertIdentity(); nativeId(id); return (await state.findRequest(id)) !== null; },
     async stop(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId']); hash(args.expectedChatHash); nativeId(args.requestId);
       const before = await state.read();
       // The exact owned request survives harmless operation-pin hash changes.
@@ -205,56 +324,27 @@ export async function openProcessingController(context, dependencies = {}) {
       return publicState(after);
     },
     async status({ inspectOperation = true, selection = null } = {}) {
+      assertIdentity();
       for (let attempt = 0; attempt < 2; attempt++) {
-        const view = await state.read(), result = publicState(view);
-        // A terminal native turn does not complete its claimed engine operation.
-        // Read only metadata, and never describe an unfinished claim as complete.
-        if (inspectOperation && result.state === 'idle' && result.operationId !== null) {
-          try {
-            const operation = await withStorageProbes(() => dependencies.inspectOperation
-              ? dependencies.inspectOperation(result.operationId) : inspectProcessing(capability, result.operationId));
-            result.operationState = operation.state;
-            result.operationOutcome = operation.outcome;
-            result.recoveryRequired = operation.recoveryRequired;
-            if (selection !== null) {
-              const old = operation.selection;
-              result.resumeSupported = (view.registry?.runs.at(-1)?.request.worksetId || view.registry?.runs.at(-1)?.request.resumeOperationId) ? true : Boolean(old && old.client === selection.client && old.sessionId === selection.sessionId &&
-                old.cwd === selection.cwd && (!selection.unitId || old.unitId === selection.unitId) &&
-                operation.inputs.every(input => selectionIncludesIdentity(selection, input.identity)));
-            }
-          } catch {
-            // Keep the native snapshot useful without treating unavailable engine
-            // metadata as either completion or permission to resume.
-            Object.assign(result, { operationState: 'unknown', operationOutcome: null, recoveryRequired: null });
-            result.diagnostics = [...new Set([...result.diagnostics, 'OPERATION_OUTCOME_UNKNOWN'])];
-          }
-          if ((await state.read()).hash !== view.hash) continue;
-        }
-        if (inspectOperation && result.worksetId !== null) {
-          try {
-            result.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: result.worksetId }));
-            if (result.workset.policyState !== 'current') result.resumeSupported = false;
-          } catch {
-            result.workset = null; result.resumeSupported = false;
-            result.diagnostics = [...new Set([...result.diagnostics, 'WORKSET_OUTCOME_UNKNOWN'])];
-          }
-          if ((await state.read()).hash !== view.hash) continue;
-        }
-        return result;
+        try { return await publicState(await state.read(), { inspectOperation, selection }); }
+        catch (error) { if (error.code !== 'PROCESSING_CHAT_STATE_CHANGED') throw error; }
       }
       fail('PROCESSING_CHAT_STATE_CHANGED');
     },
     async reauthorize(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'previousPolicyHash']); hash(args.expectedChatHash); hash(args.previousPolicyHash);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
       return publicState(await state.reauthorize({ expectedHash: args.expectedChatHash, previousPolicyHash: args.previousPolicyHash }));
     },
     async rollover(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash']); hash(args.expectedChatHash);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
       return publicState(await state.rollover({ expectedHash: args.expectedChatHash }));
     },
     async reviewContext(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId']); hash(args.expectedChatHash); nativeId(args.requestId);
       const view = await state.read(), run = view.registry?.runs.at(-1);
       if (view.hash !== args.expectedChatHash) fail('PROCESSING_CHAT_STATE_CHANGED');
@@ -276,6 +366,7 @@ export async function openProcessingController(context, dependencies = {}) {
       return { selection: structuredClone(operation.selection), operationId: run.reviewOperationId };
     },
     async finishReview(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId', 'operationId']); hash(args.expectedChatHash);
       nativeId(args.requestId); nativeId(args.operationId);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
@@ -289,11 +380,13 @@ export async function openProcessingController(context, dependencies = {}) {
       return publicState(finished);
     },
     async abandon(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId', 'offline']); hash(args.expectedChatHash); nativeId(args.requestId);
       if (closed || running || args.offline !== true) fail('PROCESSING_CHAT_ABANDON_UNPROVEN');
       return publicState(await state.abandon({ expectedHash: args.expectedChatHash, requestId: args.requestId, offline: true }));
     },
     async reconcile(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId']); hash(args.expectedChatHash); nativeId(args.requestId);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
       running = true;
@@ -305,8 +398,10 @@ export async function openProcessingController(context, dependencies = {}) {
         }
         const active = current.registry?.active;
         if (!active || active.requestId !== args.requestId) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
-        const unresolved = () => ({ ...publicState(current), diagnostics: [...publicState(current).diagnostics,
-          'PROCESSING_CHAT_RECONCILIATION_UNPROVEN'] });
+        const unresolved = async () => {
+          const projected = await publicState(current);
+          return { ...projected, diagnostics: [...projected.diagnostics, 'PROCESSING_CHAT_RECONCILIATION_UNPROVEN'] };
+        };
         if (!current.registry.session || !active.selection || client !== 'codex' ||
             !(current.state === 'busy' || (current.state === 'blocked' && current.registry.block.reason === 'dispatch-outcome-unknown'))) return unresolved();
         if (await ownerMayBeLive(active)) fail('PROCESSING_CHAT_BUSY');
@@ -327,7 +422,7 @@ export async function openProcessingController(context, dependencies = {}) {
         let review = false;
         if (active.operationId !== null) {
           const operation = await withStorageProbes(() => inspectProcessing(capability, active.operationId));
-          if (operation.recoveryRequired) return { ...unresolved(), diagnostics: ['PROCESSING_RECOVERY_REQUIRED'] };
+          if (operation.recoveryRequired) return { ...await unresolved(), diagnostics: ['PROCESSING_RECOVERY_REQUIRED'] };
           review = operation.state === 'awaiting-review';
         }
         current = await state.finish({ expectedHash: current.hash, generation: current.generation, requestId: args.requestId,
@@ -336,6 +431,7 @@ export async function openProcessingController(context, dependencies = {}) {
       } finally { running = false; recoveryVerify = null; }
     },
     async run(args) {
+      assertIdentity();
       keys(args, ['requestId', 'selection', 'expectedChatHash'], ['worksetId', 'resumeOperationId']); nativeId(args.requestId);
       if (args.worksetId !== undefined) nativeId(args.worksetId);
       if (args.resumeOperationId !== undefined) nativeId(args.resumeOperationId);
@@ -358,31 +454,43 @@ export async function openProcessingController(context, dependencies = {}) {
         const runInstructions = `${instructions}\n${requestWorksetId
           ? 'Process sequential operations in the bound frozen workset. Use processing_pending.nextPreparation exactly, including interrupted admissions; resume any unfinished operation first. After unchanged completion or PROCESSING_BATCH_BUDGET, call processing_pending again for the exact next fitting preparation. Stop for a proposal, conflict, recovery, run-budget, input-budget, exhausted workset budget, or no nextPreparation. Never choose fresh evidence outside the workset.'
           : 'Process at most one operation per request. Stop after publishing its exact proposal or completing it unchanged.'}`;
-        const prompt = `${runInstructions}\n\nRequest: ${requestId}\nSelection: ${canonicalJSON(selection)}${requestWorksetId ? `\nFrozen workset: ${requestWorksetId}` : ''}${args.resumeOperationId ? `\nResume only operation: ${args.resumeOperationId}` : ''}\nBegin with processing_pending. Stop for any outstanding proposal or recovery.`;
+        const evidenceBinding = requestWorksetId ? { worksetId: requestWorksetId }
+          : args.resumeOperationId ? { resumeOperationId: args.resumeOperationId } : null;
+        const scope = evidenceBinding
+          ? `Invoking source: ${canonicalJSON(selection)}\nEvidence scope: ${canonicalJSON(evidenceBinding)}\nThe invoking source identifies the chat requesting this run, not an evidence filter. ${requestWorksetId
+            ? 'Process only the exact frozen inputs returned for this workset by processing_pending. Their sessions and clients may differ from the invoking source and the workset creation selection.'
+            : 'Resume only this operation using its original selection and inputs returned by processing_pending. They may differ from the invoking source; do not prepare another operation.'} The engine checks current authority for the bound evidence. Stop on any refusal; never widen or replace the binding.`
+          : `Selection: ${canonicalJSON(selection)}`;
+        const prompt = `${runInstructions}\n\nRequest: ${requestId}\n${scope}\nBegin with processing_pending. Stop for any outstanding proposal or recovery.`;
         const inputHash = digest(prompt), requestHash = digest(canonicalJSON({ selection, inputHash }));
         current = await state.read();
         const prior = await state.findRequest(requestId);
         if (prior || current.registry?.active?.requestId === requestId) {
           if ((prior?.request ?? current.registry.active).inputHash !== inputHash) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
-          return publicState(current);
+          return await publicState(current);
         }
         if (current.hash !== args.expectedChatHash) fail('PROCESSING_CHAT_STATE_CHANGED');
         if (current.state === 'awaiting-review') {
           const priorReview = current.registry.runs.at(-1);
           try { current = await state.acknowledgeReview({ expectedHash: current.hash, generation: current.generation,
             requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId },
-          { beforePublish: () => { if (client === 'claude') assertClaudeHostAuthentication(env); } }); }
-          catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return publicState(await state.read()); throw error; }
+          { beforePublish: assertAuthentication }); }
+          catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return await publicState(await state.read()); throw error; }
         }
-        const fresh = current.state === 'missing' || (current.state === 'blocked' && ['creation-not-dispatched', 'run-abandoned'].includes(current.registry.block.reason));
-        if (!fresh && current.state !== 'idle') return publicState(current);
+        // A restartable native binding can still retain an unsafe engine claim.
+        // Apply the same inspection/ownership gate as status before replacement,
+        // including direct CLI runs without an explicit resume operation.
+        const admission = await publicState(current);
+        if (admission.state !== 'missing' && admission.state !== 'idle') return admission;
+        const fresh = current.state === 'missing' || admission.restartSupported;
         if (requestWorksetId) {
-          const workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId }));
+          const workset = admission.worksetId === requestWorksetId && admission.workset
+            ? admission.workset : await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId }));
           if (workset.policyState !== 'current') fail('WORKFLOW_POLICY_CHANGED');
           await withStorageProbes(() => assertWorkflowStorage(capability, workset.selection, 'explicitProcess'));
           if (workset.operations.some(item => item.recoveryRequired || (!item.outcome && item.conflict) || item.state === 'awaiting-review')) fail('PROCESSING_WORKSET_BLOCKED');
           if (!workset.operations.some(item => !item.outcome) && (workset.budgetExhausted || !workset.items.some(item => item.state === 'unattempted'))) {
-            return { ...publicState(current), worksetId: requestWorksetId, workset,
+            return { ...admission, worksetId: requestWorksetId, workset,
               dispatch: 'not-started', reason: !workset.remainingSelected ? 'workset-complete'
                 : workset.inputCounts.unattempted && workset.budgetExhausted ? 'workset-budget' : 'workset-remainder-unavailable' };
           }
@@ -392,17 +500,18 @@ export async function openProcessingController(context, dependencies = {}) {
           if (!operation.selection) fail('PROCESSING_CLAIM_MISSING');
           await withStorageProbes(() => assertWorkflowStorage(capability, operation.selection, 'explicitProcess'));
           if (operation.recoveryRequired || operation.conflict || operation.blockers.length || operation.state === 'awaiting-review') fail('PROCESSING_WORKSET_BLOCKED');
-          if (operation.outcome) return { ...publicState(current), dispatch: 'not-started', reason: 'operation-complete', operationId: args.resumeOperationId };
+          if (operation.outcome) return { ...admission, dispatch: 'not-started', reason: 'operation-complete', operationId: args.resumeOperationId };
         }
         const competing = (await state.collectionActivity()).filter(item => !item.own);
         if (competing.length) throw Object.assign(new Error('PROCESSING_COLLECTION_BUSY'), { code: 'PROCESSING_COLLECTION_BUSY', activity: competing });
         // Read-only no-launch outcomes above do not need a host credential.
-        if (client === 'claude') assertClaudeHostAuthentication(env);
+        assertAuthentication();
         await ensureTransport();
         if (fresh) {
           const self = await ownProcessIdentity();
           const owner = { pid: process.pid, controllerId, hostname: self.hostname, boot: self.boot, processStart: self.processStart, platform: self.platform };
           current = await state.reserve({ expectedHash: current.hash, requestId, requestHash, owner });
+          if (current.action !== 'create') return await publicState(current);
           started = true;
           nativeSession = client === 'codex' ? await transport.create() : { client, sessionId: randomUUID(), cwd, profileId,
             transport: 'claude-cli', toolContractHash: contractHash, desktopVerified: false };
@@ -419,7 +528,7 @@ export async function openProcessingController(context, dependencies = {}) {
           processStart: self.processStart, platform: self.platform };
         current = await state.begin({ expectedHash: current.hash, generation: current.generation, requestId, inputHash, selection, owner, ...(requestWorksetId ? { worksetId: requestWorksetId } : {}),
           ...(args.resumeOperationId ? { operationId: args.resumeOperationId, resumeOperationId: args.resumeOperationId } : {}) });
-        if (current.action !== 'dispatch') return publicState(current);
+        if (current.action !== 'dispatch') return await publicState(current);
         started = true;
         if (client === 'codex' && !createdThisRun) {
           nativeSession = await transport.resume(nativeSession); verified = true;
@@ -461,13 +570,16 @@ export async function openProcessingController(context, dependencies = {}) {
         current = await state.finish({ expectedHash: current.hash, generation: current.generation, requestId,
           outcome: inspectionUnknown ? 'needs-inspection' : review ? 'awaiting-review' : 'idle', nativeRun: nativeResult, diagnostics,
           ...(lastOperationId !== null ? { operationId: lastOperationId } : {}) });
-        const response = { ...publicState(current), operationId: lastOperationId, nativeStatus: result.status,
+        const response = { ...await publicState(current), operationId: lastOperationId, nativeStatus: result.status,
           ...(operation ? { operationState: operation.state, operationOutcome: operation.outcome,
             recoveryRequired: operation.recoveryRequired } : {}),
           model: typeof result.model === 'string' ? result.model : null };
         if (requestWorksetId) {
           try { response.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId })); }
-          catch { response.workset = null; response.diagnostics = [...new Set([...response.diagnostics, 'WORKSET_OUTCOME_UNKNOWN'])]; }
+          catch (error) {
+            response.workset = null;
+            response.diagnostics = [...new Set([...response.diagnostics, writerReservationDiagnostic(error) ?? 'WORKSET_OUTCOME_UNKNOWN'])];
+          }
         }
         return response;
       } catch (error) {
@@ -481,8 +593,14 @@ export async function openProcessingController(context, dependencies = {}) {
           }
           catch { /* Preserve original outcome; never retry dispatch or discard intent. */ }
         }
-        throw Object.assign(error, { processingChat: current ? publicState(current) : null,
-          code: safeErrorCode(error, 'PROCESSING_CLIENT_OUTCOME_UNKNOWN') });
+        // Error reporting must not perform fallible I/O or replace the original
+        // refusal (including its activity payload). A retired snapshot without
+        // fresh inspection is conservatively blocked, never permission to resume.
+        const code = safeErrorCode(error, 'PROCESSING_CLIENT_OUTCOME_UNKNOWN');
+        const processingChat = current ? nativeState(current) : null;
+        if (processingChat?.restartSupported) Object.assign(processingChat,
+          { state: 'blocked', resumeSupported: false, diagnostics: [code] });
+        throw Object.assign(error, { processingChat, code });
       } finally {
         acceptingEngine = false;
         await engineQueue;

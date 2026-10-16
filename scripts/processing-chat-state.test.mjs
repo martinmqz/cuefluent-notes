@@ -70,6 +70,32 @@ test('offline abandonment checks the exact owner and hash before retiring an unk
   assert.equal(next.namespaceHash, reserved.namespaceHash);
 });
 
+test('retired active binding requires fresh restart proof under the intake lock before replacement', async t => {
+  const f = await fixture(t), bound = await f.bind(await f.reserve()), request = beginArgs(bound);
+  const busy = await f.registry.begin(request);
+  const state = await createProcessingChatState({ ...f.factory, verifyAbandon: async () => true });
+  const retired = await state.abandon({ expectedHash: busy.hash, requestId: request.requestId, offline: true });
+  const args = { expectedHash: retired.hash, requestId: randomUUID(), requestHash: digest('replacement request') };
+  const original = await fs.readFile(statePath(f, retired));
+  assert.equal((await state.reserve(args)).action, 'inspect-existing');
+  assert.deepEqual(await fs.readFile(statePath(f, retired)), original);
+  let permit = false, failure = false, verifications = 0;
+  const verified = await createProcessingChatState({ ...f.factory, async verifyRestart(view) {
+    verifications++;
+    assert.equal(view.hash, retired.hash); assert.deepEqual(view.registry.active, retired.registry.active);
+    assert.equal((await fs.lstat(path.join(f.collection.intakeStateDir, '.intake-lock'))).isDirectory(), true);
+    if (failure) throw Object.assign(new Error('synthetic own selection refusal'), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+    return permit;
+  } });
+  assert.equal((await verified.reserve(args)).action, 'inspect-existing');
+  failure = true;
+  await assert.rejects(verified.reserve(args), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+  assert.deepEqual(await fs.readFile(statePath(f, retired)), original);
+  failure = false; permit = true;
+  assert.equal((await verified.reserve(args)).action, 'create');
+  assert.equal(verifications, 3);
+});
+
 test('chat registry reads without writes, reserves creation idempotently and reuses the exact bound chat', async t => {
   const f = await fixture(t), before = await fs.readdir(f.collection.intakeStateDir);
   assert.equal((await f.registry.read()).state, 'missing');
@@ -293,16 +319,20 @@ test('archived operation proof is bounded, namespace-bound and refuses missing o
   const indexBytes = await fs.readFile(index), archiveBytes = await fs.readFile(archive);
   await fs.rm(archive);
   await assert.rejects(other.canResumeOperation(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
+  await assert.rejects(other.hasTerminalOperationOwner(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
   await fs.writeFile(archive, archiveBytes, { mode: 0o600 });
   const wrong = JSON.parse(indexBytes); wrong.operationId = randomUUID();
   await fs.writeFile(index, canonicalJSON(wrong) + '\n');
   await assert.rejects(other.canResumeOperation(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
+  await assert.rejects(other.hasTerminalOperationOwner(operationId), { code: 'INVALID_PROCESSING_CHAT_STATE' });
   wrong.operationId = operationId; wrong.bindingHash = digest('other-collection');
   await fs.writeFile(index, canonicalJSON(wrong) + '\n');
   await assert.rejects(other.canResumeOperation(operationId), { code: 'PROCESSING_CHAT_BINDING_CHANGED' });
+  await assert.rejects(other.hasTerminalOperationOwner(operationId), { code: 'PROCESSING_CHAT_BINDING_CHANGED' });
   await fs.writeFile(index, indexBytes);
   const another = { ...beginArgs(rolled), operationId }, active = await f.registry.begin(another);
   assert.equal(await other.canResumeOperation(operationId), false, 'archived proof cannot override current execution');
+  assert.equal(await other.hasTerminalOperationOwner(operationId), true, 'current execution does not erase archived terminal proof');
   const again = await f.registry.finish(finishArgs(active, another));
   await f.registry.rollover({ expectedHash: again.hash });
   assert.deepEqual(await fs.readFile(index), indexBytes, 'terminal retries preserve the first exact immutable proof');
@@ -324,11 +354,13 @@ test('only an internal proven pre-dispatch abort releases busy and an exact retr
 
 test('changed policy, namespace and unsupported persisted state fail without replacing stored sessions', async t => {
   const f = await fixture(t), reserved = await f.reserve();
+  const peer = await createProcessingChatState({ ...f.factory, profileId: digest('other-synthetic-profile') });
   const original = await fs.readFile(statePath(f, reserved));
   for (const mutate of [value => { value.version = 2; }, value => { value.state = 'unknown'; }, value => { value.namespace.client = 'claude'; }]) {
     await fs.writeFile(statePath(f, reserved), original);
     await writeFixtureState(f, reserved, mutate);
     await assert.rejects(f.registry.read(), error => ['INVALID_PROCESSING_CHAT_STATE', 'PROCESSING_CHAT_BINDING_CHANGED'].includes(error.code));
+    await assert.rejects(peer.collectionActivity(), error => ['INVALID_PROCESSING_CHAT_STATE', 'PROCESSING_CHAT_BINDING_CHANGED'].includes(error.code));
   }
   await fs.writeFile(statePath(f, reserved), original);
   f.config.routes[0].processing = { mode: 'prompted' };
@@ -340,7 +372,7 @@ test('changed policy, namespace and unsupported persisted state fail without rep
   assert.deepEqual(await fs.readFile(statePath(f, reserved)), original);
 });
 
-test('known nonexecuting peer blocks preserve terminal operation ownership; unknown blocks do not', async t => {
+test('peer execution gates resume independently of terminal operation ownership', async t => {
   const f = await fixture(t), bound = await f.bind(await f.reserve()), operationId = randomUUID();
   const request = { ...beginArgs(bound), operationId }, busy = await f.registry.begin(request);
   await f.registry.finish(finishArgs(busy, request));
@@ -350,7 +382,9 @@ test('known nonexecuting peer blocks preserve terminal operation ownership; unkn
   for (const [reason, allowed] of [['creation-not-dispatched', true], ['run-abandoned', true], ['creation-outcome-unknown', false], ['host-unavailable', false]]) {
     await writeFixtureState(f, blocked, value => { value.block.reason = reason; });
     assert.equal(await f.registry.canResumeOperation(operationId), allowed, reason);
+    assert.equal(await f.registry.hasTerminalOperationOwner(operationId), true, reason);
     assert.equal((await f.registry.collectionActivity()).some(item => !item.own), !allowed, reason);
     assert.equal(await f.registry.canResumeOperation(randomUUID()), false, 'a harmless peer cannot fabricate ownership');
+    assert.equal(await f.registry.hasTerminalOperationOwner(randomUUID()), false, 'peer state cannot fabricate terminal proof');
   }
 });

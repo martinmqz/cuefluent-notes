@@ -53,8 +53,10 @@ const CREDENTIAL_ENVIRONMENT = new Set([
 ]);
 const HOST_CONTROL_ENVIRONMENT = new Set([
   'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
-  'CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USERPROFILE', 'NODE_OPTIONS', 'CLAUDE_CODE_SESSION_ID'
+  'CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USERPROFILE', 'NODE_OPTIONS', 'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB', 'CUEFLUENT_CLAUDE_AUTHENTICATION'
 ]);
+const AUTHENTICATION_SETTING = 'CUEFLUENT_CLAUDE_AUTHENTICATION';
 // These are known provider selectors, not arbitrary feature toggles sharing a
 // CLAUDE_CODE_USE_ prefix. Their provider configuration is not restored here.
 const UNSUPPORTED_PROVIDERS = new Set(['CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD']);
@@ -98,6 +100,51 @@ export function claudeHostEnvironment(env = process.env, platform = process.plat
   // identity, source attribution or permission to collect/process evidence.
   return typeof hint === 'string' && hint.length > 0;
 }
+
+/** Explicit native launch configuration, never a model-supplied tool argument.
+ * Native-profile mode selects the CLI's existing login/provider configuration;
+ * it does not recover Desktop credentials or infer that two accounts match. */
+function authenticationMode(env, index) {
+  const values = (index.get(AUTHENTICATION_SETTING) ?? []).map(name => env[name]);
+  if (values.some(value => !['inherit', 'native-profile'].includes(value)) || new Set(values).size > 1) {
+    fail('PROCESSING_CLIENT_AUTHENTICATION_INVALID');
+  }
+  return values[0] ?? 'inherit';
+}
+export function claudeAuthenticationMode(env = process.env, platform = process.platform) {
+  return authenticationMode(env, environmentIndex(env, platform));
+}
+
+function hostCredentialName(env, index, platform) {
+  const locator = environmentValue(env, index, 'CLAUDE_CODE_HOST_AUTH_ENV_VAR');
+  return typeof locator === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(locator)
+    ? platform === 'win32' ? locator.toUpperCase() : locator : null;
+}
+
+function authenticationEnvironment(env, platform) {
+  const selected = { ...env }, index = environmentIndex(env, platform);
+  const mode = authenticationMode(env, index);
+  const credentialName = hostCredentialName(env, index, platform);
+  for (const name of Object.keys(selected)) {
+    const canonical = platform === 'win32' ? name.toUpperCase() : name;
+    if (canonical === AUTHENTICATION_SETTING || (mode === 'native-profile' && (
+      canonical === 'CLAUDECODE' ||
+      /^(ANTHROPIC_|AWS_|AZURE_|GOOGLE_|GCLOUD_|GCP_|VERTEX_REGION_|CLAUDE_CODE_(HOST_|OAUTH_|USE_))/.test(canonical) ||
+      ['CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLOUD_ML_REGION'].includes(canonical) ||
+      ((ENVIRONMENT.has(canonical) || UNSUPPORTED_PROVIDERS.has(canonical)) && !HOST_PROFILE_ENVIRONMENT.has(canonical)) ||
+      (canonical === credentialName && !HOST_CONTROL_ENVIRONMENT.has(canonical))
+    ))) delete selected[name];
+  }
+  return { mode, env: selected };
+}
+
+export function assertClaudeProcessingAuthentication(env = process.env, platform = process.platform) {
+  const index = environmentIndex(env, platform);
+  // Explicit native-profile selection needs no inherited host credential. Keep
+  // admission environment-only; prepare the child environment once at launch.
+  if (authenticationMode(env, index) === 'native-profile') return false;
+  return assertClaudeHostAuthentication(env, { platform, index });
+}
 /** Single owner of child-environment rewrites, shared with auth preflight. */
 export function claudeProcessingEnvironment(inherited, engine = {}, platform = process.platform) {
   const env = { ...inherited };
@@ -115,10 +162,8 @@ export function assertClaudeHostAuthentication(env = process.env, { platform = p
   const hostAuthDeclared = hostAuthName !== undefined && hostAuthName !== '';
   const hostManaged = (typeof managedFlag === 'string' && enabled(managedFlag)) || hostAuthDeclared;
   if (!hostManaged) return false;
-  if (!hostAuthDeclared || typeof hostAuthName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(hostAuthName)) {
-    fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
-  }
-  const canonical = platform === 'win32' ? hostAuthName.toUpperCase() : hostAuthName;
+  const canonical = hostCredentialName(env, index, platform);
+  if (canonical === null) fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
   // A locator declares which inherited credential to use; known routing and
   // control fields cannot serve as credentials. Presence does not prove validity.
   const child = claudeProcessingEnvironment(env, {}, platform);
@@ -179,6 +224,9 @@ export function validateClaudeRestrictedSettings(settings) {
  */
 export async function resolveClaudeLaunchSettings(env = process.env, { platform = process.platform, expectedProfile, preferHostEnvironment = false } = {}) {
   if (typeof preferHostEnvironment !== 'boolean') fail('PROCESSING_CLIENT_SETTINGS_INVALID');
+  const authentication = authenticationEnvironment(env, platform);
+  env = authentication.env;
+  if (authentication.mode === 'native-profile') preferHostEnvironment = false;
   const inherited = environmentIndex(env, platform);
   const hostManaged = assertClaudeHostAuthentication(env, { platform, index: inherited });
   let file, bytes, profile;

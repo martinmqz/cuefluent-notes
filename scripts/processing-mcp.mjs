@@ -16,7 +16,7 @@ import { inspectProcessing } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
-import { assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
+import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
@@ -29,6 +29,9 @@ const diagnostic = Object.freeze({ CREATION_NOT_DISPATCHED: 'PROCESSING_CLIENT_U
   OPERATION_OUTCOME_UNKNOWN: 'PROCESSING_OPERATION_OUTCOME_UNKNOWN', WORKSET_OUTCOME_UNKNOWN: 'WORKSET_OUTCOME_UNKNOWN',
   PROCESSING_COLLECTION_BUSY: 'PROCESSING_COLLECTION_BUSY',
   PROCESSING_RECOVERY_REQUIRED: 'PROCESSING_RECOVERY_REQUIRED',
+  PROCESSING_REINSPECTION_REQUIRED: 'PROCESSING_REINSPECTION_REQUIRED',
+  PROCESSING_OPERATION_CONFLICT: 'PROCESSING_OPERATION_CONFLICT',
+  PROCESSING_OPERATION_OWNER_UNVERIFIED: 'PROCESSING_OPERATION_OWNER_UNVERIFIED',
   PROCESSING_EXCLUSION_UNVERIFIED: 'PROCESSING_EXCLUSION_UNVERIFIED' });
 const unfinished = value => value.state === 'idle' && value.operationState !== undefined &&
   (value.operationState !== 'completed' || value.recoveryRequired);
@@ -252,6 +255,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (status.state !== 'awaiting-review') return status;
     const operation = await withStorageProbes(() => inspectProcessing(capability, status.operationId));
     if (operation.state !== 'completed' || !operation.outcome || operation.recoveryRequired) return status;
+    // Retired proposals have no terminal native review record to acknowledge.
+    if (status.restartSupported) return controller.status();
     return persist ? controller.finishReview({ expectedChatHash: status.chatHash, requestId: status.requestId, operationId: status.operationId })
       : { ...status, state: 'idle', operationState: 'completed', recoveryRequired: false };
   }
@@ -326,10 +331,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           diagnostics: ['PROCESSING_COLLECTION_BUSY'] });
         return ['creating', 'busy'].includes(other.status) ? alreadyProcessing(other) : other;
       }
-      if (['creating', 'busy', 'blocked'].includes(current.state)) { await controller.close(); return alreadyProcessing(viewOf(current)); }
+      if (['creating', 'busy'].includes(current.state)) { await controller.close(); return alreadyProcessing(viewOf(current)); }
+      // Only the controller's validated retry states may reach fresh admission.
+      // Unknown outcomes stay blocked; being blocked is not evidence of a live run.
+      if (current.state === 'blocked') { await controller.close(); return viewOf(current); }
       // Existing activity is a read-only result. Require launch credentials only
       // after those exits, before control admission or review acknowledgement.
-      if (client === 'claude') assertClaudeHostAuthentication(env);
+      if (client === 'claude') assertClaudeProcessingAuthentication(env);
       const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, args));
       controls.set(source, control); if (control.response) { await controller.close(); return control.response; }
       current = await acknowledgeFinishedReview(controller, capability, current);
@@ -390,6 +398,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (prior?.response) { controls.set(source, prior); return prior.response; }
     const job = jobs.get(key), controller = job?.controller ?? await openController({ ...options, client }, { env });
     try {
+      controller.assertIdentity();
       if (job) {
         job.cancelRequested = true;
         await job.selectionPromise;
@@ -453,9 +462,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           committedReviews.set(source, { status: 'completed', statusDetail: 'completed', requestId: status.requestId, chat: status.chat,
             nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'] });
           try {
-            const ownReview = status.state === 'awaiting-review' && status.operationId === proposal.operationId;
+            const ownReview = !status.restartSupported && status.state === 'awaiting-review' && status.operationId === proposal.operationId;
             const next = ownReview ? await controller.finishReview({ expectedChatHash: status.chatHash,
-              requestId: status.requestId, operationId: proposal.operationId }) : status;
+              requestId: status.requestId, operationId: proposal.operationId })
+              : status.restartSupported ? await controller.status({ selection: source.selection }) : status;
             response = processingStatusView(next, await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection })));
             if (!ownReview && response.status === 'missing') response = { ...response, status: 'completed', statusDetail: 'completed' };
           } catch { response = committedReviews.get(source); }
