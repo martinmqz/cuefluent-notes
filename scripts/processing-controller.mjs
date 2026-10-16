@@ -70,10 +70,13 @@ export async function openProcessingController(context, dependencies = {}) {
   const collection = await withStorageProbes(() => assertWorkflowStorage(capability));
   const claudeAuthentication = client === 'claude' ? claudeAuthenticationMode(env) : null;
   const claudeProfile = client === 'claude' ? await resolveClaudeProfile(env) : null;
-  function assertAuthentication() {
+  function assertIdentity() {
     if (client !== 'claude') return;
     if (claudeAuthenticationMode(env) !== claudeAuthentication) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
-    assertClaudeProcessingAuthentication(env);
+  }
+  function assertAuthentication() {
+    assertIdentity();
+    if (client === 'claude') assertClaudeProcessingAuthentication(env);
   }
   const execution = dependencies.beforeExecution && dependencies.afterExecution && dependencies.guardExecution
     ? dependencies : processingExecutionCallbacks({ capability,
@@ -172,7 +175,7 @@ export async function openProcessingController(context, dependencies = {}) {
   async function guardRole() {
     if (!running || !requestSelection || !current) fail('PROCESSING_CHAT_NOT_RUNNING');
     if (client === 'claude') {
-      if (claudeAuthenticationMode(env) !== claudeAuthentication) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
+      assertIdentity();
       if (await resolveClaudeProfile(env) !== claudeProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
     }
     await withStorageProbes(() => assertWorkflowStorage(capability, requestSelection, 'explicitProcess'));
@@ -286,10 +289,14 @@ export async function openProcessingController(context, dependencies = {}) {
     return result;
   }
   return Object.freeze({
-    async collectionActivity() { return state.collectionActivity(); },
-    async canResumeOperation(id) { return state.canResumeOperation(id); },
-    async hasRequest(id) { nativeId(id); return (await state.findRequest(id)) !== null; },
+    // This namespace check needs no credential and is also used before an MCP
+    // caller freezes an owned job's selection or creates a cancellation receipt.
+    assertIdentity,
+    async collectionActivity() { assertIdentity(); return state.collectionActivity(); },
+    async canResumeOperation(id) { assertIdentity(); return state.canResumeOperation(id); },
+    async hasRequest(id) { assertIdentity(); nativeId(id); return (await state.findRequest(id)) !== null; },
     async stop(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId']); hash(args.expectedChatHash); nativeId(args.requestId);
       const before = await state.read();
       // The exact owned request survives harmless operation-pin hash changes.
@@ -317,6 +324,7 @@ export async function openProcessingController(context, dependencies = {}) {
       return publicState(after);
     },
     async status({ inspectOperation = true, selection = null } = {}) {
+      assertIdentity();
       for (let attempt = 0; attempt < 2; attempt++) {
         try { return await publicState(await state.read(), { inspectOperation, selection }); }
         catch (error) { if (error.code !== 'PROCESSING_CHAT_STATE_CHANGED') throw error; }
@@ -324,16 +332,19 @@ export async function openProcessingController(context, dependencies = {}) {
       fail('PROCESSING_CHAT_STATE_CHANGED');
     },
     async reauthorize(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'previousPolicyHash']); hash(args.expectedChatHash); hash(args.previousPolicyHash);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
       return publicState(await state.reauthorize({ expectedHash: args.expectedChatHash, previousPolicyHash: args.previousPolicyHash }));
     },
     async rollover(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash']); hash(args.expectedChatHash);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
       return publicState(await state.rollover({ expectedHash: args.expectedChatHash }));
     },
     async reviewContext(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId']); hash(args.expectedChatHash); nativeId(args.requestId);
       const view = await state.read(), run = view.registry?.runs.at(-1);
       if (view.hash !== args.expectedChatHash) fail('PROCESSING_CHAT_STATE_CHANGED');
@@ -355,6 +366,7 @@ export async function openProcessingController(context, dependencies = {}) {
       return { selection: structuredClone(operation.selection), operationId: run.reviewOperationId };
     },
     async finishReview(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId', 'operationId']); hash(args.expectedChatHash);
       nativeId(args.requestId); nativeId(args.operationId);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
@@ -368,11 +380,13 @@ export async function openProcessingController(context, dependencies = {}) {
       return publicState(finished);
     },
     async abandon(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId', 'offline']); hash(args.expectedChatHash); nativeId(args.requestId);
       if (closed || running || args.offline !== true) fail('PROCESSING_CHAT_ABANDON_UNPROVEN');
       return publicState(await state.abandon({ expectedHash: args.expectedChatHash, requestId: args.requestId, offline: true }));
     },
     async reconcile(args) {
+      assertIdentity();
       keys(args, ['expectedChatHash', 'requestId']); hash(args.expectedChatHash); nativeId(args.requestId);
       if (closed || running) fail('PROCESSING_CHAT_BUSY');
       running = true;
@@ -417,6 +431,7 @@ export async function openProcessingController(context, dependencies = {}) {
       } finally { running = false; recoveryVerify = null; }
     },
     async run(args) {
+      assertIdentity();
       keys(args, ['requestId', 'selection', 'expectedChatHash'], ['worksetId', 'resumeOperationId']); nativeId(args.requestId);
       if (args.worksetId !== undefined) nativeId(args.worksetId);
       if (args.resumeOperationId !== undefined) nativeId(args.resumeOperationId);

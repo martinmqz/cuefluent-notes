@@ -398,6 +398,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (prior?.response) { controls.set(source, prior); return prior.response; }
     const job = jobs.get(key), controller = job?.controller ?? await openController({ ...options, client }, { env });
     try {
+      controller.assertIdentity();
       if (job) {
         job.cancelRequested = true;
         await job.selectionPromise;

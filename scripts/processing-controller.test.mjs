@@ -29,11 +29,11 @@ async function registryJSON(f) {
   assert.equal(files.length, 1);
   return JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
 }
-async function harness(t, f, client = 'codex') {
+async function harness(t, f, client = 'codex', env = {}) {
   const profileRoot = path.join(f.root, 'synthetic-profile'); await fs.mkdir(profileRoot);
   const h = { creates: 0, resumes: 0, dispatches: [], closes: 0, bridgeCloses: 0, events: [],
     script: async call => call('processing_pending', {}), resultStatus: 'completed', failCreate: false,
-    env: { CLAUDE_CONFIG_DIR: profileRoot }, profileId: digest('synthetic-codex-profile') };
+    env: { CLAUDE_CONFIG_DIR: profileRoot, ...env }, profileId: digest('synthetic-codex-profile') };
   const dependencies = { env: h.env, ...(client === 'codex' ? { profileId: h.profileId } : {}), hostId: digest('synthetic-controller-host'),
     async beforeExecution(event) {
       const state = await registryJSON(f);
@@ -283,6 +283,73 @@ test('a proposal stops at review; only exact engine completion unlocks the exist
   assert.equal(h.creates, 1); assert.equal(h.dispatches.length, 2);
   const stored = await registryJSON(f);
   assert.equal(stored.runs[0].reviewResolved, true);
+});
+
+for (const mode of ['inherit', 'native-profile']) test(`Claude existing-controller paths reject changed ${mode} identity without requiring credentials`, async t => {
+  const f = await processingFixture(t, { client: 'claude' });
+  const h = await harness(t, f, 'claude', { CUEFLUENT_CLAUDE_AUTHENTICATION: mode });
+  h.script = propose(f);
+  const review = await h.controller.run(await h.request());
+  const args = { expectedChatHash: review.chatHash, requestId: review.requestId };
+  // Losing a host credential does not change mode or prevent read/review controls.
+  h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+  h.env.CLAUDE_CODE_HOST_AUTH_ENV_VAR = 'ANTHROPIC_AUTH_TOKEN';
+  assert.equal((await h.controller.status()).state, 'awaiting-review');
+  assert.equal((await h.controller.reviewContext(args)).operationId, f.operationId);
+  assert.equal(await h.controller.hasRequest(review.requestId), true);
+  assert.equal((await h.controller.run(await h.request())).state, 'awaiting-review');
+  const before = await registryJSON(f), operation = await inspectProcessing(f.capability, f.operationId);
+  h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = mode === 'inherit' ? 'native-profile' : 'inherit';
+  const controls = {
+    status: () => h.controller.status(),
+    collectionActivity: () => h.controller.collectionActivity(),
+    canResumeOperation: () => h.controller.canResumeOperation(f.operationId),
+    hasRequest: () => h.controller.hasRequest(review.requestId),
+    reviewContext: () => h.controller.reviewContext(args),
+    finishReview: () => h.controller.finishReview({ ...args, operationId: f.operationId }),
+    stop: () => h.controller.stop(args),
+    abandon: () => h.controller.abandon({ ...args, offline: true }),
+    reconcile: () => h.controller.reconcile(args),
+    reauthorize: () => h.controller.reauthorize({ expectedChatHash: review.chatHash, previousPolicyHash: review.policyHash }),
+    rollover: () => h.controller.rollover({ expectedChatHash: review.chatHash }),
+    run: () => h.controller.run({ ...args, requestId: randomUUID(), selection: f.selection }),
+  };
+  for (const [name, invoke] of Object.entries(controls)) await t.test(name, async () => {
+    await assert.rejects(invoke(), { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+    assert.deepEqual(await registryJSON(f), before);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), operation);
+  });
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: operation.claimHash, outcome: 'skipped' });
+  await assert.rejects(h.controller.finishReview({ ...args, operationId: f.operationId }), { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+  assert.deepEqual(await registryJSON(f), before, 'completed engine outcome cannot acknowledge the old namespace');
+  h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = mode;
+  assert.equal((await h.controller.finishReview({ ...args, operationId: f.operationId })).state, 'idle');
+  assert.equal(h.dispatches.length, 1);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = mode === 'inherit' ? 'native-profile' : 'inherit';
+  await h.controller.close(); // Cleanup must remain possible after identity loss.
+});
+
+test('Claude active stop refuses a changed mode before signalling its original worker', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), h = await harness(t, f, 'claude');
+  const entered = deferred(), release = deferred(); let aborted = false;
+  h.script = async (_call, request) => {
+    request.signal.addEventListener('abort', () => { aborted = true; release.resolve(); }, { once: true });
+    entered.resolve(); await release.promise;
+  };
+  const request = await h.request(), run = h.controller.run(request);
+  try {
+    await entered.promise;
+    const busy = await h.controller.status(), before = await registryJSON(f);
+    h.env.CUEFLUENT_CLAUDE_AUTHENTICATION = 'native-profile';
+    await assert.rejects(h.controller.stop({ expectedChatHash: busy.chatHash, requestId: request.requestId }),
+      { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+    assert.equal(aborted, false); assert.deepEqual(await registryJSON(f), before);
+    delete h.env.CUEFLUENT_CLAUDE_AUTHENTICATION;
+    h.env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+    const stopped = await h.controller.stop({ expectedChatHash: busy.chatHash, requestId: request.requestId });
+    assert.equal(stopped.state, 'idle'); assert.equal(aborted, true);
+  } finally { delete h.env.CUEFLUENT_CLAUDE_AUTHENTICATION; release.resolve(); await run; }
 });
 
 test('explicit reconciliation finishes a sealed native result without another dispatch or claim change', async t => {

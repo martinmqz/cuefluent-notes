@@ -12,7 +12,7 @@ import { executeWorkflow } from './workflow.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { runProcessingMcp } from './processing-mcp.mjs';
 import { openProcessingController } from './processing-controller.mjs';
-import { claudeHarness, success } from './test-support/claude-client.mjs';
+import { claudeHarness, success, initialization, completed } from './test-support/claude-client.mjs';
 import { rpcClient } from './test-support/rpc-client.mjs';
 
 async function withLaunchFixture(t, run, nativeRun = success, { insideClaude = true } = {}) {
@@ -303,10 +303,48 @@ test('changing authentication mode after opening a controller refuses before res
   env.CUEFLUENT_CLAUDE_AUTHENTICATION = 'native-profile';
   await assert.rejects(controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash }),
     { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+  await assert.rejects(controller.status(), { code: 'PROCESSING_CLIENT_IDENTITY_CHANGED' });
+  delete env.CUEFLUENT_CLAUDE_AUTHENTICATION;
   assert.deepEqual(await controller.status(), before);
   assert.deepEqual(await writerSnapshot(f), writerBefore);
   assert.equal(f.nativeCalls.length, 0);
 }));
+
+test('MCP cached Claude controls refuse a changed mode before cancelling or mutating the original job', async t => {
+  let entered, active;
+  const ready = new Promise(resolve => { entered = resolve; });
+  await withLaunchFixture(t, async f => {
+    const env = { ...process.env }, rpc = processingRpc(f, { env });
+    f.defer(() => rpc.close());
+    const finish = () => {
+      delete env.CUEFLUENT_CLAUDE_AUTHENTICATION;
+      if (active) { active.child.send(completed(active.input.session_id)); active.child.emit('close', 0, null); active = null; }
+    };
+    f.defer(finish);
+    await admit(rpc, f); await ready;
+    const before = await writerSnapshot(f), worker = active.child;
+    env.CUEFLUENT_CLAUDE_AUTHENTICATION = 'native-profile';
+    let id = 1;
+    for (const name of ['processing_cancel', 'processing_status', 'processing_review', 'processing_resume', 'process_selected_captures']) {
+      const response = await rpc.send({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: {
+        name, arguments: { collectionId: f.collection.id }, _meta: { 'claudecode/toolUseId': `synthetic-mode-${id}` } } });
+      assert.equal(response.error?.message, 'PROCESSING_CLIENT_IDENTITY_CHANGED');
+      assert.equal(worker.killed, undefined, 'wrong-mode cancellation cannot signal the original worker');
+      assert.deepEqual(await writerSnapshot(f), before);
+      assert.equal(f.nativeCalls.length, 1);
+    }
+    finish(); await rpc.close();
+    const status = await executeWorkflow('processing-chat-status', { collectionId: f.collection.id,
+      expectedConfigHash: f.options.expectedConfigHash, args: { client: 'claude' } }, { configPath: f.options.configPath });
+    assert.equal(status.state, 'idle'); assert.equal(status.nativeStatus, 'completed');
+  }, request => {
+    active = request;
+    request.child.send(initialization(request.input.session_id,
+      { tools: request.args[request.args.indexOf('--allowedTools') + 1].split(',') }));
+    request.child.send({ ...request.input, isReplay: true });
+    entered();
+  });
+});
 
 for (const locator of [undefined, 'ANTHROPIC_AUTH_TOKEN']) test(`MCP rejects incomplete host handoff before workset/control mutation: ${locator ?? 'no locator'}`, async t => withLaunchFixture(t, async f => {
   const original = await providerSettings(f);

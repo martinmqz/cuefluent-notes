@@ -84,9 +84,12 @@ clear interrupted work. Existing claims and proposals remain guarded by their
 original ownership and recovery requirements. CLI status and recovery commands
 must use the same authentication mode and `CLAUDE_CONFIG_DIR` selection as the
 original run; another namespace can report `missing` while the original remains
-blocked. Status and review do not launch a model. An unrecognized or ambiguous
-mode reports `PROCESSING_CLIENT_AUTHENTICATION_INVALID` without dispatching;
-status, review and cancel also require correcting that setting first.
+blocked. An already-open controller rejects reads and controls after a mode change
+with `PROCESSING_CLIENT_IDENTITY_CHANGED`; reopen the helper to select the new
+namespace. Status and review do not launch a model or require a fresh credential.
+An unrecognized or ambiguous mode reports `PROCESSING_CLIENT_AUTHENTICATION_INVALID`
+without dispatching; status, review and cancel also require correcting that
+setting first.
 
 ### Inherited authentication and supported settings
 
