@@ -287,21 +287,23 @@ export async function createProcessingChatState(options) {
   async function retiredClaimsBlock(value, records) {
     if (!processingChatRestartSupported(value) || !value.active) return false;
     const request = value.active;
-    let operations;
-    if (request.worksetId) operations = (await inspectProcessingWorkset(capability, { worksetId: request.worksetId })).operations;
-    else if (request.operationId) operations = [await inspectProcessing(capability, request.operationId)];
-    else if (request.selection) {
-      try { operations = (await pendingProcessing(capability, { selection: request.selection, limit: 1 })).operations; }
-      catch (error) {
-        if (error.code === 'writer-reserved-by-another-collection') fail('PROCESSING_RECOVERY_REQUIRED');
-        throw error;
+    try {
+      let operations;
+      if (request.worksetId) operations = (await inspectProcessingWorkset(capability, { worksetId: request.worksetId })).operations;
+      else if (request.operationId) operations = [await inspectProcessing(capability, request.operationId)];
+      else if (request.selection) operations = (await pendingProcessing(capability, { selection: request.selection, limit: 1 })).operations;
+      else return false;
+      for (const operation of operations) {
+        if (operation.recoveryRequired || (!operation.outcome && !operation.admissionPending && operation.state !== 'awaiting-review' &&
+            !await terminalOperationOwner(operation.operationId, records))) return true;
       }
-    } else return false;
-    for (const operation of operations) {
-      if (operation.recoveryRequired || (!operation.outcome && !operation.admissionPending && operation.state !== 'awaiting-review' &&
-          !await terminalOperationOwner(operation.operationId, records))) return true;
+      return false;
+    } catch {
+      // An unreadable retired peer has not proved its claims safe to resume.
+      // Keep it visible as blocked without attributing its route/metadata error
+      // to the caller. Collection registry validation and guard still fail normally.
+      return true;
     }
-    return false;
   }
   async function collectionActivity() {
     const activity = [], records = await collectionRegistries();

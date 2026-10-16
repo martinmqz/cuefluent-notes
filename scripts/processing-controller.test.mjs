@@ -1026,6 +1026,30 @@ for (const client of ['codex', 'claude']) test(`${client} retired unpinned disco
   });
 });
 
+for (const client of ['codex', 'claude']) test(`${client} excluded retired peer stays visible without rejecting an authorized route's activity read`, async t => {
+  const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+  h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+  await assert.rejects(h.controller.run(await h.request()));
+  const failed = await h.controller.status();
+  await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const stored = await registryJSON(f);
+  assert.equal(stored.active.operationId, null); assert.equal(stored.active.worksetId, null);
+  await h.controller.close();
+  const project = path.join(f.root, 'authorized-peer-project'); await fs.mkdir(project);
+  f.config.routes.push({ ...f.config.routes[0], id: 'authorized-peer', projectRoot: project });
+  f.config.routes[0].excluded = true;
+  const settings = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, settings);
+  f.options.expectedConfigHash = digest(settings);
+  h.controller = await h.open();
+  // Own selection errors retain their precise diagnostic; peers get a blocker.
+  await assert.rejects(h.controller.status(), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+  await assertRetiredPeerBlocked(t, { ...f, selection: { ...f.selection, cwd: project, sessionId: randomUUID() } }, h);
+  assert.equal(await fs.readFile(f.options.configPath, 'utf8'), settings);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal(h.dispatches.length, 1);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
 for (const client of ['codex', 'claude']) test(`${client} retired cross-session resume preserves its binding and refuses unavailable metadata`, async t => {
   const f = await processingFixture(t, { client }), h = await harness(t, f, client);
   const other = await processingFixture(t, { base: f, client });

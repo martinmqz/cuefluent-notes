@@ -14,6 +14,7 @@ import { runProcessingMcp, processingStatusView } from './processing-mcp.mjs';
 import { readSelection, controlSelection, readCaptureHead } from './intake-store.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { inspectProcessing, readProcessingProposal } from './processing.mjs';
+import { createProcessingWorkset } from './processing-workset.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
@@ -92,6 +93,7 @@ async function harness(t, f, overrides = {}) {
     },
     ...overrides
   };
+  h.openController = context => dependencies.openController(context, { env: {} });
   h.server = runProcessingMcp({ client: 'codex', configPath: f.options.configPath, input, output, env: {} }, dependencies);
   h.server.catch(() => {});
   h.send = row => {
@@ -1761,6 +1763,43 @@ for (const beforePin of [false, true]) test(`MCP retired execution exposes the $
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
+
+for (const damage of ['missing', 'corrupt']) test(`MCP reports a blocked retired peer with ${damage} workset metadata without leaking its inspection error`, async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+  // A standalone workset is independent of the collection shortcut checkpoint.
+  const worksetId = randomUUID();
+  await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  const controller = await h.openController({ ...f.options, client: 'codex' });
+  t.after(() => controller.close());
+  await assert.rejects(controller.run({ requestId: randomUUID(), selection: f.selection, worksetId, expectedChatHash: null }));
+  const failed = await controller.status();
+  await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const registry = path.join(directory, (await fs.readdir(directory))[0]), stored = await fs.readFile(registry);
+  const workset = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', `${failed.worksetId}.json`);
+  const original = await fs.readFile(workset);
+  if (damage === 'missing') await fs.unlink(workset);
+  else await fs.writeFile(workset, 'null\n');
+  const peer = await harness(t, f, { controllerIdentity: { hostId: digest('synthetic-peer-host') } });
+  peer.callId = 'distinct-peer-call';
+  for (const tool of ['processing_status', 'processing_resume', 'process_selected_captures']) {
+    const result = body(await peer.call(tool, {}));
+    assert.equal(result.status, 'blocked'); assert.equal(result.nextAction, 'inspect');
+    assert.deepEqual(result.diagnostics, ['PROCESSING_COLLECTION_BUSY']);
+  }
+  assert.equal((await peer.call('processing_cancel', {})).error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.equal(peer.creates, 0); assert.equal(peer.dispatches, 0); assert.equal(peer.forms.length, 0);
+  assert.deepEqual(await fs.readFile(registry), stored);
+  if (damage === 'missing') await assert.rejects(fs.readFile(workset), { code: 'ENOENT' });
+  else assert.equal(await fs.readFile(workset, 'utf8'), 'null\n');
+  // Repairing only the synthetic metadata must be observed on the next call.
+  await fs.writeFile(workset, original, { mode: 0o600 });
+  const healthy = body(await peer.call('processing_status', {}));
+  assert.notEqual(healthy.status, 'blocked'); assert.deepEqual(healthy.diagnostics, []);
+  assert.deepEqual(await fs.readFile(registry), stored);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
 
 for (const failure of ['abandoned', 'not-dispatched']) test(`MCP review and cancel of ${failure} workset have no retired identifiers or errors`, async t => {
   const f = await processingFixture(t), h = await harness(t, f);

@@ -328,11 +328,13 @@ test('only an internal proven pre-dispatch abort releases busy and an exact retr
 
 test('changed policy, namespace and unsupported persisted state fail without replacing stored sessions', async t => {
   const f = await fixture(t), reserved = await f.reserve();
+  const peer = await createProcessingChatState({ ...f.factory, profileId: digest('other-synthetic-profile') });
   const original = await fs.readFile(statePath(f, reserved));
   for (const mutate of [value => { value.version = 2; }, value => { value.state = 'unknown'; }, value => { value.namespace.client = 'claude'; }]) {
     await fs.writeFile(statePath(f, reserved), original);
     await writeFixtureState(f, reserved, mutate);
     await assert.rejects(f.registry.read(), error => ['INVALID_PROCESSING_CHAT_STATE', 'PROCESSING_CHAT_BINDING_CHANGED'].includes(error.code));
+    await assert.rejects(peer.collectionActivity(), error => ['INVALID_PROCESSING_CHAT_STATE', 'PROCESSING_CHAT_BINDING_CHANGED'].includes(error.code));
   }
   await fs.writeFile(statePath(f, reserved), original);
   f.config.routes[0].processing = { mode: 'prompted' };
