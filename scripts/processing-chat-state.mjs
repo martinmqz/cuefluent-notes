@@ -9,6 +9,8 @@ import { lstatOrNull } from './file-io.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { assertProcessingShortcutExecution } from './processing-shortcuts.mjs';
 import { inspectProcessing } from './processing.mjs';
+import { inspectProcessingWorkset } from './processing-workset.mjs';
+import { pendingProcessing } from './processing-inventory.mjs';
 import { validateProcessingSelection } from './processing-contract.mjs';
 import { CLIENTS, canonicalJSON, digest, fail, keys, hash, nativeId, string, choice, integer, list, unique, object } from './workflow-values.mjs';
 
@@ -282,16 +284,37 @@ export async function createProcessingChatState(options) {
   }
   const executing = value => ['creating', 'busy'].includes(value.state) ||
     (value.state === 'blocked' && !processingChatRestartSupported(value));
+  async function retiredClaimsBlock(value, records) {
+    if (!processingChatRestartSupported(value) || !value.active) return false;
+    const request = value.active;
+    let operations;
+    if (request.worksetId) operations = (await inspectProcessingWorkset(capability, { worksetId: request.worksetId })).operations;
+    else if (request.operationId) operations = [await inspectProcessing(capability, request.operationId)];
+    else if (request.selection) {
+      try { operations = (await pendingProcessing(capability, { selection: request.selection, limit: 1 })).operations; }
+      catch (error) {
+        if (error.code === 'writer-reserved-by-another-collection') fail('PROCESSING_RECOVERY_REQUIRED');
+        throw error;
+      }
+    } else return false;
+    for (const operation of operations) {
+      if (operation.recoveryRequired || (!operation.outcome && !operation.admissionPending && operation.state !== 'awaiting-review' &&
+          !await terminalOperationOwner(operation.operationId, records))) return true;
+    }
+    return false;
+  }
   async function collectionActivity() {
-    const activity = [];
-    for (const { own, value } of await collectionRegistries()) {
+    const activity = [], records = await collectionRegistries();
+    for (const { own, value } of records) {
       if (value.state === 'awaiting-review') {
         const operation = await inspectProcessing(capability, value.runs.at(-1).reviewOperationId);
         // A completed engine outcome is authoritative even if its old native
         // client has not yet acknowledged review. This read does not rewrite it.
         if (operation.state === 'completed' && operation.outcome && !operation.recoveryRequired) continue;
       }
-      if (value.state === 'awaiting-review' || executing(value)) {
+      // Retirement removes native execution, not a retained claim's ownership
+      // requirement. Admission repeats this inspection under the intake lock.
+      if (value.state === 'awaiting-review' || executing(value) || (!own && await retiredClaimsBlock(value, records))) {
         activity.push({ own, state: value.state, client: value.namespace.client,
           sessionId: value.session?.sessionId ?? null,
           requestId: value.active?.requestId ?? value.runs.at(-1)?.request.requestId ?? value.creation.requestId });

@@ -1748,6 +1748,16 @@ for (const beforePin of [false, true]) test(`MCP retired execution exposes the $
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
   assert.equal((await controller.status()).chatHash, retired.chatHash);
   assert.equal(h.forms.length, 0); assert.equal(h.dispatches, 1);
+  const peer = await harness(t, f, { controllerIdentity: { hostId: digest('synthetic-peer-host') } });
+  peer.callId = 'distinct-peer-call';
+  for (const tool of ['processing_status', 'processing_resume', 'process_selected_captures']) {
+    const result = body(await peer.call(tool, { collectionId: f.collection.id }));
+    assert.equal(result.status, 'blocked'); assert.equal(result.nextAction, 'inspect');
+    assert(result.diagnostics.includes('PROCESSING_COLLECTION_BUSY'));
+    assert.equal(peer.creates, 0); assert.equal(peer.dispatches, 0);
+    assert.equal((await controller.status()).chatHash, retired.chatHash);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  }
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 

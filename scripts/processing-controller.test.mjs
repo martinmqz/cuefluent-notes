@@ -130,6 +130,25 @@ const propose = f => async call => {
     mappings: [{ identity: f.identity, paths: ['meetings/rollout.md'] }] } });
 };
 
+async function assertRetiredPeerBlocked(t, f, h) {
+  const stored = await registryJSON(f);
+  for (const client of ['codex', 'claude']) {
+    const profileRoot = path.join(f.root, `peer-profile-${randomUUID()}`); await fs.mkdir(profileRoot);
+    const peer = await openProcessingController({ ...f.options, client }, {
+      ...h.dependencies, profileId: digest(profileRoot), env: { CLAUDE_CONFIG_DIR: profileRoot },
+      async openCodex() { assert.fail('a retired peer claim must block before native startup'); },
+      createClaude() { assert.fail('a retired peer claim must block before native startup'); }
+    });
+    t.after(() => peer.close());
+    const activity = await peer.collectionActivity();
+    assert.equal(activity.length, 1); assert.equal(activity[0].own, false); assert.equal(activity[0].state, 'blocked');
+    await assert.rejects(peer.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }),
+      { code: 'PROCESSING_COLLECTION_BUSY' });
+    assert.deepEqual(await registryJSON(f), stored);
+    await peer.close();
+  }
+}
+
 test('Codex controller reuses one chat across three requests and reopening; exact duplicate does not dispatch', async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   h.script = unchanged(f);
@@ -536,6 +555,7 @@ test('explicit offline abandonment preserves unknown claims and blocks replaceme
     }
     assert.equal(h.dispatches.length, 1); assert.equal(h.creates, creates);
     assert.deepEqual(h.events, events);
+    await assertRetiredPeerBlocked(t, f, h);
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
 });
@@ -958,7 +978,8 @@ test('retired controller projects fresh capacity and clears historical launch id
 
 
 for (const client of ['codex', 'claude']) test(`${client} retired unpinned discovery preserves actionable inventory errors`, async t => {
-  for (const code of ['WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED']) await t.test(code, async t => {
+  for (const blocker of ['WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED', 'writer-reserved-by-another-collection']) await t.test(blocker, async t => {
+    const code = blocker === 'writer-reserved-by-another-collection' ? 'PROCESSING_RECOVERY_REQUIRED' : blocker;
     const f = await processingFixture(t, { client }), h = await harness(t, f, client);
     if (client === 'codex') {
       await h.controller.close();
@@ -973,6 +994,8 @@ for (const client of ['codex', 'claude']) test(`${client} retired unpinned disco
     const stored = await registryJSON(f);
     assert.equal(stored.active.operationId, null); assert.equal(stored.active.worksetId, null);
     const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    const reservationBytes = blocker === 'writer-reserved-by-another-collection'
+      ? canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n' : '{}\n';
     if (code === 'WORKFLOW_NOT_AUTHORIZED') {
       await h.controller.close();
       f.config.routes[0].excluded = true;
@@ -982,7 +1005,7 @@ for (const client of ['codex', 'claude']) test(`${client} retired unpinned disco
       h.controller = await h.open();
     } else {
       // Even an incomplete transfer intent reserves the writer until inspected.
-      await fs.writeFile(reservation, '{}\n', { mode: 0o600 });
+      await fs.writeFile(reservation, reservationBytes, { mode: 0o600 });
     }
     const settings = await fs.readFile(f.options.configPath);
     await assert.rejects(h.controller.status(), { code });
@@ -997,7 +1020,7 @@ for (const client of ['codex', 'claude']) test(`${client} retired unpinned disco
     });
     assert.deepEqual(await registryJSON(f), stored);
     assert.deepEqual(await fs.readFile(f.options.configPath), settings);
-    if (code === 'PROCESSING_REINSPECTION_REQUIRED') assert.equal(await fs.readFile(reservation, 'utf8'), '{}\n');
+    if (code !== 'WORKFLOW_NOT_AUTHORIZED') assert.equal(await fs.readFile(reservation, 'utf8'), reservationBytes);
     assert.equal(h.creates, client === 'codex' ? 1 : 0); assert.equal(h.dispatches.length, 1);
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
@@ -1098,6 +1121,7 @@ for (const client of ['codex', 'claude']) for (const worksetAdvance of [false, t
     assert.deepEqual(await registryJSON(f), stored);
     assert.deepEqual(await inspectProcessing(f.capability, unpinnedId), claim);
     assert.equal(h.creates, creates); assert.equal(h.dispatches.length, 1);
+    await assertRetiredPeerBlocked(t, f, h);
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
 }
@@ -1113,6 +1137,33 @@ async function retiredTerminalClaim(t) {
   await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
   return { f, h, claim: await inspectProcessing(f.capability, f.operationId) };
 }
+
+test('peer claim appearing during native startup is rechecked before reserving a replacement', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+  await assert.rejects(h.controller.run(await h.request()));
+  const failed = await h.controller.status();
+  await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const stored = await registryJSON(f), profileId = digest('synthetic-racing-peer');
+  let opens = 0, claim;
+  const peer = await openProcessingController({ ...f.options, client: 'codex' }, {
+    ...h.dependencies, profileId,
+    async openCodex() {
+      opens++; claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
+      return { profileId, async create() { assert.fail('late peer claim must block native creation'); }, async close() {} };
+    }
+  });
+  t.after(() => peer.close());
+  assert.deepEqual(await peer.collectionActivity(), []);
+  await assert.rejects(peer.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }),
+    { code: 'PROCESSING_COLLECTION_BUSY' });
+  assert.equal(opens, 1); assert.equal((await peer.status()).state, 'missing');
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
+  await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+  assert.deepEqual(await peer.collectionActivity(), []);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
 
 test('retired status retries one concurrent registry change and reads operation metadata once per attempt', async t => {
   const { f, h, claim } = await retiredTerminalClaim(t);

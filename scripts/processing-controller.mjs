@@ -228,6 +228,7 @@ export async function openProcessingController(context, dependencies = {}) {
         // Discovery refusals identify a policy or writer blocker, not an
         // unknown operation outcome. Keep their actionable public codes.
         if (['WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED'].includes(error.code)) throw error;
+        if (error.code === 'writer-reserved-by-another-collection') fail('PROCESSING_RECOVERY_REQUIRED');
         unknown('OPERATION_OUTCOME_UNKNOWN');
       }
     }
