@@ -122,8 +122,8 @@ const unchanged = f => async call => {
   const claim = await inspectAll(call, f);
   await call('processing_complete', { operationId: f.operationId, expectedClaimHash: claim.claimHash });
 };
-const propose = f => async call => {
-  const claim = await inspectAll(call, f);
+const propose = (f, inspected = null) => async call => {
+  const claim = inspected ?? await inspectAll(call, f);
   return call('processing_propose', { operationId: f.operationId, expectedClaimHash: claim.claimHash,
     proposal: { files: [{ path: 'meetings/rollout.md', expectedHash: null,
       content: '# Rollout meeting\n\n## Decision\n\nKeep the rollout paused.\n' }],
@@ -1150,8 +1150,39 @@ for (const client of ['codex', 'claude']) for (const worksetAdvance of [false, t
   });
 }
 
-async function retiredTerminalClaim(t) {
-  const f = await processingFixture(t), h = await harness(t, f);
+for (const client of ['codex', 'claude']) for (const terminalOwner of [false, true]) {
+  test(`${client} retired proposal blocks own and peer admission with terminal owner ${terminalOwner}`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    let inspected = null;
+    if (terminalOwner) {
+      h.script = async call => { inspected = await inspectAll(call, f); };
+      await h.controller.run(await h.request());
+    }
+    h.script = async call => { await propose(f, inspected)(call); throw new Error('synthetic lost terminal after proposal'); };
+    await assert.rejects(h.controller.run(await h.request(terminalOwner ? { resumeOperationId: f.operationId } : {})));
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    assert.equal(retired.state, 'awaiting-review'); assert.equal(retired.operationId, f.operationId);
+    assert.equal(retired.operationState, 'awaiting-review'); assert.equal(retired.resumeSupported, false);
+    assert.deepEqual(retired.diagnostics, []); assert.equal(retired.requestId, null); assert.equal(retired.chat, null);
+    const stored = await registryJSON(f), claim = await inspectProcessing(f.capability, f.operationId);
+    const dispatches = h.dispatches.length, creates = h.creates;
+    assert.deepEqual(await h.controller.run(await h.request()), retired);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+    assert.equal(h.dispatches.length, dispatches); assert.equal(h.creates, creates);
+    await completeProcessing(f.capability, { ...f.args, expectedClaimHash: claim.claimHash, outcome: 'skipped' });
+    assert.equal((await h.controller.status()).state, 'idle');
+    h.script = async call => call('processing_pending', {});
+    assert.equal((await h.controller.run(await h.request())).state, 'idle');
+    assert.equal(h.dispatches.length, dispatches + 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+async function retiredTerminalClaim(t, client = 'codex') {
+  const f = await processingFixture(t, { client }), h = await harness(t, f, client);
   h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
   const done = await h.controller.run(await h.request());
   await h.controller.rollover({ expectedChatHash: done.chatHash });
@@ -1160,6 +1191,41 @@ async function retiredTerminalClaim(t) {
   const failed = await h.controller.status();
   await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
   return { f, h, claim: await inspectProcessing(f.capability, f.operationId) };
+}
+
+for (const client of ['codex', 'claude']) for (const foreign of [false, true]) for (const duringStartup of [false, true]) {
+  test(`${client} pinned retired claim blocks ${foreign ? 'foreign' : 'own'} reservation ${duringStartup ? 'during startup' : 'before admission'}`, async t => {
+    const { f, h, claim } = await retiredTerminalClaim(t, client);
+    const retired = await h.controller.status(), stored = await registryJSON(f);
+    const creates = h.creates, dispatches = h.dispatches.length;
+    const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    const { binding } = JSON.parse(await fs.readFile(path.join(f.collection.notes.writerStateDir, 'claims', `${f.operationId}.json`), 'utf8'));
+    const bytes = canonicalJSON({ preview: { binding: foreign ? { ...binding, collectionId: 'other' } : binding } }) + '\n';
+    const code = foreign ? 'PROCESSING_RECOVERY_REQUIRED' : 'PROCESSING_REINSPECTION_REQUIRED';
+    const publish = () => fs.writeFile(reservation, bytes, { mode: 0o600 });
+    await h.controller.close();
+    const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+    let opens = 0;
+    h.dependencies[opener] = async (...args) => { opens++; if (duringStartup) await publish(); return open(...args); };
+    h.controller = await h.open();
+    if (!duringStartup) await publish();
+    const blocked = await h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: retired.chatHash });
+    assert.equal(blocked.state, 'blocked'); assert.deepEqual(blocked.diagnostics, [code]);
+    assert.equal(blocked.chatHash, retired.chatHash); assert.equal(blocked.operationId, f.operationId);
+    assert.deepEqual(await h.controller.status(), blocked);
+    const pending = await inspectProcessing(f.capability, f.operationId);
+    assert.equal(pending.recoveryRequired, false); assert.equal(pending.claimHash, claim.claimHash);
+    assert.deepEqual(pending.blockers, [foreign ? 'writer-reserved-by-another-collection' : code]);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await registryJSON(f), stored); assert.equal(await fs.readFile(reservation, 'utf8'), bytes);
+    assert.equal(opens, duringStartup ? 1 : 0); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+    await fs.unlink(reservation); h.dependencies[opener] = open;
+    await h.controller.close(); h.controller = await h.open();
+    h.script = async call => call('processing_status', { operationId: f.operationId });
+    assert.equal((await h.controller.run(await h.request())).state, 'idle');
+    assert.equal(h.dispatches.length, dispatches + 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
 }
 
 for (const client of ['codex', 'claude']) for (const history of ['workset', 'resume']) {

@@ -1602,6 +1602,9 @@ test('review acknowledges its own completed draft after another host applied the
 test('status distinguishes selection conflicts, mixed policy conflicts and genuine recovery', async () => {
   const { processingStatusView } = await import('./processing-mcp.mjs');
   const native = { state: 'idle', requestId: null, chat: null }, shortcut = { phase: 'ready', counts: { selected: 1 }, reviews: [] };
+  const reserved = processingStatusView({ ...native, state: 'blocked', diagnostics: ['PROCESSING_REINSPECTION_REQUIRED'] }, shortcut);
+  assert.equal(reserved.status, 'blocked'); assert.equal(reserved.nextAction, 'inspect');
+  assert.deepEqual(reserved.diagnostics, ['PROCESSING_REINSPECTION_REQUIRED']);
   for (const blockers of [['PROCESSING_INPUT_CHANGED'], ['PROCESSING_INPUT_ALREADY_HANDLED'], ['WORKFLOW_POLICY_CHANGED', 'PROCESSING_HEAD_CHANGED']]) {
     const status = processingStatusView(native, { ...shortcut, blockers });
     assert.equal(status.nextAction, 'cancel'); assert(!status.diagnostics.includes('PROCESSING_RECOVERY_REQUIRED'));
@@ -1831,7 +1834,7 @@ for (const failure of ['abandoned', 'not-dispatched']) test(`MCP review and canc
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
-test('MCP retired native run still exposes its retained proposal for review without retirement diagnostics', async t => {
+for (const completion of ['save', 'external']) test(`MCP retired proposal supports Later then ${completion} completion without native review acknowledgement`, async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   h.script = async call => { await proposeThroughTools(f)(call); throw new Error('synthetic lost terminal after proposal'); };
   const closed = h.whenClosed();
@@ -1856,6 +1859,31 @@ test('MCP retired native run still exposes its retained proposal for review with
   assert.equal((await controller.status()).chatHash, retired.chatHash);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
   assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  if (completion === 'save') {
+    const ready = h.nextForm(), save = h.call('processing_review', {});
+    h.answer(await ready, { action: 'accept', content: { decision: 'save' } });
+    const saved = body(await save);
+    assert.equal(saved.status, 'idle'); assert.equal(saved.nextAction, 'none'); assert.deepEqual(saved.diagnostics, []);
+    assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+  } else {
+    // The engine can finish after native status inspection, before the MCP
+    // layer checks completion. A retired row has no terminal review to ack.
+    h.inspectOperation = async operationId => {
+      const operation = await inspectProcessing(f.capability, operationId);
+      h.inspectOperation = null;
+      await reviewProcessingProposal(f.capability, { selection: f.selection, operationId },
+        { elicit: async () => ({ action: 'accept', content: { decision: 'skip' } }) });
+      return operation;
+    };
+    const completed = body(await h.call('processing_status', {}));
+    assert.equal(completed.status, 'idle'); assert.equal(completed.nextAction, 'none');
+    assert.deepEqual(completed.diagnostics, []);
+    assert.equal(body(await h.call('processing_review', {})).status, 'idle');
+  }
+  assert.equal(h.finishReviewCalls ?? 0, 0);
+  assert.equal((await controller.status()).state, 'idle');
+  assert.equal((await controller.status()).chatHash, retired.chatHash);
+  assert.equal(h.dispatches, 1);
 });
 
 for (const retainedClaim of [false, true]) test(`MCP retired binding ${retainedClaim ? 'with terminal-owned claim' : 'without claim'} reports a competing active namespace without relaunch`, async t => {

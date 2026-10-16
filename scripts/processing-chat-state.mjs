@@ -31,6 +31,12 @@ const nullableId = value => { if (value !== null) nativeId(value); };
 const STATES = ['creating', 'idle', 'busy', 'awaiting-review', 'blocked'];
 export const processingChatRestartSupported = registry => registry?.state === 'blocked' &&
   ['creation-not-dispatched', 'run-abandoned'].includes(registry.block?.reason);
+// Engine reservations and recovery blockers remain authoritative even when a
+// retained claim has a terminal native owner and no transaction of its own.
+export function processingChatOperationBlocker(operation) {
+  if (operation.blockers?.includes('PROCESSING_REINSPECTION_REQUIRED')) return 'PROCESSING_REINSPECTION_REQUIRED';
+  return operation.recoveryRequired || operation.blockers?.length ? 'PROCESSING_RECOVERY_REQUIRED' : null;
+}
 const BLOCKS = ['creation-outcome-unknown', 'dispatch-outcome-unknown', 'operation-outcome-unknown', 'host-unavailable', 'session-unavailable', 'binding-conflict', 'creation-not-dispatched', 'run-abandoned'];
 
 function namespaceValue(value) {
@@ -296,8 +302,8 @@ export async function createProcessingChatState(options) {
       else if (request.selection) operations = (await pendingProcessing(capability, { selection: request.selection, limit: 1 })).operations;
       else return false;
       for (const operation of operations) {
-        if (operation.recoveryRequired || (!operation.outcome && !operation.admissionPending && operation.state !== 'awaiting-review' &&
-            !await terminalOperationOwner(operation.operationId, records))) return true;
+        if (processingChatOperationBlocker(operation) || (!operation.outcome && !operation.admissionPending &&
+            (operation.state === 'awaiting-review' || !await terminalOperationOwner(operation.operationId, records)))) return true;
       }
       return false;
     } catch {

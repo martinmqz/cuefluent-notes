@@ -578,8 +578,11 @@ Both require a fresh native call and current launch authentication; neither
 automatically resolves an unfinished claim or bypasses recovery. Status clears
 the retired chat and request identifiers and any historical launch diagnostic.
 A retained unfinished claim without verified terminal ownership instead reports
-`PROCESSING_OPERATION_OWNER_UNVERIFIED` and requires inspection. An unknown outcome
-still requires inspection; it does not establish that a client is still running.
+`PROCESSING_OPERATION_OWNER_UNVERIFIED` and requires inspection. Published proposals
+remain `awaiting-review`; resolve them before starting another native run. Engine
+reinspection reservations also block new runs, even when the claim has a verified
+terminal owner. An unknown outcome still requires inspection; it does not establish
+that a client is still running.
 A failure proven to precede `thread/start` needs no abandonment: it can retry using
 freshly inspected status after the client issue is fixed.
 

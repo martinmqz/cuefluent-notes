@@ -171,10 +171,12 @@ reused for retries of that exact request. A duplicate never dispatches again.
 settings hash for explicit reauthorization. `remainingRuns` reports the native
 history capacity left before guarded rollover, or the full replacement-session
 capacity for a retired binding. `restartSupported` is true only for a binding
-explicitly retired offline or proven not to have dispatched creation. Such a
-binding reports `idle` unless its retained operation requires inspection. It
-permits the normal new-request admission checks, not automatic execution or
-bypass of authentication, claims, or recovery. `nativeStatus` distinguishes a
+explicitly retired offline or proven not to have dispatched creation. It permits
+the normal new-request admission checks, not automatic execution or bypass of
+authentication, claims, or recovery. Such a binding reports `idle` unless its
+retained operation requires inspection or has a proposal awaiting review. An
+unresolved proposal reports `awaiting-review` and prevents another native run,
+including from a different namespace. `nativeStatus` distinguishes a
 completed, failed or interrupted native run; null means no terminal is available
 for the current state. `operationId` points to authoritative engine status. For an
 idle chat with a recorded operation, status also returns

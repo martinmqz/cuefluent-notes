@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { normalizeWorkflowSelection, selectionIncludesIdentity } from './workflow-selection.mjs';
-import { createProcessingChatState, MAX_PROCESSING_CHAT_RUNS, processingChatRestartSupported } from './processing-chat-state.mjs';
+import { createProcessingChatState, MAX_PROCESSING_CHAT_RUNS, processingChatRestartSupported, processingChatOperationBlocker } from './processing-chat-state.mjs';
 import { createProcessingEngineTools } from './processing-engine-tools.mjs';
 import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
@@ -249,13 +249,22 @@ export async function openProcessingController(context, dependencies = {}) {
     if (result.restartSupported) {
       for (const operation of operations.values()) {
         if (result.operationId === null && !operation.outcome && !operation.admissionPending) projectOperation(operation);
-        if (operation.recoveryRequired) {
+        const blocker = processingChatOperationBlocker(operation);
+        if (blocker) {
           projectOperation(operation); result.state = 'blocked'; result.resumeSupported = false;
-          result.diagnostics = ['PROCESSING_RECOVERY_REQUIRED']; break;
+          result.diagnostics = [blocker]; break;
+        }
+        // A proposal ends synthesis, not review. Retirement cannot authorize
+        // another turn while it awaits disposition, even with a prior owner.
+        if (!operation.outcome && !operation.admissionPending && operation.state === 'awaiting-review') {
+          if (result.state === 'idle') {
+            projectOperation(operation); result.state = 'awaiting-review'; result.resumeSupported = false;
+          }
+          continue;
         }
         // Ownership/archive errors are registry failures, not unknown engine
         // outcomes. Let them reach the caller without relabelling them.
-        if (!operation.outcome && !operation.admissionPending && operation.state !== 'awaiting-review' &&
+        if (!operation.outcome && !operation.admissionPending &&
             !await state.hasTerminalOperationOwner(operation.operationId)) {
           projectOperation(operation); result.state = 'blocked'; result.resumeSupported = false;
           result.diagnostics = ['PROCESSING_OPERATION_OWNER_UNVERIFIED']; break;
