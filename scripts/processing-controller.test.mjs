@@ -829,6 +829,25 @@ test('unavailable frozen inputs do not block independent work and are not descri
   assert.equal(next.reason, 'workset-remainder-unavailable'); assert.equal(h.dispatches.length, 1);
 });
 
+for (const foreign of [false, true]) test(`final workset inspection preserves ${foreign ? 'foreign' : 'own'} reservation diagnostics and native completion`, async t => {
+  const f = await processingFixture(t), h = await harness(t, f), worksetId = randomUUID();
+  const workset = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+  const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+  const bytes = foreign ? canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n' : '{}\n';
+  const code = foreign ? 'PROCESSING_RECOVERY_REQUIRED' : 'PROCESSING_REINSPECTION_REQUIRED';
+  h.script = async () => {};
+  h.afterNativeResult = () => fs.writeFile(reservation, bytes, { mode: 0o600 });
+  const result = await h.controller.run(await h.request({ worksetId }));
+  assert.equal(result.workset, null); assert.deepEqual(result.diagnostics, [code]);
+  assert.equal(result.nativeStatus, 'completed'); assert.equal(result.state, 'idle');
+  assert.equal((await registryJSON(f)).runs.length, 1);
+  assert.deepEqual((await h.controller.status()).diagnostics, [code]);
+  assert.equal(await fs.readFile(reservation, 'utf8'), bytes);
+  await fs.unlink(reservation);
+  assert.equal((await h.controller.status()).workset.worksetHash, workset.worksetHash);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
 test('final workset metadata failure preserves the committed native outcome', async t => {
   const f = await processingFixture(t), worksetId = randomUUID();
   await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
@@ -1028,6 +1047,41 @@ for (const client of ['codex', 'claude']) test(`${client} retired unpinned disco
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
 });
+
+for (const client of ['codex', 'claude']) for (const foreign of [false, true]) {
+  test(`${client} retired unpinned workset preserves ${foreign ? 'foreign' : 'own'} reservation diagnostics`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    const worksetId = randomUUID();
+    const workset = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: f.inputs });
+    h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+    const request = await h.request({ worksetId }); await assert.rejects(h.controller.run(request));
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    const stored = await registryJSON(f);
+    assert.equal(stored.active.operationId, null); assert.equal(stored.active.worksetId, worksetId);
+    const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    // An incomplete own intent still reserves the writer; foreign ownership is explicit.
+    const bytes = foreign ? canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n' : '{}\n';
+    await fs.writeFile(reservation, bytes, { mode: 0o600 });
+    const code = foreign ? 'PROCESSING_RECOVERY_REQUIRED' : 'PROCESSING_REINSPECTION_REQUIRED';
+    const blocked = await h.controller.status();
+    assert.equal(blocked.state, 'blocked'); assert.deepEqual(blocked.diagnostics, [code]);
+    assert.equal(blocked.resumeSupported, false); assert.equal(blocked.worksetId, worksetId);
+    assert.equal(blocked.operationId, null); assert.equal(blocked.chat, null); assert.equal(blocked.requestId, null);
+    assert.deepEqual(await h.controller.run({ ...request, requestId: randomUUID(), expectedChatHash: retired.chatHash }), blocked);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.equal(await fs.readFile(reservation, 'utf8'), bytes);
+    assert.equal(h.dispatches.length, 1);
+    await assertRetiredPeerBlocked(t, f, h);
+    await fs.unlink(reservation);
+    const clear = await h.controller.status();
+    assert.equal(clear.state, 'idle'); assert.deepEqual(clear.diagnostics, []);
+    assert.equal(clear.workset.worksetHash, workset.worksetHash);
+    assert.deepEqual(clear.workset.inputs, workset.inputs);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
 
 for (const client of ['codex', 'claude']) test(`${client} excluded retired peer stays visible without rejecting an authorized route's activity read`, async t => {
   const f = await processingFixture(t, { client }), h = await harness(t, f, client);

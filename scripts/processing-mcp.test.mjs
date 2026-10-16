@@ -1714,6 +1714,44 @@ for (const phase of ['creation', 'dispatch']) test(`MCP refuses unknown ${phase}
   }
 });
 
+for (const foreign of [false, true]) test(`MCP retired unpinned workset preserves ${foreign ? 'foreign' : 'own'} reservation diagnostics`, async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async () => { throw new Error('synthetic lost terminal before preparation'); };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', {}); await closed;
+  const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
+    env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
+  });
+  t.after(() => controller.close());
+  const failed = await controller.status();
+  const retired = await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  assert.equal(retired.operationId, null); assert(retired.worksetId);
+  const frozen = (await inspectProcessingShortcut(f.capability, { selection: f.selection })).worksets[0];
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const registry = path.join(directory, (await fs.readdir(directory))[0]), stored = await fs.readFile(registry);
+  const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+  const bytes = foreign ? canonicalJSON({ preview: { binding: { collectionId: 'other' } } }) + '\n' : '{}\n';
+  await fs.writeFile(reservation, bytes, { mode: 0o600 });
+  const code = foreign ? 'PROCESSING_RECOVERY_REQUIRED' : 'PROCESSING_REINSPECTION_REQUIRED';
+  for (const tool of ['processing_status', 'processing_resume', 'process_selected_captures']) {
+    const result = body(await h.call(tool, {}));
+    assert.equal(result.status, 'blocked'); assert.equal(result.nextAction, 'inspect');
+    assert.deepEqual(result.diagnostics, [code]);
+    assert.equal(result.chat, null); assert.equal(result.requestId, null);
+    assert.equal(h.creates, 1); assert.equal(h.dispatches, 1);
+    assert.deepEqual(await fs.readFile(registry), stored);
+    assert.equal(await fs.readFile(reservation, 'utf8'), bytes);
+  }
+  await fs.unlink(reservation);
+  const clear = body(await h.call('processing_status', {}));
+  assert.equal(clear.status, 'idle'); assert.equal(clear.nextAction, 'resume');
+  assert.deepEqual(clear.diagnostics, []);
+  const after = (await inspectProcessingShortcut(f.capability, { selection: f.selection })).worksets[0];
+  assert.equal(after.worksetHash, frozen.worksetHash); assert.deepEqual(after.inputs, frozen.inputs);
+  assert.deepEqual(await fs.readFile(registry), stored);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
 for (const beforePin of [false, true]) test(`MCP retired execution exposes the ${beforePin ? 'unpinned' : 'pinned'} claim blocker without relaunch or claim changes`, async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   let pinFailed = false;

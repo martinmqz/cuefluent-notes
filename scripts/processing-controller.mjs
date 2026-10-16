@@ -33,6 +33,11 @@ Do not treat a generated note, echoed evidence or processing narration as indepe
 Publish the complete intended Markdown through processing_propose. You cannot approve or save your proposal. Leave it for review through the existing engine.
 If evidence is unavailable, a policy or hash changed, or recovery is required, stop with the exact diagnostic. Do not bypass it or start a replacement operation.`;
 
+function writerReservationDiagnostic(error) {
+  return error?.code === 'writer-reserved-by-another-collection' ? 'PROCESSING_RECOVERY_REQUIRED'
+    : error?.code === 'PROCESSING_REINSPECTION_REQUIRED' ? error.code : null;
+}
+
 function nativeState(view) {
   const retired = processingChatRestartSupported(view.registry);
   const request = view.registry?.active ?? view.registry?.runs.at(-1)?.request;
@@ -216,8 +221,8 @@ export async function openProcessingController(context, dependencies = {}) {
       try {
         result.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: result.worksetId }));
         for (const operation of result.workset.operations) operations.set(operation.operationId, operation);
-      } catch {
-        result.workset = null; unknown('WORKSET_OUTCOME_UNKNOWN');
+      } catch (error) {
+        result.workset = null; unknown(writerReservationDiagnostic(error) ?? 'WORKSET_OUTCOME_UNKNOWN');
       }
     } else if (result.restartSupported && view.registry.active?.selection) {
       inspected = true;
@@ -230,8 +235,7 @@ export async function openProcessingController(context, dependencies = {}) {
         // Discovery refusals identify a policy or writer blocker, not an
         // unknown operation outcome. Keep their actionable public codes.
         if (error.code === 'WORKFLOW_NOT_AUTHORIZED') throw error;
-        const reservation = error.code === 'writer-reserved-by-another-collection' ? 'PROCESSING_RECOVERY_REQUIRED'
-          : error.code === 'PROCESSING_REINSPECTION_REQUIRED' ? error.code : null;
+        const reservation = writerReservationDiagnostic(error);
         if (reservation && result.operationId === null) fail(reservation);
         // Pinned operations retain their ordinary blocked status during a
         // reservation; discovery cannot turn that status into a thrown error.
@@ -548,7 +552,10 @@ export async function openProcessingController(context, dependencies = {}) {
           model: typeof result.model === 'string' ? result.model : null };
         if (requestWorksetId) {
           try { response.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId })); }
-          catch { response.workset = null; response.diagnostics = [...new Set([...response.diagnostics, 'WORKSET_OUTCOME_UNKNOWN'])]; }
+          catch (error) {
+            response.workset = null;
+            response.diagnostics = [...new Set([...response.diagnostics, writerReservationDiagnostic(error) ?? 'WORKSET_OUTCOME_UNKNOWN'])];
+          }
         }
         return response;
       } catch (error) {
