@@ -293,25 +293,29 @@ export async function createProcessingChatState(options) {
   }
   const executing = value => ['creating', 'busy'].includes(value.state) ||
     (value.state === 'blocked' && !processingChatRestartSupported(value));
-  async function retiredClaimsBlock(value, records) {
-    if (!processingChatRestartSupported(value) || !value.active) return false;
+  async function retiredActivityState(value, records) {
+    if (!processingChatRestartSupported(value) || !value.active) return null;
     const request = value.active;
     try {
       let operations;
       if (request.worksetId) operations = (await inspectProcessingWorkset(capability, { worksetId: request.worksetId })).operations;
       else if (request.operationId) operations = [await inspectProcessing(capability, request.operationId)];
       else if (request.selection) operations = (await pendingProcessing(capability, { selection: request.selection, limit: 1 })).operations;
-      else return false;
+      else return null;
+      let reviewPending = false;
       for (const operation of operations) {
-        if (processingChatOperationBlocker(operation) || (!operation.outcome && !operation.admissionPending &&
-            (operation.state === 'awaiting-review' || !await terminalOperationOwner(operation.operationId, records)))) return true;
+        if (processingChatOperationBlocker(operation)) return 'blocked';
+        if (!operation.outcome && !operation.admissionPending) {
+          if (operation.state === 'awaiting-review') reviewPending = true;
+          else if (!await terminalOperationOwner(operation.operationId, records)) return 'blocked';
+        }
       }
-      return false;
+      return reviewPending ? 'awaiting-review' : null;
     } catch {
       // An unreadable retired peer has not proved its claims safe to resume.
       // Keep it visible as blocked without attributing its route/metadata error
       // to the caller. Collection registry validation and guard still fail normally.
-      return true;
+      return 'blocked';
     }
   }
   async function collectionActivity() {
@@ -325,10 +329,11 @@ export async function createProcessingChatState(options) {
       }
       // Retirement removes native execution, not a retained claim's ownership
       // requirement. Admission repeats this inspection under the intake lock.
-      if (value.state === 'awaiting-review' || executing(value) || (!own && await retiredClaimsBlock(value, records))) {
-        activity.push({ own, state: value.state, client: value.namespace.client,
-          sessionId: value.session?.sessionId ?? null,
-          requestId: value.active?.requestId ?? value.runs.at(-1)?.request.requestId ?? value.creation.requestId });
+      const retiredState = own ? null : await retiredActivityState(value, records);
+      if (value.state === 'awaiting-review' || executing(value) || retiredState) {
+        activity.push({ own, state: retiredState ?? value.state, client: value.namespace.client,
+          sessionId: retiredState ? null : value.session?.sessionId ?? null,
+          requestId: retiredState ? null : value.active?.requestId ?? value.runs.at(-1)?.request.requestId ?? value.creation.requestId });
       }
     }
     await guard(); return activity;

@@ -130,7 +130,7 @@ const propose = (f, inspected = null) => async call => {
     mappings: [{ identity: f.identity, paths: ['meetings/rollout.md'] }] } });
 };
 
-async function assertRetiredPeerBlocked(t, f, h) {
+async function assertRetiredPeerBlocked(t, f, h, expectedState = 'blocked') {
   const stored = await registryJSON(f);
   for (const client of ['codex', 'claude']) {
     const profileRoot = path.join(f.root, `peer-profile-${randomUUID()}`); await fs.mkdir(profileRoot);
@@ -141,7 +141,7 @@ async function assertRetiredPeerBlocked(t, f, h) {
     });
     t.after(() => peer.close());
     const activity = await peer.collectionActivity();
-    assert.equal(activity.length, 1); assert.equal(activity[0].own, false); assert.equal(activity[0].state, 'blocked');
+    assert.equal(activity.length, 1); assert.equal(activity[0].own, false); assert.equal(activity[0].state, expectedState);
     await assert.rejects(peer.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }),
       { code: 'PROCESSING_COLLECTION_BUSY' });
     assert.deepEqual(await registryJSON(f), stored);
@@ -1168,7 +1168,7 @@ for (const client of ['codex', 'claude']) for (const terminalOwner of [false, tr
     const stored = await registryJSON(f), claim = await inspectProcessing(f.capability, f.operationId);
     const dispatches = h.dispatches.length, creates = h.creates;
     assert.deepEqual(await h.controller.run(await h.request()), retired);
-    await assertRetiredPeerBlocked(t, f, h);
+    await assertRetiredPeerBlocked(t, f, h, 'awaiting-review');
     assert.deepEqual(await registryJSON(f), stored);
     assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
     assert.equal(h.dispatches.length, dispatches); assert.equal(h.creates, creates);
@@ -1199,8 +1199,8 @@ for (const client of ['codex', 'claude']) for (const duringStartup of [false, tr
     const retired = await h.controller.status(), stored = await registryJSON(f);
     const creates = h.creates, dispatches = h.dispatches.length;
     const file = path.join(f.collection.intakeStateDir, 'heads', client, f.identity.sessionId, `${f.identity.unitId}.json`);
-    const head = JSON.parse(await fs.readFile(file, 'utf8'));
-    const changed = canonicalJSON({ ...head, generation: head.generation + 1 }) + '\n';
+    const headBytes = await fs.readFile(file), head = JSON.parse(headBytes);
+    const changed = canonicalJSON({ ...head, generation: head.generation + 1, previousHash: digest(headBytes) }) + '\n';
     const publish = () => fs.writeFile(file, changed);
     await h.controller.close();
     const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];

@@ -13,7 +13,7 @@ import { processingControlAction } from './processing-control-proof.mjs';
 import { runProcessingMcp, processingStatusView } from './processing-mcp.mjs';
 import { readSelection, controlSelection, readCaptureHead } from './intake-store.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
-import { inspectProcessing, readProcessingProposal } from './processing.mjs';
+import { inspectProcessing, readProcessingProposal, completeProcessing } from './processing.mjs';
 import { createProcessingWorkset } from './processing-workset.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
@@ -1833,6 +1833,48 @@ for (const failure of ['abandoned', 'not-dispatched']) test(`MCP review and canc
   assert.equal((await controller.status()).chatHash, retired.chatHash);
   assert.equal(h.forms.length, 0); assert.equal(h.creates, 1);
   assert.equal(h.dispatches, failure === 'abandoned' ? 1 : 0);
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+});
+
+test('MCP retired peer proposal offers review while blocking new execution and preserves later conflicts', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async call => { await proposeThroughTools(f)(call); throw new Error('synthetic lost terminal after proposal'); };
+  const closed = h.whenClosed();
+  await h.call('process_selected_captures', {}); await closed;
+  const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
+    env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
+  });
+  t.after(() => controller.close());
+  const failed = await controller.status();
+  const retired = await controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  const claim = await inspectProcessing(f.capability, f.operationId);
+  const peer = await harness(t, f, { controllerIdentity: { hostId: digest('synthetic-peer-host') } });
+  for (const tool of ['processing_status', 'processing_resume', 'process_selected_captures']) {
+    const status = body(await peer.call(tool, {}));
+    assert.equal(status.status, 'awaiting-review'); assert.equal(status.nextAction, 'review');
+    assert.equal(status.chat, null); assert.equal(status.requestId, null);
+  }
+  const ready = peer.nextForm(), review = peer.call('processing_review', {}), form = await ready;
+  assert(form.params.requestedSchema.properties.changes.default.includes(claim.proposalHash));
+  peer.answer(form, { action: 'accept', content: { decision: 'later' } });
+  assert.equal(body(await review).status, 'awaiting-review');
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  const file = path.join(f.collection.intakeStateDir, 'heads', f.identity.client, f.identity.sessionId, `${f.identity.unitId}.json`);
+  const headBytes = await fs.readFile(file), head = JSON.parse(headBytes);
+  await fs.writeFile(file, canonicalJSON({ ...head, generation: head.generation + 1, previousHash: digest(headBytes) }) + '\n');
+  const conflict = body(await peer.call('processing_status', {}));
+  assert.equal(conflict.status, 'blocked'); assert.equal(conflict.nextAction, 'inspect');
+  await completeProcessing(f.capability, { selection: f.selection, operationId: f.operationId, expectedClaimHash: claim.claimHash, outcome: 'cancelled' });
+  const settledPeer = await peer.openController({ ...f.options, client: 'codex' });
+  try { assert.deepEqual(await settledPeer.collectionActivity(), []); }
+  finally { await settledPeer.close(); }
+  // Disposing the claim does not refresh the frozen checkpoint's old input.
+  const frozen = body(await peer.call('processing_status', {}));
+  assert.equal(frozen.status, 'blocked'); assert.equal(frozen.nextAction, 'cancel');
+  assert.deepEqual(frozen.diagnostics, ['PROCESSING_SELECTION_CHANGED']);
+  assert.equal((await controller.status()).chatHash, retired.chatHash);
+  assert.equal(peer.creates, 0); assert.equal(peer.dispatches, 0); assert.equal(h.dispatches, 1);
+  assert.equal(peer.finishReviewCalls ?? 0, 0);
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
