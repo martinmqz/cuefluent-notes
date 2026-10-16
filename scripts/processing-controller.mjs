@@ -247,7 +247,8 @@ export async function openProcessingController(context, dependencies = {}) {
             result.recoveryRequired = operation.recoveryRequired;
             if (selection !== null) {
               const old = operation.selection;
-              result.resumeSupported = (view.registry?.runs.at(-1)?.request.worksetId || view.registry?.runs.at(-1)?.request.resumeOperationId) ? true : Boolean(old && old.client === selection.client && old.sessionId === selection.sessionId &&
+              const request = view.registry?.active ?? view.registry?.runs.at(-1)?.request;
+              result.resumeSupported = (request?.worksetId || request?.resumeOperationId) ? true : Boolean(old && old.client === selection.client && old.sessionId === selection.sessionId &&
                 old.cwd === selection.cwd && (!selection.unitId || old.unitId === selection.unitId) &&
                 operation.inputs.every(input => selectionIncludesIdentity(selection, input.identity)));
             }

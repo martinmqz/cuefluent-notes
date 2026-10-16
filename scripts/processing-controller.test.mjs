@@ -957,19 +957,29 @@ test('retired controller projects fresh capacity and clears historical launch id
 });
 
 
-test('retired resumed claim preserves earlier terminal ownership and refuses unavailable metadata', async t => {
-  const f = await processingFixture(t), h = await harness(t, f);
+for (const client of ['codex', 'claude']) test(`${client} retired cross-session resume preserves its binding and refuses unavailable metadata`, async t => {
+  const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+  const other = await processingFixture(t, { base: f, client });
   h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
   await h.controller.run(await h.request());
   const claim = await inspectProcessing(f.capability, f.operationId);
+  assert.equal((await h.controller.status({ selection: other.selection })).resumeSupported, false);
   h.script = async () => { throw new Error('synthetic lost terminal on resume'); };
-  await assert.rejects(h.controller.run(await h.request({ resumeOperationId: f.operationId })));
+  await assert.rejects(h.controller.run(await h.request({ selection: other.selection, resumeOperationId: f.operationId })));
   const failed = await h.controller.status();
   const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
   assert.equal(retired.state, 'idle'); assert.deepEqual(retired.diagnostics, []);
   assert.equal(await h.controller.canResumeOperation(f.operationId), true);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
   const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
+  assert.equal(stored.runs.at(-1).request.selection.sessionId, f.selection.sessionId);
+  assert.equal(stored.active.selection.sessionId, other.selection.sessionId);
+  assert.equal(stored.active.resumeOperationId, f.operationId);
+  const status = await h.controller.status({ selection: other.selection });
+  assert.equal(status.state, 'idle'); assert.equal(status.resumeSupported, true);
+  assert.deepEqual(status.diagnostics, []);
+  assert.deepEqual(await registryJSON(f), stored);
+  assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
   h.inspectOperation = async () => { throw new Error('synthetic unreadable metadata'); };
   const unreadable = await h.controller.status();
   assert.equal(unreadable.state, 'blocked'); assert.equal(unreadable.operationState, 'unknown');
@@ -987,9 +997,11 @@ test('retired resumed claim preserves earlier terminal ownership and refuses una
   assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
   h.inspectOperation = null;
   h.script = async call => call('processing_status', { operationId: f.operationId });
-  const resumed = await h.controller.run(await h.request({ resumeOperationId: f.operationId }));
+  const resumed = await h.controller.run(await h.request({ selection: other.selection, resumeOperationId: f.operationId }));
   assert.equal(resumed.state, 'idle'); assert.equal(resumed.operationId, f.operationId);
   assert.notEqual(resumed.chat.sessionId, failed.chat.sessionId);
   assert.equal(h.dispatches.length, dispatches + 1);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal((await inspectProcessing(f.capability, other.operationId)).state, 'missing');
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
