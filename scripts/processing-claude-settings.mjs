@@ -115,12 +115,16 @@ export function claudeAuthenticationMode(env = process.env, platform = process.p
   return authenticationMode(env, environmentIndex(env, platform));
 }
 
+function hostCredentialName(env, index, platform) {
+  const locator = environmentValue(env, index, 'CLAUDE_CODE_HOST_AUTH_ENV_VAR');
+  return typeof locator === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(locator)
+    ? platform === 'win32' ? locator.toUpperCase() : locator : null;
+}
+
 function authenticationEnvironment(env, platform) {
   const selected = { ...env }, index = environmentIndex(env, platform);
   const mode = authenticationMode(env, index);
-  const locator = environmentValue(env, index, 'CLAUDE_CODE_HOST_AUTH_ENV_VAR');
-  const credentialName = typeof locator === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(locator)
-    ? platform === 'win32' ? locator.toUpperCase() : locator : null;
+  const credentialName = hostCredentialName(env, index, platform);
   for (const name of Object.keys(selected)) {
     const canonical = platform === 'win32' ? name.toUpperCase() : name;
     if (canonical === AUTHENTICATION_SETTING || (mode === 'native-profile' && (
@@ -135,7 +139,11 @@ function authenticationEnvironment(env, platform) {
 }
 
 export function assertClaudeProcessingAuthentication(env = process.env, platform = process.platform) {
-  return assertClaudeHostAuthentication(authenticationEnvironment(env, platform).env, { platform });
+  const index = environmentIndex(env, platform);
+  // Explicit native-profile selection needs no inherited host credential. Keep
+  // admission environment-only; prepare the child environment once at launch.
+  if (authenticationMode(env, index) === 'native-profile') return false;
+  return assertClaudeHostAuthentication(env, { platform, index });
 }
 /** Single owner of child-environment rewrites, shared with auth preflight. */
 export function claudeProcessingEnvironment(inherited, engine = {}, platform = process.platform) {
@@ -154,10 +162,8 @@ export function assertClaudeHostAuthentication(env = process.env, { platform = p
   const hostAuthDeclared = hostAuthName !== undefined && hostAuthName !== '';
   const hostManaged = (typeof managedFlag === 'string' && enabled(managedFlag)) || hostAuthDeclared;
   if (!hostManaged) return false;
-  if (!hostAuthDeclared || typeof hostAuthName !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(hostAuthName)) {
-    fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
-  }
-  const canonical = platform === 'win32' ? hostAuthName.toUpperCase() : hostAuthName;
+  const canonical = hostCredentialName(env, index, platform);
+  if (canonical === null) fail('PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
   // A locator declares which inherited credential to use; known routing and
   // control fields cannot serve as credentials. Presence does not prove validity.
   const child = claudeProcessingEnvironment(env, {}, platform);

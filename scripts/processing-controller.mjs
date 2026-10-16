@@ -12,6 +12,7 @@ import { createClaudeProcessingClient } from './processing-client-claude.mjs';
 import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment, claudeAuthenticationMode, assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { inspectProcessingWorkset } from './processing-workset.mjs';
 import { inspectProcessing } from './processing.mjs';
+import { pendingProcessing } from './processing-inventory.mjs';
 import { processingExecutionCallbacks } from './processing-execution-receipts.mjs';
 import { reconcileCompletedProcessingExecution } from './processing-chat-recovery.mjs';
 import { ownProcessIdentity, probeProcess, ownerIsGone } from './process-identity.mjs';
@@ -184,31 +185,77 @@ export async function openProcessingController(context, dependencies = {}) {
     }
     return !ownerIsGone(owner, await (dependencies.probeProcess ?? probeProcess)(owner.pid));
   }
-  async function publicState(view) {
-    const result = nativeState(view);
-    // Retiring the native binding does not establish a terminal owner for its
-    // retained engine claim. Keep that blocker visible to every controller caller.
-    if (result.restartSupported && view.registry.active?.operationId) {
+  async function publicState(view, { inspectOperation = false, selection = null } = {}) {
+    const result = nativeState(view), operations = new Map();
+    let inspected = false;
+    const unknown = diagnostic => {
+      result.diagnostics = [...new Set([...result.diagnostics, diagnostic])];
+      if (result.restartSupported) { result.state = 'blocked'; result.resumeSupported = false; }
+    };
+    const projectOperation = operation => {
+      result.operationId = operation.operationId;
+      result.operationState = operation.state;
+      result.operationOutcome = operation.outcome;
+      result.recoveryRequired = operation.recoveryRequired;
+      if (selection !== null) {
+        const old = operation.selection;
+        const request = view.registry?.active ?? view.registry?.runs.at(-1)?.request;
+        result.resumeSupported = (request?.worksetId || request?.resumeOperationId) ? true : Boolean(old && old.client === selection.client && old.sessionId === selection.sessionId &&
+          old.cwd === selection.cwd && (!selection.unitId || old.unitId === selection.unitId) &&
+          operation.inputs.every(input => selectionIncludesIdentity(selection, input.identity)));
+      }
+    };
+    // A prepare can publish its claim before the native registry records its ID.
+    // Inspect the retained workset (or original plain selection before its first
+    // pin), not just active.operationId. Workset metadata also supplies the pinned
+    // operation, avoiding a second read of that same claim.
+    if (result.worksetId !== null && (inspectOperation || result.restartSupported)) {
+      inspected = true;
+      try {
+        result.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: result.worksetId }));
+        for (const operation of result.workset.operations) operations.set(operation.operationId, operation);
+      } catch {
+        result.workset = null; unknown('WORKSET_OUTCOME_UNKNOWN');
+      }
+    } else if (result.restartSupported && result.operationId === null && view.registry.active?.selection) {
+      inspected = true;
+      try {
+        const inventory = await withStorageProbes(() => pendingProcessing(capability, { selection: view.registry.active.selection, limit: 1 }));
+        // Operations cover the complete selected session, independently of the
+        // bounded capture-head page. No evidence bodies are read here.
+        for (const operation of inventory.operations) operations.set(operation.operationId, operation);
+      } catch { unknown('OPERATION_OUTCOME_UNKNOWN'); }
+    }
+    if ((result.restartSupported || (inspectOperation && result.state === 'idle')) && result.operationId !== null) {
+      inspected = true;
       try {
         const operation = await withStorageProbes(() => dependencies.inspectOperation
-          ? dependencies.inspectOperation(result.operationId) : inspectProcessing(capability, result.operationId));
-        result.operationState = operation.state;
-        result.operationOutcome = operation.outcome;
-        result.recoveryRequired = operation.recoveryRequired;
-        if (operation.recoveryRequired) {
-          result.state = 'blocked'; result.diagnostics = ['PROCESSING_RECOVERY_REQUIRED'];
-        } else if (!operation.outcome && operation.state !== 'awaiting-review' &&
-            !await state.hasTerminalOperationOwner(result.operationId)) {
-          result.state = 'blocked'; result.resumeSupported = false;
-          result.diagnostics = ['PROCESSING_OPERATION_OWNER_UNVERIFIED'];
-        }
+          ? dependencies.inspectOperation(result.operationId)
+          : operations.get(result.operationId) ?? inspectProcessing(capability, result.operationId));
+        operations.set(operation.operationId, operation); projectOperation(operation);
       } catch {
-        Object.assign(result, { state: 'blocked', resumeSupported: false, operationState: 'unknown',
-          operationOutcome: null, recoveryRequired: null });
-        result.diagnostics = ['OPERATION_OUTCOME_UNKNOWN'];
+        Object.assign(result, { operationState: 'unknown', operationOutcome: null, recoveryRequired: null });
+        unknown('OPERATION_OUTCOME_UNKNOWN');
       }
-      if ((await state.read()).hash !== view.hash) fail('PROCESSING_CHAT_STATE_CHANGED');
     }
+    if (result.restartSupported) {
+      for (const operation of operations.values()) {
+        if (result.operationId === null && !operation.outcome && !operation.admissionPending) projectOperation(operation);
+        if (operation.recoveryRequired) {
+          projectOperation(operation); result.state = 'blocked'; result.resumeSupported = false;
+          result.diagnostics = ['PROCESSING_RECOVERY_REQUIRED']; break;
+        }
+        // Ownership/archive errors are registry failures, not unknown engine
+        // outcomes. Let them reach the caller without relabelling them.
+        if (!operation.outcome && !operation.admissionPending && operation.state !== 'awaiting-review' &&
+            !await state.hasTerminalOperationOwner(operation.operationId)) {
+          projectOperation(operation); result.state = 'blocked'; result.resumeSupported = false;
+          result.diagnostics = ['PROCESSING_OPERATION_OWNER_UNVERIFIED']; break;
+        }
+      }
+    }
+    if (result.state === 'blocked' || ('workset' in result && result.workset?.policyState !== 'current')) result.resumeSupported = false;
+    if (inspected && (await state.read()).hash !== view.hash) fail('PROCESSING_CHAT_STATE_CHANGED');
     return result;
   }
   return Object.freeze({
@@ -244,42 +291,8 @@ export async function openProcessingController(context, dependencies = {}) {
     },
     async status({ inspectOperation = true, selection = null } = {}) {
       for (let attempt = 0; attempt < 2; attempt++) {
-        const view = await state.read(), result = await publicState(view);
-        // A terminal native turn does not complete its claimed engine operation.
-        // Read only metadata, and never describe an unfinished claim as complete.
-        if (inspectOperation && result.state === 'idle' && result.operationId !== null) {
-          try {
-            const operation = await withStorageProbes(() => dependencies.inspectOperation
-              ? dependencies.inspectOperation(result.operationId) : inspectProcessing(capability, result.operationId));
-            result.operationState = operation.state;
-            result.operationOutcome = operation.outcome;
-            result.recoveryRequired = operation.recoveryRequired;
-            if (selection !== null) {
-              const old = operation.selection;
-              const request = view.registry?.active ?? view.registry?.runs.at(-1)?.request;
-              result.resumeSupported = (request?.worksetId || request?.resumeOperationId) ? true : Boolean(old && old.client === selection.client && old.sessionId === selection.sessionId &&
-                old.cwd === selection.cwd && (!selection.unitId || old.unitId === selection.unitId) &&
-                operation.inputs.every(input => selectionIncludesIdentity(selection, input.identity)));
-            }
-          } catch {
-            // Keep the native snapshot useful without treating unavailable engine
-            // metadata as either completion or permission to resume.
-            Object.assign(result, { operationState: 'unknown', operationOutcome: null, recoveryRequired: null });
-            result.diagnostics = [...new Set([...result.diagnostics, 'OPERATION_OUTCOME_UNKNOWN'])];
-          }
-          if ((await state.read()).hash !== view.hash) continue;
-        }
-        if (inspectOperation && result.worksetId !== null) {
-          try {
-            result.workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: result.worksetId }));
-            if (result.workset.policyState !== 'current') result.resumeSupported = false;
-          } catch {
-            result.workset = null; result.resumeSupported = false;
-            result.diagnostics = [...new Set([...result.diagnostics, 'WORKSET_OUTCOME_UNKNOWN'])];
-          }
-          if ((await state.read()).hash !== view.hash) continue;
-        }
-        return result;
+        try { return await publicState(await state.read(), { inspectOperation, selection }); }
+        catch (error) { if (error.code !== 'PROCESSING_CHAT_STATE_CHANGED') throw error; }
       }
       fail('PROCESSING_CHAT_STATE_CHANGED');
     },
@@ -405,7 +418,7 @@ export async function openProcessingController(context, dependencies = {}) {
         const prior = await state.findRequest(requestId);
         if (prior || current.registry?.active?.requestId === requestId) {
           if ((prior?.request ?? current.registry.active).inputHash !== inputHash) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
-          return publicState(current);
+          return await publicState(current);
         }
         if (current.hash !== args.expectedChatHash) fail('PROCESSING_CHAT_STATE_CHANGED');
         if (current.state === 'awaiting-review') {
@@ -413,7 +426,7 @@ export async function openProcessingController(context, dependencies = {}) {
           try { current = await state.acknowledgeReview({ expectedHash: current.hash, generation: current.generation,
             requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId },
           { beforePublish: assertAuthentication }); }
-          catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return publicState(await state.read()); throw error; }
+          catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return await publicState(await state.read()); throw error; }
         }
         // A restartable native binding can still retain an unsafe engine claim.
         // Apply the same inspection/ownership gate as status before replacement,
@@ -422,12 +435,13 @@ export async function openProcessingController(context, dependencies = {}) {
         if (admission.state !== 'missing' && admission.state !== 'idle') return admission;
         const fresh = current.state === 'missing' || admission.restartSupported;
         if (requestWorksetId) {
-          const workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId }));
+          const workset = admission.worksetId === requestWorksetId && admission.workset
+            ? admission.workset : await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: requestWorksetId }));
           if (workset.policyState !== 'current') fail('WORKFLOW_POLICY_CHANGED');
           await withStorageProbes(() => assertWorkflowStorage(capability, workset.selection, 'explicitProcess'));
           if (workset.operations.some(item => item.recoveryRequired || (!item.outcome && item.conflict) || item.state === 'awaiting-review')) fail('PROCESSING_WORKSET_BLOCKED');
           if (!workset.operations.some(item => !item.outcome) && (workset.budgetExhausted || !workset.items.some(item => item.state === 'unattempted'))) {
-            return { ...await publicState(current), worksetId: requestWorksetId, workset,
+            return { ...admission, worksetId: requestWorksetId, workset,
               dispatch: 'not-started', reason: !workset.remainingSelected ? 'workset-complete'
                 : workset.inputCounts.unattempted && workset.budgetExhausted ? 'workset-budget' : 'workset-remainder-unavailable' };
           }
@@ -437,7 +451,7 @@ export async function openProcessingController(context, dependencies = {}) {
           if (!operation.selection) fail('PROCESSING_CLAIM_MISSING');
           await withStorageProbes(() => assertWorkflowStorage(capability, operation.selection, 'explicitProcess'));
           if (operation.recoveryRequired || operation.conflict || operation.blockers.length || operation.state === 'awaiting-review') fail('PROCESSING_WORKSET_BLOCKED');
-          if (operation.outcome) return { ...await publicState(current), dispatch: 'not-started', reason: 'operation-complete', operationId: args.resumeOperationId };
+          if (operation.outcome) return { ...admission, dispatch: 'not-started', reason: 'operation-complete', operationId: args.resumeOperationId };
         }
         const competing = (await state.collectionActivity()).filter(item => !item.own);
         if (competing.length) throw Object.assign(new Error('PROCESSING_COLLECTION_BUSY'), { code: 'PROCESSING_COLLECTION_BUSY', activity: competing });
@@ -464,7 +478,7 @@ export async function openProcessingController(context, dependencies = {}) {
           processStart: self.processStart, platform: self.platform };
         current = await state.begin({ expectedHash: current.hash, generation: current.generation, requestId, inputHash, selection, owner, ...(requestWorksetId ? { worksetId: requestWorksetId } : {}),
           ...(args.resumeOperationId ? { operationId: args.resumeOperationId, resumeOperationId: args.resumeOperationId } : {}) });
-        if (current.action !== 'dispatch') return publicState(current);
+        if (current.action !== 'dispatch') return await publicState(current);
         started = true;
         if (client === 'codex' && !createdThisRun) {
           nativeSession = await transport.resume(nativeSession); verified = true;
@@ -526,8 +540,14 @@ export async function openProcessingController(context, dependencies = {}) {
           }
           catch { /* Preserve original outcome; never retry dispatch or discard intent. */ }
         }
-        throw Object.assign(error, { processingChat: current ? await publicState(current) : null,
-          code: safeErrorCode(error, 'PROCESSING_CLIENT_OUTCOME_UNKNOWN') });
+        // Error reporting must not perform fallible I/O or replace the original
+        // refusal (including its activity payload). A retired snapshot without
+        // fresh inspection is conservatively blocked, never permission to resume.
+        const code = safeErrorCode(error, 'PROCESSING_CLIENT_OUTCOME_UNKNOWN');
+        const processingChat = current ? nativeState(current) : null;
+        if (processingChat?.restartSupported) Object.assign(processingChat,
+          { state: 'blocked', resumeSupported: false, diagnostics: [code] });
+        throw Object.assign(error, { processingChat, code });
       } finally {
         acceptingEngine = false;
         await engineQueue;

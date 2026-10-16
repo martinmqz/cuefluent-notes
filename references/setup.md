@@ -209,13 +209,15 @@ before using the handoff. Installation grants neither collection nor processing
 consent, and Automatic still needs an explicit processing request.
 
 For Claude Desktop, explain the processor's authentication options during setup
-and let the user choose. Do not start processing or inspect credentials to verify
-that choice. If Desktop cannot pass its managed credential to subprocesses, the user can
-explicitly select an already authenticated CLI profile using the
-[processor authentication setting](processing-chat.md#select-the-processors-authentication).
-Regular native account logins and supported providers use this same choice;
-do not assume a matching provider means the same account or change the setting
-automatically after an error. This choice does not enable collection or processing.
+and let the user choose. Do not start processing or inspect credentials to
+verify that choice. If Desktop cannot pass its managed credential to
+subprocesses, the user can explicitly select an already authenticated CLI
+profile using the [processor authentication
+setting](processing-chat.md#select-the-processors-authentication). Regular
+native account logins and supported providers use this same choice; do not
+assume a matching provider means the same account or change the setting
+automatically after an error. This choice does not enable collection or
+processing.
 
 For Windows storage changes, follow
 [Windows storage selection](#windows-storage-selection) and preserve existing

@@ -1005,3 +1005,139 @@ for (const client of ['codex', 'claude']) test(`${client} retired cross-session 
   assert.equal((await inspectProcessing(f.capability, other.operationId)).state, 'missing');
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
+
+for (const client of ['codex', 'claude']) for (const worksetAdvance of [false, true]) {
+  test(`${client} retirement refuses a claim left before ${worksetAdvance ? 'workset advance' : 'first operation'} pin`, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    let binding = {}, unpinnedId, pinnedId = null, pinFailed = false;
+    if (worksetAdvance) {
+      const other = await processingFixture(t, { base: f, client }), worksetId = randomUUID();
+      await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs: [...f.inputs, ...other.inputs] });
+      binding = { worksetId };
+    }
+    h.script = async call => {
+      if (worksetAdvance) {
+        const first = await call('processing_pending', { limit: 1 });
+        pinnedId = (await completeBound(call, first.nextPreparation)).operationId;
+      }
+      const preparation = worksetAdvance ? (await call('processing_pending', { limit: 1 })).nextPreparation
+        : { operationId: f.operationId, inputs: f.inputs };
+      unpinnedId = preparation.operationId;
+      const rename = fs.rename;
+      const mock = t.mock.method(fs, 'rename', async (from, to) => {
+        if (path.dirname(to) === path.join(f.collection.intakeStateDir, 'processing-chats')) {
+          const next = JSON.parse(await fs.readFile(from, 'utf8'));
+          if (next.state === 'busy' && next.active.operationId === unpinnedId) {
+            pinFailed = true; mock.mock.restore();
+            throw Object.assign(new Error('synthetic controller loss before operation pin'), { code: 'EIO' });
+          }
+        }
+        return rename(from, to);
+      });
+      await call('processing_prepare', preparation);
+    };
+    await assert.rejects(h.controller.run(await h.request(binding)));
+    assert.equal(pinFailed, true);
+    assert.equal((await registryJSON(f)).active.operationId, pinnedId);
+    const claim = await inspectProcessing(f.capability, unpinnedId);
+    assert(claim.claimHash); assert.equal(claim.outcome, null);
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+    assert.equal(retired.state, 'blocked');
+    assert.equal(retired.operationId, unpinnedId);
+    assert.deepEqual(retired.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    const stored = await registryJSON(f), creates = h.creates;
+    assert.deepEqual(await h.controller.status(), retired);
+    assert.deepEqual(await h.controller.run(await h.request(binding)), retired);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await inspectProcessing(f.capability, unpinnedId), claim);
+    assert.equal(h.creates, creates); assert.equal(h.dispatches.length, 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+}
+
+async function retiredTerminalClaim(t) {
+  const f = await processingFixture(t), h = await harness(t, f);
+  h.script = async call => call('processing_prepare', { operationId: f.operationId, inputs: f.inputs });
+  const done = await h.controller.run(await h.request());
+  await h.controller.rollover({ expectedChatHash: done.chatHash });
+  h.script = async call => { await call('processing_status', { operationId: f.operationId }); throw new Error('synthetic lost terminal'); };
+  await assert.rejects(h.controller.run(await h.request({ resumeOperationId: f.operationId })));
+  const failed = await h.controller.status();
+  await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
+  return { f, h, claim: await inspectProcessing(f.capability, f.operationId) };
+}
+
+test('retired status retries one concurrent registry change and reads operation metadata once per attempt', async t => {
+  const { f, h, claim } = await retiredTerminalClaim(t);
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const file = path.join(directory, (await fs.readdir(directory))[0]);
+  let reads = 0;
+  h.inspectOperation = async () => {
+    if (++reads === 1) {
+      const value = await registryJSON(f); value.generation++;
+      await fs.writeFile(file, canonicalJSON(value) + '\n');
+    }
+    return claim;
+  };
+  const status = await h.controller.status();
+  assert.equal(status.state, 'idle'); assert.equal(status.operationState, claim.state);
+  assert.equal(reads, 2);
+  assert.equal(status.chatHash, digest(await fs.readFile(file)));
+  reads = 0; h.inspectOperation = async () => { reads++; return claim; };
+  assert.deepEqual(await h.controller.status(), status);
+  assert.equal(reads, 1); assert.equal(h.dispatches.length, 2);
+});
+
+test('retired run preserves collection-busy activity without a fallible second projection', async t => {
+  const { f, h, claim } = await retiredTerminalClaim(t);
+  const before = await h.controller.status(), stored = await registryJSON(f);
+  const directory = path.join(f.collection.intakeStateDir, 'processing-chats');
+  const file = path.join(directory, (await fs.readdir(directory))[0]);
+  const profileId = digest('competing synthetic profile');
+  const peer = await openProcessingController({ ...f.options, client: 'codex' }, {
+    ...h.dependencies, profileId,
+    async openCodex() { return { profileId,
+      async create() { throw new Error('synthetic creation outcome unknown'); }, async close() {} }; }
+  });
+  t.after(() => peer.close());
+  await assert.rejects(peer.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null }));
+  const activity = (await h.controller.collectionActivity()).filter(item => !item.own);
+  assert.equal(activity.length, 1);
+  let reads = 0;
+  h.inspectOperation = async () => {
+    if (++reads > 1) await fs.writeFile(file, 'synthetic concurrent invalid registry');
+    return claim;
+  };
+  await assert.rejects(h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash }), error => {
+    assert.equal(error.code, 'PROCESSING_COLLECTION_BUSY');
+    assert.deepEqual(error.activity, activity);
+    assert.equal(error.processingChat.state, 'blocked');
+    assert.equal(error.processingChat.resumeSupported, false);
+    return true;
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), stored);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.dispatches.length, 2);
+});
+
+for (const invalid of ['corrupt', 'binding']) test(`retired status preserves ${invalid} archive failure without masking run refusal`, async t => {
+  const { f, h, claim } = await retiredTerminalClaim(t);
+  const registry = await registryJSON(f), namespaceHash = digest(canonicalJSON(registry.namespace));
+  const file = path.join(f.collection.intakeStateDir, 'processing-chat-operation-history', namespaceHash, `${f.operationId}.json`);
+  const before = await h.controller.status();
+  const value = JSON.parse(await fs.readFile(file, 'utf8'));
+  if (invalid === 'binding') value.bindingHash = digest('different synthetic collection');
+  else value.operationId = randomUUID();
+  await fs.writeFile(file, canonicalJSON(value) + '\n');
+  const code = invalid === 'binding' ? 'PROCESSING_CHAT_BINDING_CHANGED' : 'INVALID_PROCESSING_CHAT_STATE';
+  await assert.rejects(h.controller.status(), { code });
+  await assert.rejects(h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: before.chatHash }), { code });
+  // A separate earlier refusal must survive even if status projection is broken.
+  await assert.rejects(h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: 'f'.repeat(64) }),
+    { code: 'PROCESSING_CHAT_STATE_CHANGED' });
+  assert.deepEqual(await registryJSON(f), registry);
+  assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+  assert.equal(h.dispatches.length, 2);
+});

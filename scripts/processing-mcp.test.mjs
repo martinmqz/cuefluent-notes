@@ -1707,11 +1707,28 @@ for (const phase of ['creation', 'dispatch']) test(`MCP refuses unknown ${phase}
   }
 });
 
-test('MCP retired execution exposes the retained claim blocker without relaunch or claim changes', async t => {
+for (const beforePin of [false, true]) test(`MCP retired execution exposes the ${beforePin ? 'unpinned' : 'pinned'} claim blocker without relaunch or claim changes`, async t => {
   const f = await processingFixture(t), h = await harness(t, f);
-  h.script = async call => { await prepareFromPending(call, f); throw new Error('synthetic lost terminal after claim'); };
+  let pinFailed = false;
+  h.script = async call => {
+    if (beforePin) {
+      const rename = fs.rename;
+      const mock = t.mock.method(fs, 'rename', async (from, to) => {
+        if (path.dirname(to) === path.join(f.collection.intakeStateDir, 'processing-chats')) {
+          const next = JSON.parse(await fs.readFile(from, 'utf8'));
+          if (next.state === 'busy' && next.active.operationId === f.operationId) {
+            pinFailed = true; mock.mock.restore();
+            throw Object.assign(new Error('synthetic controller loss before operation pin'), { code: 'EIO' });
+          }
+        }
+        return rename(from, to);
+      });
+    }
+    await prepareFromPending(call, f); throw new Error('synthetic lost terminal after claim');
+  };
   const closed = h.whenClosed();
   await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
+  assert.equal(pinFailed, beforePin);
   const controller = await openProcessingController({ ...f.options, client: 'codex' }, {
     env: {}, profileId: digest('synthetic-profile'), hostId: digest('synthetic-host')
   });
