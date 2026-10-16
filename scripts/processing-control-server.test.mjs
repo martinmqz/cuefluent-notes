@@ -149,6 +149,25 @@ test('known processing refusals preserve their safe actionable code', async t =>
   });
 });
 
+test('retired conflict statuses survive MCP projection and transport validation', async t => {
+  const { processingStatusView } = await import('./processing-mcp.mjs');
+  const status = processingStatusView({ state: 'blocked', chat: null, requestId: null,
+    operationState: 'conflicted', diagnostics: ['PROCESSING_OPERATION_CONFLICT'] }, {});
+  for (const client of ['codex', 'claude']) for (const name of ['processing_status', 'process_selected_captures', 'processing_resume']) {
+    await t.test(`${client}/${name}`, async () => {
+      const result = await server([initialize, tool(name, { collectionId: 'example' }, client === 'codex' ? codexMeta() : claudeMeta())], {
+        client, env: { CLAUDE_CODE_SESSION_ID: sessionId },
+        getStatus: async () => status, requestProcessing: async () => status, requestResume: async () => status,
+      });
+      assert.equal(result.rows[1].error, undefined); assert.equal(result.rows[1].result.isError, false);
+      const response = view(result.rows[1]);
+      assert.equal(response.status, 'blocked'); assert.equal(response.nextAction, 'inspect');
+      assert.deepEqual(response.diagnostics, ['PROCESSING_OPERATION_CONFLICT']);
+      assert.equal(response.statusText, 'Cuefluent: Processing needs attention. PROCESSING_OPERATION_CONFLICT. Next action: inspect.');
+    });
+  }
+});
+
 test('unknown output status, diagnostics and malformed request IDs are fixed failures', async t => {
   for (const patch of [{ status: 'private content' }, { diagnostics: ['PRIVATE_CONTENT'] }, { requestId: 'not-a-native-id' },
     { statusDetail: 'private content' }, { statusDetail: 'accepted' }]) await t.test(`${Object.keys(patch)[0]}: ${JSON.stringify(Object.values(patch)[0])}`, async () => {
