@@ -134,10 +134,12 @@ function validateState(value, namespace, bindingHash) {
  * client/hostId/profileId/sessionId/requestId/inputHash plus nativeRun, all freshly
  * bound by the host. verifyReview(input) returns its request fields plus state:
  * completed, recoveryRequired:false and the authoritative engine outcome. Callers
- * must establish those proofs outside this registry.
+ * must establish those proofs outside this registry. verifyRestart(view) is a
+ * metadata-only check under the intake lock; true permits replacing a retired
+ * active binding. Missing or negative proof preserves that binding unchanged.
  */
 export async function createProcessingChatState(options) {
-  keys(options, ['capability', 'configPath', 'client', 'hostId', 'profileId', 'verifySession', 'verifyRun', 'verifyReview'], ['verifyAbort', 'verifyAbandon', 'verifyAdvance', 'reuseHost']);
+  keys(options, ['capability', 'configPath', 'client', 'hostId', 'profileId', 'verifySession', 'verifyRun', 'verifyReview'], ['verifyAbort', 'verifyAbandon', 'verifyAdvance', 'verifyRestart', 'reuseHost']);
   let { capability, configPath, client, hostId, profileId, verifySession, verifyRun, verifyReview } = options;
   choice(client, CLIENTS); hash(hostId); hash(profileId);
   if ([verifySession, verifyRun, verifyReview].some(verify => typeof verify !== 'function')) fail('PROCESSING_CHAT_VERIFIER_REQUIRED');
@@ -456,6 +458,10 @@ export async function createProcessingChatState(options) {
           return view(saved, existingAction(saved.value));
         }
         current(saved, args.expectedHash); if (!saved.value) await countBindings(); await noOtherExecution();
+        // Startup can yield long enough for a standalone preparer to publish a
+        // claim. Recheck the retained owner before erasing it, under this lock.
+        if (retryable && saved.value.active && (typeof options.verifyRestart !== 'function' ||
+            await options.verifyRestart(view(saved)) !== true)) return view(saved, 'inspect-existing');
         return write(tx, saved, { format: 'cuefluent-processing-chat', version: PROCESSING_CHAT_STATE_VERSION,
           namespace: { ...namespace }, bindingHash: initial.hash, policyHash: initial.configHash, generation: (saved.value?.generation ?? 0) + 1, revision: saved.value?.revision ?? 0,
           state: 'creating', creation: { requestId: args.requestId, requestHash: args.requestHash, ...(args.owner ? { owner: args.owner } : {}) }, session: null, active: null, runs: [], block: null }, 'create');

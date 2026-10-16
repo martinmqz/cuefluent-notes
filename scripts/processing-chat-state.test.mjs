@@ -70,6 +70,32 @@ test('offline abandonment checks the exact owner and hash before retiring an unk
   assert.equal(next.namespaceHash, reserved.namespaceHash);
 });
 
+test('retired active binding requires fresh restart proof under the intake lock before replacement', async t => {
+  const f = await fixture(t), bound = await f.bind(await f.reserve()), request = beginArgs(bound);
+  const busy = await f.registry.begin(request);
+  const state = await createProcessingChatState({ ...f.factory, verifyAbandon: async () => true });
+  const retired = await state.abandon({ expectedHash: busy.hash, requestId: request.requestId, offline: true });
+  const args = { expectedHash: retired.hash, requestId: randomUUID(), requestHash: digest('replacement request') };
+  const original = await fs.readFile(statePath(f, retired));
+  assert.equal((await state.reserve(args)).action, 'inspect-existing');
+  assert.deepEqual(await fs.readFile(statePath(f, retired)), original);
+  let permit = false, failure = false, verifications = 0;
+  const verified = await createProcessingChatState({ ...f.factory, async verifyRestart(view) {
+    verifications++;
+    assert.equal(view.hash, retired.hash); assert.deepEqual(view.registry.active, retired.registry.active);
+    assert.equal((await fs.lstat(path.join(f.collection.intakeStateDir, '.intake-lock'))).isDirectory(), true);
+    if (failure) throw Object.assign(new Error('synthetic own selection refusal'), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+    return permit;
+  } });
+  assert.equal((await verified.reserve(args)).action, 'inspect-existing');
+  failure = true;
+  await assert.rejects(verified.reserve(args), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+  assert.deepEqual(await fs.readFile(statePath(f, retired)), original);
+  failure = false; permit = true;
+  assert.equal((await verified.reserve(args)).action, 'create');
+  assert.equal(verifications, 3);
+});
+
 test('chat registry reads without writes, reserves creation idempotently and reuses the exact bound chat', async t => {
   const f = await fixture(t), before = await fs.readdir(f.collection.intakeStateDir);
   assert.equal((await f.registry.read()).state, 'missing');

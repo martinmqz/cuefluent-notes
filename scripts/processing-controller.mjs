@@ -35,15 +35,16 @@ If evidence is unavailable, a policy or hash changed, or recovery is required, s
 
 function nativeState(view) {
   const retired = processingChatRestartSupported(view.registry);
+  const request = view.registry?.active ?? view.registry?.runs.at(-1)?.request;
   return { interfaceVersion: PROCESSING_CONTROLLER_INTERFACE_VERSION, state: retired ? 'idle' : view.state, chatHash: view.hash,
     restartSupported: retired,
     remainingRuns: MAX_PROCESSING_CHAT_RUNS - (retired ? 0 : view.registry?.runs.length ?? 0),
     generation: view.generation, policyState: view.policyState, policyHash: view.policyHash,
     nativeStatus: view.registry?.active || !view.registry?.runs.length ? null : view.registry.runs.at(-1).native.terminal ?? 'completed',
     chat: !retired && view.registry?.session ? { client: view.registry.namespace.client, sessionId: view.registry.session.sessionId } : null,
-    resumeOperationId: view.registry?.active?.resumeOperationId ?? view.registry?.runs.at(-1)?.request.resumeOperationId ?? null,
-    worksetId: view.registry?.active?.worksetId ?? view.registry?.runs.at(-1)?.request.worksetId ?? null,
-    requestId: retired ? null : view.registry?.active?.requestId ?? view.registry?.runs.at(-1)?.request.requestId ?? null,
+    resumeOperationId: request?.resumeOperationId ?? null,
+    worksetId: request?.worksetId ?? null,
+    requestId: retired ? null : request?.requestId ?? null,
     operationId: view.registry?.active ? view.registry.active.operationId
       : view.registry?.runs.at(-1)?.reviewOperationId ?? view.registry?.runs.at(-1)?.request.operationId ?? null,
     diagnostics: retired ? [] : [...(view.registry?.block ? [view.registry.block.reason.toUpperCase().replaceAll('-', '_')] : []),
@@ -153,6 +154,7 @@ export async function openProcessingController(context, dependencies = {}) {
     },
     verifyAbort: async target => abortProven && target.requestId === requestId,
     verifyAbandon: async owner => !owner || !await ownerMayBeLive({ owner }),
+    verifyRestart: async view => (await publicState(view)).state === 'idle',
     verifyAdvance: async target => {
       if (target.requestId !== requestId || target.worksetId !== requestWorksetId) return false;
       const workset = await withStorageProbes(() => inspectProcessingWorkset(capability, { worksetId: target.worksetId }));
@@ -468,6 +470,7 @@ export async function openProcessingController(context, dependencies = {}) {
           const self = await ownProcessIdentity();
           const owner = { pid: process.pid, controllerId, hostname: self.hostname, boot: self.boot, processStart: self.processStart, platform: self.platform };
           current = await state.reserve({ expectedHash: current.hash, requestId, requestHash, owner });
+          if (current.action !== 'create') return await publicState(current);
           started = true;
           nativeSession = client === 'codex' ? await transport.create() : { client, sessionId: randomUUID(), cwd, profileId,
             transport: 'claude-cli', toolContractHash: contractHash, desktopVerified: false };
