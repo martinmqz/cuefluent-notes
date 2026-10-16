@@ -63,8 +63,8 @@ export async function openProcessingController(context, dependencies = {}) {
   const options = { configPath: context.configPath, collectionId: context.collectionId, expectedConfigHash: context.expectedConfigHash };
   const capability = await verifyWorkflowStorage(options);
   const collection = await withStorageProbes(() => assertWorkflowStorage(capability));
-  const claudeProfile = client === 'claude' ? await resolveClaudeProfile(env) : null;
   const claudeAuthentication = client === 'claude' ? claudeAuthenticationMode(env) : null;
+  const claudeProfile = client === 'claude' ? await resolveClaudeProfile(env) : null;
   function assertAuthentication() {
     if (client !== 'claude') return;
     if (claudeAuthenticationMode(env) !== claudeAuthentication) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');

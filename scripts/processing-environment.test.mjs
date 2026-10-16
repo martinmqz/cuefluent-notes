@@ -258,19 +258,40 @@ test('authentication selection cannot resume a native chat created with another 
   assert.equal(retained.chatHash, inherited.chatHash);
 }));
 
-test('MCP reports invalid authentication selection without leaking its value or admitting work', async t => withLaunchFixture(t, async f => {
+for (const profileState of ['available', 'missing', 'inaccessible']) test(`invalid authentication precedes ${profileState} profile resolution across controller, CLI and MCP`, async t => withLaunchFixture(t, async f => {
   const before = await writerSnapshot(f);
-  const rpc = processingRpc(f, { env: { ...process.env,
-    CUEFLUENT_CLAUDE_AUTHENTICATION: 'synthetic-invalid-private-selection' } });
+  const profile = profileState === 'missing' ? path.join(f.root, 'missing-private-profile') : f.profile;
+  process.env.CLAUDE_CONFIG_DIR = profile;
+  process.env.CUEFLUENT_CLAUDE_AUTHENTICATION = 'synthetic-invalid-private-selection';
+  const realpath = fs.realpath; let profileReads = 0;
+  const probe = t.mock.method(fs, 'realpath', async (file, ...args) => {
+    if (String(file) === profile) {
+      profileReads++;
+      if (profileState === 'inaccessible') throw Object.assign(new Error('synthetic private failure'), { code: 'EACCES' });
+    }
+    return realpath(file, ...args);
+  });
+  f.defer(() => probe.mock.restore());
+  await assert.rejects(openProcessingController({ ...f.options, client: 'claude' }),
+    { code: 'PROCESSING_CLIENT_AUTHENTICATION_INVALID' });
+  for (const [command, args] of [
+    ['processing-chat-status', { client: 'claude' }],
+    ['processing-chat-run', { client: 'claude', requestId: randomUUID(), selection: f.selection, expectedChatHash: null }],
+  ]) await assert.rejects(executeWorkflow(command, { collectionId: f.collection.id,
+    expectedConfigHash: f.options.expectedConfigHash, args }, { configPath: f.options.configPath }),
+  { code: 'PROCESSING_CLIENT_AUTHENTICATION_INVALID' });
+  const rpc = processingRpc(f);
   f.defer(() => rpc.close());
   await rpc.send({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {
-    protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
-  const response = await rpc.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
-    name: 'process_selected_captures', arguments: { collectionId: f.collection.id },
-    _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
-  assert.equal(response.error?.message, 'PROCESSING_CLIENT_AUTHENTICATION_INVALID');
-  assert(!JSON.stringify(response).includes('synthetic-invalid-private-selection'));
-  assert.equal(f.nativeCalls.length, 0);
+    protocolVersion: '2025-11-25', capabilities: { elicitation: { form: {} } }, clientInfo: { name: 'synthetic', version: '1' } } });
+  let id = 0;
+  for (const name of ['processing_status', 'processing_review', 'processing_cancel', 'process_selected_captures', 'processing_resume']) {
+    const response = await rpc.send({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: {
+      name, arguments: { collectionId: f.collection.id }, _meta: { 'claudecode/toolUseId': `synthetic-environment-${id}` } } });
+    assert.equal(response.error?.message, 'PROCESSING_CLIENT_AUTHENTICATION_INVALID');
+    for (const secret of ['synthetic-invalid-private-selection', profile, 'synthetic private failure']) assert(!JSON.stringify(response).includes(secret));
+  }
+  assert.equal(profileReads, 0); assert.equal(f.nativeCalls.length, 0);
   assert.deepEqual(await writerSnapshot(f), before);
 }));
 
