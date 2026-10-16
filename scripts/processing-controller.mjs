@@ -224,7 +224,12 @@ export async function openProcessingController(context, dependencies = {}) {
         // Operations cover the complete selected session, independently of the
         // bounded capture-head page. No evidence bodies are read here.
         for (const operation of inventory.operations) operations.set(operation.operationId, operation);
-      } catch { unknown('OPERATION_OUTCOME_UNKNOWN'); }
+      } catch (error) {
+        // Discovery refusals identify a policy or writer blocker, not an
+        // unknown operation outcome. Keep their actionable public codes.
+        if (['WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED'].includes(error.code)) throw error;
+        unknown('OPERATION_OUTCOME_UNKNOWN');
+      }
     }
     if ((result.restartSupported || (inspectOperation && result.state === 'idle')) && result.operationId !== null) {
       inspected = true;

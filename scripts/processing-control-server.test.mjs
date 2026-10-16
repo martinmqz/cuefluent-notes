@@ -505,7 +505,8 @@ test('unknown notifications and malformed frames leave later requests usable', a
 
 test('actionable engine errors survive the control boundary without private error text', async t => {
   for (const code of ['PROCESSING_OUTPUT_CHANGED', 'PROCESSING_REVIEW_REQUIRED', 'PROCESSING_PROPOSAL_CHANGED',
-    'STALE_SELECTION', 'PROCESSING_CHAT_REQUEST_CONFLICT', 'PROCESSING_SOURCE_DISCOVERY_LIMIT']) await t.test(code, async () => {
+    'STALE_SELECTION', 'PROCESSING_CHAT_REQUEST_CONFLICT', 'PROCESSING_SOURCE_DISCOVERY_LIMIT',
+    'WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED']) await t.test(code, async () => {
     const result = await server([initialize, tool('process_selected_captures', { collectionId: 'example' })], {
       requestProcessing: async () => { throw Object.assign(new Error('private source bytes'), { code }); }
     });

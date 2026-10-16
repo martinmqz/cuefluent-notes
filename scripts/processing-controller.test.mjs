@@ -957,6 +957,52 @@ test('retired controller projects fresh capacity and clears historical launch id
 });
 
 
+for (const client of ['codex', 'claude']) test(`${client} retired unpinned discovery preserves actionable inventory errors`, async t => {
+  for (const code of ['WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED']) await t.test(code, async t => {
+    const f = await processingFixture(t, { client }), h = await harness(t, f, client);
+    if (client === 'codex') {
+      await h.controller.close();
+      h.env.CODEX_HOME = path.join(f.root, 'codex-profile'); await fs.mkdir(h.env.CODEX_HOME);
+      h.profileId = await codexProcessingProfile(h.env); h.dependencies.profileId = h.profileId;
+      h.controller = await h.open();
+    }
+    h.script = async () => { throw new Error('synthetic lost terminal before prepare'); };
+    const request = await h.request(); await assert.rejects(h.controller.run(request));
+    const failed = await h.controller.status();
+    const retired = await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: request.requestId, offline: true });
+    const stored = await registryJSON(f);
+    assert.equal(stored.active.operationId, null); assert.equal(stored.active.worksetId, null);
+    const reservation = path.join(f.collection.notes.writerStateDir, 'reinspection.json');
+    if (code === 'WORKFLOW_NOT_AUTHORIZED') {
+      await h.controller.close();
+      f.config.routes[0].excluded = true;
+      const bytes = JSON.stringify(f.config);
+      await fs.writeFile(f.options.configPath, bytes);
+      f.options.expectedConfigHash = digest(bytes);
+      h.controller = await h.open();
+    } else {
+      // Even an incomplete transfer intent reserves the writer until inspected.
+      await fs.writeFile(reservation, '{}\n', { mode: 0o600 });
+    }
+    const settings = await fs.readFile(f.options.configPath);
+    await assert.rejects(h.controller.status(), { code });
+    await assert.rejects(h.controller.run({ ...request, requestId: randomUUID(), expectedChatHash: retired.chatHash }), { code });
+    const statusRequest = path.join(f.root, 'status-request.json');
+    await fs.writeFile(statusRequest, canonicalJSON({ collectionId: f.collection.id,
+      expectedConfigHash: f.options.expectedConfigHash, args: { client } }));
+    await assert.rejects(promisify(execFile)(process.execPath,
+      [fileURLToPath(new URL('./workflow.mjs', import.meta.url)), 'processing-chat-status', '--config', f.options.configPath, '--request', statusRequest],
+      { env: { ...process.env, ...h.env } }), error => {
+      assert.equal(error.code, 1); assert.deepEqual(JSON.parse(error.stderr), { error: code }); return true;
+    });
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await fs.readFile(f.options.configPath), settings);
+    if (code === 'PROCESSING_REINSPECTION_REQUIRED') assert.equal(await fs.readFile(reservation, 'utf8'), '{}\n');
+    assert.equal(h.creates, client === 'codex' ? 1 : 0); assert.equal(h.dispatches.length, 1);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
+});
+
 for (const client of ['codex', 'claude']) test(`${client} retired cross-session resume preserves its binding and refuses unavailable metadata`, async t => {
   const f = await processingFixture(t, { client }), h = await harness(t, f, client);
   const other = await processingFixture(t, { base: f, client });
