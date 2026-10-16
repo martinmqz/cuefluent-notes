@@ -1602,9 +1602,11 @@ test('review acknowledges its own completed draft after another host applied the
 test('status distinguishes selection conflicts, mixed policy conflicts and genuine recovery', async () => {
   const { processingStatusView } = await import('./processing-mcp.mjs');
   const native = { state: 'idle', requestId: null, chat: null }, shortcut = { phase: 'ready', counts: { selected: 1 }, reviews: [] };
-  const reserved = processingStatusView({ ...native, state: 'blocked', diagnostics: ['PROCESSING_REINSPECTION_REQUIRED'] }, shortcut);
-  assert.equal(reserved.status, 'blocked'); assert.equal(reserved.nextAction, 'inspect');
-  assert.deepEqual(reserved.diagnostics, ['PROCESSING_REINSPECTION_REQUIRED']);
+  for (const code of ['PROCESSING_REINSPECTION_REQUIRED', 'PROCESSING_OPERATION_CONFLICT']) {
+    const blocked = processingStatusView({ ...native, state: 'blocked', diagnostics: [code] }, shortcut);
+    assert.equal(blocked.status, 'blocked'); assert.equal(blocked.nextAction, 'inspect');
+    assert.deepEqual(blocked.diagnostics, [code]);
+  }
   for (const blockers of [['PROCESSING_INPUT_CHANGED'], ['PROCESSING_INPUT_ALREADY_HANDLED'], ['WORKFLOW_POLICY_CHANGED', 'PROCESSING_HEAD_CHANGED']]) {
     const status = processingStatusView(native, { ...shortcut, blockers });
     assert.equal(status.nextAction, 'cancel'); assert(!status.diagnostics.includes('PROCESSING_RECOVERY_REQUIRED'));

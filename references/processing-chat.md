@@ -580,9 +580,11 @@ the retired chat and request identifiers and any historical launch diagnostic.
 A retained unfinished claim without verified terminal ownership instead reports
 `PROCESSING_OPERATION_OWNER_UNVERIFIED` and requires inspection. Published proposals
 remain `awaiting-review`; resolve them before starting another native run. Engine
-reinspection reservations also block new runs, even when the claim has a verified
-terminal owner. An unknown outcome still requires inspection; it does not establish
-that a client is still running.
+reinspection reservations and unfinished input conflicts also block new runs,
+even when the claim has a verified terminal owner. `PROCESSING_OPERATION_CONFLICT`
+requires inspecting the retained operation for its exact conflict before any
+explicit resolution. An unknown outcome still requires inspection; it does not
+establish that a client is still running.
 A failure proven to precede `thread/start` needs no abandonment: it can retry using
 freshly inspected status after the client issue is fixed.
 

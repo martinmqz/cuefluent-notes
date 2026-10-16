@@ -31,11 +31,12 @@ const nullableId = value => { if (value !== null) nativeId(value); };
 const STATES = ['creating', 'idle', 'busy', 'awaiting-review', 'blocked'];
 export const processingChatRestartSupported = registry => registry?.state === 'blocked' &&
   ['creation-not-dispatched', 'run-abandoned'].includes(registry.block?.reason);
-// Engine reservations and recovery blockers remain authoritative even when a
+// Engine blockers and unfinished conflicts remain authoritative even when a
 // retained claim has a terminal native owner and no transaction of its own.
 export function processingChatOperationBlocker(operation) {
   if (operation.blockers?.includes('PROCESSING_REINSPECTION_REQUIRED')) return 'PROCESSING_REINSPECTION_REQUIRED';
-  return operation.recoveryRequired || operation.blockers?.length ? 'PROCESSING_RECOVERY_REQUIRED' : null;
+  if (operation.recoveryRequired || operation.blockers?.length) return 'PROCESSING_RECOVERY_REQUIRED';
+  return !operation.outcome && operation.conflict ? 'PROCESSING_OPERATION_CONFLICT' : null;
 }
 const BLOCKS = ['creation-outcome-unknown', 'dispatch-outcome-unknown', 'operation-outcome-unknown', 'host-unavailable', 'session-unavailable', 'binding-conflict', 'creation-not-dispatched', 'run-abandoned'];
 
