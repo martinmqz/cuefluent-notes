@@ -439,7 +439,14 @@ export async function openProcessingController(context, dependencies = {}) {
         const runInstructions = `${instructions}\n${requestWorksetId
           ? 'Process sequential operations in the bound frozen workset. Use processing_pending.nextPreparation exactly, including interrupted admissions; resume any unfinished operation first. After unchanged completion or PROCESSING_BATCH_BUDGET, call processing_pending again for the exact next fitting preparation. Stop for a proposal, conflict, recovery, run-budget, input-budget, exhausted workset budget, or no nextPreparation. Never choose fresh evidence outside the workset.'
           : 'Process at most one operation per request. Stop after publishing its exact proposal or completing it unchanged.'}`;
-        const prompt = `${runInstructions}\n\nRequest: ${requestId}\nSelection: ${canonicalJSON(selection)}${requestWorksetId ? `\nFrozen workset: ${requestWorksetId}` : ''}${args.resumeOperationId ? `\nResume only operation: ${args.resumeOperationId}` : ''}\nBegin with processing_pending. Stop for any outstanding proposal or recovery.`;
+        const evidenceBinding = requestWorksetId ? { worksetId: requestWorksetId }
+          : args.resumeOperationId ? { resumeOperationId: args.resumeOperationId } : null;
+        const scope = evidenceBinding
+          ? `Invoking source: ${canonicalJSON(selection)}\nEvidence scope: ${canonicalJSON(evidenceBinding)}\nThe invoking source identifies the chat requesting this run, not an evidence filter. ${requestWorksetId
+            ? 'Process only the exact frozen inputs returned for this workset by processing_pending. Their sessions and clients may differ from the invoking source and the workset creation selection.'
+            : 'Resume only this operation using its original selection and inputs returned by processing_pending. They may differ from the invoking source; do not prepare another operation.'} The engine checks current authority for the bound evidence. Stop on any refusal; never widen or replace the binding.`
+          : `Selection: ${canonicalJSON(selection)}`;
+        const prompt = `${runInstructions}\n\nRequest: ${requestId}\n${scope}\nBegin with processing_pending. Stop for any outstanding proposal or recovery.`;
         const inputHash = digest(prompt), requestHash = digest(canonicalJSON({ selection, inputHash }));
         current = await state.read();
         const prior = await state.findRequest(requestId);

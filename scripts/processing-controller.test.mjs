@@ -661,13 +661,18 @@ test('frozen runs cannot start another operation until the current one has a dur
   assert.equal(resumed.workset.inputCounts.handled, 2); assert.equal(h.creates, 1); assert.equal(h.resumes, 1);
 });
 
-test('frozen proposal review uses its original operation selection when invoked from a different chat', async t => {
+for (const client of ['codex', 'claude']) test(`${client} frozen proposal handoff and review retain evidence scope across invoking chats`, async t => {
   const a = await processingFixture(t), b = await processingFixture(t, { base: a, client: 'claude' });
   const worksetId = randomUUID();
   await createProcessingWorkset(a.capability, { selection: a.selection, worksetId, inputs: [...a.inputs, ...b.inputs] });
-  const h = await harness(t, a);
+  const h = await harness(t, a, client);
   h.script = async call => {
     const pending = await call('processing_pending');
+    const prompt = h.dispatches.at(-1).input;
+    assert.doesNotMatch(prompt, /^Selection:/m, 'invoking chat must not be presented as the evidence filter');
+    assert.deepEqual(JSON.parse(prompt.match(/^Invoking source: (.+)$/m)?.[1]), b.selection);
+    assert.deepEqual(JSON.parse(prompt.match(/^Evidence scope: (.+)$/m)?.[1]), { worksetId: pending.workset.worksetId });
+    assert.deepEqual(pending.workset.selection, a.selection);
     let claim = await call('processing_prepare', pending.nextPreparation);
     const operationId = claim.operationId;
     for (let page = 0; page < claim.packet.pages.length; page++) {
@@ -685,12 +690,16 @@ test('frozen proposal review uses its original operation selection when invoked 
   assert.deepEqual(await fs.readdir(a.collection.notes.notesDir), []);
 });
 
-test('explicit legacy-operation resume preserves exact selection and does not admit fresh evidence', async t => {
+for (const client of ['codex', 'claude']) test(`${client} legacy-operation handoff preserves exact selection across invoking chats`, async t => {
   const a = await processingFixture(t), b = await processingFixture(t, { base: a });
   await prepareProcessing(a.capability, { ...a.args, inputs: a.inputs });
-  const h = await harness(t, a);
+  const h = await harness(t, a, client);
   h.script = async call => {
     const pending = await call('processing_pending');
+    const prompt = h.dispatches.at(-1).input;
+    assert.doesNotMatch(prompt, /^Selection:/m, 'invoking chat must not be presented as the evidence filter');
+    assert.deepEqual(JSON.parse(prompt.match(/^Invoking source: (.+)$/m)?.[1]), b.selection);
+    assert.deepEqual(JSON.parse(prompt.match(/^Evidence scope: (.+)$/m)?.[1]), { resumeOperationId: pending.operations[0].operationId });
     assert.equal(pending.operations[0].operationId, a.operationId); assert.deepEqual(pending.pending, []);
     await assert.rejects(call('processing_prepare', { operationId: a.operationId, inputs: a.inputs }), { code: 'PROCESSING_RESUME_REQUIRED' });
     const read = await call('processing_page', { operationId: a.operationId, expectedClaimHash: pending.operations[0].claimHash, page: 0 });

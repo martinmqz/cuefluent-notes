@@ -352,6 +352,9 @@ both clients. `process repo` uses the nearest verified Git checkout and excludes
 separate nested repositories. `process chat` selects the invoking native session.
 The invoking chat proves the request; it is not the default evidence boundary.
 These actions never create a new route or change collection settings.
+For worksets and operation resumes, the worker receives the invoking source
+separately from its evidence binding. The engine's exact bound inputs retain
+their original sessions and clients, even when another chat requests the run.
 
 Selection begins with metadata, preserves exact head hashes, and resumes existing
 unfinished operations with a verified stopped native owner before admitting more
