@@ -16,7 +16,7 @@ import { inspectProcessing } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
-import { assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
+import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
@@ -333,7 +333,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (current.state === 'blocked') { await controller.close(); return viewOf(current); }
       // Existing activity is a read-only result. Require launch credentials only
       // after those exits, before control admission or review acknowledgement.
-      if (client === 'claude') assertClaudeHostAuthentication(env);
+      if (client === 'claude') assertClaudeProcessingAuthentication(env);
       const control = await withStorageProbes(() => beginProcessingShortcutControl(capability, args));
       controls.set(source, control); if (control.response) { await controller.close(); return control.response; }
       current = await acknowledgeFinishedReview(controller, capability, current);

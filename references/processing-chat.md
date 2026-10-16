@@ -2,8 +2,10 @@
 
 The installed plugin can hand an explicit processing request to a dedicated native
 Codex or Claude session. It reuses one session per collection, client, machine and
-client profile. Several source projects can use that session. The existing engine
-still owns evidence, claims, proposals, approvals, writer transactions and recovery.
+client profile. Claude also separates sessions by the selected authentication
+mode. Several source projects can use that session. The existing engine still
+owns evidence, claims, proposals,
+approvals, writer transactions and recovery.
 Cuefluent does not need to be installed or running.
 
 This path requires the matching native client executable on PATH and its normal
@@ -20,6 +22,58 @@ state without launching a native client. A native executable is needed only when
 a request actually creates or resumes a processing run.
 
 ## Claude launch settings
+
+### Select the processor's authentication
+
+The selected Claude CLI profile can use regular native account login or a
+supported provider configuration; Foundry is not required. Codex retains its
+native profile authentication and provider selection. Cuefluent does not read
+either client's credential store or start a sign-in flow.
+
+Claude defaults to `CUEFLUENT_CLAUDE_AUTHENTICATION=inherit` (also the behavior
+when unset). It preserves the calling host's authentication rules below. Some
+Desktop versions deliberately remove their managed credential from subprocesses,
+so that credential cannot authenticate the separate processor.
+
+To explicitly use an already authenticated Claude CLI profile instead, set
+`CUEFLUENT_CLAUDE_AUTHENTICATION` to `native-profile` in the native client's
+environment configuration for the plugin, then restart the affected source
+session and reconnect its MCP server. Select the intended CLI profile with
+`CLAUDE_CONFIG_DIR` if needed; leaving it unset uses the native default. The user
+must first confirm which account and provider that profile uses: matching provider
+names alone do not prove matching accounts.
+This is a setup choice, never an automatic fallback or a processing-tool argument.
+Do not enable it merely because a processing call failed.
+
+This mode uses the profile's stored native login or supported provider settings
+in its user `settings.json` `env`. Provider values exported by a shell, terminal
+or Desktop are ignored. A working CLI with those exports does not verify this
+mode: use the native client's account/provider display outside project-specific
+configuration, with the intended profile and those exports absent. Otherwise an
+export-only provider can be lost and an existing native login selected instead.
+Do not inspect credential values or start processing to verify setup.
+
+In `native-profile` mode, the processor removes inherited Desktop credentials,
+provider selectors, endpoints, model environment overrides and credential-chain
+locators before loading the selected CLI user settings. Its normal native login
+or configured provider credential chain supplies authentication. The plugin does
+not copy host credentials, read the host credential file, disable subprocess
+scrubbing, or run shell startup files. Native credential-chain executables must
+be available on the calling environment's `PATH`. Supported connection and tuning
+defaults remain available; selected user settings take precedence in this mode.
+The existing restricted-tool and credential-helper limitations below still apply.
+
+Authentication modes have separate native processing-session bindings. Changing
+the mode cannot resume a chat created with the other mode, transfer a claim, or
+clear interrupted work. Existing claims and proposals remain guarded by their
+original ownership and recovery requirements. CLI status and recovery commands
+must use the same authentication mode and `CLAUDE_CONFIG_DIR` selection as the
+original run; another namespace can report `missing` while the original remains
+blocked. Status and review do not launch a model. An unrecognized or ambiguous
+mode reports `PROCESSING_CLIENT_AUTHENTICATION_INVALID` without dispatching;
+status, review and cancel also require correcting that setting first.
+
+### Inherited authentication and supported settings
 
 Restricted Claude processing retains its existing native authentication and
 supported provider, deployment and connection environment settings. Before each
@@ -89,11 +143,13 @@ cost or quality. Controller status does not report the resolved model. Use the
 host's supported model configuration or supported structured profile model
 preferences under native precedence; do not rely on the ignored profile `env` keys.
 
-Use the [standalone workflow](processing.md) in an explicitly selected uncaptured
+If the host cannot delegate its authentication, explicitly select a working CLI
+profile as above, use the [standalone workflow](processing.md) in an uncaptured
 chat whose normal authentication works, or invoke processing from an independently
-authenticated Claude terminal. Do not unset host routing or authentication markers
-inside the failing host to force a different account. Status and pending-proposal
-review do not need this launch credential. A run that already failed with an
+authenticated Claude terminal. Do not manually unset host routing or authentication
+markers to force a different account. With a valid authentication-mode setting,
+status and pending-proposal review do not need this launch credential. A run that
+already failed with an
 unknown outcome still requires the existing recovery controls below; this
 preflight does not clear it.
 
@@ -120,11 +176,14 @@ client resolves effort without those stored preferences; see its
 
 Authentication values remain in process memory and environment, never command
 arguments, proposal receipts or plugin diagnostics. A missing user settings file
-retains the inherited environment. The processor does not discover project
-settings, restore Claude's credential-helper command settings, restore unrelated
-profile settings, or modify authentication. Project-specific configuration must
-already be supplied through the calling host's environment; project-specific
-structured settings are not read. Hooks, plugins, slash commands and arbitrary
+retains the environment after the explicit authentication-mode selection. The
+processor does not discover project settings, restore Claude's credential-helper
+command settings, restore unrelated
+profile settings, or modify authentication. In `inherit` mode, project-specific
+configuration must already be supplied through the calling host's environment;
+`native-profile` instead requires the selected user profile's supported provider
+settings. Project-specific structured settings are not read. Hooks, plugins, slash
+commands and arbitrary
 tools remain disabled; native runtime verification still requires the sole
 selected engine and its exact tool set.
 
@@ -471,6 +530,11 @@ terminal whose engine state could not be inspected remains blocked with
 `PROCESSING_OPERATION_OUTCOME_UNKNOWN`; reconciliation inspects that operation
 without restarting the native turn.
 
+For Claude CLI recovery, preserve the original run's
+`CUEFLUENT_CLAUDE_AUTHENTICATION` and `CLAUDE_CONFIG_DIR` selection, including an
+unset profile locator. A plugin-only environment setting is not automatically
+present in an ordinary terminal; the terminal must explicitly select the same
+mode and profile. Do not change namespaces to bypass a blocked run.
 Use `processing-chat-status` and the exact guarded
 `processing-chat-reconcile` command. Codex can reconcile a sealed completed,
 failed or interrupted native unit after verifying its terminal and unchanged

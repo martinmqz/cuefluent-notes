@@ -9,7 +9,7 @@ import { openProcessingEngineBridge } from './processing-engine-bridge.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
 import { openCodexProcessingClient, codexProcessingProfile } from './processing-client-codex.mjs';
 import { createClaudeProcessingClient } from './processing-client-claude.mjs';
-import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment, assertClaudeHostAuthentication } from './processing-claude-settings.mjs';
+import { resolveClaudeLaunchSettings, resolveClaudeProfile, claudeHostEnvironment, claudeAuthenticationMode, assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { inspectProcessingWorkset } from './processing-workset.mjs';
 import { inspectProcessing } from './processing.mjs';
 import { processingExecutionCallbacks } from './processing-execution-receipts.mjs';
@@ -62,6 +62,12 @@ export async function openProcessingController(context, dependencies = {}) {
   const capability = await verifyWorkflowStorage(options);
   const collection = await withStorageProbes(() => assertWorkflowStorage(capability));
   const claudeProfile = client === 'claude' ? await resolveClaudeProfile(env) : null;
+  const claudeAuthentication = client === 'claude' ? claudeAuthenticationMode(env) : null;
+  function assertAuthentication() {
+    if (client !== 'claude') return;
+    if (claudeAuthenticationMode(env) !== claudeAuthentication) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
+    assertClaudeProcessingAuthentication(env);
+  }
   const execution = dependencies.beforeExecution && dependencies.afterExecution && dependencies.guardExecution
     ? dependencies : processingExecutionCallbacks({ capability,
       claudeConfigDir: claudeProfile });
@@ -103,7 +109,8 @@ export async function openProcessingController(context, dependencies = {}) {
   }
   let bridge = null, transport = null;
   const profileId = dependencies.profileId ?? (client === 'codex' ? await codexProcessingProfile(env)
-    : digest(canonicalJSON({ home: claudeProfile, platform: process.platform })));
+    : digest(canonicalJSON({ home: claudeProfile, platform: process.platform,
+      ...(claudeAuthentication === 'native-profile' ? { authentication: claudeAuthentication } : {}) })));
   hash(profileId);
   async function ensureTransport() {
     if (transport && client === 'codex') return;
@@ -114,6 +121,7 @@ export async function openProcessingController(context, dependencies = {}) {
           onEngineTool: call => engineCall(call.tool.slice('cuefluent_'.length), call.arguments) }, { env });
         if (transport.profileId !== profileId) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
       } else {
+        assertAuthentication();
         // Resolve native user provider settings before reserving or dispatching.
         // A reused session gets a fresh environment without restoring unrelated
         // profile behavior, modifying settings or putting credentials in argv.
@@ -156,6 +164,7 @@ export async function openProcessingController(context, dependencies = {}) {
   async function guardRole() {
     if (!running || !requestSelection || !current) fail('PROCESSING_CHAT_NOT_RUNNING');
     if (client === 'claude') {
+      if (claudeAuthenticationMode(env) !== claudeAuthentication) fail('PROCESSING_CLIENT_IDENTITY_CHANGED');
       if (await resolveClaudeProfile(env) !== claudeProfile) fail('PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
     }
     await withStorageProbes(() => assertWorkflowStorage(capability, requestSelection, 'explicitProcess'));
@@ -403,7 +412,7 @@ export async function openProcessingController(context, dependencies = {}) {
           const priorReview = current.registry.runs.at(-1);
           try { current = await state.acknowledgeReview({ expectedHash: current.hash, generation: current.generation,
             requestId: priorReview.request.requestId, operationId: priorReview.reviewOperationId },
-          { beforePublish: () => { if (client === 'claude') assertClaudeHostAuthentication(env); } }); }
+          { beforePublish: assertAuthentication }); }
           catch (error) { if (error.code === 'PROCESSING_CHAT_REVIEW_UNRESOLVED') return publicState(await state.read()); throw error; }
         }
         // A restartable native binding can still retain an unsafe engine claim.
@@ -433,7 +442,7 @@ export async function openProcessingController(context, dependencies = {}) {
         const competing = (await state.collectionActivity()).filter(item => !item.own);
         if (competing.length) throw Object.assign(new Error('PROCESSING_COLLECTION_BUSY'), { code: 'PROCESSING_COLLECTION_BUSY', activity: competing });
         // Read-only no-launch outcomes above do not need a host credential.
-        if (client === 'claude') assertClaudeHostAuthentication(env);
+        assertAuthentication();
         await ensureTransport();
         if (fresh) {
           const self = await ownProcessIdentity();

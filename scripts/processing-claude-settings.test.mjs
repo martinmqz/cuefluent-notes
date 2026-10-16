@@ -13,6 +13,50 @@ async function fixture(t, content = '{}') {
   return { root, file, env: { CLAUDE_CONFIG_DIR: root, PATH: 'synthetic-native-path' } };
 }
 
+for (const platform of ['linux', 'win32']) for (const [account, configured] of [
+  ['native account login', {}],
+  ['API key', { ANTHROPIC_API_KEY: 'synthetic-selected-key' }],
+  ['Foundry', { CLAUDE_CODE_USE_FOUNDRY: '1', ANTHROPIC_FOUNDRY_BASE_URL: 'https://selected.example.invalid' }],
+  ['Bedrock', { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'synthetic-selected-profile' }],
+  ['Vertex', { CLAUDE_CODE_USE_VERTEX: '1', ANTHROPIC_VERTEX_PROJECT_ID: 'synthetic-selected-project' }]
+]) test(`explicit native-profile authentication isolates ${account} from Desktop routing on ${platform}`, async t => {
+  const content = JSON.stringify({ env: configured });
+  const f = await fixture(t, content);
+  const env = { ...f.env, CUEFLUENT_CLAUDE_AUTHENTICATION: 'native-profile',
+    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1', CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'SYNTHETIC_DESKTOP_TOKEN',
+    SYNTHETIC_DESKTOP_TOKEN: 'synthetic-host-secret', CLAUDE_CODE_HOST_CREDS_FILE: 'synthetic-host-store',
+    ANTHROPIC_BASE_URL: 'https://host.example.invalid', ANTHROPIC_UNIX_SOCKET: 'synthetic-host-socket',
+    CLAUDE_CODE_USE_FOUNDRY: '1', ANTHROPIC_FOUNDRY_API_KEY: 'synthetic-host-key',
+    AWS_PROFILE: 'synthetic-host-profile', AZURE_CLIENT_SECRET: 'synthetic-host-azure-secret',
+    GOOGLE_APPLICATION_CREDENTIALS: 'synthetic-host-google-file', ANTHROPIC_MODEL: 'synthetic-host-model',
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1', HTTPS_PROXY: 'https://proxy.example.invalid', CLAUDECODE: '1' };
+  if (platform === 'win32') {
+    env.cuefluent_claude_authentication = env.CUEFLUENT_CLAUDE_AUTHENTICATION;
+    delete env.CUEFLUENT_CLAUDE_AUTHENTICATION;
+    env.synthetic_desktop_token = env.SYNTHETIC_DESKTOP_TOKEN;
+    delete env.SYNTHETIC_DESKTOP_TOKEN;
+  }
+  const before = { ...env };
+  const result = await resolveClaudeLaunchSettings(env, { platform, preferHostEnvironment: true });
+  assert.deepEqual(result.env, { ...f.env, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1',
+    HTTPS_PROXY: 'https://proxy.example.invalid', ...configured });
+  assert.deepEqual(result.settings, { disableAllHooks: true });
+  assert.deepEqual(env, before);
+  assert.equal(await fs.readFile(f.file, 'utf8'), content);
+  assert.deepEqual(await fs.readdir(f.root), ['settings.json']);
+});
+
+test('invalid authentication selection refuses before reading native settings', async t => {
+  const f = await fixture(t, '{invalid');
+  for (const selection of ['', 'automatic', 'profile', 'NATIVE-PROFILE']) {
+    await assert.rejects(resolveClaudeLaunchSettings({ ...f.env, CUEFLUENT_CLAUDE_AUTHENTICATION: selection }),
+      { code: 'PROCESSING_CLIENT_AUTHENTICATION_INVALID' });
+  }
+  await assert.rejects(resolveClaudeLaunchSettings({ ...f.env,
+    CUEFLUENT_CLAUDE_AUTHENTICATION: 'inherit', cuefluent_claude_authentication: 'native-profile' },
+  { platform: 'win32' }), { code: 'PROCESSING_CLIENT_AUTHENTICATION_INVALID' });
+});
+
 for (const content of [null, JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'synthetic-profile-token' } })]) {
   test(`missing host auth cannot fall back to ${content === null ? 'native login' : 'profile credentials'}`, async t => {
     const f = await fixture(t, content);
