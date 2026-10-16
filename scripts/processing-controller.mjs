@@ -208,9 +208,9 @@ export async function openProcessingController(context, dependencies = {}) {
       }
     };
     // A prepare can publish its claim before the native registry records its ID.
-    // Inspect the retained workset (or original plain selection before its first
-    // pin), not just active.operationId. Workset metadata also supplies the pinned
-    // operation, avoiding a second read of that same claim.
+    // Inspect the retained workset or original plain selection, even after a
+    // pin: another claim can outlive the run's last recorded operation. Reuse
+    // discovered metadata while still inspecting a pin outside that selection.
     if (result.worksetId !== null && (inspectOperation || result.restartSupported)) {
       inspected = true;
       try {
@@ -219,7 +219,7 @@ export async function openProcessingController(context, dependencies = {}) {
       } catch {
         result.workset = null; unknown('WORKSET_OUTCOME_UNKNOWN');
       }
-    } else if (result.restartSupported && result.operationId === null && view.registry.active?.selection) {
+    } else if (result.restartSupported && view.registry.active?.selection) {
       inspected = true;
       try {
         const inventory = await withStorageProbes(() => pendingProcessing(capability, { selection: view.registry.active.selection, limit: 1 }));
@@ -229,9 +229,13 @@ export async function openProcessingController(context, dependencies = {}) {
       } catch (error) {
         // Discovery refusals identify a policy or writer blocker, not an
         // unknown operation outcome. Keep their actionable public codes.
-        if (['WORKFLOW_NOT_AUTHORIZED', 'PROCESSING_REINSPECTION_REQUIRED'].includes(error.code)) throw error;
-        if (error.code === 'writer-reserved-by-another-collection') fail('PROCESSING_RECOVERY_REQUIRED');
-        unknown('OPERATION_OUTCOME_UNKNOWN');
+        if (error.code === 'WORKFLOW_NOT_AUTHORIZED') throw error;
+        const reservation = error.code === 'writer-reserved-by-another-collection' ? 'PROCESSING_RECOVERY_REQUIRED'
+          : error.code === 'PROCESSING_REINSPECTION_REQUIRED' ? error.code : null;
+        if (reservation && result.operationId === null) fail(reservation);
+        // Pinned operations retain their ordinary blocked status during a
+        // reservation; discovery cannot turn that status into a thrown error.
+        unknown(reservation ?? 'OPERATION_OUTCOME_UNKNOWN');
       }
     }
     if ((result.restartSupported || (inspectOperation && result.state === 'idle')) && result.operationId !== null) {

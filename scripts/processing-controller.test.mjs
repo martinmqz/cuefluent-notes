@@ -13,6 +13,9 @@ import { prepareProcessing, completeProcessing, inspectProcessing } from './proc
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { unitKey } from './capture-retention.mjs';
 import { codexProcessingProfile } from './processing-client-codex.mjs';
+import { createCapture } from './capture-contract.mjs';
+import { controlSelection, readSelection, publishCapture } from './intake-store.mjs';
+import { withIntakeLock } from './intake-io.mjs';
 
 const deferred = () => {
   let resolve, reject;
@@ -1191,6 +1194,61 @@ async function retiredTerminalClaim(t, client = 'codex') {
   const failed = await h.controller.status();
   await h.controller.abandon({ expectedChatHash: failed.chatHash, requestId: failed.requestId, offline: true });
   return { f, h, claim: await inspectProcessing(f.capability, f.operationId) };
+}
+
+async function additionalSelectedCapture(f) {
+  // Sort after the pinned input so a one-head inventory page cannot discover
+  // this claim by accident. Operation discovery must cover the whole selection.
+  const identity = { ...f.identity, unitId: 'ffffffff-ffff-ffff-ffff-ffffffffffff' };
+  const scopeId = randomUUID(), previous = await readSelection(f.store, identity);
+  const proof = { ...f.publishArgs.proof, ...identity };
+  const selected = await withIntakeLock(f.store, tx => controlSelection(tx, {
+    source: f.source, expectedHash: previous.hash, authorize: async () => true,
+    request: { id: scopeId, operation: 'capture-current', ...identity, expectedRevision: previous.state.revision,
+      scope: { unitIds: [identity.unitId], start: proof.start, end: null } }
+  }));
+  const capture = createCapture({ ...f.capture, identity });
+  const published = await withIntakeLock(f.store, tx => publishCapture(tx, {
+    ...f.publishArgs, capture, proof, scopeId, selectionHash: selected.hash,
+    scan: { ...f.publishArgs.scan, accounted: f.publishArgs.scan.accounted.map(item => ({ ...item, unitId: identity.unitId })) },
+    checkpoint: f.publishArgs.checkpoint ? { ...f.publishArgs.checkpoint, scopeId } : null
+  }));
+  return { selection: f.selection, operationId: randomUUID(), inputs: [{ identity, headHash: published.headHash }] };
+}
+
+for (const client of ['codex', 'claude']) for (const completedPin of [false, true]) for (const duringStartup of [false, true]) {
+  test(`${client} retired pin does not hide a second selected claim with ${completedPin ? 'completed' : 'terminal-owned'} pin ${duringStartup ? 'during startup' : 'before admission'}`, async t => {
+    const { f, h, claim: initialClaim } = await retiredTerminalClaim(t, client);
+    // A completed pinned claim no longer occupies the synthesis slot, but the
+    // retired native binding still points to it when another claim is prepared.
+    if (completedPin) await completeProcessing(f.capability, { ...f.args, expectedClaimHash: initialClaim.claimHash, outcome: 'cancelled' });
+    const claim = await inspectProcessing(f.capability, f.operationId);
+    const additional = await additionalSelectedCapture(f), retired = await h.controller.status();
+    assert.equal(retired.state, 'idle'); assert.equal(retired.operationId, f.operationId);
+    assert.equal(await h.controller.canResumeOperation(f.operationId), true);
+    const stored = await registryJSON(f), creates = h.creates, dispatches = h.dispatches.length;
+    let extraClaim, opens = 0;
+    const prepare = async () => { extraClaim = await prepareProcessing(f.capability, { ...additional, parallelism: 2 }); };
+    await h.controller.close();
+    const opener = client === 'codex' ? 'openCodex' : 'openBridge', open = h.dependencies[opener];
+    h.dependencies[opener] = async (...args) => { opens++; if (duringStartup) await prepare(); return open(...args); };
+    h.controller = await h.open();
+    if (!duringStartup) await prepare();
+    const blocked = await h.controller.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: retired.chatHash });
+    assert.equal(blocked.state, 'blocked'); assert.equal(blocked.operationId, additional.operationId);
+    assert.deepEqual(blocked.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
+    assert.equal(blocked.resumeSupported, false); assert.equal(blocked.chatHash, retired.chatHash);
+    assert.deepEqual(await h.controller.status(), blocked);
+    await assertRetiredPeerBlocked(t, f, h);
+    assert.deepEqual(await registryJSON(f), stored);
+    assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
+    assert.equal((await inspectProcessing(f.capability, additional.operationId)).claimHash, extraClaim.claimHash);
+    assert.equal(opens, duringStartup ? 1 : 0); assert.equal(h.creates, creates); assert.equal(h.dispatches.length, dispatches);
+    await completeProcessing(f.capability, { selection: f.selection, operationId: additional.operationId,
+      expectedClaimHash: extraClaim.claimHash, outcome: 'cancelled' });
+    assert.equal((await h.controller.status()).state, 'idle');
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  });
 }
 
 for (const client of ['codex', 'claude']) for (const duringStartup of [false, true]) {
