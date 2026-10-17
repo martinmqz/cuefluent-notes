@@ -167,6 +167,10 @@ async function sourcePresence(collection, context, policyHash, capability = null
   if (client === 'codex') {
     try { await fs.lstat(path.join(collection.intakeStateDir, registrationPath(context))); return 'registration'; }
     catch (error) { if (error.code !== 'ENOENT') return 'registration'; }
+  } else {
+    // A registered Claude session can bind before its selection is armed.
+    try { await fs.lstat(path.join(collection.intakeStateDir, registrationPath(context))); return 'binding'; }
+    catch (error) { if (error.code !== 'ENOENT') return 'binding'; }
   }
   return 'missing';
 }

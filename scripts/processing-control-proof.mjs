@@ -2,7 +2,7 @@ import path from 'node:path';
 import { readBoundedBytes } from './file-io.mjs';
 import { readSessionRange } from './session-jsonl.mjs';
 import { verifyCodexHeader } from './codex-reader.mjs';
-import { claudeRegistrationHeader } from './claude-reader.mjs';
+import { claudeRegistrationHeader, claudeSessionKinds } from './claude-reader.mjs';
 import { canonicalJSON, digest, integer, isNativeId, object } from './workflow-values.mjs';
 
 const proofs = new WeakSet();
@@ -72,8 +72,10 @@ const claudeText = row => typeof row?.message?.content === 'string' ? row.messag
 const claudeHuman = row => row?.type === 'user' && row.message?.role === 'user' && row.isMeta !== true &&
   row.isVirtual !== true && row.isCompactSummary !== true && row.isVisibleInTranscriptOnly !== true &&
   !(Array.isArray(row.message.content) && row.message.content.some(block => block.type === 'tool_result'));
-const claudeRoot = (row, source) => row?.sessionId === source.sessionId && row.isSidechain === false &&
-  row.agentId == null && row.forkedFrom == null && row.foreignToBridgeSession == null && row.sessionKind == null;
+// sessionKinds names a background kind tolerated only for a verified continuation.
+const claudeRoot = (row, source, sessionKinds = []) => row?.sessionId === source.sessionId && row.isSidechain === false &&
+  row.agentId == null && row.forkedFrom == null && row.foreignToBridgeSession == null &&
+  (row.sessionKind == null || sessionKinds.includes(row.sessionKind));
 const commandText = (command, control = CONTROL) => `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${control}</command-args>`;
 export function claudeProcessingCommandKind(row, skillCommand = 'cuefluent-notes:cuefluent-notes') {
   if (!skillCommandLike(skillCommand) || !claudeHuman(row) || row.promptSource !== undefined) return null;
@@ -103,8 +105,9 @@ export async function loadClaudeProcessingSkill({ skillPath, skillCommand = 'cue
 
 /** A typed native companion plus native skill-attributed MCP call binds the
  * formal command. Ordinary assistant parentUuid links are deliberately unused. */
-export function findClaudeProcessingControlInput(records, { source, callId, tool, argsHash, skill, control }) {
+export function findClaudeProcessingControlInput(records, { source, callId, tool, argsHash, skill, control, sessionKinds = [] }) {
   if (!skill || !skillCommandLike(skill.skillCommand) || !hashLike(skill.skillExpansionHash)) return null;
+  const kinds = claudeSessionKinds(sessionKinds);
   if (control !== undefined && processingControlText(control) === null) return null;
   const plugin = skill.skillCommand.split(':')[0], calls = [];
   for (let index = 0; index < records.length; index++) {
@@ -114,20 +117,20 @@ export function findClaudeProcessingControlInput(records, { source, callId, tool
   }
   if (calls.length !== 1) return null;
   const call = calls[0];
-  if (!claudeRoot(call.row, source) || call.row.attributionSkill !== skill.skillCommand || call.row.attributionPlugin !== plugin ||
+  if (!claudeRoot(call.row, source, kinds) || call.row.attributionSkill !== skill.skillCommand || call.row.attributionPlugin !== plugin ||
       call.block.name !== tool || !object(call.block.input) || digest(canonicalJSON(call.block.input)) !== argsHash || !isNativeId(call.row.uuid)) return null;
   let inputIndex = call.index - 1;
   while (inputIndex >= 0 && !claudeHuman(records[inputIndex].value)) inputIndex--;
   if (inputIndex < 0) return null;
   const input = records[inputIndex], row = input.value;
-  if (!claudeRoot(row, source) || !isNativeId(row.uuid) || !isNativeId(row.promptId) || row.promptSource !== undefined ||
+  if (!claudeRoot(row, source, kinds) || !isNativeId(row.uuid) || !isNativeId(row.promptId) || row.promptSource !== undefined ||
       row.interruptedMessageId !== undefined || row.interruptedByShutdown === true) return null;
   const typed = control ?? processingControlAction(tool, call.block.input);
   if (typed === null || claudeText(row) !== commandText(skill.skillCommand, typed)) return null;
   const companions = records.slice(inputIndex + 1, call.index).filter(record => record.value?.turnCompanion === true);
   if (companions.length !== 1) return null;
   const companion = companions[0], meta = companion.value;
-  if (!claudeRoot(meta, source) || meta.type !== 'user' || meta.message?.role !== 'user' || meta.isMeta !== true ||
+  if (!claudeRoot(meta, source, kinds) || meta.type !== 'user' || meta.message?.role !== 'user' || meta.isMeta !== true ||
       meta.promptId !== row.promptId || meta.parentUuid !== row.uuid || !isNativeId(meta.uuid) ||
       digest(claudeText(meta) ?? '') !== skill.skillExpansionHash) return null;
   return { unitId: row.promptId, inputId: row.uuid, inputHash: digest(claudeText(row)),
@@ -298,12 +301,13 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
 /** The Claude reader retains human inputs only. This proof excludes only the
  * exact formal command record; ordinary assistant/tool records gain no new
  * ownership classification from their parent links or their position. */
-export async function verifyClaudeProcessingControl({ source, fromByte, endByte, unitId }, { resolveDispatch, trustedSkill }) {
+export async function verifyClaudeProcessingControl({ source, fromByte, endByte, unitId }, { resolveDispatch, trustedSkill, sessionKinds = [] }) {
   integer(fromByte); integer(endByte);
+  const kinds = claudeSessionKinds(sessionKinds);
   if (!isNativeId(unitId) || source?.client !== 'claude' || !isNativeId(source.sessionId) ||
       endByte <= fromByte || endByte - fromByte > MAX_CONTROL_BYTES || typeof resolveDispatch !== 'function') return null;
   const read = await readSessionRange({ source, from: fromByte, endByte, maxBytes: MAX_CONTROL_BYTES, maxRecords: MAX_CONTROL_RECORDS,
-    readHeader: claudeRegistrationHeader(source), verifyHeader: value => value });
+    readHeader: claudeRegistrationHeader(source, { sessionKinds: kinds }), verifyHeader: value => value });
   if (read.blocked || read.limited || read.pendingTail || read.discarded.length || read.readEnd !== endByte) return null;
   const calls = [], results = [], humans = [];
   for (const record of read.records) {
@@ -314,7 +318,7 @@ export async function verifyClaudeProcessingControl({ source, fromByte, endByte,
       for (const block of row.message.content) if (block?.type === 'tool_result') results.push({ row, block });
     }
     if (row.type !== 'assistant') continue;
-    if (!claudeRoot(row, source) || row.message?.role !== 'assistant' || !Array.isArray(row.message.content)) return null;
+    if (!claudeRoot(row, source, kinds) || row.message?.role !== 'assistant' || !Array.isArray(row.message.content)) return null;
     for (const block of row.message.content) {
       if (block.type === 'tool_use') calls.push({ row, block });
       else if (!['text', 'thinking', 'redacted_thinking'].includes(block.type)) return null;
@@ -332,7 +336,7 @@ export async function verifyClaudeProcessingControl({ source, fromByte, endByte,
     if (typeof loader.block.id !== 'string' || calls.indexOf(loader) > calls.indexOf(call) || paired.length !== 1 || !object(input) ||
         Object.keys(input).some(key => !['query', 'max_results'].includes(key)) || input.query !== `select:${call.block.name}` ||
         (input.max_results !== undefined && !(Number.isSafeInteger(input.max_results) && input.max_results >= 1 && input.max_results <= 5)) ||
-        !claudeRoot(used.row, source) || used.row.promptId !== unitId || used.row.sourceToolAssistantUUID !== loader.row.uuid || used.block.is_error === true ||
+        !claudeRoot(used.row, source, kinds) || used.row.promptId !== unitId || used.row.sourceToolAssistantUUID !== loader.row.uuid || used.block.is_error === true ||
         !Array.isArray(used.block.content) || used.block.content.length !== 1 || canonicalJSON(used.block.content[0]) !== canonicalJSON({ type: 'tool_reference', tool_name: call.block.name }) ||
         !object(used.row.toolUseResult) || canonicalJSON(used.row.toolUseResult.matches) !== canonicalJSON([call.block.name])) return null;
   }
@@ -346,10 +350,10 @@ export async function verifyClaudeProcessingControl({ source, fromByte, endByte,
   const receipt = await resolveDispatch(Object.freeze(query));
   if (!receiptMatches(receipt, query, source)) return null;
   if (!trustedSkill || !Object.isFrozen(trustedSkill) || ['skillPath', 'skillCommand', 'skillExpansionHash'].some(key => trustedSkill[key] !== receipt[key])) return null;
-  const mapping = findClaudeProcessingControlInput(read.records, { source, ...query, skill: trustedSkill });
+  const mapping = findClaudeProcessingControlInput(read.records, { source, ...query, skill: trustedSkill, sessionKinds: kinds });
   if (!mapping || ['unitId', 'inputId', 'inputHash', 'companionId', 'companionHash', 'skillCommand', 'skillExpansionHash'].some(key => mapping[key] !== receipt[key]) ||
       humans[0].value.uuid !== mapping.inputId) return null;
-  if (!claudeRoot(output.row, source) || output.row.promptId !== unitId || output.row.sourceToolAssistantUUID !== call.row.uuid ||
+  if (!claudeRoot(output.row, source, kinds) || output.row.promptId !== unitId || output.row.sourceToolAssistantUUID !== call.row.uuid ||
       output.block.tool_use_id !== call.block.id || output.block.is_error === true ||
       !Array.isArray(output.block.content) || !Array.isArray(output.row.toolUseResult) ||
       digest(canonicalJSON(output.block.content)) !== receipt.resultHash ||

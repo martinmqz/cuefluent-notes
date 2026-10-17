@@ -28,10 +28,14 @@ export function reviewCode(proposalHash) {
   return Array.from(bytes.subarray(0, 6), byte => CODE_ALPHABET[byte % CODE_ALPHABET.length]).join('');
 }
 
-/** The chat a presentation belongs to. Today this is the verified invoking
- * native session; a verified continuation can later map onto the same lineage. */
-export const reviewChatLineage = source => Object.freeze({ client: choice(source.selection.client, CLIENTS),
-  sessionId: nativeId(source.selection.sessionId) });
+/** The chat a presentation belongs to: the verified invoking native session,
+ * or, for a session the binding verified as a continuation, the root session of
+ * that lineage. Only the native binding supplies `chatLineage`. */
+export function reviewChatLineage(source) {
+  const client = choice(source.selection.client, CLIENTS), lineage = source.chatLineage ?? source.selection;
+  if (lineage.client !== client) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  return Object.freeze({ client, sessionId: nativeId(lineage.sessionId) });
+}
 
 const sameLineage = (a, b) => a.client === b.client && a.sessionId === b.sessionId;
 export const sameReviewRevision = (a, b) => a.operationId === b.operationId &&

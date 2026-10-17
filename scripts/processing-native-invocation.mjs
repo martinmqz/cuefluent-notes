@@ -5,14 +5,15 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import path from 'node:path';
 import { openWorkflowIntake, intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readSelection } from './intake-store.mjs';
-import { assertWorkflowStorage, workflowProcessingContext } from './workflow-storage.mjs';
+import { assertWorkflowStorage, workflowProcessingContext, workflowCollectionGrant } from './workflow-storage.mjs';
 import { currentIntervals, inspectSourceBoundary } from './capture-selection.mjs';
-import { processingSourceDirectory, processingSourcePath, validateProcessingSource } from './collection-ingress.mjs';
+import { processingSourceDirectory, processingSourcePath, validateProcessingSource, readRegistration, registrationPath, registrationFloorPath } from './collection-ingress.mjs';
 import { readSessionRange } from './session-jsonl.mjs';
 import { verifyCodexHeader, codexRegistrationHeader } from './codex-reader.mjs';
-import { claudeRegistrationHeader } from './claude-reader.mjs';
+import { claudeRegistrationHeader, isClaudeHumanRow } from './claude-reader.mjs';
+import { readContinuesLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
 import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, claudeProcessingCommandKind, processingControlAction, processingControlText, processingControlMatches } from './processing-control-proof.mjs';
-import { canonicalJSON, digest, fail, object, isNativeId } from './workflow-values.mjs';
+import { canonicalJSON, digest, fail, object, isNativeId, keys, hash, integer } from './workflow-values.mjs';
 
 const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
 // A bounded primary wait plus one complete fallback pass, never a scan per retry.
@@ -62,6 +63,41 @@ function codexNestedCall(records, context, invocation, argsHash) {
     handshakeResultHash: digest(canonicalJSON(item.result)) };
 }
 
+/** A Claude session registered for collection whose selection is not armed
+ * yet: its first prompt is often persisted before the hook froze the floor.
+ * The exact current registration and its saved floor pin the native file; the
+ * registration's own grant must still be current collection consent. This
+ * binds a call only; it creates no selection and moves no floor. */
+async function registeredSource(capability, store, identity, sessionKinds) {
+  const { snapshot, registration } = await readRegistration(store, identity, { mismatchCode: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+  if (!registration) throw new MissingNativeInvocation();
+  const { collection } = await workflowProcessingContext(capability);
+  const selection = { ...identity, cwd: registration.cwd };
+  if (registration.collectionId !== collection.id) throw new UnavailableNativeSource();
+  let grant;
+  try { grant = await workflowCollectionGrant(capability, selection); }
+  catch (error) { if (['WORKFLOW_NOT_AUTHORIZED', 'COLLECTION_GRANT_REQUIRES_SETUP'].includes(error.code)) throw new UnavailableNativeSource(); throw error; }
+  if (grant !== registration.grantHash) throw new UnavailableNativeSource();
+  const records = [{ name: registrationPath(identity), hash: snapshot.hash }];
+  let frozen = registration.snapshot;
+  if (!frozen) {
+    // Only the worker freezes a floor; until then there is nothing to pin.
+    const floorName = registrationFloorPath(identity), saved = await intakeSnapshot(store, 'state', floorName, { maxBytes: 16384 });
+    const value = intakeJSON(saved);
+    if (!value) throw new MissingNativeInvocation();
+    keys(value, ['registrationId', 'snapshot']);
+    if (value.registrationId !== registration.id) throw new UnavailableNativeSource();
+    frozen = value.snapshot; records.push({ name: floorName, hash: saved.hash });
+  }
+  keys(frozen, ['path', 'fileIdentity', 'eofByte']); hash(frozen.fileIdentity); integer(frozen.eofByte);
+  if (frozen.path !== registration.sourcePath) throw new UnavailableNativeSource();
+  await assertWorkflowStorage(capability, selection, 'explicitProcess');
+  const selected = { ...identity, path: registration.sourcePath, projectRoot: registration.cwd };
+  const inspected = await inspectSourceBoundary(selected, { frozen, verifyHeader: claudeRegistrationHeader(selected, { sessionKinds }) });
+  if (inspected.status !== 'registered') throw new UnavailableNativeSource();
+  return { source: inspected.source, floor: inspected.boundary, records, unitId: registration.unitId };
+}
+
 /** Bind native MCP metadata to the actual call in an already selected source.
  * No archive search, last-session heuristic, caller JSON proof or source write.
  * Pausing collection preserves this binding for independently authorized
@@ -73,33 +109,71 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   const identity = { client: context.client, sessionId: context.sessionId };
   const selected = await readSelection(store, identity);
   if (selected.state?.safetyStop) throw new UnavailableNativeSource();
+  // A verified continuation of a registered root session: its background kind
+  // is accepted, its re-homed prefix is never read, and it shares the
+  // predecessor's chat lineage. Unverified or changed links bind nothing.
+  let continued = null;
+  if (context.client === 'claude') {
+    try { continued = await readContinuesLink(store, identity.sessionId); }
+    catch (error) { if (error.code === 'INVALID_SESSION_CONTINUATION') throw new UnavailableNativeSource(); throw error; }
+  }
+  const sessionKinds = continued?.link.to.sessionKinds ?? [];
+  const pinned = context.client === 'claude' ? [{ name: continuesPath(identity.sessionId), hash: continued?.pointerHash ?? null },
+    ...(continued ? [{ name: continuedPath(continued.link.from.sessionId), hash: continued.linkHash }] : [])] : [];
+  let registered = null;
   const intervals = selected.state ? currentIntervals(selected.state) : [];
   const interval = selected.state?.paused ? intervals.at(-1) : intervals.find(value => value.upper === null);
   let source = selected.state?.source, floor = interval ? (selected.state.paused ? interval.upper ?? interval.lower : interval.lower) : null;
-  let processingBinding = null;
   if (!floor && selected.state?.explicitScopes.length) {
     floor = { eofByte: Math.min(...selected.state.explicitScopes.map(scope => scope.start.startByte)), startsMidRecord: false };
   }
   if (!floor) {
     const name = processingSourcePath(identity, configHash), snapshot = await intakeSnapshot(store, 'state', name, { maxBytes: 16384 });
-    if (!snapshot.bytes) throw new MissingNativeInvocation();
-    const value = validateProcessingSource(intakeJSON(snapshot), identity, configHash, snapshot.bytes);
-    source = { ...identity, path: value.snapshot.path, fileIdentity: value.snapshot.fileIdentity, projectRoot: value.cwd };
-    // Collection stays off. Only the explicit MCP request may inspect this
-    // source, starting at the immutable metadata-only hook boundary.
-    await assertWorkflowStorage(capability, { ...identity, cwd: source.projectRoot }, 'explicitProcess');
-    const inspected = await inspectSourceBoundary({ ...identity, path: source.path, projectRoot: source.projectRoot }, {
-      frozen: value.snapshot, verifyHeader: (context.client === 'codex' ? codexRegistrationHeader : claudeRegistrationHeader)(source) });
-    if (inspected.status !== 'registered') throw new UnavailableNativeSource();
-    source = inspected.source; floor = inspected.boundary;
-    processingBinding = { name, hash: snapshot.hash };
+    if (snapshot.bytes) {
+      const value = validateProcessingSource(intakeJSON(snapshot), identity, configHash, snapshot.bytes);
+      source = { ...identity, path: value.snapshot.path, fileIdentity: value.snapshot.fileIdentity, projectRoot: value.cwd };
+      // Collection stays off. Only the explicit MCP request may inspect this
+      // source, starting at the immutable metadata-only hook boundary.
+      await assertWorkflowStorage(capability, { ...identity, cwd: source.projectRoot }, 'explicitProcess');
+      const inspected = await inspectSourceBoundary({ ...identity, path: source.path, projectRoot: source.projectRoot }, {
+        frozen: value.snapshot, verifyHeader: context.client === 'codex' ? codexRegistrationHeader(source) : claudeRegistrationHeader(source, { sessionKinds }) });
+      if (inspected.status !== 'registered') throw new UnavailableNativeSource();
+      source = inspected.source; floor = inspected.boundary;
+      pinned.push({ name, hash: snapshot.hash });
+      // No collection, so no capture to exclude: a typed control on either side of the boundary binds.
+      registered = { unitId: null, preFloorControlsOnly: false };
+    } else if (context.client === 'claude' && selected.state === null) {
+      // Only a session with no selection state at all; an exclusion-only or
+      // retired selection keeps its existing refusal, also as a fallback candidate.
+      const found = await registeredSource(capability, store, identity, sessionKinds);
+      source = found.source; floor = found.floor; pinned.push(...found.records);
+      // Collection is on but not armed: a later typed control needs the armed
+      // selection, whose exclusion receipt keeps it out of captured evidence.
+      registered = { unitId: found.unitId, preFloorControlsOnly: true };
+    } else throw new MissingNativeInvocation();
   }
   const selection = { client: context.client, sessionId: context.sessionId, cwd: source.projectRoot, unitId: null };
+  // Authorization precedes every transcript read, including the link's pinned
+  // prefix record just below: an excluded route reads nothing.
+  await assertWorkflowStorage(capability, selection, 'explicitProcess');
+  // The link's pinned prefix record is re-read on every guard: the binding
+  // window starts past it, so only this check notices a prefix rewritten in
+  // place, which otherwise would lend the predecessor's lineage to a decision.
+  const verifiedTarget = async () => {
+    let verified;
+    try { verified = await continuationTarget(continued, source); }
+    catch (error) { if (error.code === 'INVALID_SESSION_CONTINUATION') throw new UnavailableNativeSource(); throw error; }
+    if (verified) readBudget.bytes += verified.prefix.endByte - verified.prefix.startByte;
+    if (readBudget.bytes > MAX_READS * MAX_PREFIX) fail('PROCESSING_SOURCE_DISCOVERY_LIMIT');
+    return verified;
+  };
+  const target = await verifiedTarget();
   const guard = async () => {
     signal?.throwIfAborted();
     await assertWorkflowStorage(capability, selection, 'explicitProcess');
-    if ((await readSelection(store, identity)).hash !== selected.hash || (processingBinding &&
-        (await intakeSnapshot(store, 'state', processingBinding.name, { maxBytes: 16384 })).hash !== processingBinding.hash)) throw new UnavailableNativeSource();
+    if ((await readSelection(store, identity)).hash !== selected.hash) throw new UnavailableNativeSource();
+    for (const record of pinned) if ((await intakeSnapshot(store, 'state', record.name, { maxBytes: 16384 })).hash !== record.hash) throw new UnavailableNativeSource();
+    if (target) await verifiedTarget();
     signal?.throwIfAborted();
   };
   const deadline = performance.now() + settleMs;
@@ -107,7 +181,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   for (let attempt = 0; ; attempt++) {
     await guard();
     try {
-      found = await readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget });
+      found = await readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget, sessionKinds, base: target?.prefix.endByte ?? 0, registered });
       if (requireCompleted && found.call.pending) throw new MissingNativeInvocation();
       break;
     } catch (error) {
@@ -124,6 +198,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill: nested ? false : nativeSkill,
     controlExclusionUnsupported: Boolean(nested && nativeSkill), unitId, argsHash, ...call,
     ...(nativeSkill && !nested ? { typedControl } : {}),
+    ...(continued ? { chatLineage: Object.freeze({ client: 'claude', sessionId: continued.link.lineage }) } : {}),
     ...(controlInput ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand'].map(key => [key, controlInput[key]])) : {}) });
   if (call.pending) pendingBindings.add(result);
   else bindings.add(result);
@@ -132,29 +207,43 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
 
 // Re-read only the selected source tail while persistence catches up. Source
 // identity and the immutable floor remain pinned by resolveBoundInvocation.
-async function readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget }) {
+// `base` is the end of a verified re-homed prefix, which is never read.
+async function readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget, sessionKinds = [], base = 0, registered = null }) {
   const endByte = Number((await fs.lstat(source.path, { bigint: true })).size);
-  const from = Math.max(floor.eofByte, endByte - MAX_PREFIX);
+  // A registered source without a selection may also read back to its own
+  // start: a fresh session's first prompt precedes the floor its hook froze.
+  // The whole window is then bounded like the tail, and it is used only when
+  // it holds no earlier prompt than the registered one.
+  const early = context.client === 'claude' && registered !== null && base < floor.eofByte && endByte - base <= MAX_PREFIX;
+  const from = early ? base : Math.max(floor.eofByte, base, endByte - MAX_PREFIX);
   readBudget.bytes += endByte - from;
   if (++readBudget.reads > MAX_READS || readBudget.bytes > MAX_READS * MAX_PREFIX) fail('PROCESSING_SOURCE_DISCOVERY_LIMIT');
   const read = await readSessionRange({ source, from, endByte,
-    startsMidRecord: from === floor.eofByte ? floor.startsMidRecord : true,
+    startsMidRecord: from === floor.eofByte ? floor.startsMidRecord : from !== base,
     maxBytes: MAX_PREFIX, maxRecords: 4096,
     ...(context.client === 'codex' ? { verifyHeader: verifyCodexHeader }
-      : { readHeader: claudeRegistrationHeader(source), verifyHeader: value => value }) });
+      : { readHeader: claudeRegistrationHeader(source, { sessionKinds }), verifyHeader: value => value }) });
   if (read.blocked || read.limited) throw new UnavailableNativeSource();
+  let records = read.records;
+  if (early) {
+    const prompts = new Set(records.filter(({ value, startByte }) => startByte < floor.eofByte && value?.sessionId === source.sessionId &&
+      isClaudeHumanRow(value) && isNativeId(value.promptId)).map(({ value }) => value.promptId));
+    const fresh = prompts.size <= 1 && (registered.unitId === null || [...prompts].every(unitId => unitId === registered.unitId));
+    // Otherwise exactly the records the floor-bounded read would have returned.
+    if (!fresh) records = records.filter(record => record.startByte >= floor.eofByte);
+  }
   // Resume metadata inside the already authorized tail must preserve the same
   // root ownership and history shape as the initial header. Never scan backward
   // beyond that bounded tail to look for another source or a usable header.
-  if (context.client === 'codex') for (const { value } of read.records) {
+  if (context.client === 'codex') for (const { value } of records) {
     if (value.type !== 'session_meta') continue;
     const resumed = await verifyCodexHeader(value, source);
     if (resumed.historyMode !== read.metadata.historyMode) fail('UNSUPPORTED_CODEX_HISTORY');
   }
   const argsHash = digest(canonicalJSON(invocation.arguments));
   let call = null, unitId = context.unitId ?? null, nativeSkill = false, typedControl = null;
-  const nested = context.client === 'codex' ? codexNestedCall(read.records, context, invocation, argsHash) : null;
-  for (const record of read.records) {
+  const nested = context.client === 'codex' ? codexNestedCall(records, context, invocation, argsHash) : null;
+  for (const record of records) {
     const row = record.value;
     if (context.client === 'codex') {
       const p = row.payload;
@@ -192,14 +281,27 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
   let controlInput = null;
   if (context.client === 'claude') {
     const skill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control: processingControlAction(invocation.tool, invocation.arguments) });
-    controlInput = findClaudeProcessingControlInput(read.records, { source, ...call, argsHash, skill });
+    controlInput = findClaudeProcessingControlInput(records, { source, ...call, argsHash, skill, sessionKinds });
+    // Without an armed selection there is no exclusion receipt. The first human
+    // prompt after the floor is the boundary the worker will exclude, so a typed
+    // control there is never collected and may bind now; a later one would be
+    // collected and binds only once the selection is armed. Only a window that
+    // reaches the floor (or the re-homed prefix end) can show that no earlier
+    // prompt exists: a longer unarmed tail waits for the armed selection.
+    if (controlInput && registered?.preFloorControlsOnly && controlInput.inputRange.fromByte >= floor.eofByte) {
+      const start = Math.max(floor.eofByte, base);
+      if (from > start) throw new UnavailableNativeSource();
+      const earlier = records.some(record => record.startByte >= start && record.startByte < controlInput.inputRange.fromByte &&
+        record.value?.sessionId === source.sessionId && isClaudeHumanRow(record.value) && isNativeId(record.value.promptId) && record.value.promptId !== controlInput.unitId);
+      if (earlier) throw new UnavailableNativeSource();
+    }
     if (controlInput) { nativeSkill = true; unitId = controlInput.unitId; typedControl = processingControlAction(invocation.tool, invocation.arguments); }
     else {
-      const alternatives = new Set(read.records.map(({ value }) => claudeProcessingCommandKind(value, skillCommand)));
+      const alternatives = new Set(records.map(({ value }) => claudeProcessingCommandKind(value, skillCommand)));
       alternatives.delete(null); alternatives.delete(processingControlAction(invocation.tool, invocation.arguments));
       for (const control of alternatives) {
         const otherSkill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control });
-        if (findClaudeProcessingControlInput(read.records, { source, ...call, argsHash, skill: otherSkill, control })) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
+        if (findClaudeProcessingControlInput(records, { source, ...call, argsHash, skill: otherSkill, control, sessionKinds })) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
       }
     }
   }

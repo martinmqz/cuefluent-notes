@@ -227,10 +227,22 @@ is consumed on its first retry, and does not survive reconnects. A failed retry
 requires a fresh explicit invocation; it must not fall back to inline processing.
 
 Native metadata must bind the actual call to an already registered source: an
-active or paused selection, explicit capture scopes, or a processing-only hook
-binding. Processing-only bindings record a locator and future byte boundary under
-the current policy; they never enable collection. The explicit request verifies
-the native source header and exact call within the bounded recent range.
+active or paused selection, explicit capture scopes, a processing-only hook
+binding, or, for Claude, an exact current collection registration (its own grant
+still current) with no selection state yet. Processing-only bindings record
+a locator and future byte boundary under the current policy; they never enable
+collection. The explicit request verifies the native source header and exact call
+within the bounded recent range. Without a selection, a Claude source may also be
+read from its start (after a verified continuation's re-homed prefix) within the
+same 2 MiB bound when everything before the hook boundary holds at most the one
+prompt that registered it, so a typed control in a
+fresh session's first prompt binds. This creates no selection, moves no floor and
+captures nothing earlier: the first full prompt after the floor is still the
+excluded boundary, so collection starts with the prompt after that. With
+collection on, a typed control that is itself that first prompt after the floor
+binds before the selection is armed (it can never be collected), provided the
+bounded read still reaches the floor; any later typed control, or one past a
+longer unarmed tail, binds only once the selection is armed.
 Omitted collection selection must resolve uniquely from bounded registration
 metadata; no new source is discovered. The optional `selection` must match the
 verified caller; it is not the default evidence boundary. Evidence `scope` is
@@ -293,8 +305,10 @@ supports and at most five omission details plus a count), inspection limits, the
 decision commands and the operation, claim and proposal hashes, bounded to 1 MiB.
 A durable presentation record in the
 same private state stores `{chatLineage, operationId, proposalHash, claimHash,
-presentedAt, verified, delivered, typedDelivered}` for the invoking native
-session: `verified` and `delivered` describe the latest presentation attempt of
+presentedAt, verified, delivered, typedDelivered}` for the invoking chat lineage:
+the native session, or the root session of a verified Claude continuation (see
+the [Claude reader contract](session-workflow.md#claude-reader-contract)), so the
+records outlive a continuation. `verified` and `delivered` describe the latest presentation attempt of
 that revision (typed, and its reply committed), and `typedDelivered` records that
 some typed review of it was delivered to that session. A coded decision needs
 `typedDelivered`; a bare decision needs the session's latest attempt to be a

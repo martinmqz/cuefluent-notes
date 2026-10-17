@@ -550,11 +550,17 @@ to the user; do not describe a pending draft as a review that was displayed.
 Claude Desktop 2.42304.0 declines review forms without displaying them, and Claude
 CLI 2.1.294 and 2.1.299 clip form text, so Claude never uses the review form. Claude
 CLI also collapses tool results until Ctrl-O; the review reply is short so the
-assistant can repeat it. A fresh Claude session's first prompt only registers it;
-send a typed `review` after that first prompt. A presentation belongs to the native
-session that showed it. When Claude CLI continues a session into a new session ID,
-earlier presentations do not carry over, and controls in the continued session can
-be refused as unverified.
+assistant can repeat it. In a new Claude session its hooks registered, a typed
+control also works as the first prompt; no warm-up prompt is needed. If Claude
+keeps its tool process across `/clear`, the new session is found only among sources
+that already have a selection or a processing-only binding, so a control as its
+first prompt can still be refused until its collection is armed. A presentation belongs to the chat
+that showed it. When Claude CLI continues a session into a new session ID and both
+sessions are registered for collection, the new session joins the same chat
+lineage once both transcripts agree, so a typed decision there applies to a draft
+reviewed before the move. Until then, drafts reviewed before the move are not
+decidable there, and controls in a Claude CLI background session are refused as
+unverified. Continuations on processing-only routes are not joined.
 
 For a factual correction, choose Later and provide the correction in the ordinary
 work chat. Capture it through the existing selected-source workflow before using

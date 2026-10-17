@@ -11,12 +11,21 @@ import { createCapture, validateCapture, assertCaptureExtension, clientVersion, 
 import { SKILL_ROOT } from './runtime-paths.mjs';
 import { loadClaudeProcessingSkill, claudeProcessingCommandKind, isClaudeProcessingCommand, verifyClaudeProcessingControl, isProcessingControlProof } from './processing-control-proof.mjs';
 import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
-import { nativeId, timestamp, canonicalJSON, fail } from './workflow-values.mjs';
+import { nativeId, timestamp, canonicalJSON, fail, integer, hash, keys, isNativeId } from './workflow-values.mjs';
 
 export const CLAUDE_READER_VERSION = '1';
 // Bump when compatibility or classification rules change. This expires only
 // disposable suspensions, independently of immutable captures/checkpoints.
-export const CLAUDE_READER_RULES_REVISION = 2;
+export const CLAUDE_READER_RULES_REVISION = 3;
+// Claude CLI background sessions (CLAUDE_CODE_SESSION_KIND=bg) stamp every
+// record with this kind, including the history a session moved there carries.
+// Accepted only for a session verified as the continuation of a registered root
+// session; any other kind, agent or sidechain keeps its ownership refusal.
+export const CLAUDE_CONTINUATION_SESSION_KINDS = Object.freeze(['bg']);
+export function claudeSessionKinds(value = []) {
+  if (!Array.isArray(value) || value.length > 1 || value.some(kind => !CLAUDE_CONTINUATION_SESSION_KINDS.includes(kind))) fail('INVALID_WORKFLOW');
+  return Object.freeze([...value]);
+}
 const metadataTypes = new Set(['summary', 'custom-title', 'ended-by-model', 'ai-title', 'last-prompt', 'tag',
   'agent-name', 'agent-color', 'agent-setting', 'pr-link', 'frame-link', 'artifact-comment-monitor',
   'artifact-autoreact-ledger', 'file-history-snapshot', 'file-history-delta', 'attribution-snapshot',
@@ -62,20 +71,42 @@ export async function readClaudeHeader({ readHeader, size }) {
   }
   fail('SESSION_HEADER_UNAVAILABLE');
 }
-async function verifyClaudeIdentity(row, source, { header = false } = {}) {
+async function verifyClaudeIdentity(row, source, { header = false, sessionKinds = [] } = {}) {
   if (source.client !== 'claude' || row.sessionId !== source.sessionId) fail('SOURCE_IDENTITY_MISMATCH');
   // Resumed sessions can contain different client versions with the same format.
   clientVersion(row.version);
   if (row.isSidechain !== false || row.agentId != null || row.forkedFrom != null || row.foreignToBridgeSession != null ||
-      row.sessionKind != null) fail('UNSUPPORTED_SESSION_OWNERSHIP');
+      (row.sessionKind != null && !sessionKinds.includes(row.sessionKind))) fail('UNSUPPORTED_SESSION_OWNERSHIP');
   if (header) {
     absolutePath(row.cwd);
     if (path.normalize(row.cwd) !== path.normalize(source.projectRoot) && await fs.realpath(row.cwd).catch(() => null) !== source.projectRoot) fail('SOURCE_IDENTITY_MISMATCH');
   }
   return { client: 'claude', sessionId: row.sessionId, projectRoot: source.projectRoot, version: row.version };
 }
-export const claudeRegistrationHeader = selected => async io => verifyClaudeIdentity(await readClaudeHeader(io),
-  { ...selected, projectRoot: await fs.realpath(selected.projectRoot) }, { header: true });
+export const claudeRegistrationHeader = (selected, { sessionKinds = [] } = {}) => {
+  const kinds = claudeSessionKinds(sessionKinds);
+  return async io => verifyClaudeIdentity(await readClaudeHeader(io),
+    { ...selected, projectRoot: await fs.realpath(selected.projectRoot) }, { header: true, sessionKinds: kinds });
+};
+/** The verified header identity plus its first root row, for comparing two
+ * registered transcripts. The row is untrusted content; nothing is copied. */
+export const claudeHeaderRow = (selected, { sessionKinds = [] } = {}) => {
+  const kinds = claudeSessionKinds(sessionKinds), out = { row: null };
+  const verify = async io => {
+    const row = await readClaudeHeader(io);
+    const identity = await verifyClaudeIdentity(row, { ...selected, projectRoot: await fs.realpath(selected.projectRoot) }, { header: true, sessionKinds: kinds });
+    out.row = row; return identity;
+  };
+  return { verify, out };
+};
+export const isClaudeHumanRow = row => row?.type === 'user' && human(row);
+/** An exact `continued-in` marker written by this source: the session it names. */
+export function claudeContinuedIn(row, source) {
+  if (row?.type !== 'continued-in' || Object.keys(row).length !== 4 || row.sessionId !== source.sessionId ||
+      typeof row.timestamp !== 'string' || !isNativeId(row.continuedInSessionId) || row.continuedInSessionId === source.sessionId) return null;
+  try { timestamp(row.timestamp); } catch { return null; }
+  return row.continuedInSessionId;
+}
 
 function normalizeHuman(record, out) {
   const content = record.value.message.content;
@@ -93,14 +124,32 @@ function normalizeHuman(record, out) {
 const progressAt = (source, record) => ({ sourceIdentity: source.fileIdentity, offset: record.endByte,
   anchor: record.tailAnchor ?? { startByte: record.startByte, endByte: record.endByte, hash: record.hash } });
 
+/** Trusted view of a verified session link, supplied by the worker under its
+ * intake lock: `from` when this session continues a registered root session
+ * (its re-homed prefix and background kind), `into` when this session was
+ * continued elsewhere (its exact terminal marker). Never caller JSON. */
+function continuationView(value) {
+  if (value === null) return { from: null, into: null };
+  keys(value, ['from', 'into']);
+  const record = value => {
+    keys(value, ['startByte', 'endByte', 'hash']); integer(value.startByte); integer(value.endByte); hash(value.hash);
+    if (value.endByte <= value.startByte) fail('INVALID_WORKFLOW');
+  };
+  if (value.from !== null) { keys(value.from, ['prefix', 'sessionKinds']); record(value.from.prefix); claudeSessionKinds(value.from.sessionKinds); }
+  if (value.into !== null) { keys(value.into, ['sessionId', 'record']); nativeId(value.into.sessionId); record(value.into.record); }
+  return value;
+}
+
 /** Native parent links establish ancestry of human input, not causal ownership
  * of ordinary assistant/tool records. Only proven human records are copied.
  * Carry is bounded metadata; no unowned payload enters a capture or checkpoint.
  */
 export async function readClaudeSelection({ state, scopeId, cursor = null, checkpoint = null, heads = new Map(), loadHead = null,
   resolveProcessingDispatch = null, resolveProcessingExecution = null, processingSkillPath = path.join(SKILL_ROOT, 'SKILL.md'),
-  capturedAt = new Date().toISOString(), deadline = Infinity, now = Date.now, ...limits }) {
+  capturedAt = new Date().toISOString(), deadline = Infinity, now = Date.now, continuation = null, ...limits }) {
   validateSelectionState(state); nativeId(scopeId); timestamp(capturedAt);
+  const { from: continuedFrom, into: continuedInto } = continuationView(continuation);
+  const sessionKinds = continuedFrom?.sessionKinds ?? [];
   const scope = currentIntervals(state).find(item => item.id === scopeId) ?? state.explicitScopes.find(item => item.id === scopeId);
   if (!scope) fail('CAPTURE_NOT_SELECTED');
   const source = state.source, floor = scope.lower?.eofByte ?? scope.start.startByte;
@@ -108,6 +157,9 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   if (from.sourceIdentity !== source.fileIdentity || from.offset < floor) fail('INVALID_INTAKE_CURSOR');
   const ceiling = scope.upper?.eofByte ?? scope.end?.endByte;
   if (ceiling !== undefined && from.offset > ceiling) fail('CLAUDE_INSPECTION_SUSPENDED');
+  // A verified continuation marker is terminal: nothing after it is read.
+  if (continuedInto && from.offset > continuedInto.record.endByte) fail('INVALID_INTAKE_CURSOR');
+  const stops = [ceiling, limits.endByte, continuedInto?.record.endByte].filter(value => value !== undefined);
   if (cursor) await verifySourceCursor(source, cursor);
   if (from.offset > floor && !checkpoint) fail('READER_CHECKPOINT_REQUIRED');
   if (checkpoint) validateReaderCheckpoint(checkpoint, { identity: source, scopeId, sourceIdentity: source.fileIdentity, offset: from.offset });
@@ -120,8 +172,9 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   let checkpointBytes = Buffer.byteLength(canonicalJSON(carry));
   const checkBudget = () => { checkWorkflowBudget(); if (now() >= deadline) fail('SESSION_READ_BUDGET'); };
   const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, readHeader: readClaudeHeader,
-    verifyHeader: (row, source) => verifyClaudeIdentity(row, source, { header: true }), ...(ceiling !== undefined ? { endByte: Math.min(ceiling, limits.endByte ?? ceiling) } : {}),
+    verifyHeader: (row, source) => verifyClaudeIdentity(row, source, { header: true, sessionKinds }), ...(stops.length ? { endByte: Math.min(...stops) } : {}),
     startsMidRecord: from.offset === floor && Boolean(scope.lower?.startsMidRecord) });
+  let continuedIn = null, terminal = false;
   let selection = structuredClone(state), blocked = scan.blocked, to = from;
   const rows = new Map(carry.records.map(row => [row.id, row])), changes = new Map(), badUnits = new Set();
   const frames = scan.discarded.map(r => ({ ...r, kind: 'excluded' })), anchorUpdates = [];
@@ -150,12 +203,28 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       checkBudget();
       const row = record.value;
       if (!row || typeof row !== 'object') fail('UNSUPPORTED_CLAUDE_RECORD');
-      if (discontinuities.has(row.type) || (row.type === 'last-prompt' && row.rewound === true)) fail('CLAUDE_HISTORY_REQUIRES_REVIEW');
+      const marker = claudeContinuedIn(row, source);
+      const sealed = marker !== null && continuedInto?.sessionId === marker && record.startByte === continuedInto.record.startByte &&
+        record.endByte === continuedInto.record.endByte && record.hash === continuedInto.record.hash;
+      if (!sealed && (discontinuities.has(row.type) || (row.type === 'last-prompt' && row.rewound === true))) {
+        // Only the registered successor, verified from both transcripts, can
+        // turn this marker into a terminal record; the hint carries no authority.
+        if (marker !== null && !continuedInto) continuedIn = { sessionId: marker, record: { startByte: record.startByte, endByte: record.endByte, hash: record.hash } };
+        fail('CLAUDE_HISTORY_REQUIRES_REVIEW');
+      }
       if (row.sessionId !== undefined && row.sessionId !== source.sessionId) fail('SOURCE_IDENTITY_MISMATCH');
-      const excluded = row.type === 'progress' || metadataTypes.has(row.type) || row.isSidechain === true || row.agentId != null;
+      // Re-homed history of the verified predecessor was that session's
+      // evidence; here it is structural and never a second capture. The exact
+      // boundary record pins the prefix the link verified.
+      const boundary = continuedFrom?.prefix;
+      if (boundary && ((record.startByte < boundary.endByte && record.endByte > boundary.endByte) || (record.endByte === boundary.endByte &&
+          (record.startByte !== boundary.startByte || record.hash !== boundary.hash)))) fail('SOURCE_CHANGED');
+      const rehomed = boundary !== undefined && record.endByte <= boundary.endByte;
+      const excluded = sealed || rehomed || row.type === 'progress' || metadataTypes.has(row.type) || row.isSidechain === true || row.agentId != null;
+      if (sealed) terminal = true;
       if (!excluded) {
         if (!rootTypes.has(row.type)) fail('UNSUPPORTED_CLAUDE_RECORD');
-        await verifyClaudeIdentity(row, source); nativeId(row.uuid); timestamp(row.timestamp);
+        await verifyClaudeIdentity(row, source, { sessionKinds }); nativeId(row.uuid); timestamp(row.timestamp);
         if (row.parentUuid !== null) nativeId(row.parentUuid);
         if (row.parentUuid === row.uuid) fail('CLAUDE_PARENT_CYCLE');
       }
@@ -216,6 +285,13 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       if (['SOURCE_IDENTITY_MISMATCH', 'UNSUPPORTED_SESSION_OWNERSHIP'].includes(error.code)) throw error;
       blocked = { offset: record.startByte, code: error.code ?? 'UNSUPPORTED_CLAUDE_RECORD' }; break;
     }
+  }
+  // Bytes after a terminal marker were not read; their presence alone keeps
+  // the session in review rather than silently dropping later evidence.
+  // A cursor already at the marker reads nothing and is terminal as well.
+  if (continuedInto && !blocked && scan.readEnd === continuedInto.record.endByte) {
+    terminal = true;
+    if (scan.snapshotEnd > continuedInto.record.endByte) blocked = { offset: continuedInto.record.endByte, code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' };
   }
   carry.offset = to.offset;
   validateReaderCheckpoint(carry);
@@ -294,7 +370,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
           if (await trustedSkills.get(controlKind)) {
             const input = records[0], laterInput = scan.records.find(record => record.startByte > input.startByte && human(record.value));
             const endByte = laterInput?.startByte ?? to.offset;
-            const control = await verifyClaudeProcessingControl({ source, unitId, fromByte: input.startByte, endByte }, { resolveDispatch: resolveProcessingDispatch, trustedSkill: await trustedSkills.get(controlKind) });
+            const control = await verifyClaudeProcessingControl({ source, unitId, fromByte: input.startByte, endByte }, { resolveDispatch: resolveProcessingDispatch, trustedSkill: await trustedSkills.get(controlKind), sessionKinds });
             if (isProcessingControlProof(control) && excludeInput(control, records)) for (const id of control.recordIds) provenInputs.add(id);
             else {
               const finished = scan.records.some(record => record.startByte > input.startByte && record.endByte <= endByte &&
@@ -341,6 +417,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
     } catch (error) { pending.push({ unitId, reason: error.code ?? 'UNSUPPORTED_CLAUDE_UNIT' }); }
   }
   return { candidates, covered, pending, noEvidence, processingControls, unanchoredUnits: [], blocked, anchorUpdates, selection, from, to, frames, eligibility, checkpoint: carry,
+    continuedIn: blocked?.code === 'CLAUDE_HISTORY_REQUIRES_REVIEW' && continuedIn?.record.startByte === blocked.offset ? continuedIn : null, terminal,
     nativeAnchors: carry.units.map(unit => ({ unitId: unit.id, record: anchor(rows.get(unit.recordId)) })), recordAnchors: scan.records.filter(record => record.id && record.endByte <= to.offset).map(anchor),
     diagnostics: { pendingTail: scan.pendingTail, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd,
       automaticCeilingReached: Boolean(scope.upper && scan.snapshotEnd >= ceiling && !scan.limited && !scan.blocked),

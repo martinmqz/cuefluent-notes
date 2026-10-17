@@ -22,6 +22,7 @@ export const SOURCE_FILES = Object.freeze([
   'scripts/capture-maintenance.mjs',
   'scripts/capture-retention.mjs',
   'scripts/capture-selection.mjs',
+  'scripts/claude-continuation.mjs',
   'scripts/claude-reader.mjs',
   'scripts/codex-reader.mjs',
   'scripts/collection-hook-definition.mjs',

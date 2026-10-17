@@ -21,6 +21,7 @@ import { CLIENTS, fail, nativeId, keys, hash, integer, choice, canonicalJSON, di
 import { withStorageProbes } from './storage-platform.mjs';
 import { canonicalWorkflowProject } from './workflow-paths.mjs';
 import { createProcessingControlResolver } from './processing-control-receipts.mjs';
+import { readContinuesLink, readContinuedLink, continuationTarget, continuationOrigin, linkClaudeContinuation, ensureContinuesPointer } from './claude-continuation.mjs';
 
 // ACKs are disposable scheduling hints. They never replace fresh policy,
 // immutable registration/source checks, native boundaries, or reader progress.
@@ -48,7 +49,7 @@ async function hasAcknowledgement(store, name, expected) {
 /** First registration waits for a real post-floor native boundary, excludes that
  * boundary prompt, then authorizes subsequent full units. Never look behind EOF.
  */
-async function armRegistration(transaction, store, registration, wake, authorize, observeRead, current, grantHash) {
+async function armRegistration(transaction, store, registration, wake, authorize, observeRead, current, grantHash, link = null) {
   const selected = { client: registration.client, sessionId: registration.sessionId,
     path: registration.sourcePath, projectRoot: registration.cwd };
   const floorName = `registration-floors/${registration.client}/${registration.sessionId}.json`;
@@ -59,29 +60,66 @@ async function armRegistration(transaction, store, registration, wake, authorize
   if (!frozen) return { pending: 'SOURCE_BOUNDARY_PENDING' };
   keys(frozen, ['path', 'fileIdentity', 'eofByte']); hash(frozen.fileIdentity); integer(frozen.eofByte);
   if (frozen.path !== selected.path) fail('SOURCE_IDENTITY_MISMATCH');
-  const verifyHeader = registration.client === 'codex' ? codexRegistrationHeader(selected) : claudeRegistrationHeader(selected);
+  // A verified continuation of a registered root session may carry Claude's
+  // background kind and re-homes that session's history, which is never
+  // collected again: its boundary is the first own prompt after both floors.
+  const continued = registration.client === 'claude' ? await readContinuesLink(store, registration.sessionId) : null;
+  const verifyHeader = registration.client === 'codex' ? codexRegistrationHeader(selected)
+    : claudeRegistrationHeader(selected, { sessionKinds: continued?.link.to.sessionKinds ?? [] });
   const observed = await inspectSourceBoundary(selected, { verifyHeader, frozen, currentUnitId: registration.unitId });
   if (observed.status !== 'registered') return { pending: 'SOURCE_BOUNDARY_PENDING' };
+  const continuation = registration.client === 'claude' ? await claudeContinuation(transaction, store, observed.source, link, authorize, observeRead) : null;
+  const target = continuation?.from ?? null;
   if (registration.snapshot === null && floor === null) await replaceIntakeJSON(transaction, floorName,
     { registrationId: registration.id, snapshot: frozen }, null);
   const intervalId = randomUUID(), temporary = newSelectionState(observed.source);
   temporary.active = true; temporary.intervals = [{ id: intervalId, lower: { ...observed.boundary, unitId: null }, upper: null }];
-  const result = await (registration.client === 'codex' ? readCodexSelection : readClaudeSelection)({ state: temporary, scopeId: intervalId, maxBytes: 8 * 1024 * 1024, observeRead });
-  const anchors = result.nativeAnchors;
-  const usable = anchors.filter(item => item.record.startByte >= frozen.eofByte && item.record.endByte - item.record.startByte <= 64 * 1024);
+  const result = await (registration.client === 'codex' ? readCodexSelection : readClaudeSelection)({ state: temporary, scopeId: intervalId, maxBytes: 8 * 1024 * 1024, observeRead,
+    ...(continuation ? { continuation } : {}) });
+  const anchors = result.nativeAnchors, floorByte = Math.max(frozen.eofByte, target?.prefix.endByte ?? 0);
+  const usable = anchors.filter(item => item.record.startByte >= floorByte && item.record.endByte - item.record.startByte <= 64 * 1024);
   const anchor = usable.find(item => item.unitId === registration.unitId) ?? usable[0];
-  if (!anchor) return { pending: result.blocked?.code ?? 'NATIVE_BOUNDARY_PENDING' };
+  if (!anchor) {
+    // A session continued before its first boundary prompt (a fresh session
+    // whose only prompt was a control) links here; it never arms afterwards.
+    if (result.continuedIn && link && !link.attempted) {
+      link.attempted = true;
+      await authorize();
+      await linkClaudeContinuation(transaction, store, { source: observed.source, registration, originKinds: target?.sessionKinds ?? [],
+        hint: result.continuedIn, config: link.config, authorize, observeRead });
+    }
+    if (result.terminal && !result.blocked) return { pending: null };
+    return { pending: result.blocked?.code ?? 'NATIVE_BOUNDARY_PENDING' };
+  }
   const boundary = { ...observed.boundary, unitId: anchor.unitId, record: anchor.record };
   const selection = await controlSelection(transaction, { source: observed.source, expectedHash: current.hash, boundary, authorize, grantHash,
     request: { id: registration.id, operation: 'start', client: registration.client, sessionId: registration.sessionId, unitId: anchor.unitId, expectedRevision: current.state?.revision ?? 0 } });
   return { selection, boundaryExcluded: anchor.unitId };
 }
 
-export async function processScope(transaction, store, selection, scopeId, authorize, observeRead) {
+// Verified links of this Claude source, read fresh on every pass. They never
+// widen a scope: a successor skips its re-homed prefix, an origin stops at its
+// marker. Only the worker, with the registration and policy, creates a link.
+async function claudeContinuation(transaction, store, source, link, authorize, observeRead) {
+  const registration = link?.registration ?? null;
+  const origin = await readContinuedLink(store, source.sessionId);
+  // Repair a pointer lost between the two create-once writes.
+  if (origin && registration) await ensureContinuesPointer(transaction, store, origin, authorize);
+  // The pinned prefix record is re-read here, so a rewrite behind a floor that
+  // starts past it still fails this pass rather than reading as structural.
+  const from = await continuationTarget(await readContinuesLink(store, source.sessionId), source, registration, { observeRead });
+  const into = continuationOrigin(origin, source, registration);
+  return from || into ? { from, into } : null;
+}
+
+// `link` carries the registration and policy for creating a session link; its
+// `attempted` flag is shared by all scopes of one registration visit.
+export async function processScope(transaction, store, selection, scopeId, authorize, observeRead, link = null) {
   let saved = 0, pending = null;
   for (let pass = 0; pass < 8; pass++) {
     checkWorkflowBudget();
     const identity = { client: selection.state.source.client, sessionId: selection.state.source.sessionId };
+    const continuation = identity.client === 'claude' ? await claudeContinuation(transaction, store, selection.state.source, link, authorize, observeRead) : null;
     const { snapshot: progress, cursor, checkpointRoot } = await readReaderProgress(store, identity, scopeId, selection.state.source.fileIdentity, { metadataOnly: true });
     const scope = currentIntervals(selection.state).find(item => item.id === scopeId) ?? selection.state.explicitScopes.find(item => item.id === scopeId);
     if (scope?.end && cursor?.offset === scope.end.endByte) return { saved, pending: null, incomplete: false, drained: true };
@@ -144,7 +182,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
           sourcePath: selection.state.source.path }) }),
       resolveProcessingDispatch: createProcessingControlResolver(transaction,
         { state: selection.state, selectionHash: selection.hash, authorize }),
-      loadHead: unitId => readCaptureHead(store, { ...identity, unitId }) });
+      loadHead: unitId => readCaptureHead(store, { ...identity, unitId }), ...(identity.client === 'claude' ? { continuation } : {}) });
     // A later event for an already published/pruned Codex unit is not harmless
     // structural content. Do not advance through it as an excluded prefix.
     for (const unitId of result.unanchoredUnits) {
@@ -182,6 +220,14 @@ export async function processScope(transaction, store, selection, scopeId, autho
         selectionHash: selection.hash, cursorHash: progress.hash, scan: plan.scan, checkpoint: plan.checkpoint, authorize });
       continue;
     }
+    // One bounded link attempt per registration visit; a refused link leaves
+    // the marker diagnostic exactly as before.
+    if (result.continuedIn && link && !link.attempted) {
+      link.attempted = true;
+      await authorize();
+      if (await linkClaudeContinuation(transaction, store, { source: selection.state.source, registration: link.registration,
+        originKinds: continuation?.from?.sessionKinds ?? [], hint: result.continuedIn, config: link.config, authorize, observeRead })) continue;
+    }
     const frozenBlock = !result.blocked || ['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
       'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
       'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
@@ -198,7 +244,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
   return { saved, pending: 'WORKER_PASS_LIMIT', incomplete: true };
 }
 
-async function runRegistration(capability, registration, registrationHash, route, grantHash, observeRead) {
+async function runRegistration(capability, registration, registrationHash, route, grantHash, observeRead, config) {
   const identity = { client: registration.client, sessionId: registration.sessionId };
   const selectionIdentity = { ...identity, cwd: registration.cwd };
   await assertWorkflowStorage(capability, selectionIdentity, 'collect');
@@ -222,9 +268,10 @@ async function runRegistration(capability, registration, registrationHash, route
         return { saved: 0, pending: selection.state.paused ? 'COLLECTION_PAUSED' : null, boundaryExcluded: currentIntervals(selection.state)[0]?.lower.unitId ?? null };
       }
     }
+    const link = { registration, config, attempted: false };
     if (selection.state === null || (!selection.state.active && !selection.state.paused)) {
       await authorize(); // Before ANY selected-source bytes are read.
-      const armed = await armRegistration(transaction, store, registration, intakeJSON(wakeSnapshot), authorize, observeRead, selection, grantHash);
+      const armed = await armRegistration(transaction, store, registration, intakeJSON(wakeSnapshot), authorize, observeRead, selection, grantHash, link);
       if (!armed.selection) return { saved: 0, pending: armed.pending };
       selection = armed.selection; boundaryExcluded = armed.boundaryExcluded;
     }
@@ -234,7 +281,7 @@ async function runRegistration(capability, registration, registrationHash, route
     let saved = 0, pending = null, incomplete = false, drained = true, suspended = true;
     for (const scope of [...currentIntervals(selection.state), ...selection.state.explicitScopes]) {
       await authorize();
-      const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead);
+      const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link);
       saved += result.saved; pending ??= result.pending; incomplete ||= Boolean(result.incomplete);
       drained &&= result.drained === true; suspended &&= result.suspended === true || result.drained === true;
       selection = await readSelection(store, identity);
@@ -347,7 +394,7 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           if (!route.intended?.collect) continue;
           if (route.collection.id !== collectionId) continue;
           const grantHash = await collectionGrantHash(snapshot.config, route.route.id, registration);
-          const result = await runRegistration(capability, registration, registered.hash, route, grantHash, observeRead);
+          const result = await runRegistration(capability, registration, registered.hash, route, grantHash, observeRead, snapshot.config);
           output.saved += result.saved;
           if (result.pending) {
             output.pending.push(result.pending);

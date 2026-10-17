@@ -458,7 +458,8 @@ bounded and nonempty; `reader.headerClientVersion` explicitly records only the
 header's client version, not the emitting version of later rows.
 Malformed metadata or unsupported record types block at that row while preserving
 the supported prefix. Unsupported history relocation,
-rewinds or native ownership produce diagnostics. Compaction summaries, injected
+rewinds or native ownership produce diagnostics; a verified continuation is
+described below. Compaction summaries, injected
 context, sidechain/child records, reasoning and queued attachment records are
 excluded. API request snapshot records (`api-request-shape`, `api-request-blob`
 and `api-request`, written by Claude CLI 2.1.299) are excluded transport metadata;
@@ -474,6 +475,28 @@ advanced scope checks that exact record and byte range against the active head,
 then skips it rather than copying it twice. Empty follow-ups do not create
 provenance-only revisions. Inline attachment omissions preserve MIME and counts.
 Inline binary is omitted, while actual URL references remain references.
+
+Claude CLI can continue a session into a new session ID: the old transcript ends
+with a `continued-in` record naming the new ID, and the new transcript re-homes the
+earlier records under that ID. Claude CLI's background sessions also mark every
+record `sessionKind: "bg"`. The worker links the two sessions only when both are
+registered through their own hooks for the same route, project and collection;
+the new transcript is the old one's sibling `<new session ID>.jsonl` and was never
+collected on its own; the marker is the old transcript's final record; and, within
+the new transcript's first 16 MiB, its first root record and the old session's
+last human input (found within 4 MiB before the marker) are re-homed copies with
+the same UUID, type, timestamp and message. The link is recorded once in private
+state, never inferred from timing, titles or the marker alone. The old session is
+then terminal at the marker: captures made before it stay valid, nothing after it
+is read, and bytes appended after it report `CLAUDE_HISTORY_REQUIRES_REVIEW`. The
+new session accepts the `bg` kind, treats its re-homed prefix as structural (never
+captured again, including records from before the old session's floor) and
+otherwise registers its own floor and excluded boundary prompt normally. The
+link's exact prefix boundary record is re-read and compared on every worker pass
+and every control binding, wherever reading starts; a prefix rewritten in place
+fails `SOURCE_CHANGED` for that session and binds nothing in the lineage. Without a
+link the marker keeps `CLAUDE_HISTORY_REQUIRES_REVIEW` and a session kind remains
+an ownership refusal; agent, sidechain and other session kinds never join.
 
 Incremental reads seek from the saved cursor. The helper reads exact immutable
 heads as baselines when a selected prompt has more proven human records. Prior

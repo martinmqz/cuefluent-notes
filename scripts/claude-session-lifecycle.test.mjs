@@ -1,0 +1,436 @@
+import test from './test-support/storage-test.mjs';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { storageFixture } from './test-support/storage-fixture.mjs';
+import { runCollectionWorker } from './test-support/capture-workflow.mjs';
+import { collectionIngress, registrationFloorPath } from './collection-ingress.mjs';
+import { inspectIntakeStore } from './intake-io.mjs';
+import { readSelection, readCaptureHead } from './intake-store.mjs';
+import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
+import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
+import { verifyWorkflowStorage } from './workflow-storage.mjs';
+import { digest } from './workflow-values.mjs';
+
+// Synthetic Claude CLI 2.1.299-shaped transcripts: root user/assistant rows
+// plus metadata and large API request snapshots. All content is fictional.
+const COMMAND = 'cuefluent-notes:cuefluent-notes';
+const line = value => JSON.stringify(value) + '\n';
+const CONTROLS = {
+  status: { tool: 'processing_status', arguments: {} },
+  review: { tool: 'processing_review', arguments: {} },
+  'review save k2mn9p': { tool: 'processing_review', arguments: { decision: 'save', draft: 'k2mn9p' } },
+};
+
+async function claudeFixture(t, { collect = true } = {}) {
+  const f = await storageFixture(t, { privateConfig: true });
+  if (!collect) {
+    // Processing-only: hooks register a processing source only for a non-manual mode.
+    f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'prompted';
+    const bytes = JSON.stringify(f.config);
+    await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+    f.options.expectedConfigHash = digest(bytes);
+    f.capability = await verifyWorkflowStorage(f.options);
+  }
+  const transcripts = path.join(f.root, 'claude-projects', 'synthetic-project');
+  await fs.mkdir(transcripts, { recursive: true });
+  const skillPath = path.join(f.root, 'synthetic-plugin', 'SKILL.md');
+  await fs.mkdir(path.dirname(skillPath), { recursive: true });
+  await fs.writeFile(skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+  const store = await inspectIntakeStore(f.collection);
+  let clock = 0;
+  const stamp = () => new Date(Date.UTC(2026, 9, 16, 12, 0, 0, clock++)).toISOString();
+  const session = (sessionId = randomUUID(), { kind = null } = {}) => {
+    const file = path.join(transcripts, `${sessionId}.jsonl`);
+    let parent = null;
+    const s = {
+      sessionId, file, rows: [],
+      root(type, extra = {}) {
+        const row = { parentUuid: parent, isSidechain: false, userType: 'external', cwd: f.project, sessionId, version: '2.1.299',
+          gitBranch: 'main', ...(kind ? { sessionKind: kind } : {}), type, uuid: randomUUID(), timestamp: stamp(), ...extra };
+        parent = row.uuid; return row;
+      },
+      meta: (type, extra = {}) => ({ type, sessionId, ...extra }),
+      snapshot: () => ({ type: 'api-request', sessionId, requestId: randomUUID(), body: 'synthetic request snapshot '.repeat(800) }),
+      prompt: (text, promptId = randomUUID()) => s.root('user', { promptId, message: { role: 'user', content: text } }),
+      control(control, promptId = randomUUID()) {
+        const input = s.root('user', { promptId, message: { role: 'user',
+          content: `<command-message>${COMMAND}</command-message>\n<command-name>/${COMMAND}</command-name>\n<command-args>${control}</command-args>` } });
+        const companion = s.root('user', { promptId, isMeta: true, turnCompanion: true, message: { role: 'user',
+          content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(skillPath)}\n\nSynthetic control ${control}\n` }] } });
+        return [input, companion];
+      },
+      call(control, callId = `toolu_${randomUUID().replaceAll('-', '')}`) {
+        const { tool, arguments: input } = CONTROLS[control];
+        return s.root('assistant', { attributionSkill: COMMAND, attributionPlugin: 'cuefluent-notes', message: { role: 'assistant',
+          content: [{ type: 'tool_use', id: callId, name: `mcp__plugin_cuefluent-notes_cuefluent_control__${tool}`, input: structuredClone(input) }] } });
+      },
+      reply: text => s.root('assistant', { message: { role: 'assistant', content: [{ type: 'text', text }] } }),
+      async append(rows) { s.rows.push(...rows); await fs.appendFile(file, rows.map(line).join('')); },
+      hook: (event, promptId = null, extra = {}) => collectionIngress('claude', { session_id: sessionId, cwd: f.project, transcript_path: file,
+        hook_event_name: event, ...(promptId ? { prompt_id: promptId, prompt: 'Not persisted by ingress' } : { source: 'startup' }), ...extra },
+      { configPath: f.options.configPath, launch: async () => {} }),
+      resolve: (callRow, capability = f.capability) => {
+        const block = callRow.message.content[0];
+        return resolveProcessingInvocation(capability, { client: 'claude', sessionId, toolCallId: block.id },
+          { tool: block.name.split('__').at(-1), arguments: structuredClone(block.input) }, { skillPath, settleMs: 0 });
+      },
+      head: unitId => readCaptureHead(store, { client: 'claude', sessionId, unitId }),
+      selection: () => readSelection(store, { client: 'claude', sessionId }),
+    };
+    return s;
+  };
+  const run = extra => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id, ...extra });
+  return { ...f, transcripts, skillPath, store, session, run };
+}
+// Every private state file with its bytes: a binding must write nothing.
+async function stateFiles(root) {
+  const out = {};
+  async function walk(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true }).catch(() => [])) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) await walk(file);
+      else out[path.relative(root, file)] = digest(await fs.readFile(file));
+    }
+  }
+  await walk(root); return out;
+}
+const sessionCodes = (result, sessionId) => result.diagnostics.filter(item => item.sessionId === sessionId).map(item => item.code);
+
+test('a typed control as the first prompt of a fresh registered Claude session binds without a warm-up prompt', async t => {
+  for (const control of Object.keys(CONTROLS)) await t.test(control, async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    // The CLI persists the prompt and large request snapshots before the hook
+    // that registers the session freezes its floor past them.
+    await A.append([A.meta('mode', { mode: 'normal' }), A.meta('permission-mode', { permissionMode: 'default' }),
+      ...A.control(control, P1), A.snapshot(), A.snapshot()]);
+    assert.equal((await A.hook('UserPromptSubmit', P1)).status, 'queued');
+    assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['NATIVE_BOUNDARY_PENDING']);
+    const call = A.call(control); await A.append([call]);
+    const before = await stateFiles(f.collection.intakeStateDir), transcript = await fs.readFile(A.file);
+    const bound = await A.resolve(call);
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1); assert.equal(bound.typedControl, control);
+    assert.equal(bound.captureActive, false); assert.equal(bound.selectionHash, null); assert.equal(bound.chatLineage, undefined);
+    assert.deepEqual(bound.selection, { client: 'claude', sessionId: A.sessionId, cwd: f.project, unitId: null });
+    // Binding creates no selection and writes no state; the source is untouched.
+    assert.equal((await A.selection()).state, null);
+    assert.deepEqual(await stateFiles(f.collection.intakeStateDir), before);
+    assert.deepEqual(await fs.readFile(A.file), transcript);
+  });
+});
+
+test('a SessionStart registration binds the first prompt through the floor the worker froze from its first wake', async t => {
+  const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+  assert.equal((await A.hook('SessionStart')).status, 'pending-source');
+  await A.append([A.meta('mode', { mode: 'normal' }), ...A.control('review', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  const call = A.call('review'); await A.append([call]);
+  const bound = await A.resolve(call);
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1);
+  // A floor saved for a different registration never pins this source.
+  const floor = path.join(f.collection.intakeStateDir, registrationFloorPath({ client: 'claude', sessionId: A.sessionId }));
+  const saved = JSON.parse(await fs.readFile(floor, 'utf8'));
+  await fs.writeFile(floor, JSON.stringify({ ...saved, registrationId: randomUUID() }) + '\n', { mode: 0o600 });
+  await assert.rejects(A.resolve(call), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+});
+
+test('the floor still governs collection after a first-prompt control: the next prompt is the excluded boundary', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+  await A.append([A.meta('mode', { mode: 'normal' }), ...A.control('review', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  const call = A.call('review'); await A.append([call, A.reply('Draft folder written.')]);
+  assert.equal((await A.resolve(call)).nativeSkill, true);
+  await A.append([A.prompt('Boundary after the first control', P2)]);
+  await A.hook('UserPromptSubmit', P2);
+  const armed = await f.run();
+  assert.deepEqual(armed.boundaryExcluded, [{ client: 'claude', sessionId: A.sessionId, unitId: P2 }]); assert.equal(armed.saved, 0);
+  await A.append([A.reply('Noted.'), A.prompt('Synthetic decision: keep the pilot paused', P3)]);
+  await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  assert.equal((await A.head(P1)).head, null); assert.equal((await A.head(P2)).head, null);
+  assert.deepEqual((await A.head(P3)).capture.evidence.map(item => item.text), ['Synthetic decision: keep the pilot paused']);
+  assert.equal((await A.selection()).state.intervals[0].lower.unitId, P2);
+});
+
+test('stale, replaced or out-of-scope registrations and later or older prompts never verify a selection-less binding', async t => {
+  await t.test('a renewed collection grant', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.append([...A.control('status', P1), A.snapshot()]); await A.hook('UserPromptSubmit', P1); await f.run();
+    const call = A.call('status'); await A.append([call]);
+    f.config.routes[0].collection.generation = randomUUID();
+    const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+    const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
+    await assert.rejects(A.resolve(call, capability), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+  });
+  await t.test('collection turned off', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.append([...A.control('status', P1), A.snapshot()]); await A.hook('UserPromptSubmit', P1); await f.run();
+    const call = A.call('status'); await A.append([call]);
+    f.config.routes[0].collection.enabled = false;
+    const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+    const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
+    await assert.rejects(A.resolve(call, capability), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+  });
+  await t.test('a replaced transcript', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.append([...A.control('status', P1), A.snapshot()]); await A.hook('UserPromptSubmit', P1); await f.run();
+    const call = A.call('status'); await A.append([call]);
+    const bytes = await fs.readFile(A.file); await fs.rm(A.file); await fs.writeFile(A.file, bytes);
+    await assert.rejects(A.resolve(call), { code: 'SOURCE_CHANGED' });
+  });
+  await t.test('the first prompt after the floor binds before arming; a later one waits for the armed selection', async t => {
+    const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+    await A.append([A.prompt('Opening context', P1), A.snapshot()]); await A.hook('UserPromptSubmit', P1);
+    const [input, companion] = A.control('status', P2), call = A.call('status');
+    await A.append([input, companion, call]);
+    // Not armed yet, but this prompt is the boundary the worker will exclude,
+    // so it can never be collected: it binds without a receipt.
+    const early = await A.resolve(call);
+    assert.equal(early.nativeSkill, true); assert.equal(early.unitId, P2); assert.equal(early.captureActive, false);
+    // A second post-floor control before arming would be collected later; it waits.
+    const [input3, companion3] = A.control('review', P3), call3 = A.call('review');
+    await A.append([input3, companion3, call3]);
+    await assert.rejects(A.resolve(call3), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+    await A.hook('UserPromptSubmit', P2); await f.run();
+    const bound = await A.resolve(call);
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P2); assert.equal(bound.captureActive, true);
+    assert.equal((await A.resolve(call3)).unitId, P3);
+  });
+  await t.test('a post-floor control beyond the bounded window waits too: an earlier prompt could hide outside it', async t => {
+    const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+    await A.append([A.prompt('Opening context', P1), A.snapshot()]); await A.hook('UserPromptSubmit', P1);
+    // An earlier post-floor prompt, then more request snapshots than the 2 MiB
+    // binding window holds, then a typed control. The window no longer reaches
+    // the floor, so nothing shows the control to be the excluded boundary.
+    await A.append([A.prompt('Earlier prompt after the floor', P2), A.reply('Noted.'), ...Array.from({ length: 110 }, () => A.snapshot())]);
+    const [input, companion] = A.control('status', P3), call = A.call('status');
+    await A.append([input, companion, call]);
+    assert((await fs.stat(A.file)).size > 2 * 1024 * 1024 + 256 * 1024);
+    await assert.rejects(A.resolve(call), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+    // Armed, the earlier prompt is the excluded boundary and the control binds
+    // inside the collected interval, where its exclusion receipt applies.
+    await A.hook('UserPromptSubmit', P2);
+    const armed = await f.run();
+    assert.deepEqual(armed.boundaryExcluded, [{ client: 'claude', sessionId: A.sessionId, unitId: P2 }]);
+    const bound = await A.resolve(call);
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P3); assert.equal(bound.captureActive, true);
+  });
+  await t.test('an older prompt before the floor', async t => {
+    const f = await claudeFixture(t), A = f.session(), [P0, P1] = [randomUUID(), randomUUID()];
+    await A.append([A.prompt('Earlier history', P0), A.reply('Earlier reply'), ...A.control('status', P1), A.snapshot()]);
+    await A.hook('UserPromptSubmit', P1); await f.run();
+    const call = A.call('status'); await A.append([call]);
+    // Not a fresh session: only the floor-bounded tail is read, so the call
+    // binds as model-chosen and the earlier prompt is never consulted.
+    const bound = await A.resolve(call);
+    assert.equal(bound.nativeSkill, false); assert.equal(bound.typedControl, undefined); assert.equal(bound.unitId, null);
+  });
+});
+
+test('a processing-only route also verifies a first-prompt control before its hook boundary', async t => {
+  const f = await claudeFixture(t, { collect: false }), A = f.session(), P1 = randomUUID();
+  await A.append([...A.control('review', P1), A.snapshot()]);
+  assert.equal((await A.hook('UserPromptSubmit', P1)).status, 'processing-only');
+  const call = A.call('review'); await A.append([call]);
+  const bound = await A.resolve(call);
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1); assert.equal(bound.captureActive, false);
+});
+
+// A session the CLI moved into a background session: the origin ends with
+// `continued-in`, the successor re-homes every root record under its own ID
+// with sessionKind "bg" (Claude CLI's background-session stamp).
+async function continued(t, { rehome = rows => rows, successorKind = 'bg', register = true, sibling = true, arm = false } = {}) {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision before the move', P3), A.reply('Recorded.')]);
+  await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const B = f.session(randomUUID(), { kind: successorKind });
+  if (!sibling) B.file = path.join(f.root, `${B.sessionId}.jsonl`);
+  await B.append([B.meta('ai-title', { aiTitle: 'Synthetic title' }), B.meta('agent-name', { agentName: 'synthetic' }),
+    B.meta('mode', { mode: 'normal' }), B.meta('permission-mode', { permissionMode: 'default' })]);
+  // Registered while only metadata exists: its floor precedes the re-homed history.
+  if (register) await B.hook('SessionStart', null, { source: 'resume' });
+  const copies = rehome(A.rows.filter(row => ['user', 'assistant', 'system', 'attachment'].includes(row.type))
+    .map(row => ({ ...row, sessionId: B.sessionId, ...(successorKind ? { sessionKind: successorKind } : {}) })));
+  await fs.appendFile(B.file, copies.map(line).join(''));
+  if (arm) {
+    // Collected before the origin's marker exists: nothing can link it later.
+    const Q0 = randomUUID(); await B.append([B.prompt('Successor prompt before the marker', Q0)]);
+    await B.hook('UserPromptSubmit', Q0); await f.run();
+  }
+  const marker = { type: 'continued-in', timestamp: new Date(Date.UTC(2026, 9, 16, 13)).toISOString(), sessionId: A.sessionId, continuedInSessionId: B.sessionId };
+  await fs.appendFile(A.file, line(marker));
+  return { f, A, B, P: [P1, P2, P3], copies };
+}
+
+test('a verified continuation ends the origin at its marker, never recollects re-homed history and binds controls in the successor', async t => {
+  const { f, A, B, P: [P1, P2, P3] } = await continued(t);
+  // The worker may visit the successor before the origin links it; the second
+  // pass sees both sides settled.
+  await f.run();
+  const settled = await f.run();
+  assert.deepEqual(sessionCodes(settled, A.sessionId), []);
+  assert(!JSON.stringify(settled.diagnostics).includes('CLAUDE_HISTORY_REQUIRES_REVIEW'));
+  // The link is recorded once, from both registered transcripts.
+  const link = (await readContinuedLink(f.store, A.sessionId)).value, pointer = await readContinuesLink(f.store, B.sessionId);
+  assert.equal(link.to.sessionId, B.sessionId); assert.equal(link.lineage, A.sessionId); assert.deepEqual(link.to.sessionKinds, ['bg']);
+  assert.equal(pointer.link.lineage, A.sessionId);
+  const bBytes = await fs.readFile(B.file, 'utf8'), copyOfP3 = bBytes.split('\n').findIndex(text => text.includes(`"promptId":"${P3}"`));
+  assert.equal(link.to.prefix.endByte, Buffer.byteLength(bBytes.split('\n').slice(0, copyOfP3 + 1).join('\n') + '\n'));
+  // The successor's first own prompt, a typed control, is its excluded boundary.
+  const Q1 = randomUUID(), [input, companion] = B.control('status', Q1), call = B.call('status');
+  await B.append([input, companion]); await B.hook('UserPromptSubmit', Q1);
+  const armed = await f.run();
+  assert.deepEqual(armed.boundaryExcluded.filter(item => item.sessionId === B.sessionId), [{ client: 'claude', sessionId: B.sessionId, unitId: Q1 }]);
+  await B.append([call]);
+  const bound = await B.resolve(call);
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, Q1); assert.equal(bound.captureActive, true);
+  assert.deepEqual(bound.chatLineage, { client: 'claude', sessionId: A.sessionId });
+  // Later successor prompts are collected under the successor's own identity.
+  const Q2 = randomUUID();
+  await B.append([B.reply('Status shown.'), B.prompt('Synthetic decision after the move', Q2)]); await B.hook('UserPromptSubmit', Q2);
+  const later = await f.run();
+  assert.equal(later.saved, 1); assert.deepEqual(sessionCodes(later, B.sessionId), []);
+  assert.deepEqual((await B.head(Q2)).capture.evidence.map(item => item.text), ['Synthetic decision after the move']);
+  // Re-homed units are neither captured twice nor captured from before the floor.
+  for (const unitId of [P1, P2, P3]) assert.equal((await B.head(unitId)).head, null);
+  assert.equal((await A.head(P1)).head, null); assert.equal((await A.head(P2)).head, null);
+  assert.deepEqual((await A.head(P3)).capture.evidence.map(item => item.text), ['Synthetic decision before the move']);
+  // Bytes after the terminal marker are not read; they keep the origin in review.
+  await A.append([A.prompt('Late origin prompt', randomUUID())]);
+  const late = await f.run();
+  assert.deepEqual(sessionCodes(late, A.sessionId), ['CLAUDE_HISTORY_REQUIRES_REVIEW']);
+  assert.equal((await readContinuedLink(f.store, A.sessionId)).value.linkedAt, link.linkedAt);
+});
+
+test('the successor reader refuses a re-homed prefix rewritten in place after the link', async t => {
+  const { f, A, B } = await continued(t);
+  await f.run(); await f.run();
+  const link = (await readContinuedLink(f.store, A.sessionId)).value;
+  // Same file identity, same length, different bytes inside the boundary record.
+  const bytes = await fs.readFile(B.file), at = bytes.indexOf('before the move', link.to.prefix.startByte);
+  assert(at > link.to.prefix.startByte && at < link.to.prefix.endByte);
+  const handle = await fs.open(B.file, 'r+');
+  try { await handle.write(Buffer.from('before the mova'), 0, 15, at); } finally { await handle.close(); }
+  assert.deepEqual(sessionCodes(await f.run(), B.sessionId), ['SOURCE_CHANGED']);
+  assert.equal((await B.selection()).state, null);
+});
+
+test('a successor registered at its first prompt binds that control through the floor past it', async t => {
+  const { f, A, B } = await continued(t, { register: false });
+  const Q1 = randomUUID();
+  await B.append([...B.control('review', Q1), B.snapshot()]);
+  await B.hook('UserPromptSubmit', Q1);
+  await f.run(); await f.run();
+  assert(await readContinuesLink(f.store, B.sessionId));
+  const call = B.call('review'); await B.append([call]);
+  const bound = await B.resolve(call);
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, Q1); assert.equal(bound.captureActive, false);
+  assert.deepEqual(bound.chatLineage, { client: 'claude', sessionId: A.sessionId });
+});
+
+test('a re-homed prefix rewritten in place behind the floor neither binds in the lineage nor collects', async t => {
+  const { f, A, B } = await continued(t, { register: false });
+  const Q1 = randomUUID();
+  await B.append([...B.control('review', Q1), B.snapshot()]);
+  await B.hook('UserPromptSubmit', Q1);
+  await f.run(); await f.run();
+  const link = (await readContinuedLink(f.store, A.sessionId)).value;
+  const call = B.call('review'); await B.append([call]);
+  assert.deepEqual((await B.resolve(call)).chatLineage, { client: 'claude', sessionId: A.sessionId });
+  // Same file identity and length, different bytes inside the boundary record.
+  // The floor and the binding window both start past it, so only the pinned
+  // record itself can show the change.
+  const bytes = await fs.readFile(B.file), at = bytes.indexOf('before the move', link.to.prefix.startByte);
+  assert(at > link.to.prefix.startByte && at < link.to.prefix.endByte);
+  const handle = await fs.open(B.file, 'r+');
+  try { await handle.write(Buffer.from('before the mova'), 0, 15, at); } finally { await handle.close(); }
+  await assert.rejects(B.resolve(call), { code: 'SOURCE_CHANGED' });
+  assert.deepEqual(sessionCodes(await f.run(), B.sessionId), ['SOURCE_CHANGED']);
+  assert.equal((await B.selection()).state, null);
+  assert.equal((await readContinuedLink(f.store, A.sessionId)).value.linkedAt, link.linkedAt);
+});
+
+test('an excluded route refuses a linked, armed successor before any transcript read', async t => {
+  const { f, A, B } = await continued(t);
+  await f.run(); await f.run();
+  const Q1 = randomUUID(), [input, companion] = B.control('status', Q1), call = B.call('status');
+  await B.append([input, companion]); await B.hook('UserPromptSubmit', Q1); await f.run();
+  await B.append([call]);
+  assert.deepEqual((await B.resolve(call)).chatLineage, { client: 'claude', sessionId: A.sessionId });
+  // Policy changes after the link and the arming. With the transcript gone, a
+  // read of its header or pinned prefix record before the authorization check
+  // would surface as a file error instead of the refusal.
+  f.config.routes[0].excluded = true;
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
+  await fs.rm(B.file);
+  await assert.rejects(B.resolve(call, capability), { code: 'WORKFLOW_NOT_AUTHORIZED' });
+});
+
+test('a fresh session continued right after its first-prompt control still links and its successor decides in the same lineage', async t => {
+  const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+  await A.append([A.meta('mode', { mode: 'normal' }), ...A.control('review', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  const call = A.call('review'); await A.append([call]);
+  assert.equal((await A.resolve(call)).nativeSkill, true);
+  // Moved to a background session before any second prompt: the origin was never armed.
+  const B = f.session(randomUUID(), { kind: 'bg' });
+  await B.append([B.meta('agent-name', { agentName: 'synthetic' })]);
+  await B.hook('SessionStart', null, { source: 'resume' });
+  await fs.appendFile(B.file, A.rows.filter(row => ['user', 'assistant'].includes(row.type))
+    .map(row => line({ ...row, sessionId: B.sessionId, sessionKind: 'bg' })).join(''));
+  await fs.appendFile(A.file, line({ type: 'continued-in', timestamp: new Date(Date.UTC(2026, 9, 16, 13)).toISOString(), sessionId: A.sessionId, continuedInSessionId: B.sessionId }));
+  await f.run();
+  const settled = await f.run();
+  assert.equal((await readContinuesLink(f.store, B.sessionId)).link.lineage, A.sessionId);
+  assert.deepEqual(sessionCodes(settled, A.sessionId), []);
+  assert.equal((await A.selection()).state, null);
+  const Q1 = randomUUID(), [input, companion] = B.control('review save k2mn9p', Q1), decision = B.call('review save k2mn9p');
+  await B.append([input, companion]); await B.hook('UserPromptSubmit', Q1); await f.run();
+  await B.append([decision]);
+  const bound = await B.resolve(decision);
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, 'review save k2mn9p');
+  assert.deepEqual(bound.chatLineage, { client: 'claude', sessionId: A.sessionId });
+  assert.equal((await B.head(P1)).head, null);
+});
+
+test('a marker alone, an unregistered, agent, sidechain, other-kind or mismatched successor never joins a lineage', async t => {
+  const cases = {
+    'no registered successor': { register: false },
+    'changed re-homed input': { rehome: rows => rows.map(row => row.message?.content === 'Synthetic decision before the move'
+      ? { ...row, message: { ...row.message, content: 'Altered decision' } } : row) },
+    'missing re-homed input': { rehome: rows => rows.filter(row => row.message?.content !== 'Synthetic decision before the move') },
+    'agent rows': { rehome: rows => rows.map(row => ({ ...row, agentId: 'a1b2c3' })) },
+    'sidechain rows': { rehome: rows => rows.map(row => ({ ...row, isSidechain: true })) },
+    'daemon session kind': { successorKind: 'daemon' },
+    'not the sibling transcript': { sibling: false },
+  };
+  for (const [name, options] of Object.entries(cases)) await t.test(name, async t => {
+    const { f, A, B } = await continued(t, options);
+    await f.run(); await f.run();
+    assert.equal(await readContinuedLink(f.store, A.sessionId), null);
+    assert.equal(await readContinuesLink(f.store, B.sessionId), null);
+    // The origin keeps its marker diagnostic and nothing after the marker.
+    assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['CLAUDE_HISTORY_REQUIRES_REVIEW']);
+    if (options.register === false) return; // An unregistered transcript is never read.
+    // The successor stays unarmed, and a control typed there is not bound.
+    const Q1 = randomUUID(), [input, companion] = B.control('status', Q1), call = B.call('status');
+    await B.append([input, companion, call]); await B.hook('UserPromptSubmit', Q1); await f.run();
+    assert.equal((await B.selection()).state, null);
+    await assert.rejects(B.resolve(call));
+  });
+});
+
+test('a successor collected on its own before any link is never joined afterwards', async t => {
+  const { f, A, B } = await continued(t, { successorKind: null, arm: true });
+  assert((await B.selection()).state);
+  await f.run(); await f.run();
+  assert.equal(await readContinuedLink(f.store, A.sessionId), null);
+  assert.equal(await readContinuesLink(f.store, B.sessionId), null);
+  assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['CLAUDE_HISTORY_REQUIRES_REVIEW']);
+});

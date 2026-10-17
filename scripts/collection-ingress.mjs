@@ -21,6 +21,7 @@ export const registrationPath = identity => `ingress/registrations/${choice(iden
 export const wakePath = identity => `ingress/wake/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const suspendedPath = identity => `ingress/suspended/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const drainedPath = identity => `ingress/drained/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
+export const registrationFloorPath = identity => `registration-floors/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const processingSourceDirectory = client => `ingress/processing-sources/${choice(client, ['codex', 'claude'])}`;
 export const processingSourcePath = (identity, policyHash) => `${processingSourceDirectory(identity.client)}/${nativeId(identity.sessionId)}/${hash(policyHash)}/record.json`;
 // Shape version only; reader-owned rules revisions invalidate cached results.

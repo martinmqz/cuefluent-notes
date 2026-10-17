@@ -10,7 +10,8 @@ import { reviewCode, presentReviewFiles, readReviewPresentations } from './proce
 import { readReviewPreview } from './processing-host-review.mjs';
 import { REVIEW_CODE, REVIEW_COMMANDS } from './processing-control-proof.mjs';
 import { fingerprint } from './safe-update.mjs';
-import { digest } from './workflow-values.mjs';
+import { canonicalJSON, digest } from './workflow-values.mjs';
+import { readSelection } from './intake-store.mjs';
 
 const content = '# Rollout meeting\n\n## Decision\n\nKeep the rollout paused.\n';
 const claude = REVIEW_COMMANDS.claude, codex = REVIEW_COMMANDS.codex;
@@ -239,6 +240,38 @@ test('bare decisions never pick the only draft and refuse an unverified latest d
     assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
+});
+
+test('a verified continuation keeps the chat lineage: a bare decision after the move applies the draft typed-reviewed before it', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
+  const origin = f.identity.sessionId, successor = randomUUID(), other = randomUUID();
+  // The real binding supplies chatLineage only for a link verified from both
+  // registered transcripts (claude-session-lifecycle tests); this stub stands in.
+  let chat = { sessionId: origin, lineage: null }, h;
+  h = await harness(t, f, { client: 'claude', async resolveInvocation(capability, context, invocation) {
+    const selected = await readSelection(f.store, { client: 'claude', sessionId: origin });
+    return Object.freeze({ source: f.source, selection: { ...f.selection, sessionId: chat.sessionId }, selectionHash: selected.hash,
+      nativeSkill: h.nativeSkill, controlExclusionUnsupported: false, unitId: f.identity.unitId, argsHash: digest(canonicalJSON(invocation.arguments)),
+      captureActive: false, tool: `mcp__cuefluent_control.${invocation.tool}`, callId: context.toolCallId,
+      ...(chat.lineage ? { chatLineage: { client: 'claude', sessionId: chat.lineage } } : {}) });
+  } });
+  h.nativeSkill = true;
+  const shown = await review(h), code = shown.draft.code;
+  assert.equal(shown.review, 'presented');
+  assert.deepEqual((await reviewState(f)).recent.map(item => item.chatLineage), [{ client: 'claude', sessionId: origin }]);
+  // Another chat, even in the same project, was never shown the draft.
+  chat = { sessionId: other, lineage: null };
+  assert.equal((await review(h, { decision: 'save' })).review, 'unresolved');
+  assert.equal((await review(h, { decision: 'save', draft: code })).review, 'not-shown');
+  // The continued session shares the origin's lineage, so its latest typed review counts.
+  chat = { sessionId: successor, lineage: origin };
+  const saved = await review(h, { decision: 'save' });
+  assert.equal(saved.review, 'saved');
+  assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  const state = await reviewState(f);
+  assert.deepEqual(state.bindings, []);
+  assert.deepEqual(state.recent.map(item => item.chatLineage), [{ client: 'claude', sessionId: origin }]);
 });
 
 test('a presentation counts only once its reply is committed; an unconfirmed one is never a decision target', async t => {
