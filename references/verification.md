@@ -22,8 +22,9 @@ contracts for supported commands, formats, permissions and recovery procedures.
   structural Markdown checks certify classification or summary quality.
 - Host hook trust, launch PATH, session reload and native review rendering depend
   on the client. Tested Claude Desktop and CLI versions cannot complete a native
-  review form; see
-  [Claude form limitations](processing-chat.md#claude-form-limitations). Installation grants
+  review form, so Claude reviews through the private review folder and typed
+  decisions; see [Claude limitations](processing-chat.md#claude-limitations).
+  Opening or reading the review folder is not verified by the plugin. Installation grants
   neither collection nor processing consent. See [installation](distribution.md)
   and [setup](setup.md).
 - Windows profile, package visibility and indexing policies vary by host. Existing

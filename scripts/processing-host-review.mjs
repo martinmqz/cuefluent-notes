@@ -1,14 +1,9 @@
 import { inspectProcessing, readProcessingProposal, saveProcessing, completeProcessing } from './processing.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { keys, choice, fail } from './workflow-values.mjs';
-import { CONTROLS } from './file-io.mjs';
+import { DISPLAY_CONTROLS as displayControls, displayEscape as controlEscape, displayScalar as scalar } from './file-io.mjs';
 import { unitKey } from './capture-retention.mjs';
 
-// Also escape Unicode line separators and directional overrides so untrusted
-// text cannot add structural lines or rearrange the review's labels.
-const displayControls = new RegExp(`${CONTROLS.source}|[\u2028\u2029\u202a-\u202e\u2066-\u2069]`, 'g');
-const controlEscape = char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
-const scalar = value => JSON.stringify(value).replace(displayControls, controlEscape);
 const quotedMarkdown = value => value.replaceAll('\\', '\\\\').replace(/\r\n?/g, '\n')
   .replace(displayControls, char => char === '\n' || char === '\t' ? char : controlEscape(char))
   .split('\n').map(line => `│ ${line}`).join('\n');
@@ -55,23 +50,63 @@ function processingReviewText(preview) {
 }
 
 const OUTCOMES = Object.freeze({ save: 'saved', skip: 'skipped', cancel: 'cancelled' });
+
+async function inspectReview(capability, operationId) {
+  const inspected = await withStorageProbes(() => inspectProcessing(capability, operationId));
+  if (inspected.state !== 'awaiting-review' || inspected.recoveryRequired) fail('PROCESSING_REVIEW_REQUIRED');
+  return inspected;
+}
+
+/** Exact read-only review material for the currently outstanding revision.
+ * Its claim and proposal hashes are the only binding a later decision may use. */
+export async function readReviewPreview(capability, { selection, operationId }) {
+  const inspected = await inspectReview(capability, operationId);
+  return withStorageProbes(() => readProcessingProposal(capability, { selection, operationId,
+    expectedClaimHash: inspected.claimHash, expectedProposalHash: inspected.proposalHash }));
+}
+
+// Cancellation remains actionable through engine preflight and staging. Once
+// intent/disposition publication starts, finish or report recovery explicitly;
+// a late transport cancellation must not hide the committed operation.
+async function decide(capability, { selection, operationId }, { claimHash, proposalHash }, decision, { signal, commitResponse }) {
+  const beforeCommit = () => { signal?.throwIfAborted(); commitResponse?.(); };
+  const result = await withStorageProbes(() => decision === 'save'
+    ? saveProcessing(capability, { selection, operationId, expectedClaimHash: claimHash,
+      approvedProposalHash: proposalHash, trigger: 'approved' }, { beforeCommit })
+    : completeProcessing(capability, { selection, operationId, expectedClaimHash: claimHash,
+      outcome: OUTCOMES[decision] }, { beforeCommit }));
+  return { ...result, review: OUTCOMES[decision] };
+}
+
+/** Apply a verified typed decision to the exact revision presented to this
+ * chat. A changed claim or proposal refuses before staging; the engine then
+ * rechecks inputs, destinations and transactions under its own locks. */
+export async function applyReviewDecision(capability, { selection, operationId }, { decision, expectedClaimHash, expectedProposalHash, signal, commitResponse }) {
+  choice(decision, ['save', 'skip', 'cancel']);
+  signal?.throwIfAborted();
+  const inspected = await inspectReview(capability, operationId);
+  if (inspected.claimHash !== expectedClaimHash) fail('PROCESSING_CLAIM_CHANGED');
+  if (inspected.proposalHash !== expectedProposalHash) fail('PROCESSING_PROPOSAL_CHANGED');
+  signal?.throwIfAborted();
+  return decide(capability, { selection, operationId }, { claimHash: expectedClaimHash, proposalHash: expectedProposalHash }, decision, { signal, commitResponse });
+}
+
 /** The model cannot supply a decision. elicit is the native host-control channel
  * callback, and its correlated response approves only the exact preview here.
  * No engine lock is held while the host waits. Closed/unsupported forms preserve
  * the pending proposal; revisions and conflicts require a fresh review. A decision
  * applies only when the host reports the preview it displayed as intact; `review`
- * reports what happened without implying that a form appeared. */
-export async function reviewProcessingProposal(capability, { selection, operationId }, { elicit, signal, commitResponse }) {
+ * reports what happened without implying that a form appeared. A caller that
+ * already read the exact preview (for its review folder) passes it and the folder. */
+export async function reviewProcessingProposal(capability, { selection, operationId }, { elicit, signal, commitResponse, preview, folder }) {
   signal?.throwIfAborted();
   if (typeof elicit !== 'function') fail('PROCESSING_REVIEW_UNSUPPORTED');
-  const inspected = await withStorageProbes(() => inspectProcessing(capability, operationId));
-  if (inspected.state !== 'awaiting-review' || inspected.recoveryRequired) fail('PROCESSING_REVIEW_REQUIRED');
-  const preview = await withStorageProbes(() => readProcessingProposal(capability, { selection, operationId,
-    expectedClaimHash: inspected.claimHash, expectedProposalHash: inspected.proposalHash }));
+  preview ??= await readReviewPreview(capability, { selection, operationId });
+  if (preview.operationId !== operationId) fail('PROCESSING_REVIEW_INTERRUPTED');
   const message = processingReviewText(preview);
   if (Buffer.byteLength(message) > 256 * 1024) fail('PROCESSING_REVIEW_LIMIT');
   signal?.throwIfAborted();
-  const response = await elicit({ message });
+  const response = await elicit({ message, ...(folder === undefined ? {} : { folder }) });
   signal?.throwIfAborted();
   keys(response, ['action'], ['content', 'preview']); choice(response.action, ['accept', 'decline', 'cancel']);
   const pending = review => ({ operationId, status: 'awaiting-review', proposalHash: preview.proposalHash, review });
@@ -85,14 +120,5 @@ export async function reviewProcessingProposal(capability, { selection, operatio
   // Keep every decision pending, including Later, and say why.
   if (choice(response.preview, ['intact', 'altered']) === 'altered') return pending('display-altered');
   if (decision === 'later') return pending('deferred');
-  // Cancellation remains actionable through engine preflight and staging. Once
-  // intent/disposition publication starts, finish or report recovery explicitly;
-  // a late transport cancellation must not hide the committed operation.
-  const beforeCommit = () => { signal?.throwIfAborted(); commitResponse?.(); };
-  const result = await withStorageProbes(() => decision === 'save'
-    ? saveProcessing(capability, { selection, operationId, expectedClaimHash: preview.claimHash,
-      approvedProposalHash: preview.proposalHash, trigger: 'approved' }, { beforeCommit })
-    : completeProcessing(capability, { selection, operationId, expectedClaimHash: preview.claimHash,
-      outcome: OUTCOMES[decision] }, { beforeCommit }));
-  return { ...result, review: OUTCOMES[decision] };
+  return decide(capability, { selection, operationId }, preview, decision, { signal, commitResponse });
 }

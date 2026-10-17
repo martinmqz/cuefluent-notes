@@ -253,17 +253,24 @@ export async function assertIntakeTransaction(transaction) {
 }
 
 export async function replaceIntakeJSON(transaction, name, value, expectedHash) {
-  checkWorkflowBudget();
-  const store = await assertIntakeTransaction(transaction);
   const bytes = Buffer.from(canonicalJSON(value) + '\n');
   if (bytes.length > META_LIMIT) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
-  if ((await intakeSnapshot(store, 'state', name)).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
+  return replaceIntakeBytes(transaction, name, bytes, expectedHash);
+}
+
+/** Atomically replace one private state file with exact bytes. The expected
+ * hash (null for absent) is checked before staging and again before rename. */
+export async function replaceIntakeBytes(transaction, name, bytes, expectedHash, { maxBytes = META_LIMIT } = {}) {
+  checkWorkflowBudget();
+  if (!Buffer.isBuffer(bytes) || bytes.length > maxBytes) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
+  const store = await assertIntakeTransaction(transaction);
+  if ((await intakeSnapshot(store, 'state', name, { maxBytes })).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
   const stageName = `metadata-stages/.metadata-${randomUUID()}.tmp`;
   const guard = () => assertIntakeTransaction(transaction);
   const stage = await writeIntakeStage(store, 'state', stageName, bytes, guard);
   try {
     const target = await intakePath(store, 'state', name, { createParents: true });
-    if ((await intakeSnapshot(store, 'state', name)).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
+    if ((await intakeSnapshot(store, 'state', name, { maxBytes })).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
     if (!await isOwnedStage(stage.file, stage.identity, bytes, { guard })) fail('INTAKE_STAGE_CHANGED');
     await guard(); await guardStore(store, [stage.file, target]); await fs.rename(stage.file, target); await syncDirectory(path.dirname(target));
     return digest(bytes);

@@ -213,7 +213,7 @@ The installed `cuefluent_control` MCP server exposes these strict tools:
 | `process_selected_captures` | `{collectionId?, selection?, requestId?, retryToken?, scope?}` |
 | `processing_resume` | `{collectionId?, retryToken?}` |
 | `processing_cancel` | `{collectionId?, retryToken?}` |
-| `processing_review` | `{collectionId?, retryToken?}` |
+| `processing_review` | Claude: `{collectionId?, retryToken?, draft?, decision?}`; Codex: `{collectionId?, retryToken?}` |
 
 The MCP `arguments` member may be omitted or null for an empty argument object;
 other non-object values are rejected. Native source verification still applies.
@@ -284,16 +284,54 @@ If the engine disposition committed but registry or receipt bookkeeping failed,
 the response is `completed` with `nextAction: "inspect"` and a bounded diagnostic.
 Inspect the existing operation; do not repeat its save. That response does not
 claim successful capture-exclusion bookkeeping.
-`processing_review` sends the exact proposal through the correlated native host
-form; an unsupported or closed form preserves the pending proposal. A model's
-tool arguments cannot substitute for that host response.
+`processing_review` writes the exact outstanding proposal to a private review
+folder under the collection's intake state (`review/<code>/`, directories 0700 and
+files 0600 on POSIX, no links followed): `proposed.md` and, for an update,
+`current.md` (numbered `N-proposed.md`/`N-current.md` for several files), plus
+`summary.txt` with paths, sizes, sources (each with the numbers of the files it
+supports and at most five omission details plus a count), inspection limits, the
+decision commands and the operation, claim and proposal hashes, bounded to 1 MiB.
+A durable presentation record in the
+same private state stores `{chatLineage, operationId, proposalHash, claimHash,
+presentedAt, verified, delivered, typedDelivered}` for the invoking native
+session: `verified` and `delivered` describe the latest presentation attempt of
+that revision (typed, and its reply committed), and `typedDelivered` records that
+some typed review of it was delivered to that session. A coded decision needs
+`typedDelivered`; a bare decision needs the session's latest attempt to be a
+delivered typed review. Delivery is confirmed after the reply commits and
+before it is written; if that confirmation fails, the reply is the error and the
+draft must be reviewed again. A cancelled, failed or model-started attempt
+therefore never makes a draft decidable, and never lets a bare decision fall
+back to an older draft. A folder is removed when its draft is
+decided through review, or by a later review or refused decision once its revision
+is no longer pending; records are bounded per collection.
+
+The draft code is six characters from `a-h j k m n p-t v-z 2-9`, derived from a
+domain-separated hash of the proposal hash. Claude's optional `draft` (that code)
+and `decision` (`save`, `skip`, `cancel` or `later`) mirror the typed action
+`review`, `review <code>`, `review <decision> <code>` or `review <decision>`; the
+native transcript must show exactly that typed text, so changed or model-chosen
+fields are refused. Codex refuses these fields with
+`PROCESSING_CONTROL_INVALID_REQUEST`; its verified typed text alone names the
+draft and decision. A decision applies only through a verified typed action, to a
+revision presented to the invoking session by a verified typed review (a
+model-initiated or natural-language display records `verified: false` and does
+not count, even with the code), whose claim and proposal hashes still
+match; Save, Skip and Cancel then use the existing exact-hash engine paths. A
+decision without a code uses only the session's most recent presentation, and
+only when that presentation was verified. Tool arguments cannot substitute for
+the typed text or a host response.
+
+Codex with form support also sends the same exact proposal through the correlated
+native host form, whose header names the review folder; an unsupported or closed
+form preserves the pending proposal.
 The control server supports MCP `2025-11-25`, including the string defaults needed
 by native review. It offers this version even when the client's initial request
 names an older one. Clients unable to accept it cannot use this MCP server and
-must use the explicit CLI commands; clients accepting it without form capability receive
-`PROCESSING_REVIEW_UNSUPPORTED` for review. See
+must use the explicit CLI commands. Claude never receives a review form, and Codex
+without form capability reviews through the folder and typed decisions. See
 [MCP version negotiation](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#version-negotiation).
-When multiple proposals are pending, review first sends a selector with a required
+When multiple proposals are pending, Codex's form review first sends a selector with a required
 `operationId` string and titled `oneOf` choices (`const` is the exact operation ID).
 There is no default. Acceptance selects a preview only; decline/cancel leaves all
 proposals unchanged. The subsequent form remains bound to the selected exact
@@ -305,11 +343,21 @@ host response echoes the unchanged preview, allowing LF/CRLF/CR line-ending
 conversion only. Changed, trimmed, collapsed, oversized or missing text applies no
 decision and leaves the exact proposal pending; it cannot revise or authorize
 different note bytes.
-Review responses add `review`, separate from `statusDetail`: `saved`, `skipped` or
-`cancelled` for a completed decision; `deferred` for Later; `declined` for a host
-decline or close, including a declined draft selector; `display-altered` for a
-changed echo; and `unavailable` when a pending draft meets a host without form
-support. A pending outcome always has status `awaiting-review`.
+Review responses add `review`, separate from `statusDetail`: `presented` for a
+written review folder; `saved`, `skipped` or `cancelled` for a completed decision;
+`deferred` for Later; `declined` for a host decline or close, including a declined
+draft selector; `display-altered` for a changed echo; `not-shown` for a draft not
+presented to this session; `unverified` for a decision that was not a verified
+typed action; `changed` for a revision, destination or pending state that no
+longer matches; `unresolved` for a decision without a code and no verified latest
+presentation; and `unavailable` for a pending draft without a review callback.
+`presented`, `deferred`, `declined`, `display-altered` and `unavailable` always
+have status `awaiting-review`. Review responses built from review fields also return
+`commandPrefix`, optional `draft` (`{code}` or `{code, folder, files, fileCount}`,
+with at most five `{path, bytes, change}` files) and optional `drafts` (at most
+four `{code, path, fileCount}`), and their `statusText` omits diagnostic codes.
+Note paths in these fields are truncated to 512 bytes for display; `summary.txt`
+keeps every full path.
 Quoted note-content lines, escaped controls and per-file line-ending
 summaries distinguish source text from review structure without changing saved bytes.
 The outgoing form is bounded to 256 KiB. Incoming frames allow up to six times

@@ -386,7 +386,7 @@ continue without replacing their hashes.
 The checkpoint contains scope, frozen inputs and continuation pointers. Existing
 engine worksets, claims, acknowledgments, proposals and outcomes remain the
 source of truth. It supplies no independent save or completion authority. Each
-proposal still needs its exact native review decision.
+proposal still needs its exact review decision.
 
 Redelivery of an exact verified formal call returns its original admitted response
 without dispatching again, reopening a review form or rewriting its receipt. That
@@ -458,60 +458,103 @@ state intact until the supported operation succeeds.
 
 ## Review controls
 
-Invoke the same skill with `review`. When several proposals are pending, first
-choose an authorized draft in the native selector. Drafts whose sources are no
-longer authorized remain preserved and are not offered. They do not prevent
-reviewing other authorized drafts. Selecting a draft is not approval. Its
-`cuefluent_control.processing_review` call requests a native host form displaying
-the exact proposal, original note contents, paths, new directories, input identities
-and known evidence limits. Read the full preview in the scrollable **Proposed
-changes** field, then advance to **Proposal action**. Choose **Save exact proposal**,
-**Skip these captures without saving**, **Cancel operation; keep captures pending**
-or **Later; keep proposal pending**. No action is selected by default. The host's
-own **Skip** or dismiss control is not the proposal's Skip action; it leaves the
-proposal pending. Draft bytes
-travel through that host-control channel; they are not returned as model tool
-output to the source chat. A host response is distinct from a model tool argument;
-it does not establish that a person physically clicked rather than a host policy
-answering the form.
+Invoke the same skill with `review` (or `review <code>` for one draft). Its
+`cuefluent_control.processing_review` call writes the exact outstanding proposal
+to a private review folder in the collection's private state, never in the notes
+folder or the project, and replies with the folder path, each note path with its
+size, and the decision commands. Open the folder in any editor:
 
-Save uses the existing exact-proposal writer. Skip handles only those revisions;
-Cancel releases an unapplied operation; Later, declining or closing the form leaves
-it pending. A decision applies only when the host returns the preview unchanged.
-No filesystem lock spans the decision. Changes to note contents,
-proposals, inputs or policy preserve a conflict and require fresh review. The form
-requires MCP `2025-11-25` string-default support. The server offers that protocol
-even if the host initially requests an older version. Hosts unable to accept it
-must use the explicit CLI workflow; hosts lacking form support leave the proposal
-pending. An exact review exceeding the 256 KiB form limit is refused without
-truncation; use the supported explicit proposal and save commands from an
-uncaptured context instead.
+- `proposed.md` holds the exact Markdown that Save would write, and `current.md`
+  the note as it is now when the draft updates an existing note. A draft with
+  several files numbers them (`1-proposed.md`, `1-current.md`, `2-proposed.md`).
+- `summary.txt` lists the note paths and sizes, new folders, source sessions and
+  turns with their known limits, inspection coverage, the draft code, the exact
+  decision commands and the revision's operation, claim and proposal hashes.
 
-The preview displays the proposal; it is not an editor. Note-content lines
+The folder is a read-only copy; editing it changes nothing. It is removed when the
+draft is decided through review, or by a later review once the draft is replaced
+or no longer pending. Drafts whose sources are no longer authorized remain
+preserved and are not offered. When several drafts are pending, `review` shows one
+and lists the others by code and note path.
+
+A draft code is six letters and digits derived from the exact proposal. A
+replaced proposal gets a new code. Decide by typing one command yourself:
+`review save <code>` writes the exact proposal through the existing writer,
+`review skip <code>` handles only those captures without saving, `review cancel
+<code>` releases the unapplied operation and keeps its captures pending, and
+`review later <code>` keeps the draft pending. In Claude, prefix these with
+`/cuefluent-notes:cuefluent-notes`; in Codex, select Cuefluent Notes and type the
+action.
+
+A decision applies only when all of these hold:
+
+- the exact command was typed in the chat and verified from the native transcript;
+  model text, a natural-language reply or a tool argument the model chose is
+  refused, and near misses (other case or spacing) are ordinary chat input;
+- this chat was shown that exact revision by a typed `review` whose reply reached
+  the chat, recorded durably in private state; a draft never shown here, shown only
+  by a natural-language request or a model-initiated call, or whose review was
+  cancelled before its reply, is refused even when its code is given;
+- the draft's claim, proposal and destinations still match, rechecked before
+  anything is staged. Otherwise nothing is applied, this chat's stale record and
+  folder are removed, and a fresh `review` is needed; if a note changed, restore it
+  or process again.
+
+Without a code, `review save`, `review skip`, `review cancel` and `review later`
+apply only to the revision this chat was most recently shown by a typed `review`.
+If that display came from a natural-language request or a model-initiated call, or
+nothing was shown, the reply lists the pending drafts and nothing is applied. Being
+the only pending draft or the only review folder never selects a draft. No
+filesystem lock spans the decision.
+
+Codex also opens its native host form for the same exact proposal, naming the review
+folder in its header; a proposal too large for the form is reviewed through the
+folder and typed decisions instead. When several proposals are pending, it first asks you to
+choose one in a native selector; selecting a draft is not approval. Read the full
+preview in the scrollable **Proposed changes** field, then advance to **Proposal
+action**. Choose **Save exact proposal**, **Skip these captures without saving**,
+**Cancel operation; keep captures pending** or **Later; keep proposal pending**. No
+action is selected by default. The host's own **Skip** or dismiss control is not the
+proposal's Skip action; it leaves the proposal pending. A host response is distinct
+from a model tool argument; it does not establish that a person physically clicked
+rather than a host policy answering the form. Codex accepts the same typed decisions,
+for example after choosing Later. A Codex host without form support reviews through
+the folder and typed decisions only.
+
+A form decision applies only when the host returns the preview unchanged. Changes to
+note contents, proposals, inputs or policy preserve a conflict and require fresh
+review. The form requires MCP `2025-11-25` string-default support. The server offers
+that protocol even if the host initially requests an older version. Hosts unable to
+accept it must use the explicit CLI workflow. A proposal whose form text would
+exceed the 256 KiB form limit is not truncated: Codex skips the form and reviews
+it through the review folder and typed decisions.
+
+The form preview displays the proposal; it is not an editor. Note-content lines
 are prefixed with `│ `, and control characters and backslashes are visibly escaped
 so note text cannot imitate the review's headings or terminal controls. Each
 file's original and proposed line endings are summarized separately. These display
-changes do not alter the Markdown that Save writes.
-
-Host LF/CRLF/CR line-ending conversion is accepted when the rest of the preview is
-unchanged. If the host returns edited, trimmed, collapsed or missing preview text,
-no decision is applied, including Later; the exact proposal remains pending and the
-stored draft is not treated as changed. If the host cannot preserve the preview,
-use the explicit proposal and save commands from an uncaptured context.
+changes do not alter the Markdown that Save writes. Host LF/CRLF/CR line-ending
+conversion is accepted when the rest of the preview is unchanged. If the host
+returns edited, trimmed, collapsed or missing preview text, no form decision is
+applied, including Later; the exact proposal remains pending and the stored draft
+is not treated as changed.
 
 The review result reports what happened, separately from whether a draft exists:
-completed (saved, skipped or cancelled), deferred with Later, declined or closed,
-display altered, or unavailable without form support. A decline does not show
-whether a form appeared. Return that result to the user; do not describe a pending
-draft as a review that was displayed.
+presented, completed (saved, skipped or cancelled), deferred with Later, declined
+or closed, display altered, not shown in this chat, not typed by you, changed, or
+no draft named. A decline does not show whether a form appeared. Return that result
+to the user; do not describe a pending draft as a review that was displayed.
 
-### Claude form limitations
+### Claude limitations
 
-Claude Desktop 2.42304.0 declines review forms without displaying them. Claude CLI
-2.1.294 and 2.1.299 replace the preview's line breaks, so the complete proposal may
-not be readable and no decision is applied. These clients cannot complete native
-review through this form. Use the supported explicit proposal and save commands
-from an uncaptured context instead; see [processing](processing.md).
+Claude Desktop 2.42304.0 declines review forms without displaying them, and Claude
+CLI 2.1.294 and 2.1.299 clip form text, so Claude never uses the review form. Claude
+CLI also collapses tool results until Ctrl-O; the review reply is short so the
+assistant can repeat it. A fresh Claude session's first prompt only registers it;
+send a typed `review` after that first prompt. A presentation belongs to the native
+session that showed it. When Claude CLI continues a session into a new session ID,
+earlier presentations do not carry over, and controls in the continued session can
+be refused as unverified.
 
 For a factual correction, choose Later and provide the correction in the ordinary
 work chat. Capture it through the existing selected-source workflow before using

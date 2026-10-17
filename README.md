@@ -100,7 +100,9 @@ for this user. Clone the repository and run its install:codex npm script
 **Processing starts with an explicit request.** For the reusable processing chat,
 select the Cuefluent Notes skill in Codex and enter `process`, or use
 `/cuefluent-notes:cuefluent-notes process` in Claude. Invoke the same skill with
-`review` to review an exact proposal through the client's supported native form.
+`review` to write an exact proposal to a private review folder (Codex also opens its
+native form), then decide by typing `review save <code>`, `review skip <code>` or
+`review later <code>`.
 Plain `process` covers pending captures across the existing collection; use
 `process repo` or `process chat` to narrow it, `resume` for saved unfinished work,
 `status` for progress, and `cancel` to stop owned work while keeping captures

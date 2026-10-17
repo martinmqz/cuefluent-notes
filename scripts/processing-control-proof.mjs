@@ -10,6 +10,37 @@ const MAX_CONTROL_BYTES = 2 * 1024 * 1024;
 const MAX_CONTROL_RECORDS = 1024;
 const CONTROL = 'process';
 export const PROCESSING_CONTROLS = Object.freeze(['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel']);
+// Review drafts are named by a short code (no i, l, o, u, 0 or 1). A typed
+// review action may name a draft, a decision, or both; nothing is normalized.
+export const REVIEW_CODE = /^[a-hjkmnp-tv-z2-9]{6}$/;
+export const REVIEW_DECISIONS = Object.freeze(['save', 'skip', 'cancel', 'later']);
+// How a person types a formal action in each client. Display only; the typed
+// text itself is verified from the native transcript.
+export const REVIEW_COMMANDS = Object.freeze({ claude: '/cuefluent-notes:cuefluent-notes', codex: '$cuefluent-notes' });
+/** Canonical typed review action for review tool fields, or null. */
+export function reviewControl({ draft, decision } = {}) {
+  if (draft !== undefined && (typeof draft !== 'string' || !REVIEW_CODE.test(draft))) return null;
+  if (decision !== undefined && !REVIEW_DECISIONS.includes(decision)) return null;
+  return ['review', decision, draft].filter(part => part !== undefined).join(' ');
+}
+/** The exact typed control text, or null. Whitespace, case and other spellings
+ * are not normalized, so a near miss stays ordinary input rather than a control. */
+export function processingControlText(text) {
+  if (typeof text !== 'string') return null;
+  if (PROCESSING_CONTROLS.includes(text)) return text;
+  const match = /^review (?:(save|skip|cancel|later)(?: ([a-z2-9]{6}))?|([a-z2-9]{6}))$/.exec(text);
+  if (!match) return null;
+  const args = match[1] ? { decision: match[1], ...(match[2] ? { draft: match[2] } : {}) } : { draft: match[3] };
+  return reviewControl(args) === text ? text : null;
+}
+/** Fields of a typed review action; null when the text is not one. */
+export function reviewControlFields(text) {
+  if (processingControlText(text) === null || (text !== 'review' && !text.startsWith('review '))) return null;
+  const parts = text.split(' ').slice(1), fields = {};
+  if (REVIEW_DECISIONS.includes(parts[0])) fields.decision = parts.shift();
+  if (parts.length) fields.draft = parts[0];
+  return fields;
+}
 /** Exact action/argument binding, shared by native invocation and retained proof.
  * No keyword or substring classifies ordinary user work as processing output. */
 export function processingControlAction(tool, args = {}) {
@@ -18,7 +49,16 @@ export function processingControlAction(tool, args = {}) {
     const scope = args.scope ?? 'collection';
     return scope === 'collection' ? 'process' : ['repo', 'chat'].includes(scope) ? `process ${scope}` : null;
   }
-  return { processing_resume: 'resume', processing_status: 'status', processing_review: 'review', processing_cancel: 'cancel' }[name] ?? null;
+  if (name === 'processing_review') return reviewControl(args);
+  return { processing_resume: 'resume', processing_status: 'status', processing_cancel: 'cancel' }[name] ?? null;
+}
+/** Claude copies typed review fields into its tool call, verified exactly.
+ * Codex refuses those fields: its verified typed text alone names the draft
+ * and decision, so its call to the review tool carries no review fields. */
+export function processingControlMatches(command, tool, args, client) {
+  const action = processingControlAction(tool, args);
+  if (action === null || processingControlText(command) === null) return false;
+  return command === action || (client === 'codex' && action === 'review' && reviewControlFields(command) !== null);
 }
 const hashLike = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const textBlocks = (blocks, kind) => Array.isArray(blocks) && blocks.length > 0 &&
@@ -35,15 +75,19 @@ const claudeHuman = row => row?.type === 'user' && row.message?.role === 'user' 
 const claudeRoot = (row, source) => row?.sessionId === source.sessionId && row.isSidechain === false &&
   row.agentId == null && row.forkedFrom == null && row.foreignToBridgeSession == null && row.sessionKind == null;
 const commandText = (command, control = CONTROL) => `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${control}</command-args>`;
-export const claudeProcessingCommandKind = (row, skillCommand = 'cuefluent-notes:cuefluent-notes') => skillCommandLike(skillCommand) &&
-  claudeHuman(row) && row.promptSource === undefined
-  ? PROCESSING_CONTROLS.find(control => claudeText(row) === commandText(skillCommand, control)) ?? null : null;
+export function claudeProcessingCommandKind(row, skillCommand = 'cuefluent-notes:cuefluent-notes') {
+  if (!skillCommandLike(skillCommand) || !claudeHuman(row) || row.promptSource !== undefined) return null;
+  const text = claudeText(row), prefix = commandText(skillCommand, ''), suffix = '</command-args>';
+  if (typeof text !== 'string' || !text.startsWith(prefix.slice(0, -suffix.length)) || !text.endsWith(suffix)) return null;
+  const control = processingControlText(text.slice(prefix.length - suffix.length, -suffix.length));
+  return control !== null && text === commandText(skillCommand, control) ? control : null;
+}
 export const isClaudeProcessingCommand = (row, skillCommand) => claudeProcessingCommandKind(row, skillCommand) !== null;
 
 /** Trusted installed skill only. This does not discover plugins or accept a
  * model-provided expansion. Unsupported substitutions remain unverified. */
 export async function loadClaudeProcessingSkill({ skillPath, skillCommand = 'cuefluent-notes:cuefluent-notes', control = CONTROL }) {
-  if (typeof skillPath !== 'string' || !path.isAbsolute(skillPath) || !skillCommandLike(skillCommand) || !PROCESSING_CONTROLS.includes(control)) return null;
+  if (typeof skillPath !== 'string' || !path.isAbsolute(skillPath) || !skillCommandLike(skillCommand) || processingControlText(control) === null) return null;
   let snapshot;
   try { snapshot = await readBoundedBytes(skillPath, { maxBytes: 128 * 1024, noFollow: true, missing: true }); }
   catch { return null; }
@@ -61,6 +105,7 @@ export async function loadClaudeProcessingSkill({ skillPath, skillCommand = 'cue
  * formal command. Ordinary assistant parentUuid links are deliberately unused. */
 export function findClaudeProcessingControlInput(records, { source, callId, tool, argsHash, skill, control }) {
   if (!skill || !skillCommandLike(skill.skillCommand) || !hashLike(skill.skillExpansionHash)) return null;
+  if (control !== undefined && processingControlText(control) === null) return null;
   const plugin = skill.skillCommand.split(':')[0], calls = [];
   for (let index = 0; index < records.length; index++) {
     const row = records[index].value;
@@ -76,8 +121,9 @@ export function findClaudeProcessingControlInput(records, { source, callId, tool
   if (inputIndex < 0) return null;
   const input = records[inputIndex], row = input.value;
   if (!claudeRoot(row, source) || !isNativeId(row.uuid) || !isNativeId(row.promptId) || row.promptSource !== undefined ||
-      row.interruptedMessageId !== undefined || row.interruptedByShutdown === true ||
-      claudeText(row) !== commandText(skill.skillCommand, control ?? processingControlAction(tool, call.block.input))) return null;
+      row.interruptedMessageId !== undefined || row.interruptedByShutdown === true) return null;
+  const typed = control ?? processingControlAction(tool, call.block.input);
+  if (typed === null || claudeText(row) !== commandText(skill.skillCommand, typed)) return null;
   const companions = records.slice(inputIndex + 1, call.index).filter(record => record.value?.turnCompanion === true);
   if (companions.length !== 1) return null;
   const companion = companions[0], meta = companion.value;
@@ -157,7 +203,7 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
         const [skill, command] = item.content;
         if (skill?.type !== 'skill' || skill.name !== 'cuefluent-notes' || typeof skill.path !== 'string' ||
             Object.keys(skill).some(k => !['type', 'name', 'path'].includes(k)) || command?.type !== 'text' ||
-            !PROCESSING_CONTROLS.includes(command.text) || !Array.isArray(command.text_elements) || command.text_elements.length ||
+            processingControlText(command.text) === null || !Array.isArray(command.text_elements) || command.text_elements.length ||
             Object.keys(command).some(k => !['type', 'text', 'text_elements'].includes(k))) return null;
         user = { skillName: skill.name, skillPath: skill.path, command: command.text }; continue;
       }
@@ -193,7 +239,7 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
           continue;
         }
         if (userText !== null || kinds.length !== 1 || kinds[0] !== 'user.text' ||
-            !PROCESSING_CONTROLS.includes(textBlocks(p.content, 'input_text'))) return null;
+            processingControlText(textBlocks(p.content, 'input_text')) === null) return null;
         userText = textBlocks(p.content, 'input_text'); continue;
       }
       if (p.role === 'assistant') {
@@ -224,7 +270,7 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
       nativeCall.id !== invocation.callId || nativeOutput.call_id !== invocation.callId ||
       `mcp__${nativeCall.server}.${nativeCall.tool}` !== invocation.tool ||
       digest(canonicalJSON(nativeCall.arguments)) !== invocation.argsHash) return null;
-  if (user.command !== processingControlAction(invocation.tool, nativeCall.arguments)) return null;
+  if (!processingControlMatches(user.command, invocation.tool, nativeCall.arguments, 'codex')) return null;
   const query = { client: 'codex', sessionId: source.sessionId, unitId, ...invocation };
   const receipt = await resolveDispatch(Object.freeze(query));
   if (!receiptMatches(receipt, query, source) || user.skillPath !== receipt.skillPath ||

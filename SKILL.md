@@ -47,11 +47,16 @@ Select this skill and supply one exact action:
 | `process chat` | Draft from the invoking native chat. | `process_selected_captures` with `scope: "chat"` |
 | `resume` | Continue the saved unfinished selection and page checkpoints; do not add later captures. | `processing_resume` |
 | `status` | Show execution, bounded collection inventory, unfinished operations and drafts awaiting review. | `processing_status` |
-| `review` | Choose a pending draft if needed, then review its exact proposed changes. | `processing_review` |
+| `review` | Write a pending draft's exact proposed changes to a private review folder and report its path and draft code; Codex also opens its native review form. | `processing_review` |
+| `review <code>` | The same for the draft with that code. | `processing_review` |
+| `review save <code>`, `review skip <code>`, `review cancel <code>`, `review later <code>` | Decide on a draft this chat was shown by a typed `review`. Without a code, the decision applies only to the draft most recently shown that way. | `processing_review` |
 | `cancel` | Stop owned native execution before releasing unapplied operations; keep captures pending. | `processing_cancel` |
 
 For an exact action, call its available `cuefluent_control` tool once. Native
-clients may prefix tool names. The adapter derives request identity from that
+clients may prefix tool names. In Claude, copy a typed review action's draft code
+and decision into the `processing_review` arguments `draft` and `decision`
+exactly as typed; omit them when the action has none. In Codex, call
+`processing_review` without those arguments; the typed text carries them. The adapter derives request identity from that
 native call; do not invent a request ID or selection. Omit `collectionId` unless
 already known; the adapter must resolve exactly one existing collection binding.
 These actions preserve collection settings. `process` and `resume` prepare drafts,
@@ -71,9 +76,12 @@ invent selection metadata.
 
 Natural-language processing requests can use the same handoff, but mixed messages
 remain original evidence. Preserve their facts, attachments and corrections.
-Approvals come through the native review form, not tool arguments supplied by the
-model. An unsupported, declined or altered form, or no answer, leaves the exact proposal
-pending. A pending draft does not mean a form appeared. See
+Approvals come only from the user's exact typed review decision or the Codex
+native review form, never from tool arguments the model chooses or from chat text.
+A decision applies only to the revision shown to this chat; a changed draft or
+destination is refused and needs a fresh `review`. Codex's unsupported, declined or
+altered form, or no answer, leaves the exact proposal pending. A pending draft does
+not mean a form appeared. See
 [processing chat controls](references/processing-chat.md) for reuse, bounded work,
 corrections and recovery. Setup, status and merely loading this skill do not dispatch.
 

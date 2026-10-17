@@ -4,6 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/;
+// Untrusted text shown to people: also escape Unicode line separators and
+// directional overrides so it cannot add lines or rearrange nearby labels.
+export const DISPLAY_CONTROLS = new RegExp(`${CONTROLS.source}|[\u2028\u2029\u202a-\u202e\u2066-\u2069]`, 'g');
+export const displayEscape = char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+export const displayScalar = value => JSON.stringify(value).replace(DISPLAY_CONTROLS, displayEscape);
 // Win32 aliases (devices, alternate streams, trailing dots/spaces) cannot be
 // treated as distinct ordinary files. Keep this independent of the host for tests.
 export const windowsComponent = value => !!value && !CONTROLS.test(value) &&

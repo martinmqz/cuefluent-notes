@@ -620,6 +620,20 @@ export async function inspectProcessing(capability, operationId) {
   await ctx.guard(); return result;
 }
 
+/** Metadata-only note paths of an outstanding proposal intent, for naming a
+ * draft in a listing. It reads no note or draft bytes and grants nothing. */
+export async function processingProposalPaths(capability, operationId) {
+  nativeId(operationId);
+  const ctx = await readProcessingState(capability, null, 'maintenance');
+  const saved = await processingSnapshot(ctx, claimPath(operationId));
+  if (!saved.bytes) fail('PROCESSING_CLAIM_MISSING');
+  const claim = validateClaim(intakeJSON(saved));
+  if (claim.operationId !== operationId || !claim.proposalIntent) fail('PROCESSING_REVIEW_REQUIRED');
+  const proposal = validateProcessingProposal(claim.proposalIntent.value, claim);
+  await ctx.guard();
+  return { claimHash: saved.hash, proposalHash: claim.proposalIntent.hash, paths: proposal.plan.files.map(file => file.path) };
+}
+
 async function proposalReviewFiles(ctx, proposal) {
   const files = []; let total = 0;
   for (const [index, file] of proposal.plan.files.entries()) {

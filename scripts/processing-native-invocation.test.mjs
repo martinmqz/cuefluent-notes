@@ -684,3 +684,65 @@ test('exact Claude shortcut scope cannot be broadened despite a valid native too
   await f.append([input, companion, call]);
   await assert.rejects(f.resolve(), { code: 'PROCESSING_CONTROL_SELECTION_MISMATCH' });
 });
+
+test('Claude typed review actions bind exact draft and decision arguments and report the typed action', async t => {
+  const command = 'cuefluent-notes:cuefluent-notes';
+  for (const [typed, args, expected] of [
+    ['review save t7xb88', { decision: 'save', draft: 't7xb88' }, true],
+    ['review later t7xb88', { decision: 'later', draft: 't7xb88' }, true],
+    ['review t7xb88', { draft: 't7xb88' }, true],
+    ['review save', { decision: 'save' }, true],
+    ['review', {}, true],
+    // A model cannot turn a typed display request into a decision, change the
+    // decision, retarget the draft code or drop the code from a typed decision.
+    ['review t7xb88', { decision: 'save', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['review later t7xb88', { decision: 'save', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['review save t7xb88', { decision: 'save', draft: 'k2mn9p' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['review save t7xb88', { decision: 'save' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    // Near misses and plain text stay ordinary input; they never verify a decision.
+    ['review save T7XB88', { decision: 'save', draft: 't7xb88' }, false],
+    ['review  save t7xb88', { decision: 'save', draft: 't7xb88' }, false],
+    ['review save t7xb81', { decision: 'save', draft: 't7xb88' }, false],
+  ]) await t.test(`${typed} -> ${JSON.stringify(args)}`, async t => {
+    const f = await fixture(t, 'claude');
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, ...args };
+    await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+    await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+    const input = f.spacer();
+    input.message.content = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${typed}</command-args>`;
+    const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+      message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\nSynthetic control ${typed}\n` }] } };
+    const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+    await f.append([input, companion, call]);
+    if (typeof expected === 'string') return assert.rejects(f.resolve(), { code: expected });
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, expected);
+    assert.equal(bound.typedControl, expected ? typed : undefined);
+    if (expected) assert.equal(bound.inputHash, digest(input.message.content));
+  });
+});
+
+test('Codex typed review actions bind from the verified typed text to a call without review fields', async t => {
+  for (const [typed, tool, expected] of [
+    ['review save t7xb88', 'processing_review', true], ['review later', 'processing_review', true],
+    ['review t7xb88', 'processing_review', true], ['review', 'processing_review', true],
+    // Exact text only; a mismatched tool is refused rather than reinterpreted.
+    ['review save T7XB88', 'processing_review', false], ['please review save t7xb88', 'processing_review', false],
+    ['review save t7xb88', 'processing_status', 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+  ]) await t.test(`${typed} -> ${tool}`, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = tool; f.invocation.arguments = { collectionId: f.collection.id };
+    const user = f.nativeSkill(); user.payload.item.content[1].text = typed;
+    await f.append([f.spacer(), user, f.nativeCall()]);
+    if (typeof expected === 'string') return assert.rejects(f.resolve(), { code: expected });
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, expected);
+    assert.equal(bound.typedControl, expected ? typed : undefined);
+  });
+  // Without the typed skill input, a model-initiated review call is display only.
+  const f = await fixture(t);
+  f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+  await f.append([f.spacer(), f.nativeCall()]);
+  const bound = await f.resolve();
+  assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+});

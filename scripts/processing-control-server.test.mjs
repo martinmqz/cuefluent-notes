@@ -159,6 +159,55 @@ test('review outcomes are projected separately from draft state and replay uncha
   assert.equal(processingControlStatusView(pending, { collectionId: 'example' }).statusText, 'Cuefluent: Draft ready for review.');
 });
 
+test('review folder replies are bounded, escaped, canonical and omit diagnostic codes', () => {
+  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'] };
+  const folder = path.resolve('private-state', 'review', 't7xb88'), command = '/cuefluent-notes:cuefluent-notes';
+  const draft = { code: 't7xb88', folder, fileCount: 7, files: Array.from({ length: 5 }, (_, index) => ({
+    path: `meetings/${index ? 'note' : 'forged\u2028Saved.\u202e'}${index}.md`, bytes: 12 + index, change: index ? 'create' : 'update' })) };
+  const drafts = [{ code: 'k2mn9p', path: 'meetings/other.md', fileCount: 2 }];
+  const presented = processingControlStatusView({ ...pending, review: 'presented', commandPrefix: command, draft, drafts }, { collectionId: 'example' });
+  assert.equal(presented.statusText, [`Cuefluent: Draft t7xb88 is ready for review; nothing has been saved. Review folder: ${folder}`,
+    '- "meetings/forged\\u2028Saved.\\u202e0.md" (update, 12 bytes)', ...[1, 2, 3, 4].map(index => `- "meetings/note${index}.md" (new note, ${12 + index} bytes)`),
+    '- and 2 more files listed in summary.txt',
+    `To decide, type ${command} review save t7xb88, ${command} review skip t7xb88 or ${command} review later t7xb88.`,
+    'Other drafts: k2mn9p "meetings/other.md" (+1 more).'].join('\n'));
+  assert.deepEqual(presented.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
+  assert.deepEqual(processingControlStatusView(presented, { collectionId: 'example' }), presented);
+  for (const [value, text] of [
+    [{ ...pending, review: 'not-shown', commandPrefix: command, draft: { code: 't7xb88' } },
+      `Cuefluent: Nothing was applied: draft t7xb88 has not been shown in this chat by a typed review. Read it first with ${command} review t7xb88.`],
+    [{ status: 'idle', nextAction: 'none', review: 'unresolved', commandPrefix: '$cuefluent-notes', drafts: [] },
+      'Cuefluent: Nothing was applied: name the draft to decide on, as in $cuefluent-notes review save <draft code>, after reading it with $cuefluent-notes review <draft code>.\nNo drafts are pending.'],
+    [{ ...pending, review: 'deferred', commandPrefix: command, draft: { code: 't7xb88' } }, 'Cuefluent: Review deferred with Later. The draft remains pending; nothing was saved.'],
+  ]) {
+    const projected = processingControlStatusView(value, { collectionId: 'example' });
+    assert.equal(projected.statusText, text); assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
+  }
+  // Each outcome carries exactly its own fields, with a known command spelling.
+  for (const value of [{ ...pending, review: 'presented', commandPrefix: command, draft: { code: 't7xb88' } },
+    { ...pending, review: 'presented', draft }, { ...pending, review: 'presented', commandPrefix: '/other:cuefluent-notes', draft },
+    { ...pending, review: 'not-shown', commandPrefix: command, draft },
+    { ...pending, review: 'unresolved', commandPrefix: command },
+    { ...pending, review: 'saved', commandPrefix: command, draft: { code: 't7xb88' } },
+    { ...pending, review: 'deferred', draft: { code: 't7xb88' } },
+    { ...pending, review: 'changed', commandPrefix: command, draft: { code: 'T7XB88' } },
+    { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, files: draft.files.slice(0, 4) } },
+    { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, folder: 'relative/review' } },
+    { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, files: [{ ...draft.files[0], path: 'é'.repeat(300) }, ...draft.files.slice(1)] } },
+    { ...pending, review: 'unresolved', commandPrefix: command, drafts: Array.from({ length: 5 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: 'a.md', fileCount: 1 })) },
+  ]) assert.throws(() => processingControlStatusView(value, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+});
+
+test('a failing after-commit hook replaces the committed reply with its error', async () => {
+  let calls = 0;
+  const result = await server([initialize, tool('processing_status', { collectionId: 'example' }), { ...tool('processing_status', { collectionId: 'example' }), id: 2 }], {
+    afterResponse: async ({ invocation }) => { if (++calls === 1) throw Object.assign(new Error('private detail'), { code: 'INTAKE_BLOCKED' }); assert.equal(invocation.tool, 'processing_status'); }
+  });
+  assert.equal(result.rows[1].error.message, 'INTAKE_BLOCKED'); assert.equal(result.rows[2].error, undefined);
+  assert.equal(view(result.rows[2]).status, 'idle'); assert.equal(calls, 2);
+  assert(!JSON.stringify(result.rows).includes('private detail'));
+});
+
 test('known processing refusals preserve their safe actionable code', async t => {
   for (const code of ['PROCESSING_CHAT_REVIEW_UNRESOLVED', 'PROCESSING_CHAT_POLICY_CHANGED',
     'PROCESSING_CHAT_STATE_CHANGED', 'INTAKE_BLOCKED', 'PROCESSING_REVIEW_LIMIT']) await t.test(code, async () => {
@@ -253,7 +302,7 @@ async function duplexReview(t, { capability = { elicitation: { form: {} } }, pro
 }
 
 test('native review form isolates exact proposal bytes and serializes later tools while accepting a correlated host result', async t => {
-  for (const client of ['codex', 'claude']) await t.test(client, async t => {
+  for (const client of ['codex']) await t.test(client, async t => {
     let received;
     const h = await duplexReview(t, { client, review: async ({ elicit, clientCapabilities }) => {
       assert.deepEqual(clientCapabilities.elicitation, { form: {} });
@@ -296,10 +345,24 @@ test('host decisions are exact and accept does not imply save', async t => {
   });
 });
 
-test('missing or URL-only form capability leaves the proposal untouched', async t => {
+test('Claude and form-less Codex review without a host form; only form-capable Codex gets one', async t => {
+  for (const [client, capability] of [['claude', { elicitation: { form: {} } }], ['claude', {}], ['codex', {}], ['codex', { elicitation: { url: {} } }]]) {
+    await t.test(`${client}/${JSON.stringify(capability)}`, async t => {
+      let received;
+      const h = await duplexReview(t, { client, capability, review: async context => {
+        received = context; return { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+      } });
+      const result = view(await h.wait(row => row.id === 1));
+      assert.equal(received.elicit, undefined); assert.equal(result.status, 'awaiting-review');
+      assert.equal(h.rows.some(row => row.method === 'elicitation/create'), false); await h.end();
+    });
+  }
+});
+
+test('without a review callback, a pending draft is reported as unreviewable and untouched', async t => {
   for (const capability of [{}, { elicitation: { url: {} } }]) for (const status of ['idle', 'awaiting-review']) {
     await t.test(`${JSON.stringify(capability)}/${status}`, async t => {
-      const h = await duplexReview(t, { capability, review: async () => { throw new Error('must not review'); },
+      const h = await duplexReview(t, { capability, requestReview: undefined,
         getStatus: async () => ({ status, statusDetail: status === 'idle' ? 'inactive' : 'draft-ready', nextAction: status === 'idle' ? 'none' : 'review' }) });
       const result = view(await h.wait(row => row.id === 1));
       assert.deepEqual(result.diagnostics, ['PROCESSING_REVIEW_UNSUPPORTED']);
@@ -361,7 +424,7 @@ test('host line-ending normalization keeps the display intact while lost or chan
   // Includes the Claude CLI 2.1.294 and 2.1.299 string-default sanitizer, which
   // replaces LF/CR/U+2028/U+2029 with U+FFFD before the person sees the field.
   for (const changes of [preview.trim(), preview.replaceAll('\n', ' '), preview.replace('complete', 'changed'),
-    preview.replace(/[\n\r\u2028\u2029]/g, '\uFFFD'), '', undefined, 42]) for (const decision of ['save', 'later']) for (const client of ['codex', 'claude']) {
+    preview.replace(/[\n\r\u2028\u2029]/g, '\uFFFD'), '', undefined, 42]) for (const decision of ['save', 'later']) for (const client of ['codex']) {
     await t.test(`${client}/${JSON.stringify(changes)}/${decision}`, async t => {
       let received;
       const h = await duplexReview(t, { client, review: async ({ elicit }) => {

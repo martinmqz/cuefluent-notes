@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { verifyCodexProcessingControl, verifyClaudeProcessingControl, loadClaudeProcessingSkill, isProcessingControlProof } from './processing-control-proof.mjs';
+import { verifyCodexProcessingControl, verifyClaudeProcessingControl, loadClaudeProcessingSkill, isProcessingControlProof,
+  processingControlText, processingControlAction, processingControlMatches, reviewControl, reviewControlFields } from './processing-control-proof.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
@@ -17,9 +18,11 @@ const event = (type, more = {}) => ({ type: 'event_msg', payload: { type, ...mor
 const item = value => event('item_completed', { thread_id: sessionId, turn_id: unitId, item: value });
 const response = payload => ({ type: 'response_item', payload: { ...payload, internal_chat_message_metadata_passthrough: metadata() } });
 
+// Claude mirrors typed review fields in its call; Codex sends none.
+const reviewFields = control => control.startsWith('review') ? reviewControlFields(control) : null;
 async function claudeFixture(t, mutate = () => {}, control = 'process') {
-  const callArgs = { ...args, ...(control.startsWith('process ') ? { scope: control.split(' ')[1] } : {}) };
-  const toolName = control.startsWith('process') ? 'process_selected_captures' : `processing_${control}`;
+  const callArgs = { ...args, ...(control.startsWith('process ') ? { scope: control.split(' ')[1] } : {}), ...reviewFields(control) };
+  const toolName = control.startsWith('process') ? 'process_selected_captures' : reviewFields(control) ? 'processing_review' : `processing_${control}`;
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-claude-control-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, 'native.jsonl'), skillPath = path.join(root, 'SKILL.md');
@@ -52,7 +55,7 @@ async function claudeFixture(t, mutate = () => {}, control = 'process') {
 }
 async function fixture(t, mutate = () => {}, control = 'process') {
   const callArgs = { ...args, ...(control.startsWith('process ') ? { scope: control.split(' ')[1] } : {}) };
-  const toolName = control.startsWith('process') ? 'process' : `processing_${control}`;
+  const toolName = control.startsWith('process') ? 'process' : reviewFields(control) ? 'processing_review' : `processing_${control}`;
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-control-proof-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, 'session.jsonl'), skillPath = path.join(root, 'plugin', 'SKILL.md');
@@ -200,7 +203,8 @@ test('bounded exact source inspection refuses truncated, replaced and oversized 
   await assert.rejects(verifyCodexProcessingControl({ ...f.request, source: { ...f.source, fileIdentity: 'b'.repeat(64) } }, f), { code: 'SOURCE_CHANGED' });
 });
 
-for (const control of ['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel']) {
+for (const control of ['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel',
+  'review t7xb88', 'review save t7xb88', 'review skip t7xb88', 'review cancel t7xb88', 'review later t7xb88', 'review save', 'review later']) {
   test(`exact ${control} has bounded proof in both clients; mixed corrections remain evidence`, async t => {
     const codex = await fixture(t, () => {}, control);
     const claude = await claudeFixture(t, () => {}, control);
@@ -212,3 +216,37 @@ for (const control of ['process', 'process repo', 'process chat', 'resume', 'sta
     assert.equal(await verifyClaudeProcessingControl(mixedClaude.request, mixedClaude), null);
   });
 }
+
+test('typed review grammar accepts only exact canonical review actions', () => {
+  for (const text of ['review', 'review t7xb88', 'review save t7xb88', 'review skip t7xb88', 'review cancel t7xb88',
+    'review later t7xb88', 'review save', 'review skip', 'review cancel', 'review later', 'process', 'cancel']) assert.equal(processingControlText(text), text);
+  // Near misses stay ordinary input: case, spacing, ambiguous letters, length,
+  // order, other words and pages (removed with the paged prototype).
+  for (const text of ['Review', 'review ', ' review t7xb88', 'review T7XB88', 'review t7xb8', 'review t7xb888', 'review t7xb81',
+    'review t7xbl8', 'review t7xbo8', 'review t7xb88 2', 'review approve t7xb88', 'review save t7xb88 2', 'review t7xb88 save',
+    'review  save t7xb88', 'review save t7xb88\n', 'save t7xb88', 'save', 'review save later', 'review save save']) assert.equal(processingControlText(text), null, text);
+  assert.deepEqual(reviewControlFields('review'), {}); assert.deepEqual(reviewControlFields('review t7xb88'), { draft: 't7xb88' });
+  assert.deepEqual(reviewControlFields('review later'), { decision: 'later' });
+  assert.deepEqual(reviewControlFields('review skip t7xb88'), { decision: 'skip', draft: 't7xb88' });
+  assert.equal(reviewControlFields('status'), null); assert.equal(reviewControlFields('review T7XB88'), null);
+  assert.equal(reviewControl({ draft: 't7xb88', decision: 'approve' }), null); assert.equal(reviewControl({ draft: 'T7XB88' }), null);
+  assert.equal(processingControlAction('mcp__cuefluent_control__processing_review', { collectionId: 'example' }), 'review');
+  assert.equal(processingControlAction('mcp__cuefluent_control__processing_review', { decision: 'skip', draft: 't7xb88' }), 'review skip t7xb88');
+  assert.equal(processingControlAction('mcp__cuefluent_control__processing_review', { decision: 'approve', draft: 't7xb88' }), null);
+});
+
+test('Claude mirrors typed review fields exactly; Codex binds typed review text to a field-free review call', () => {
+  const review = 'mcp__cuefluent_control__processing_review', status = 'mcp__cuefluent_control__processing_status';
+  for (const client of ['claude', 'codex']) {
+    assert.equal(processingControlMatches('review save t7xb88', review, { decision: 'save', draft: 't7xb88' }, client), true);
+    // A model cannot change the decision or draft, or turn a display into a decision.
+    assert.equal(processingControlMatches('review later t7xb88', review, { decision: 'save', draft: 't7xb88' }, client), false);
+    assert.equal(processingControlMatches('review save t7xb88', review, { decision: 'save', draft: 'k2mn9p' }, client), false);
+    assert.equal(processingControlMatches('review t7xb88', review, { decision: 'save', draft: 't7xb88' }, client), false);
+    assert.equal(processingControlMatches('review save t7xb88', status, {}, client), false);
+    assert.equal(processingControlMatches('review save T7XB88', review, {}, client), false);
+  }
+  assert.equal(processingControlMatches('review save t7xb88', review, {}, 'claude'), false);
+  assert.equal(processingControlMatches('review save t7xb88', review, {}, 'codex'), true);
+  assert.equal(processingControlMatches('review', review, {}, 'codex'), true);
+});

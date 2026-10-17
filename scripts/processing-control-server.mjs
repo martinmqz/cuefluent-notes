@@ -2,6 +2,8 @@ import path from 'node:path';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
+import { DISPLAY_CONTROLS, displayEscape, displayScalar } from './file-io.mjs';
+import { REVIEW_CODE, REVIEW_COMMANDS, REVIEW_DECISIONS, reviewControl } from './processing-control-proof.mjs';
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
@@ -48,7 +50,99 @@ const REVIEW_OUTCOMES = Object.freeze({
   declined: { pending: true, text: 'Review not completed: the client declined or closed the review form, which may not have been displayed. The draft remains pending; nothing was saved.' },
   'display-altered': { pending: true, text: 'Review not completed: the client changed the preview text, so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; the draft remains pending.' },
   unavailable: { pending: true, text: 'Review unavailable: this client did not report review form support. The draft remains pending; nothing was saved.' },
+  // Review folder and typed decisions. Their text is built from bounded fields.
+  presented: { pending: true, text: null },
+  'not-shown': { pending: null, text: null },
+  unverified: { pending: null, text: null },
+  changed: { pending: null, text: null },
+  unresolved: { pending: null, text: null },
 });
+const REVIEW_FILES_SHOWN = 5, REVIEW_DRAFTS_SHOWN = 4, REVIEW_PATH_BYTES = 160, REVIEW_FOLDER_BYTES = 1024, REVIEW_NOTE_PATH_BYTES = 512;
+/** A note path bounded for a review reply, which must fit the transport and its
+ * receipt. Display only: summary.txt in the review folder keeps every full path. */
+export function reviewNotePath(value) {
+  if (Buffer.byteLength(value) <= REVIEW_NOTE_PATH_BYTES) return value;
+  let text = '';
+  for (const char of value) { if (Buffer.byteLength(text + char + '…') > REVIEW_NOTE_PATH_BYTES) break; text += char; }
+  return `${text}…`;
+}
+const notePath = value => { string(value, REVIEW_NOTE_PATH_BYTES); if (Buffer.byteLength(value) > REVIEW_NOTE_PATH_BYTES) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); return value; };
+// Untrusted note paths are quoted, escaped and bounded; the folder is a private
+// path the person opens, so only its controls are escaped.
+function displayPath(value) {
+  let text = '';
+  for (const char of value) {
+    if (Buffer.byteLength(displayScalar(text + char)) > REVIEW_PATH_BYTES) return `${displayScalar(text).slice(0, -1)}…"`;
+    text += char;
+  }
+  return displayScalar(text);
+}
+const displayFolder = value => value.replace(DISPLAY_CONTROLS, displayEscape);
+const reviewCode = value => { if (typeof value !== 'string' || !REVIEW_CODE.test(value)) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); return value; };
+function reviewDraft(value) {
+  keys(value, ['code'], ['folder', 'files', 'fileCount']);
+  const result = { code: reviewCode(value.code) };
+  if (Object.keys(value).length === 1) return result;
+  keys(value, ['code', 'folder', 'files', 'fileCount']);
+  string(value.folder, REVIEW_FOLDER_BYTES);
+  if (!path.isAbsolute(value.folder) || Buffer.byteLength(displayFolder(value.folder)) > REVIEW_FOLDER_BYTES) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+  integer(value.fileCount);
+  if (value.fileCount < 1 || value.fileCount > 100) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+  list(value.files, REVIEW_FILES_SHOWN, { empty: false });
+  if (value.files.length !== Math.min(value.fileCount, REVIEW_FILES_SHOWN)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+  return { ...result, folder: value.folder, fileCount: value.fileCount, files: value.files.map(file => {
+    keys(file, ['path', 'bytes', 'change']); integer(file.bytes);
+    return { path: notePath(file.path), bytes: file.bytes, change: choice(file.change, ['create', 'update']) };
+  }) };
+}
+function reviewDrafts(value) {
+  list(value, REVIEW_DRAFTS_SHOWN); unique(value.map(item => item?.code));
+  return value.map(item => {
+    keys(item, ['code', 'path', 'fileCount']); integer(item.fileCount);
+    if (item.fileCount < 1 || item.fileCount > 100) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+    return { code: reviewCode(item.code), path: notePath(item.path), fileCount: item.fileCount };
+  });
+}
+const listedDraft = item => `${item.code} ${displayPath(item.path)}${item.fileCount > 1 ? ` (+${item.fileCount - 1} more)` : ''}`;
+// One short paragraph for the person: where to read the draft and what to
+// type. Hashes, operation IDs and diagnostics stay in the private files.
+function reviewText(review, { draft, drafts, commandPrefix: command }) {
+  const code = draft?.code, typed = decision => `${command} review ${decision} ${code}`;
+  const choices = `To decide, type ${typed('save')}, ${typed('skip')} or ${typed('later')}.`;
+  const lines = [];
+  if (review === 'presented') {
+    lines.push(`Draft ${code} is ready for review; nothing has been saved. Review folder: ${displayFolder(draft.folder)}`,
+      ...draft.files.map(file => `- ${displayPath(file.path)} (${file.change === 'create' ? 'new note' : 'update'}, ${file.bytes} bytes)`));
+    if (draft.fileCount > draft.files.length) lines.push(`- and ${draft.fileCount - draft.files.length} more files listed in summary.txt`);
+    lines.push(choices);
+    if (drafts?.length) lines.push(`Other drafts: ${drafts.map(listedDraft).join('; ')}.`);
+  } else if (review === 'not-shown') {
+    lines.push(`Nothing was applied: draft ${code} has not been shown in this chat by a typed review. Read it first with ${command} review ${code}.`);
+  } else if (review === 'unverified') {
+    lines.push(`Nothing was applied: a review decision counts only when you type the exact command yourself, for example ${command} review save ${code ?? '<draft code>'}.`);
+  } else if (review === 'changed') {
+    lines.push(`Nothing was applied: ${code ? `draft ${code}` : 'that draft'} changed, its destination changed, or it is no longer pending. Review the current draft with ${command} review before deciding; if a note changed, restore it or process again.`);
+    if (drafts?.length) lines.push(`Pending drafts: ${drafts.map(listedDraft).join('; ')}.`);
+  } else if (review === 'unresolved') {
+    lines.push(`Nothing was applied: name the draft to decide on, as in ${command} review save <draft code>, after reading it with ${command} review <draft code>.`,
+      drafts.length ? `Pending drafts: ${drafts.map(listedDraft).join('; ')}.` : 'No drafts are pending.');
+  } else {
+    lines.push(REVIEW_OUTCOMES[review].text);
+    if (draft?.folder) lines.push(`Review folder: ${displayFolder(draft.folder)}`, choices);
+  }
+  return `Cuefluent: ${lines.join('\n')}`;
+}
+// Which review fields each outcome carries: a draft with its folder, a draft
+// code only, or either ('?' marks an optional draft); a listing of drafts.
+const REVIEW_FIELDS = Object.freeze({ presented: { draft: 'folder', drafts: true }, 'not-shown': { draft: 'code' },
+  unverified: { draft: 'code?' }, changed: { draft: 'code?', drafts: true }, unresolved: { drafts: 'required' },
+  deferred: { draft: 'any?' }, declined: { draft: 'any?' }, 'display-altered': { draft: 'any?' } });
+function checkReviewFields(fields, draft, drafts) {
+  const need = fields.draft;
+  if (draft === undefined ? need === 'folder' || need === 'code'
+    : need === undefined || (need === 'folder' && draft.folder === undefined) || (['code', 'code?'].includes(need) && draft.folder !== undefined)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+  if (drafts === undefined ? fields.drafts === 'required' : !fields.drafts) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+}
 const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CONTROL_FAILED',
   'PROCESSING_INVENTORY_CHANGED', 'PROCESSING_OPERATION_OWNER_UNVERIFIED', 'PROCESSING_CHAT_HISTORY_FULL', 'PROCESSING_CHAT_BUSY', 'PROCESSING_CHAT_BLOCKED', 'PROCESSING_CHAT_MISSING', 'PROCESSING_CHAT_BINDING_CHANGED',
   'PROCESSING_CHAT_HOST_UNAVAILABLE', 'PROCESSING_CHAT_SESSION_UNAVAILABLE', 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
@@ -66,6 +160,7 @@ const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROC
 const ERRORS = new Set([...DIAGNOSTICS, 'PROCESSING_CONTROL_PROTOCOL', 'PROCESSING_CONTROL_INPUT_LIMIT',
   'PROCESSING_CONTROL_OUTPUT_INVALID', 'PROCESSING_CONTROL_METHOD_UNSUPPORTED', 'PROCESSING_CONTROL_INVALID_REQUEST',
   'PROCESSING_CONTROL_SELECTION_MISMATCH', 'PROCESSING_REVIEW_REQUIRED', 'PROCESSING_OUTPUT_CHANGED',
+  'PROCESSING_REVIEW_STATE_INVALID', 'PROCESSING_REVIEW_CODE_CONFLICT', 'PROCESSING_REVIEW_FILES_CHANGED',
   'PROCESSING_PROPOSAL_CHANGED', 'PROCESSING_CLAIM_CHANGED', 'STALE_SELECTION', 'PROCESSING_CHAT_REQUEST_CONFLICT',
   'PROCESSING_SOURCE_DISCOVERY_LIMIT', 'PROCESSING_SOURCE_CHANGED', 'PROCESSING_SOURCE_UNAVAILABLE',
   'PROCESSING_SOURCE_AMBIGUOUS', 'PROCESSING_CLIENT_UNAVAILABLE', 'PROCESSING_CLIENT_OUTCOME_UNKNOWN',
@@ -83,7 +178,7 @@ const selectionSchema = { type: 'object', additionalProperties: false, required:
   properties: { client: { type: 'string', enum: CLIENTS }, sessionId: uuidSchema,
     cwd: { type: 'string', minLength: 1, maxLength: 4096 }, unitId: uuidSchema } };
 const scopeSchema = { type: 'string', enum: PROCESSING_SCOPES, description: 'Pending retained evidence scope; defaults to the existing collection.' };
-const TOOLS = [
+const toolsFor = client => [
   { name: 'processing_status', description: 'Read bounded processing-chat status for the selected collection. Returns no evidence or drafts.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
@@ -97,9 +192,15 @@ const TOOLS = [
   ].map(([name, description]) => ({ name, description,
     inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } })),
-  { name: 'processing_review', description: 'Open native review controls for the exact outstanding proposal. Drafts stay in the host form; only a native host response can save, skip, or cancel. Tool arguments never authorize an outcome.',
-    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } }
+  client === 'claude'
+    ? { name: 'processing_review', description: 'Write the exact outstanding proposal to a private review folder and return its path. A save, skip, cancel or later applies only when the user typed that exact review command. Copy draft and decision from the typed command; never add or change them yourself.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema,
+        draft: { type: 'string', pattern: REVIEW_CODE.source, description: 'The draft code from the user\'s typed review command, if any.' },
+        decision: { type: 'string', enum: REVIEW_DECISIONS, description: 'save, skip, cancel or later from the user\'s typed review command, if any. Never infer it.' } } },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } }
+    : { name: 'processing_review', description: 'Write the exact outstanding proposal to a private review folder and open native review controls. Only a native host response or the user\'s exact typed review command can save, skip or cancel. Tool arguments never authorize an outcome.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } }
 ];
 
 const token = value => {
@@ -127,9 +228,12 @@ function nativeContext(client, meta, env) {
   } catch { fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); }
 }
 
-function argumentsFor(name, args) {
+function argumentsFor(name, args, client) {
   try {
-    if (['processing_status', 'processing_review', 'processing_resume', 'processing_cancel'].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
+    // Claude copies a typed review action's fields; Codex refuses them because
+    // its verified typed text alone names the draft and decision.
+    if (name === 'processing_review' && client === 'claude') keys(args, [], ['collectionId', 'retryToken', 'draft', 'decision']);
+    else if (['processing_status', 'processing_review', 'processing_resume', 'processing_cancel'].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
     else if (name === 'process_selected_captures') keys(args, [], ['requestId', 'collectionId', 'selection', 'retryToken', 'scope']);
     else fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
     if (args.collectionId !== undefined) id(args.collectionId);
@@ -138,6 +242,11 @@ function argumentsFor(name, args) {
     const result = args.collectionId === undefined ? {} : { collectionId: args.collectionId };
     if (args.requestId !== undefined) result.requestId = args.requestId;
     if (args.scope !== undefined) result.scope = choice(args.scope, PROCESSING_SCOPES);
+    if (args.draft !== undefined || args.decision !== undefined) {
+      if (reviewControl({ draft: args.draft, decision: args.decision }) === null) fail('PROCESSING_CONTROL_INVALID_REQUEST');
+      if (args.draft !== undefined) result.draft = args.draft;
+      if (args.decision !== undefined) result.decision = args.decision;
+    }
     if (args.selection !== undefined) {
       keys(args.selection, ['client', 'sessionId', 'cwd'], ['unitId']);
       choice(args.selection.client, CLIENTS); nativeId(args.selection.sessionId); string(args.selection.cwd);
@@ -153,7 +262,10 @@ function argumentsFor(name, args) {
 }
 
 /** Project a callback result without copying callback prose, evidence, proposals,
- * private paths or future implementation fields into a captured source chat. */
+ * private paths or future implementation fields into a captured source chat. The
+ * one exception is review: its reply names the private review folder the person
+ * opens and the bounded, escaped note paths and sizes of the draft, never note
+ * content, hashes or identifiers. */
 export function processingControlStatusView(value, args) {
   try {
     if (!object(value)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
@@ -177,12 +289,24 @@ export function processingControlStatusView(value, args) {
       result.statusDetail = value.statusDetail;
       result.statusText = `Cuefluent: ${detail.text}`;
     }
+    let reviewReply = false;
     if (value.review !== undefined) {
       choice(value.review, Object.keys(REVIEW_OUTCOMES));
-      const outcome = REVIEW_OUTCOMES[value.review];
+      const outcome = REVIEW_OUTCOMES[value.review], fields = REVIEW_FIELDS[value.review] ?? {};
       if (outcome.pending && result.status !== 'awaiting-review') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
       result.review = value.review;
-      result.statusText = `Cuefluent: ${outcome.text}` +
+      const draft = value.draft === undefined ? undefined : reviewDraft(value.draft);
+      const drafts = value.drafts === undefined ? undefined : reviewDrafts(value.drafts);
+      checkReviewFields(fields, draft, drafts);
+      // Every reply built from these fields names its command spelling.
+      reviewReply = REVIEW_OUTCOMES[value.review].text === null || draft !== undefined;
+      if (reviewReply !== (value.commandPrefix !== undefined)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (reviewReply) {
+        result.commandPrefix = choice(value.commandPrefix, Object.values(REVIEW_COMMANDS));
+        if (draft) result.draft = draft;
+        if (drafts) result.drafts = drafts;
+        result.statusText = reviewText(value.review, result);
+      } else result.statusText = `Cuefluent: ${outcome.text}` +
         (outcome.pending === false && result.statusDetail ? ` ${STATUS_DETAILS[result.statusDetail].text}` : '');
     }
     if (value.scope !== undefined) {
@@ -204,7 +328,9 @@ export function processingControlStatusView(value, args) {
       result.inventory = { ...counts, incomplete, sourceCompleteness };
       result.statusText += ` Inventory${incomplete ? ' (partial)' : ''}: ${counts.pending} pending, ${counts.claimed} claimed, ${counts.awaitingReview} drafts awaiting review.`;
     }
-    if (result.diagnostics.length) result.statusText += ` ${result.diagnostics.join(', ')}. Next action: ${result.nextAction}.`;
+    // A review reply stays one plain paragraph; codes remain in the fields.
+    if (result.diagnostics.length && !reviewReply) result.statusText += ` ${result.diagnostics.join(', ')}. Next action: ${result.nextAction}.`;
+    if (Buffer.byteLength(result.statusText) > 4096) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
     return result;
   } catch { fail('PROCESSING_CONTROL_OUTPUT_INVALID'); }
 }
@@ -215,7 +341,7 @@ export function processingControlStatusView(value, args) {
  * skill/control provenance for a dispatch. Its opaque result is never accepted
  * from JSON or returned to the model. No transcript discovery exists here. */
 export async function runProcessingControlServer({ client, input = process.stdin, output = process.stdout,
-  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse } = {}) {
+  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse, afterResponse } = {}) {
   choice(client, CLIENTS);
   if ([resolveSource, getStatus, requestProcessing].some(value => typeof value !== 'function')) fail('PROCESSING_CONTROL_INVALID_REQUEST');
   const launchEnv = { CLAUDE_CODE_SESSION_ID: env.CLAUDE_CODE_SESSION_ID };
@@ -274,7 +400,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     const commitResponse = () => { signal.throwIfAborted(); request.complete = true; };
     try {
       if (request.cancelled) fail('PROCESSING_REVIEW_INTERRUPTED');
-      let result;
+      let result, afterCommit = null;
       if (row.method === 'initialize') {
         if (initialized || !object(row.params) || (row.params.capabilities !== undefined && !object(row.params.capabilities))) fail('PROCESSING_CONTROL_PROTOCOL');
         const caps = row.params.capabilities ?? {};
@@ -287,10 +413,10 @@ export async function runProcessingControlServer({ client, input = process.stdin
       } else {
         if (!initialized) fail('PROCESSING_CONTROL_PROTOCOL');
         if (row.method === 'ping') result = {};
-        else if (row.method === 'tools/list') result = { tools: TOOLS };
+        else if (row.method === 'tools/list') result = { tools: toolsFor(client) };
         else if (row.method === 'tools/call') {
           keys(row.params, ['name'], ['arguments', '_meta']);
-          const args = argumentsFor(row.params.name, row.params.arguments ?? {});
+          const args = argumentsFor(row.params.name, row.params.arguments ?? {}, client);
           const context = nativeContext(client, row.params._meta, launchEnv);
           const invocation = Object.freeze({ tool: row.params.name, arguments: args });
           const retryToken = row.params.arguments?.retryToken;
@@ -330,11 +456,14 @@ export async function runProcessingControlServer({ client, input = process.stdin
           let elicited = 0, selectedForm = false;
           const elicit = async proposal => {
             const selecting = proposal.choices !== undefined;
-            keys(proposal, selecting ? ['choices'] : ['message']);
+            keys(proposal, selecting ? ['choices'] : ['message'], selecting ? [] : ['folder']);
             if (selecting) {
               list(proposal.choices, 5, { empty: false }).forEach(item => { keys(item, ['operationId', 'label']); nativeId(item.operationId); string(item.label, 256); });
               unique(proposal.choices.map(item => item.operationId));
-            } else string(proposal.message, FORM_BYTES);
+            } else {
+              string(proposal.message, FORM_BYTES);
+              if (proposal.folder !== undefined && (string(proposal.folder, REVIEW_FOLDER_BYTES), !path.isAbsolute(proposal.folder))) fail('PROCESSING_CONTROL_PROTOCOL');
+            }
             if (!formSupported) fail('PROCESSING_REVIEW_UNSUPPORTED');
             if (closed || request.cancelled || request.complete || requests.get(rpcId) !== request) fail('PROCESSING_REVIEW_INTERRUPTED');
             if (elicited >= 2 || (elicited === 1 && (!selectedForm || selecting))) fail('PROCESSING_CONTROL_PROTOCOL');
@@ -348,7 +477,8 @@ export async function runProcessingControlServer({ client, input = process.stdin
               requestedSchema: { type: 'object', properties: { operationId: { type: 'string', title: 'Draft to review',
                 oneOf: proposal.choices.map(item => ({ const: item.operationId, title: item.label })) } }, required: ['operationId'] } } }
               : { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form',
-              message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.',
+              message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.' +
+                (proposal.folder === undefined ? '' : ` The same proposal is in the private review folder ${displayFolder(proposal.folder)}`),
               requestedSchema: { type: 'object', properties: {
                 changes: { type: 'string', title: 'Proposed changes',
                   description: 'Read the full preview, then go to the next field. For corrections, choose Later and provide them in your work chat; do not edit this preview. If the preview looks collapsed or incomplete, close this form and leave the draft pending.',
@@ -369,12 +499,17 @@ export async function runProcessingControlServer({ client, input = process.stdin
           };
           let response;
           if (row.params.name === 'processing_review') {
-            if (!formSupported || typeof requestReview !== 'function') {
+            if (typeof requestReview !== 'function') {
               const current = await getStatus({ source, context, ...resolvedArgs });
               response = { ...current, ...(current.status === 'awaiting-review' ? { review: 'unavailable' } : {}),
                 diagnostics: [...new Set(['PROCESSING_REVIEW_UNSUPPORTED', ...(current.diagnostics ?? [])])].slice(0, 8) };
             }
-            else response = await requestReview({ source, context, ...resolvedArgs, clientCapabilities, elicit, signal, commitResponse });
+            // Tested Claude hosts cannot show a complete form (Desktop declines
+            // every form; the CLI clips its text), so Claude reviews through the
+            // private review folder and typed decisions. Codex keeps its form
+            // when the host supports one.
+            else response = await requestReview({ source, context, ...resolvedArgs, clientCapabilities,
+              elicit: client === 'codex' && formSupported ? elicit : undefined, signal, commitResponse });
           } else {
             const action = { processing_status: getStatus, process_selected_captures: requestProcessing,
               processing_resume: requestResume, processing_cancel: requestCancel }[row.params.name];
@@ -389,9 +524,15 @@ export async function runProcessingControlServer({ client, input = process.stdin
           // committed review. Reproject the bounded result without attempting
           // another receipt; the attempted receipt cannot prove this new result.
           if (replacement !== undefined) result = { content: [{ type: 'text', text: canonicalJSON(processingControlStatusView(replacement, resolvedArgs)) }], isError: false };
+          if (typeof afterResponse === 'function') afterCommit = () => afterResponse({ source, context, invocation, signal });
         } else fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
       }
       commitResponse();
+      // Bookkeeping that must follow the commit: a review presentation counts
+      // only once its reply is committed. Cancellation can no longer affect the
+      // request, but a failure here turns the reply into that error, so the
+      // chat is never told a draft was presented when it cannot be decided on.
+      if (afterCommit) await afterCommit();
       await reply({ jsonrpc: '2.0', id: rpcId, result });
     } catch (error) {
       request.complete = true;
