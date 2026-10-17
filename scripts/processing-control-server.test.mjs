@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Writable } from 'node:stream';
 import { canonicalJSON, digest } from './workflow-values.mjs';
-import { runProcessingControlServer } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView } from './processing-control-server.mjs';
 import { withReviewPreview } from './test-support/processing-review.mjs';
 
 const sessionId = randomUUID(), unitId = randomUUID(), chatId = randomUUID();
@@ -138,6 +138,27 @@ test('result projection drops private evidence and callback prose and builds sta
   assert.equal(view(result.rows[1]).statusText, 'Cuefluent processing: awaiting-review. PROCESSING_APPROVAL_REQUIRED. Next action: review.');
 });
 
+test('review outcomes are projected separately from draft state and replay unchanged', () => {
+  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+  for (const [value, text] of [
+    [{ ...pending, review: 'deferred' }, 'Cuefluent: Review deferred with Later. The draft remains pending; nothing was saved.'],
+    [{ ...pending, review: 'declined' }, 'Cuefluent: Review not completed: the client declined or closed the review form, which may not have been displayed. The draft remains pending; nothing was saved.'],
+    [{ ...pending, review: 'display-altered' }, 'Cuefluent: Review not completed: the client changed the preview text, so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; the draft remains pending.'],
+    [{ ...pending, review: 'unavailable', diagnostics: ['PROCESSING_REVIEW_UNSUPPORTED'] }, 'Cuefluent: Review unavailable: this client did not report review form support. The draft remains pending; nothing was saved. PROCESSING_REVIEW_UNSUPPORTED. Next action: review.'],
+    [{ status: 'idle', statusDetail: 'inactive', nextAction: 'none', review: 'saved' }, 'Cuefluent: Review completed: the exact reviewed proposal was saved. No processing run is active.'],
+    // A completed review can leave another draft pending; say both.
+    [{ ...pending, review: 'skipped' }, 'Cuefluent: Review completed: these captures were skipped without saving. Draft ready for review.'],
+    [{ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: 'cancelled' },
+      'Cuefluent: Review completed: the operation was cancelled; its captures remain pending. Processing operation completed. PROCESSING_CHAT_CONFLICT. Next action: inspect.'],
+  ]) {
+    const projected = processingControlStatusView(value, { collectionId: 'example' });
+    assert.equal(projected.statusText, text); assert.equal(projected.review, value.review);
+    // Response receipts require a canonical, idempotent projection.
+    assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
+  }
+  assert.equal(processingControlStatusView(pending, { collectionId: 'example' }).statusText, 'Cuefluent: Draft ready for review.');
+});
+
 test('known processing refusals preserve their safe actionable code', async t => {
   for (const code of ['PROCESSING_CHAT_REVIEW_UNRESOLVED', 'PROCESSING_CHAT_POLICY_CHANGED',
     'PROCESSING_CHAT_STATE_CHANGED', 'INTAKE_BLOCKED', 'PROCESSING_REVIEW_LIMIT']) await t.test(code, async () => {
@@ -170,7 +191,9 @@ test('retired conflict statuses survive MCP projection and transport validation'
 
 test('unknown output status, diagnostics and malformed request IDs are fixed failures', async t => {
   for (const patch of [{ status: 'private content' }, { diagnostics: ['PRIVATE_CONTENT'] }, { requestId: 'not-a-native-id' },
-    { statusDetail: 'private content' }, { statusDetail: 'accepted' }]) await t.test(`${Object.keys(patch)[0]}: ${JSON.stringify(Object.values(patch)[0])}`, async () => {
+    { statusDetail: 'private content' }, { statusDetail: 'accepted' }, { review: 'private content' },
+    // A pending review outcome cannot describe a draft that no longer awaits review.
+    { review: 'deferred' }, { review: 'declined' }]) await t.test(`${Object.keys(patch)[0]}: ${JSON.stringify(Object.values(patch)[0])}`, async () => {
     const result = await server([initialize, tool('process_selected_captures', { collectionId: 'example', requestId: randomUUID() })], {
       requestProcessing: async args => ({ status: 'idle', nextAction: 'none', requestId: args.requestId, ...patch })
     });
@@ -253,7 +276,7 @@ test('native review form isolates exact proposal bytes and serializes later tool
     h.send({ jsonrpc: '2.0', id: form.id, result: withReviewPreview(form, { action: 'accept', content: { decision: 'save' } }) });
     const result = await h.wait(row => row.id === 1);
     await h.wait(row => row.id === 2);
-    assert.deepEqual(received, { action: 'accept', content: { decision: 'save' } });
+    assert.deepEqual(received, { action: 'accept', content: { decision: 'save' }, preview: 'intact' });
     assert.equal(view(result).status, 'completed'); assert(!JSON.stringify(result).includes('PRIVATE-PROPOSAL'));
     assert.deepEqual(h.calls.map(x => x[0]), ['resolve', 'review', 'resolve', 'status']);
     await h.end();
@@ -269,19 +292,28 @@ test('host decisions are exact and accept does not imply save', async t => {
     } });
     const form = await h.wait(row => row.method === 'elicitation/create');
     h.send({ jsonrpc: '2.0', id: form.id, result: withReviewPreview(form, response) }); await h.wait(row => row.id === 1);
-    assert.deepEqual(received, response.action === 'accept' ? response : { action: response.action }); await h.end();
+    assert.deepEqual(received, response.action === 'accept' ? { ...response, preview: 'intact' } : { action: response.action }); await h.end();
   });
 });
 
 test('missing or URL-only form capability leaves the proposal untouched', async t => {
-  for (const capability of [{}, { elicitation: { url: {} } }]) await t.test(JSON.stringify(capability), async t => {
-    const h = await duplexReview(t, { capability, review: async () => { throw new Error('must not review'); } });
-    const result = await h.wait(row => row.id === 1);
-    assert.deepEqual(view(result).diagnostics, ['PROCESSING_REVIEW_UNSUPPORTED']);
-    assert.equal(view(result).status, 'idle');
-    assert.equal(h.calls.some(call => call[0] === 'review'), false);
-    assert.equal(h.rows.some(row => row.method === 'elicitation/create'), false); await h.end();
-  });
+  for (const capability of [{}, { elicitation: { url: {} } }]) for (const status of ['idle', 'awaiting-review']) {
+    await t.test(`${JSON.stringify(capability)}/${status}`, async t => {
+      const h = await duplexReview(t, { capability, review: async () => { throw new Error('must not review'); },
+        getStatus: async () => ({ status, statusDetail: status === 'idle' ? 'inactive' : 'draft-ready', nextAction: status === 'idle' ? 'none' : 'review' }) });
+      const result = view(await h.wait(row => row.id === 1));
+      assert.deepEqual(result.diagnostics, ['PROCESSING_REVIEW_UNSUPPORTED']);
+      assert.equal(result.status, status);
+      // Only an actual pending draft is described as unreviewable here.
+      assert.equal(result.review, status === 'idle' ? undefined : 'unavailable');
+      if (status === 'awaiting-review') {
+        assert.match(result.statusText, /^Cuefluent: Review unavailable: this client did not report review form support\. The draft remains pending; nothing was saved\./);
+        assert(!result.statusText.includes('Draft ready'));
+      }
+      assert.equal(h.calls.some(call => call[0] === 'review'), false);
+      assert.equal(h.rows.some(row => row.method === 'elicitation/create'), false); await h.end();
+    });
+  }
 });
 
 test('clients offering an older protocol can accept the supported revision and review', async t => {
@@ -312,7 +344,7 @@ test('a client declining the supported protocol can disconnect without starting 
   assert.equal(h.calls.length, 0);
 });
 
-test('host line-ending normalization preserves decisions while lost or changed text is refused', async t => {
+test('host line-ending normalization keeps the display intact while lost or changed text is reported as altered', async t => {
   const preview = '# Synthetic preview\n\nA complete line.\n';
   for (const decision of ['save', 'skip', 'cancel', 'later']) for (const ending of ['\r\n', '\r']) {
     await t.test(`${decision}/${JSON.stringify(ending)}`, async t => {
@@ -323,19 +355,24 @@ test('host line-ending normalization preserves decisions while lost or changed t
       const form = await h.wait(row => row.method === 'elicitation/create');
       h.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { decision, changes: preview.replaceAll('\n', ending) } } });
       assert.equal((await h.wait(row => row.id === 1)).error, undefined);
-      assert.deepEqual(received, { action: 'accept', content: { decision } }); await h.end();
+      assert.deepEqual(received, { action: 'accept', content: { decision }, preview: 'intact' }); await h.end();
     });
   }
-  for (const changes of [preview.trim(), preview.replaceAll('\n', ' '), preview.replace('complete', 'changed')]) {
-    await t.test(JSON.stringify(changes), async t => {
-      let decided = false;
-      const h = await duplexReview(t, { review: async ({ elicit }) => {
-        await elicit({ message: preview }); decided = true; return { status: 'completed', nextAction: 'none' };
+  // Includes the Claude CLI 2.1.294 and 2.1.299 string-default sanitizer, which
+  // replaces LF/CR/U+2028/U+2029 with U+FFFD before the person sees the field.
+  for (const changes of [preview.trim(), preview.replaceAll('\n', ' '), preview.replace('complete', 'changed'),
+    preview.replace(/[\n\r\u2028\u2029]/g, '\uFFFD'), '', undefined, 42]) for (const decision of ['save', 'later']) for (const client of ['codex', 'claude']) {
+    await t.test(`${client}/${JSON.stringify(changes)}/${decision}`, async t => {
+      let received;
+      const h = await duplexReview(t, { client, review: async ({ elicit }) => {
+        received = await elicit({ message: preview }); return { status: 'awaiting-review', nextAction: 'review' };
       } });
       const form = await h.wait(row => row.method === 'elicitation/create');
-      h.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { decision: 'save', changes } } });
-      assert.equal((await h.wait(row => row.id === 1)).error.message, 'PROCESSING_REVIEW_PREVIEW_CHANGED');
-      assert.equal(decided, false); await h.end();
+      h.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { decision, changes } } });
+      // The decision reaches review only with an altered display marker; the
+      // transport no longer turns a display problem into a proposal error.
+      assert.equal((await h.wait(row => row.id === 1)).error, undefined);
+      assert.deepEqual(received, { action: 'accept', content: { decision }, preview: 'altered' }); await h.end();
     });
   }
 });
@@ -389,29 +426,14 @@ test('oversize exact previews are refused rather than truncated or sent as ordin
   assert.equal(h.rows.some(row => row.method === 'elicitation/create'), false); await h.end();
 });
 
-test('edited or missing preview cannot accompany a native decision', async t => {
-  for (const changes of [undefined, '', 'Changed preview']) await t.test(String(changes), async t => {
-    let decisions = 0;
-    const h = await duplexReview(t, { review: async ({ elicit }) => {
-      await elicit({ message: 'Exact synthetic proposal' }); decisions++; return { status: 'completed', nextAction: 'none' };
-    } });
-    const form = await h.wait(row => row.method === 'elicitation/create');
-    h.send({ jsonrpc: '2.0', id: form.id, result: { action: 'accept', content: { changes, decision: 'save' } } });
-    assert.equal((await h.wait(row => row.id === 1)).error.message,
-      changes === undefined ? 'PROCESSING_REVIEW_INTERRUPTED' : 'PROCESSING_REVIEW_PREVIEW_CHANGED');
-    assert.equal(decisions, 0); await h.end();
-  });
-});
-
 test('large UTF-8 preview echoes are bounded separately from ordinary requests', async t => {
   const preview = '# Synthetic review\n' + 'café 🌳\n'.repeat(8000);
   assert(Buffer.byteLength(preview) > 64 * 1024);
   for (const kind of ['host response', 'ordinary method', 'oversized host response']) await t.test(kind, async t => {
-    let decisions = 0;
+    let received;
     const h = await duplexReview(t, { review: async ({ elicit }) => {
-      const result = await elicit({ message: preview });
-      assert.deepEqual(result, { action: 'accept', content: { decision: 'skip' } });
-      decisions++; return { status: 'completed', nextAction: 'none' };
+      received = await elicit({ message: preview });
+      return { status: 'awaiting-review', nextAction: 'review' };
     } });
     const form = await h.wait(row => row.method === 'elicitation/create');
     assert.equal(form.params.requestedSchema.properties.changes.default, preview);
@@ -421,13 +443,15 @@ test('large UTF-8 preview echoes are bounded separately from ordinary requests',
       ? { jsonrpc: '2.0', id: 2, method: 'ping', params: { text: preview } }
       : { jsonrpc: '2.0', id: form.id, result });
     if (kind === 'host response') {
-      assert.equal(view(await h.wait(row => row.id === 1)).status, 'completed'); assert.equal(decisions, 1);
+      assert.equal((await h.wait(row => row.id === 1)).error, undefined);
+      assert.deepEqual(received, { action: 'accept', content: { decision: 'skip' }, preview: 'intact' });
     } else if (kind === 'oversized host response') {
-      assert.equal((await h.wait(row => row.id === 1)).error.message, 'PROCESSING_REVIEW_TOO_LARGE');
-      assert.equal(decisions, 0);
+      // An oversized echo cannot match the bounded preview; it applies nothing.
+      assert.equal((await h.wait(row => row.id === 1)).error, undefined);
+      assert.deepEqual(received, { action: 'accept', content: { decision: 'skip' }, preview: 'altered' });
       h.send({ jsonrpc: '2.0', id: 90, method: 'ping' }); assert.deepEqual((await h.wait(row => row.id === 90)).result, {});
     } else {
-      await assert.rejects(h.running, { code: 'PROCESSING_CONTROL_INPUT_LIMIT' }); assert.equal(decisions, 0); return;
+      await assert.rejects(h.running, { code: 'PROCESSING_CONTROL_INPUT_LIMIT' }); assert.equal(received, undefined); return;
     }
     await h.end();
   });

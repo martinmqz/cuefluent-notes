@@ -476,3 +476,17 @@ test('reader capacity stops before the overflowing row and commits the entire ac
   assert(progress.checkpoint.records.length > 25000); assert.equal(progress.cursor.offset, blocked.offset);
   assert(progress.cursor.offset < (await fs.stat(f.source.path)).size);
 });
+
+test('Claude 2.1.299 API request snapshots are skipped transport metadata, never evidence', async t => {
+  const apiShape = { type: 'api-request-shape', sessionId: S, shapeHash: 'a'.repeat(64), timestamp: stamp, version: '2.1.299', shape: {} };
+  const apiBlob = text => ({ type: 'api-request-blob', sessionId: S, hash: digest(text), message: { role: 'user', content: text } });
+  const apiRequest = { type: 'api-request', sessionId: S, id: randomUUID(), timestamp: stamp, version: '2.1.299', querySource: 'repl_main_thread',
+    shapeHash: 'a'.repeat(64), params: {}, keep: 1, tail: [], cacheControl: [], requestDigest: 'b'.repeat(64) };
+  const f = await fixture(t, [human(), apiShape, apiBlob('COPIED BLOB TEXT'), apiRequest, assistant()],
+    { prefix: JSON.stringify(apiShape) + '\n' });
+  const result = await readClaudeSelection(f.args);
+  assert.equal(result.blocked, null); assert.equal(result.candidates.length, 1);
+  assert.deepEqual(result.candidates[0].capture.evidence.map(item => item.text), ['Meeting: selected source.']);
+  assert(!JSON.stringify(result).includes('COPIED BLOB TEXT'));
+  await publish(f, result);
+});

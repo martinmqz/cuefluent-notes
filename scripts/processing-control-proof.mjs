@@ -274,8 +274,25 @@ export async function verifyClaudeProcessingControl({ source, fromByte, endByte,
       else if (!['text', 'thinking', 'redacted_thinking'].includes(block.type)) return null;
     }
   }
-  if (calls.length !== 1 || results.length !== 1 || humans.length !== 1) return null;
-  const call = calls[0], output = results[0];
+  // Claude can defer MCP schemas: its built-in ToolSearch may first load exactly
+  // the Cuefluent tool this control calls. That pair carries no user content; any
+  // other tool, query, extra match or error keeps the whole unit collectible.
+  const controls = calls.filter(item => item.block.name !== 'ToolSearch');
+  if (controls.length !== 1 || humans.length !== 1) return null;
+  const call = controls[0], loaders = calls.filter(item => item !== call), resultFor = id => results.filter(item => item.block.tool_use_id === id);
+  if (results.length !== loaders.length + 1) return null;
+  for (const loader of loaders) {
+    const paired = resultFor(loader.block.id), input = loader.block.input, used = paired[0];
+    if (typeof loader.block.id !== 'string' || calls.indexOf(loader) > calls.indexOf(call) || paired.length !== 1 || !object(input) ||
+        Object.keys(input).some(key => !['query', 'max_results'].includes(key)) || input.query !== `select:${call.block.name}` ||
+        (input.max_results !== undefined && !(Number.isSafeInteger(input.max_results) && input.max_results >= 1 && input.max_results <= 5)) ||
+        !claudeRoot(used.row, source) || used.row.promptId !== unitId || used.row.sourceToolAssistantUUID !== loader.row.uuid || used.block.is_error === true ||
+        !Array.isArray(used.block.content) || used.block.content.length !== 1 || canonicalJSON(used.block.content[0]) !== canonicalJSON({ type: 'tool_reference', tool_name: call.block.name }) ||
+        !object(used.row.toolUseResult) || canonicalJSON(used.row.toolUseResult.matches) !== canonicalJSON([call.block.name])) return null;
+  }
+  const outputs = resultFor(call.block.id);
+  if (outputs.length !== 1) return null;
+  const output = outputs[0];
   if (typeof call.block.id !== 'string' || !/^mcp__[a-zA-Z0-9_-]*cuefluent_control__(?:process_selected_captures|processing_review|processing_status|processing_resume|processing_cancel)$/.test(call.block.name ?? '') ||
       !object(call.block.input)) return null;
   const query = { client: 'claude', sessionId: source.sessionId, unitId, callId: call.block.id,

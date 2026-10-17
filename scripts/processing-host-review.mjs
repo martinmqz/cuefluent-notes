@@ -54,10 +54,13 @@ function processingReviewText(preview) {
   return text.join('\n\n');
 }
 
+const OUTCOMES = Object.freeze({ save: 'saved', skip: 'skipped', cancel: 'cancelled' });
 /** The model cannot supply a decision. elicit is the native host-control channel
  * callback, and its correlated response approves only the exact preview here.
  * No engine lock is held while the host waits. Closed/unsupported forms preserve
- * the pending proposal; revisions and conflicts require a fresh review. */
+ * the pending proposal; revisions and conflicts require a fresh review. A decision
+ * applies only when the host reports the preview it displayed as intact; `review`
+ * reports what happened without implying that a form appeared. */
 export async function reviewProcessingProposal(capability, { selection, operationId }, { elicit, signal, commitResponse }) {
   signal?.throwIfAborted();
   if (typeof elicit !== 'function') fail('PROCESSING_REVIEW_UNSUPPORTED');
@@ -70,18 +73,26 @@ export async function reviewProcessingProposal(capability, { selection, operatio
   signal?.throwIfAborted();
   const response = await elicit({ message });
   signal?.throwIfAborted();
-  keys(response, ['action'], ['content']); choice(response.action, ['accept', 'decline', 'cancel']);
-  if (response.action !== 'accept') return { operationId, status: 'awaiting-review', proposalHash: preview.proposalHash };
-  keys(response, ['action', 'content']); keys(response.content, ['decision']);
+  keys(response, ['action'], ['content', 'preview']); choice(response.action, ['accept', 'decline', 'cancel']);
+  const pending = review => ({ operationId, status: 'awaiting-review', proposalHash: preview.proposalHash, review });
+  if (response.action !== 'accept') {
+    if (response.content !== undefined || response.preview !== undefined) fail('PROCESSING_REVIEW_INTERRUPTED');
+    return pending('declined');
+  }
+  keys(response, ['action', 'content', 'preview']); keys(response.content, ['decision']);
   const decision = choice(response.content.decision, ['save', 'skip', 'cancel', 'later']);
-  if (decision === 'later') return { operationId, status: 'awaiting-review', proposalHash: preview.proposalHash };
+  // A collapsed, truncated or edited echo cannot show what the person read.
+  // Keep every decision pending, including Later, and say why.
+  if (choice(response.preview, ['intact', 'altered']) === 'altered') return pending('display-altered');
+  if (decision === 'later') return pending('deferred');
   // Cancellation remains actionable through engine preflight and staging. Once
   // intent/disposition publication starts, finish or report recovery explicitly;
   // a late transport cancellation must not hide the committed operation.
   const beforeCommit = () => { signal?.throwIfAborted(); commitResponse?.(); };
-  return withStorageProbes(() => decision === 'save'
+  const result = await withStorageProbes(() => decision === 'save'
     ? saveProcessing(capability, { selection, operationId, expectedClaimHash: preview.claimHash,
       approvedProposalHash: preview.proposalHash, trigger: 'approved' }, { beforeCommit })
     : completeProcessing(capability, { selection, operationId, expectedClaimHash: preview.claimHash,
-      outcome: decision === 'skip' ? 'skipped' : 'cancelled' }, { beforeCommit }));
+      outcome: OUTCOMES[decision] }, { beforeCommit }));
+  return { ...result, review: OUTCOMES[decision] };
 }

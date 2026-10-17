@@ -450,7 +450,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (proposals.length > 1) {
         const chosen = await elicit({ choices: proposals.map((item, index) => ({ operationId: item.operationId,
           label: `Draft ${index + 1}: ${item.inputCount} captures; ${item.createdAt}` })) });
-        if (chosen.action !== 'accept') return { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+        if (chosen.action !== 'accept') return { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', review: 'declined' };
         proposal = proposals.find(item => item.operationId === chosen.content.operationId);
         if (!proposal) fail('PROCESSING_REVIEW_INTERRUPTED');
       }
@@ -460,7 +460,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         const result = await reviewProcessingProposal(capability, context, { elicit, signal, commitResponse });
         if (result.status !== 'awaiting-review') {
           committedReviews.set(source, { status: 'completed', statusDetail: 'completed', requestId: status.requestId, chat: status.chat,
-            nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'] });
+            nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: result.review });
           try {
             const ownReview = !status.restartSupported && status.state === 'awaiting-review' && status.operationId === proposal.operationId;
             const next = ownReview ? await controller.finishReview({ expectedChatHash: status.chatHash,
@@ -468,8 +468,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
               : status.restartSupported ? await controller.status({ selection: source.selection }) : status;
             response = processingStatusView(next, await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection })));
             if (!ownReview && response.status === 'missing') response = { ...response, status: 'completed', statusDetail: 'completed' };
+            response = { ...response, review: result.review };
           } catch { response = committedReviews.get(source); }
-        } else response = { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+        } else response = { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', review: result.review };
       }
     } finally {
       try { await controller.close(); }

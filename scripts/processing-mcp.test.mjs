@@ -526,7 +526,10 @@ test('editing the native preview refuses Save and preserves the exact proposal f
   h.answer(form, { action: 'accept', content: {
     changes: form.params.requestedSchema.properties.changes.default + '\nUser edit', decision: 'save'
   } });
-  assert.equal((await review).error.message, 'PROCESSING_REVIEW_PREVIEW_CHANGED');
+  const refused = body(await review);
+  assert.equal(refused.status, 'awaiting-review'); assert.equal(refused.review, 'display-altered');
+  assert.equal(refused.nextAction, 'review'); assert.deepEqual(refused.diagnostics, []);
+  assert.match(refused.statusText, /Nothing was saved, skipped or cancelled; the draft remains pending\./);
   const after = await inspectProcessing(f.capability, f.operationId);
   assert.equal(after.state, 'awaiting-review'); assert.equal(after.outcome, null);
   assert.equal(after.claimHash, before.claimHash); assert.equal(after.proposalHash, before.proposalHash);
@@ -539,6 +542,49 @@ test('editing the native preview refuses Save and preserves the exact proposal f
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'skipped');
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+});
+
+test('observed Claude review responses keep the exact draft pending with truthful outcomes', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
+  const before = await inspectProcessing(f.capability, f.operationId);
+  const review = async answer => {
+    const next = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
+    const form = await next; h.answer(form, answer(form)); return result;
+  };
+  // Claude CLI 2.1.294 and 2.1.299 initialize string defaults through a sanitizer
+  // that replaces LF/CR/U+2028/U+2029 with U+FFFD; the person cannot read the
+  // original multiline preview, then submits only a navigated decision.
+  const sanitized = form => form.params.requestedSchema.properties.changes.default.replace(/[\n\r\u2028\u2029]/g, '\uFFFD');
+  for (const [name, answer, outcome] of [
+    // Claude Desktop 2.42304.0 advertises elicitation without a host handler;
+    // its SDK returns this decline without displaying any form.
+    ['Desktop decline', () => ({ action: 'decline' }), 'declined'],
+    ['CLI Later', form => ({ action: 'accept', content: { changes: sanitized(form), decision: 'later' } }), 'display-altered'],
+    ['CLI Save', form => ({ action: 'accept', content: { changes: sanitized(form), decision: 'save' } }), 'display-altered'],
+    ['CLI Skip', form => ({ action: 'accept', content: { changes: sanitized(form), decision: 'skip' } }), 'display-altered'],
+  ]) {
+    const row = await review(answer);
+    assert.equal(row.error, undefined, name);
+    const reported = body(row);
+    assert.equal(reported.status, 'awaiting-review', name); assert.equal(reported.review, outcome, name);
+    assert.equal(reported.nextAction, 'review', name); assert.deepEqual(reported.diagnostics, [], name);
+    // Neither result claims a displayed form, a changed draft, or bare readiness.
+    assert(!reported.statusText.includes('Draft ready'), name);
+    assert(!JSON.stringify(row).includes('PREVIEW_CHANGED'), name);
+    assert.match(reported.statusText, outcome === 'declined' ? /may not have been displayed/ : /may not have been readable/, name);
+    const current = await inspectProcessing(f.capability, f.operationId);
+    assert.equal(current.state, 'awaiting-review', name); assert.equal(current.outcome, null, name);
+    assert.equal(current.claimHash, before.claimHash, name); assert.equal(current.proposalHash, before.proposalHash, name);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), [], name);
+  }
+  // The same pending draft still saves exactly when a host round-trips its display.
+  const saved = body(await review(() => ({ action: 'accept', content: { decision: 'save' } })));
+  assert.equal(saved.review, 'saved');
+  assert.match(saved.statusText, /^Cuefluent: Review completed: the exact reviewed proposal was saved\./);
+  assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
+  assert.equal(h.dispatches, 1);
 });
 
 test('native review safely displays controls and accepts a CRLF echo while saving the exact draft bytes', async t => {
@@ -565,7 +611,7 @@ test('an oversized decoded form reply preserves the exact proposal and permits a
   const next = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
   const form = await next;
   h.answer(form, { action: 'accept', content: { decision: 'save', changes: 'x'.repeat(256 * 1024 + 1) } });
-  assert.equal((await review).error.message, 'PROCESSING_REVIEW_TOO_LARGE');
+  assert.equal(body(await review).review, 'display-altered');
   const after = await inspectProcessing(f.capability, f.operationId);
   assert.equal(after.claimHash, before.claimHash); assert.equal(after.proposalHash, before.proposalHash);
   assert.equal(after.state, 'awaiting-review'); assert.equal(after.outcome, null);
@@ -733,14 +779,18 @@ test('source review preserves exact pending proposal on Later, decline and close
   for (const decision of ['skip', 'cancel']) await t.test(decision, async t => {
     const f = await processingFixture(t), h = await harness(t, f); await proposeInChat(f, h);
     const pending = await inspectProcessing(f.capability, f.operationId);
-    for (const response of [{ action: 'accept', content: { decision: 'later' } }, { action: 'decline' }, { action: 'cancel' }]) {
+    for (const [response, review] of [[{ action: 'accept', content: { decision: 'later' } }, 'deferred'],
+      [{ action: 'decline' }, 'declined'], [{ action: 'cancel' }, 'declined']]) {
       const next = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
-      h.answer(await next, response); assert.equal(body(await result).status, 'awaiting-review');
+      h.answer(await next, response);
+      const reported = body(await result);
+      assert.equal(reported.status, 'awaiting-review'); assert.equal(reported.review, review);
       assert.equal((await inspectProcessing(f.capability, f.operationId)).proposalHash, pending.proposalHash);
     }
     const next = h.nextForm(), result = h.call('processing_review', { collectionId: f.collection.id });
     h.answer(await next, { action: 'accept', content: { decision } });
-    assert.equal(body(await result).status, 'idle');
+    const completed = body(await result);
+    assert.equal(completed.status, 'idle'); assert.equal(completed.review, decision === 'skip' ? 'skipped' : 'cancelled');
     assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, decision === 'skip' ? 'skipped' : 'cancelled');
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []); assert.equal(h.dispatches, 1);
   });
@@ -1563,7 +1613,8 @@ test('the engine enforces the draft-selector limit even for claims prepared befo
   const h = await harness(t, f), ready = h.nextForm(), result = h.call('processing_review', {}), selector = await ready;
   const choices = selector.params.requestedSchema.properties.operationId.oneOf;
   assert.equal(choices.length, 5); assert(!choices.some(item => item.const === fixtures[5].operationId));
-  h.answer(selector, { action: 'cancel' }); assert.equal(body(await result).status, 'awaiting-review');
+  h.answer(selector, { action: 'cancel' });
+  const dismissed = body(await result); assert.equal(dismissed.status, 'awaiting-review'); assert.equal(dismissed.review, 'declined');
   assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
 
@@ -1591,7 +1642,7 @@ test('an unauthorized draft stays intact while an authorized draft can be review
 test('review acknowledges its own completed draft after another host applied the outcome', async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   await proposeInChat(f, h);
-  await reviewProcessingProposal(f.capability, { selection: f.selection, operationId: f.operationId }, { elicit: async () => ({ action: 'accept', content: { decision: 'skip' } }) });
+  await reviewProcessingProposal(f.capability, { selection: f.selection, operationId: f.operationId }, { elicit: async () => ({ action: 'accept', content: { decision: 'skip' }, preview: 'intact' }) });
   const status = body(await h.call('processing_status', {}));
   assert.notEqual(status.status, 'awaiting-review'); assert.equal(h.finishReviewCalls ?? 0, 0, 'status remains read-only');
   const reviewed = body(await h.call('processing_review', {}));
@@ -1954,7 +2005,7 @@ for (const completion of ['save', 'external']) test(`MCP retired proposal suppor
       const operation = await inspectProcessing(f.capability, operationId);
       h.inspectOperation = null;
       await reviewProcessingProposal(f.capability, { selection: f.selection, operationId },
-        { elicit: async () => ({ action: 'accept', content: { decision: 'skip' } }) });
+        { elicit: async () => ({ action: 'accept', content: { decision: 'skip' }, preview: 'intact' }) });
       return operation;
     };
     const completed = body(await h.call('processing_status', {}));

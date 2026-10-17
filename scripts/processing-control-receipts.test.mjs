@@ -32,7 +32,7 @@ const ordinary = turn => [evt('task_started', { turn_id: turn, root_turn_id: tur
   item(turn, { type: 'UserMessage', id: `user-${turn}`, content: [{ type: 'text', text: `Genuine work ${turn}.` }] }),
   evt('task_complete', { turn_id: turn })];
 
-async function claudeFixture(t, { partial = false, control = 'process', installedSkill = false } = {}) {
+async function claudeFixture(t, { partial = false, control = 'process', installedSkill = false, schemaLoad = null } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-claude-receipt-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = { client: 'claude', sessionId, projectRoot: root, path: path.join(root, 'native.jsonl'), fileIdentity: '' };
@@ -54,7 +54,18 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
     { promptId: unitId, sourceToolAssistantUUID: call.uuid, toolUseResult: result.content, parentUuid: call.uuid });
   const final = row('assistant', [{ type: 'text', text: statusText }], { attributionSkill: command, attributionPlugin: 'cuefluent-notes',
     attributionMcpServer: 'cuefluent_control', attributionMcpTool: tool, parentUuid: output.uuid }); final.message.stop_reason = 'end_turn';
-  const all = [input, companion, call, output, final], lines = all.map(row => JSON.stringify(row) + '\n');
+  // Claude CLI 2.1.299 can load a deferred MCP schema with its built-in ToolSearch first.
+  const loaded = [];
+  if (schemaLoad) {
+    const name = `mcp__cuefluent_control__${tool}`, query = schemaLoad.query ?? `select:${name}`;
+    const loader = row('assistant', [{ type: 'tool_use', id: 'loader-call', name: 'ToolSearch', input: { query, max_results: 1 }, caller: { type: 'direct' } }],
+      { attributionSkill: command, attributionPlugin: 'cuefluent-notes', parentUuid: companion.uuid });
+    const loadedResult = row('user', [{ type: 'tool_result', tool_use_id: 'loader-call', content: (schemaLoad.matches ?? [name]).map(tool_name => ({ type: 'tool_reference', tool_name })) }],
+      { promptId: unitId, sourceToolAssistantUUID: loader.uuid, toolUseResult: { matches: schemaLoad.matches ?? [name], query, total_deferred_tools: 35 }, parentUuid: loader.uuid });
+    loaded.push(loader, loadedResult);
+  }
+  const all = schemaLoad?.after ? [input, companion, call, output, ...loaded, final] : [input, companion, ...loaded, call, output, final];
+  const lines = all.map(row => JSON.stringify(row) + '\n');
   await fs.writeFile(source.path, prefix + (partial ? lines[0] : lines.join('')));
   source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
   const store = await privateIntakeFixture(t, source);
@@ -90,6 +101,22 @@ test('Claude formal process and review inputs advance without raw captures and r
       const later = await f.read(tx, { cursor: plan.scan.to, checkpoint: plan.checkpoint });
       assert.deepEqual(later.pending, []); assert.equal(later.candidates.length, 1);
       assert.deepEqual(later.candidates[0].capture.evidence.map(item => item.text), ['Correction: use SDK 606.']);
+    });
+  });
+});
+
+test('Claude deferred-schema ToolSearch for the exact control tool does not block exclusion; other searches do', async t => {
+  for (const [name, schemaLoad, excluded] of [
+    ['exact schema load', {}, true],
+    ['different tool', { query: 'select:mcp__other__tool', matches: ['mcp__other__tool'] }, false],
+    ['extra match', { matches: ['mcp__cuefluent_control__processing_review', 'mcp__other__tool'] }, false],
+    ['after the control call', { after: true }, false],
+  ]) await t.test(name, async t => {
+    const f = await claudeFixture(t, { control: 'review', schemaLoad });
+    await withIntakeLock(f.store, async tx => {
+      await f.record(tx); const read = await f.read(tx);
+      assert.equal(read.processingControls.length, excluded ? 1 : 0);
+      assert.equal(read.candidates.length, excluded ? 0 : 1);
     });
   });
 });

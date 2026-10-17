@@ -20,7 +20,10 @@ export const CLAUDE_READER_RULES_REVISION = 2;
 const metadataTypes = new Set(['summary', 'custom-title', 'ended-by-model', 'ai-title', 'last-prompt', 'tag',
   'agent-name', 'agent-color', 'agent-setting', 'pr-link', 'frame-link', 'artifact-comment-monitor',
   'artifact-autoreact-ledger', 'file-history-snapshot', 'file-history-delta', 'attribution-snapshot',
-  'mode', 'permission-mode', 'isolation-latch', 'memory-mode', 'atis-latch', 'worktree-state', 'cost-state', 'queue-operation']);
+  'mode', 'permission-mode', 'isolation-latch', 'memory-mode', 'atis-latch', 'worktree-state', 'cost-state', 'queue-operation',
+  // Claude CLI 2.1.299 API request snapshots: shapes, digests and message copies
+  // of records already present as root user/assistant rows. Never human input.
+  'api-request-shape', 'api-request-blob', 'api-request']);
 const discontinuities = new Set(['relocated', 'continued-in', 'bridge-session', 'history-suppression',
   'content-replacement', 'fork-context-ref', 'observer-ref']);
 const rootTypes = new Set(['user', 'assistant', 'system', 'attachment']);

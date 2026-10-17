@@ -15,17 +15,19 @@ test('proposal preview is read-only and exact host Save writes through the exist
     assert(message.includes(p.proposalHash)); assert(message.includes('│ Keep the rollout paused.'));
     assert(message.includes('CREATE "meetings/rollout.md"')); assert(message.includes('Folders to create:\n- "meetings"'));
     assert(!message.includes('CURRENT MARKDOWN')); assert(!message.includes('expectedContentHash'));
-    return { action: 'accept', content: { decision: 'save' } };
+    return { action: 'accept', content: { decision: 'save' }, preview: 'intact' };
   } });
-  assert.equal(result.status, 'saved'); assert.equal(await fs.readFile(p.target, 'utf8'), preview.files[0].proposed);
+  assert.equal(result.status, 'saved'); assert.equal(result.review, 'saved'); assert.equal(await fs.readFile(p.target, 'utf8'), preview.files[0].proposed);
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
 });
 
-test('closed forms, Later and unsupported host leave exact proposal pending', async t => {
+test('closed forms, Later and unsupported host leave exact proposal pending with a distinct review outcome', async t => {
   const f = await processingFixture(t), p = await proposedClaim(f);
-  for (const answer of [{ action: 'cancel' }, { action: 'decline' }, { action: 'accept', content: { decision: 'later' } }]) {
+  for (const [answer, review] of [[{ action: 'cancel' }, 'declined'], [{ action: 'decline' }, 'declined'],
+    [{ action: 'accept', content: { decision: 'later' }, preview: 'intact' }, 'deferred']]) {
     const result = await reviewProcessingProposal(f.capability, f.args, { elicit: async () => answer });
     assert.equal(result.status, 'awaiting-review'); assert.equal(result.proposalHash, p.proposalHash);
+    assert.equal(result.review, review);
   }
   await assert.rejects(reviewProcessingProposal(f.capability, f.args, {}), { code: 'PROCESSING_REVIEW_UNSUPPORTED' });
   const current = await inspectProcessing(f.capability, f.operationId);
@@ -55,7 +57,7 @@ test('review shows complete originals, proposals and source limitations while sa
     }
     assert(message.includes('Used in: "decision.md"')); assert(message.includes(p.proposalHash));
     assert.match(message, /1 of 1 retained evidence pages inspected.*does not establish completeness/);
-    return { action: 'accept', content: { decision: 'save' } };
+    return { action: 'accept', content: { decision: 'save' }, preview: 'intact' };
   } });
   assert.equal(await fs.readFile(p.target, 'utf8'), content);
 });
@@ -81,7 +83,7 @@ test('review quotes forged structure and escapes controls without altering saved
     assert(message.includes('Partial source coverage.')); assert(message.includes('Omitted:'));
     assert(message.includes('caption: "Synthetic image\\nUsed in: forged.md'));
     assert(message.endsWith(`Exact proposal: ${p.proposalHash}`));
-    return { action: 'accept', content: { decision: 'save' } };
+    return { action: 'accept', content: { decision: 'save' }, preview: 'intact' };
   } });
   assert.equal(await fs.readFile(p.target, 'utf8'), content);
 });
@@ -98,7 +100,7 @@ test('line-ending-only edits and mixed endings remain visible in review', async 
       assert(message.includes('Current line endings — CRLF: 5, LF: 0, CR: 0'));
       const proposed = message.split('\n').find(line => line.startsWith('Proposed line endings'));
       assert(!proposed.includes('CRLF: 5, LF: 0, CR: 0'));
-      return { action: 'accept', content: { decision: 'save' } };
+      return { action: 'accept', content: { decision: 'save' }, preview: 'intact' };
     } });
     assert.equal(await fs.readFile(p.target, 'utf8'), content);
   });
@@ -110,7 +112,7 @@ test('cancellation before or just after elicitation preserves the exact pending 
     const cancelled = Object.assign(new Error('Cancelled synthetic review'), { code: 'PROCESSING_CONTROL_CANCELLED' });
     let forms = 0, commits = 0;
     const options = { signal: abort.signal, commitResponse: () => { commits++; }, elicit: async () => {
-      forms++; abort.abort(cancelled); return { action: 'accept', content: { decision } };
+      forms++; abort.abort(cancelled); return { action: 'accept', content: { decision }, preview: 'intact' };
     } };
     await assert.rejects(reviewProcessingProposal(f.capability, f.args, options), cancelled);
     await assert.rejects(reviewProcessingProposal(f.capability, f.args, options), cancelled);
@@ -126,7 +128,7 @@ test('human edits during the host wait keep conflict protection and do not refre
   const f = await processingFixture(t), p = await proposedClaim(f, { name: 'rollout.md' });
   await assert.rejects(reviewProcessingProposal(f.capability, f.args, { elicit: async () => {
     await fs.writeFile(p.target, '# Human edit\n');
-    return { action: 'accept', content: { decision: 'save' } };
+    return { action: 'accept', content: { decision: 'save' }, preview: 'intact' };
   } }), error => /output changed since inspection/.test(error.message));
   assert.equal(await fs.readFile(p.target, 'utf8'), '# Human edit\n');
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, null);
@@ -135,12 +137,32 @@ test('human edits during the host wait keep conflict protection and do not refre
 test('host Skip and Cancel use distinct authoritative dispositions; model-shaped decisions fail', async t => {
   for (const [decision, outcome] of [['skip', 'skipped'], ['cancel', 'cancelled']]) await t.test(decision, async t => {
     const f = await processingFixture(t); await proposedClaim(f);
-    for (const response of [{ decision }, { action: 'accept', content: { decision, correction: 'new source' } },
-      { action: 'accept', content: { decision: 'save' }, approved: true }]) {
+    for (const response of [{ decision }, { action: 'accept', content: { decision, correction: 'new source' }, preview: 'intact' },
+      { action: 'accept', content: { decision: 'save' }, preview: 'intact', approved: true },
+      // The transport always states the display; an unstated one fails closed.
+      { action: 'accept', content: { decision } }, { action: 'accept', content: { decision }, preview: 'unknown' }]) {
       await assert.rejects(reviewProcessingProposal(f.capability, f.args, { elicit: async () => response }));
     }
-    const result = await reviewProcessingProposal(f.capability, f.args, { elicit: async () => ({ action: 'accept', content: { decision } }) });
-    assert.equal(result.status, outcome); assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, outcome);
+    const result = await reviewProcessingProposal(f.capability, f.args, { elicit: async () => ({ action: 'accept', content: { decision }, preview: 'intact' }) });
+    assert.equal(result.status, outcome); assert.equal(result.review, outcome); assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, outcome);
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
+});
+
+test('an altered host display applies no decision and leaves the exact proposal saveable', async t => {
+  const f = await processingFixture(t), p = await proposedClaim(f);
+  for (const decision of ['save', 'skip', 'cancel', 'later']) {
+    let commits = 0;
+    const result = await reviewProcessingProposal(f.capability, f.args, { commitResponse: () => { commits++; },
+      elicit: async () => ({ action: 'accept', content: { decision }, preview: 'altered' }) });
+    assert.deepEqual(result, { operationId: f.operationId, status: 'awaiting-review', proposalHash: p.proposalHash, review: 'display-altered' });
+    assert.equal(commits, 0);
+    const current = await inspectProcessing(f.capability, f.operationId);
+    assert.equal(current.state, 'awaiting-review'); assert.equal(current.outcome, null);
+    assert.equal(current.claimHash, p.claimHash); assert.equal(current.proposalHash, p.proposalHash);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  }
+  const saved = await reviewProcessingProposal(f.capability, f.args, { elicit: async () => ({ action: 'accept', content: { decision: 'save' }, preview: 'intact' }) });
+  assert.equal(saved.review, 'saved'); assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+  assert.match(await fs.readFile(p.target, 'utf8'), /Keep the rollout paused/);
 });

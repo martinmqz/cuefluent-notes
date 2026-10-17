@@ -38,6 +38,17 @@ const STATUS_DETAILS = Object.freeze({
   continuation: { states: ['idle'], text: 'Selected evidence remains. Use resume to continue.' },
   cancelled: { states: ['idle', 'completed', 'missing'], text: 'Processing cancelled; unhandled captures remain pending.' },
 });
+// A review result is separate from draft state: a pending draft does not show
+// that a form opened. Pending outcomes describe only what the host returned.
+const REVIEW_OUTCOMES = Object.freeze({
+  saved: { pending: false, text: 'Review completed: the exact reviewed proposal was saved.' },
+  skipped: { pending: false, text: 'Review completed: these captures were skipped without saving.' },
+  cancelled: { pending: false, text: 'Review completed: the operation was cancelled; its captures remain pending.' },
+  deferred: { pending: true, text: 'Review deferred with Later. The draft remains pending; nothing was saved.' },
+  declined: { pending: true, text: 'Review not completed: the client declined or closed the review form, which may not have been displayed. The draft remains pending; nothing was saved.' },
+  'display-altered': { pending: true, text: 'Review not completed: the client changed the preview text, so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; the draft remains pending.' },
+  unavailable: { pending: true, text: 'Review unavailable: this client did not report review form support. The draft remains pending; nothing was saved.' },
+});
 const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CONTROL_FAILED',
   'PROCESSING_INVENTORY_CHANGED', 'PROCESSING_OPERATION_OWNER_UNVERIFIED', 'PROCESSING_CHAT_HISTORY_FULL', 'PROCESSING_CHAT_BUSY', 'PROCESSING_CHAT_BLOCKED', 'PROCESSING_CHAT_MISSING', 'PROCESSING_CHAT_BINDING_CHANGED',
   'PROCESSING_CHAT_HOST_UNAVAILABLE', 'PROCESSING_CHAT_SESSION_UNAVAILABLE', 'PROCESSING_CHAT_OUTCOME_UNKNOWN',
@@ -166,6 +177,14 @@ export function processingControlStatusView(value, args) {
       result.statusDetail = value.statusDetail;
       result.statusText = `Cuefluent: ${detail.text}`;
     }
+    if (value.review !== undefined) {
+      choice(value.review, Object.keys(REVIEW_OUTCOMES));
+      const outcome = REVIEW_OUTCOMES[value.review];
+      if (outcome.pending && result.status !== 'awaiting-review') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      result.review = value.review;
+      result.statusText = `Cuefluent: ${outcome.text}` +
+        (outcome.pending === false && result.statusDetail ? ` ${STATUS_DETAILS[result.statusDetail].text}` : '');
+    }
     if (value.scope !== undefined) {
       result.scope = choice(value.scope, PROCESSING_SCOPES);
       result.statusText += ` Scope: ${result.scope}.`;
@@ -231,20 +250,22 @@ export async function runProcessingControlServer({ client, input = process.stdin
           form.resolve(Object.freeze({ action: 'accept', content: Object.freeze({ operationId: row.result.content.operationId }) }));
           return;
         }
-        keys(row.result.content, ['changes', 'decision']);
-        if (typeof row.result.content.changes !== 'string') fail('PROCESSING_REVIEW_INTERRUPTED');
-        const changes = row.result.content.changes.replace(/\r\n?/g, '\n');
-        if (Buffer.byteLength(changes) > FORM_BYTES) fail('PROCESSING_REVIEW_TOO_LARGE');
-        if (changes !== form.preview.replace(/\r\n?/g, '\n')) fail('PROCESSING_REVIEW_PREVIEW_CHANGED');
+        keys(row.result.content, ['decision'], ['changes']);
         choice(row.result.content.decision, ['save', 'skip', 'cancel', 'later']);
-        form.resolve(Object.freeze({ action: 'accept', content: Object.freeze({ decision: row.result.content.decision }) }));
+        // The preview field only displays the proposal; the decision enum is the
+        // host answer. Hosts can collapse, truncate or omit the text (and people
+        // can edit it), so report the display state instead of failing the
+        // response. Review applies a decision only for an intact display.
+        const { changes } = row.result.content;
+        const intact = typeof changes === 'string' && changes.replace(/\r\n?/g, '\n') === form.preview.replace(/\r\n?/g, '\n');
+        form.resolve(Object.freeze({ action: 'accept', content: Object.freeze({ decision: row.result.content.decision }),
+          preview: intact ? 'intact' : 'altered' }));
       } else {
         if (row.result.content !== undefined && row.result.content !== null) fail('PROCESSING_CONTROL_PROTOCOL');
         form.resolve(Object.freeze({ action: row.result.action }));
       }
-    } catch (error) {
-      const code = ['PROCESSING_REVIEW_PREVIEW_CHANGED', 'PROCESSING_REVIEW_TOO_LARGE'].includes(error.code) ? error.code : 'PROCESSING_REVIEW_INTERRUPTED';
-      form.reject(Object.assign(new Error(code), { code }));
+    } catch {
+      form.reject(Object.assign(new Error('PROCESSING_REVIEW_INTERRUPTED'), { code: 'PROCESSING_REVIEW_INTERRUPTED' }));
     }
   };
   const processRequest = async (row, request) => {
@@ -330,7 +351,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
               message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.',
               requestedSchema: { type: 'object', properties: {
                 changes: { type: 'string', title: 'Proposed changes',
-                  description: 'Read the full preview, then go to the next field. For corrections, choose Later and provide them in your work chat; do not edit this preview.',
+                  description: 'Read the full preview, then go to the next field. For corrections, choose Later and provide them in your work chat; do not edit this preview. If the preview looks collapsed or incomplete, close this form and leave the draft pending.',
                   default: proposal.message },
                 decision: { type: 'string', title: 'Proposal action',
                   description: 'Save writes the exact proposal. Skip handles these captures without saving. Cancel releases the operation and keeps captures pending. Later keeps the proposal pending.',
@@ -350,7 +371,8 @@ export async function runProcessingControlServer({ client, input = process.stdin
           if (row.params.name === 'processing_review') {
             if (!formSupported || typeof requestReview !== 'function') {
               const current = await getStatus({ source, context, ...resolvedArgs });
-              response = { ...current, diagnostics: [...new Set(['PROCESSING_REVIEW_UNSUPPORTED', ...(current.diagnostics ?? [])])].slice(0, 8) };
+              response = { ...current, ...(current.status === 'awaiting-review' ? { review: 'unavailable' } : {}),
+                diagnostics: [...new Set(['PROCESSING_REVIEW_UNSUPPORTED', ...(current.diagnostics ?? [])])].slice(0, 8) };
             }
             else response = await requestReview({ source, context, ...resolvedArgs, clientCapabilities, elicit, signal, commitResponse });
           } else {

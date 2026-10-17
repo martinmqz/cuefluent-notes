@@ -72,7 +72,8 @@ invent selection metadata.
 Natural-language processing requests can use the same handoff, but mixed messages
 remain original evidence. Preserve their facts, attachments and corrections.
 Approvals come through the native review form, not tool arguments supplied by the
-model. An unsupported form or no answer leaves the exact proposal pending. See
+model. An unsupported, declined or altered form, or no answer, leaves the exact proposal
+pending. A pending draft does not mean a form appeared. See
 [processing chat controls](references/processing-chat.md) for reuse, bounded work,
 corrections and recovery. Setup, status and merely loading this skill do not dispatch.
 

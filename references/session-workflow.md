@@ -460,7 +460,10 @@ Malformed metadata or unsupported record types block at that row while preservin
 the supported prefix. Unsupported history relocation,
 rewinds or native ownership produce diagnostics. Compaction summaries, injected
 context, sidechain/child records, reasoning and queued attachment records are
-excluded. Selected human prose is not filtered by instruction-like words.
+excluded. API request snapshot records (`api-request-shape`, `api-request-blob`
+and `api-request`, written by Claude CLI 2.1.299) are excluded transport metadata;
+their message copies never become evidence. Selected human prose is not filtered
+by instruction-like words.
 Classification uses the documented native types, ownership fields and known
 injection flags. Neither reader validates every optional field: a future producer
 that changes human/injected-message semantics under a known type needs a reader

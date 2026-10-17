@@ -300,18 +300,24 @@ proposals unchanged. The subsequent form remains bound to the selected exact
 proposal. This uses the [supported single-select schema](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation#requested-schema).
 The proposal form uses a short header, a required `changes` string containing
 the complete readable preview as its default, and a required `decision` enum (`save`, `skip`,
-`cancel`, `later`) without a default. An accepted host response must echo the
-unchanged preview plus the chosen decision, allowing LF/CRLF/CR line-ending
-conversion only. Changed, trimmed or collapsed text produces
-`PROCESSING_REVIEW_PREVIEW_CHANGED`; it cannot revise or authorize different note
-bytes. Quoted note-content lines, escaped controls and per-file line-ending
+`cancel`, `later`) without a default. A decision applies only when the accepted
+host response echoes the unchanged preview, allowing LF/CRLF/CR line-ending
+conversion only. Changed, trimmed, collapsed, oversized or missing text applies no
+decision and leaves the exact proposal pending; it cannot revise or authorize
+different note bytes.
+Review responses add `review`, separate from `statusDetail`: `saved`, `skipped` or
+`cancelled` for a completed decision; `deferred` for Later; `declined` for a host
+decline or close, including a declined draft selector; `display-altered` for a
+changed echo; and `unavailable` when a pending draft meets a host without form
+support. A pending outcome always has status `awaiting-review`.
+Quoted note-content lines, escaped controls and per-file line-ending
 summaries distinguish source text from review structure without changing saved bytes.
 The outgoing form is bounded to 256 KiB. Incoming frames allow up to six times
 that size for host JSON escaping, even after a form closes; ordinary MCP requests
 remain bounded to 64 KiB. Late or unknown response IDs are ignored within the
-framing bound. A correlated response whose normalized preview exceeds 256 KiB
-refuses only that review with `PROCESSING_REVIEW_TOO_LARGE`. Frames exceeding the
-hard framing bound still close the connection. Host decline/cancel responses leave
+framing bound. A correlated response whose preview echo exceeds 256 KiB is a
+changed display. Frames exceeding the hard framing bound still close the
+connection. Host decline/cancel responses leave
 the proposal pending, distinct from an accepted `skip` or `cancel` decision. See
 [review controls](processing-chat.md#review-controls) for the user workflow.
 Cancelling the MCP request before its save intent or disposition starts publication

@@ -21,8 +21,11 @@ contracts for supported commands, formats, permissions and recovery procedures.
   status does not report the resolved model; neither successful dispatch nor
   structural Markdown checks certify classification or summary quality.
 - Host hook trust, launch PATH, session reload and native review rendering depend
-  on the client. Installation grants neither collection nor processing consent.
-  See [installation](distribution.md) and [setup](setup.md).
+  on the client. Tested Claude Desktop and CLI versions cannot complete a native
+  review form; see
+  [Claude form limitations](processing-chat.md#claude-form-limitations). Installation grants
+  neither collection nor processing consent. See [installation](distribution.md)
+  and [setup](setup.md).
 - Windows profile, package visibility and indexing policies vary by host. Existing
   package stores have limits on additions and replacement setup, and automatic
   migration is unsupported. No universal protection from third-party indexing or

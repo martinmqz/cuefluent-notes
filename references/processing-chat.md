@@ -477,7 +477,8 @@ answering the form.
 
 Save uses the existing exact-proposal writer. Skip handles only those revisions;
 Cancel releases an unapplied operation; Later, declining or closing the form leaves
-it pending. No filesystem lock spans the decision. Changes to note contents,
+it pending. A decision applies only when the host returns the preview unchanged.
+No filesystem lock spans the decision. Changes to note contents,
 proposals, inputs or policy preserve a conflict and require fresh review. The form
 requires MCP `2025-11-25` string-default support. The server offers that protocol
 even if the host initially requests an older version. Hosts unable to accept it
@@ -486,17 +487,31 @@ pending. An exact review exceeding the 256 KiB form limit is refused without
 truncation; use the supported explicit proposal and save commands from an
 uncaptured context instead.
 
-The preview field displays the proposal; it is not an editor. Note-content lines
+The preview displays the proposal; it is not an editor. Note-content lines
 are prefixed with `│ `, and control characters and backslashes are visibly escaped
 so note text cannot imitate the review's headings or terminal controls. Each
 file's original and proposed line endings are summarized separately. These display
 changes do not alter the Markdown that Save writes.
 
 Host LF/CRLF/CR line-ending conversion is accepted when the rest of the preview is
-unchanged. Edited, trimmed or collapsed preview text is refused with
-`PROCESSING_REVIEW_PREVIEW_CHANGED`, leaving the exact proposal pending. Reopen
-review to restore the preview; if the host cannot preserve it, use the explicit
-proposal and save commands from an uncaptured context.
+unchanged. If the host returns edited, trimmed, collapsed or missing preview text,
+no decision is applied, including Later; the exact proposal remains pending and the
+stored draft is not treated as changed. If the host cannot preserve the preview,
+use the explicit proposal and save commands from an uncaptured context.
+
+The review result reports what happened, separately from whether a draft exists:
+completed (saved, skipped or cancelled), deferred with Later, declined or closed,
+display altered, or unavailable without form support. A decline does not show
+whether a form appeared. Return that result to the user; do not describe a pending
+draft as a review that was displayed.
+
+### Claude form limitations
+
+Claude Desktop 2.42304.0 declines review forms without displaying them. Claude CLI
+2.1.294 and 2.1.299 replace the preview's line breaks, so the complete proposal may
+not be readable and no decision is applied. These clients cannot complete native
+review through this form. Use the supported explicit proposal and save commands
+from an uncaptured context instead; see [processing](processing.md).
 
 For a factual correction, choose Later and provide the correction in the ordinary
 work chat. Capture it through the existing selected-source workflow before using
