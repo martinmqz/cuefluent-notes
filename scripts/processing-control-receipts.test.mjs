@@ -195,6 +195,9 @@ test('unsupported native markup cannot stall later human work or become an exclu
     const read = await f.read(tx);
     assert.deepEqual(read.pending, []); assert.equal(read.processingControls.length, 0); assert.equal(read.candidates.length, 2);
     assert(read.candidates.some(candidate => candidate.capture.evidence.some(item => item.text === 'A genuine new SDK finding.')));
+    // Deferral was never exclusion: the unproven control is captured as what was typed, without markup.
+    const control = read.candidates.find(candidate => candidate.capture.identity.unitId === unitId).capture;
+    assert.deepEqual(control.evidence.map(item => [item.recordId, item.text]), [[f.input.uuid, 'process']]);
   });
 });
 

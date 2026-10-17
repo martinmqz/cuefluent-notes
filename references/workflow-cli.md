@@ -372,6 +372,15 @@ with at most five `{path, bytes, change}` files) and optional `drafts` (at most
 four `{code, path, fileCount}`), and their `statusText` omits diagnostic codes.
 Note paths in these fields are truncated to 512 bytes for display; `summary.txt`
 keeps every full path.
+When the verified typed input that started the call selected this skill but is
+not one exact action (Claude: the trusted skill command's arguments with its
+native companion; Codex: a user message with the trusted skill block), every
+tool returns `command: "not-a-command"` with `commandPrefix` and one to three
+`suggestions` instead of acting: no dispatch, display, decision or receipt. A
+mixed message (an exact action plus more words, lines, content or a second
+message) is such input too. Suggestions are exact actions, or a decision form
+with `<draft code>` in place of an unusable code, computed deterministically from
+the command grammar and the typed text; they carry no authority.
 Quoted note-content lines, escaped controls and per-file line-ending
 summaries distinguish source text from review structure without changing saved bytes.
 The outgoing form is bounded to 256 KiB. Incoming frames allow up to six times

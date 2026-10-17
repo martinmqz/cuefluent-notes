@@ -11,7 +11,7 @@ import { inspectIntakeStore, withIntakeLock, intakeSnapshot, intakeJSON } from '
 import { controlSelection, publishCapture, commitReaderProgress, readCaptureHead, resolveStoredSelectionAnchor } from './intake-store.mjs';
 import { digest } from './workflow-values.mjs';
 import { planReaderCheckpoint, hydrateReaderCheckpoint } from './reader-pages.mjs';
-import { serializeCapture } from './capture-contract.mjs';
+import { serializeCapture, createCapture } from './capture-contract.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002', C = '20000000-0000-4000-8000-000000000003';
@@ -489,4 +489,72 @@ test('Claude 2.1.299 API request snapshots are skipped transport metadata, never
   assert.deepEqual(result.candidates[0].capture.evidence.map(item => item.text), ['Meeting: selected source.']);
   assert(!JSON.stringify(result).includes('COPIED BLOB TEXT'));
   await publish(f, result);
+});
+
+const skillCommand = 'cuefluent-notes:cuefluent-notes';
+const envelope = (args, name = skillCommand) => `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>\n<command-args>${args}</command-args>`;
+test('a skill envelope that is not a verified control keeps exactly the typed arguments, without markup', async t => {
+  for (const typed of ['review sav t7xb88', 'Review', ' review', 'review ', 'save t7xb88', 'review save T7XB88',
+    'review save t7xb88 and tag it urgent', 'review save t7xb88\nThe rollout moved to Friday.', 'The rollout moved to Friday.',
+    // An exact control without a proof is captured the same way (see the receipt suite for the hold).
+    'process']) await t.test(JSON.stringify(typed), async t => {
+    const f = await fixture(t, [human(A, envelope(typed)), assistant()]);
+    const capture = (await readClaudeSelection(f.args)).candidates[0].capture;
+    assert.deepEqual(capture.evidence.map(item => [item.kind, item.text]), [['user', typed]]);
+    assert.equal(capture.reader.version, '2'); assert.equal(capture.coverage.partial, true);
+    assert.doesNotMatch(serializeCapture(capture).toString(), /command-(?:message|name|args)/);
+  });
+});
+
+test('empty skill arguments are structural; other plugins, malformed markup and SDK input stay verbatim', async t => {
+  const empty = await fixture(t, [human(A, envelope('')), assistant()]), result = await readClaudeSelection(empty.args);
+  assert.equal(result.candidates.length, 0); assert.deepEqual(result.noEvidence, [A]);
+  assert.equal(claudePublicationPlan(result).checkpoint.records.find(row => row.unitId === A).kind, 'human-empty');
+  const blocks = await fixture(t, [human(A, [{ type: 'text', text: envelope('') }, { type: 'text', text: '' }])]);
+  assert.deepEqual((await readClaudeSelection(blocks.args)).noEvidence, [A]);
+  for (const [name, text, extra] of [
+    ['another plugin', envelope('review sav t7xb88', 'other-plugin:cuefluent-notes')],
+    ['another skill', envelope('review sav t7xb88', 'cuefluent-notes:other')],
+    ['text after the envelope', `${envelope('review save t7xb88')}\nAnd a fact.`],
+    ['text before the envelope', `Note: ${envelope('review')}`],
+    ['line endings', envelope('review').replaceAll('\n', '\r\n')],
+    ['tag order', `<command-name>/${skillCommand}</command-name>\n<command-message>${skillCommand}</command-message>\n<command-args>review</command-args>`],
+    ['unclosed arguments', envelope('review').replace('</command-args>', '')],
+    ['SDK input', envelope('review sav t7xb88'), { promptSource: 'sdk' }],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t, [human(A, text, extra)]);
+    assert.deepEqual((await readClaudeSelection(f.args)).candidates[0].capture.evidence.map(item => item.text), [text]);
+  });
+  // The envelope block alone is stripped; other content of the input stays.
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/board.png' } };
+  const mixed = await fixture(t, [human(A, [{ type: 'text', text: envelope('review save t7xb88') }, image, { type: 'text', text: 'Board photo.' }])]);
+  assert.deepEqual((await readClaudeSelection(mixed.args)).candidates[0].capture.evidence.map(item => item.text ?? item.reference),
+    ['review save t7xb88', 'https://example.invalid/board.png', 'Board photo.']);
+});
+
+test('a version 1 head keeps its verbatim rules; an unknown reader version refuses explicitly', async t => {
+  const f = await fixture(t, [human(A, envelope('review sav t7xb88'))]);
+  const result = await readClaudeSelection(f.args), current = result.candidates[0].capture;
+  // A head published under version 1 copied the envelope verbatim.
+  const old = createCapture({ ...current, reader: { ...current.reader, version: '1' },
+    evidence: current.evidence.map(item => ({ ...item, text: envelope('review sav t7xb88') })) });
+  const plan = claudePublicationPlan(result, A);
+  const first = await withIntakeLock(f.store, tx => publishCapture(tx, { ...result.candidates[0], ...plan, capture: old,
+    selectionHash: f.selectionHash, cursorHash: null, authorize: async () => true }));
+  const head = await readCaptureHead(f.store, old.identity);
+  // Replay from the held start is covered by that exact head: nothing is re-captured.
+  const replay = await readClaudeSelection({ ...f.args, heads: new Map([[A, head]]) });
+  assert.equal(replay.candidates.length, 0); assert.deepEqual(replay.covered.map(item => item.unitId), [A]);
+  // A same-prompt extension stays under version 1 rules.
+  await append(f, [human(A, envelope('review skp t7xb88'))]);
+  const next = await readClaudeSelection({ ...f.args, cursor: first.cursor, checkpoint: first.checkpoint, heads: new Map([[A, head]]) });
+  const extended = next.candidates[0].capture;
+  assert.equal(extended.reader.version, '1');
+  assert.deepEqual(extended.evidence.map(item => item.text), [envelope('review sav t7xb88'), envelope('review skp t7xb88')]);
+  await publish(f, next, A, first.cursorHash);
+  assert.equal((await readCaptureHead(f.store, old.identity)).capture.evidenceHash, extended.evidenceHash);
+  // A reader version this code does not know is never reinterpreted.
+  const future = { ...head, capture: createCapture({ ...old, reader: { ...old.reader, version: 'future' } }) };
+  const refused = await readClaudeSelection({ ...f.args, heads: new Map([[A, future]]) });
+  assert.equal(refused.candidates.length, 0); assert.deepEqual(refused.pending, [{ unitId: A, reason: 'UNSUPPORTED_CLAUDE_READER' }]);
 });

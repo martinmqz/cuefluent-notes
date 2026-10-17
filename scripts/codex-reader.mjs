@@ -12,10 +12,22 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
 // v2 allocates separate bounded call/result text pools and preserves native
-// descriptors after text exhaustion. Published v1 captures remain immutable.
-export const CODEX_READER_VERSION = '2';
+// descriptors after text exhaustion. v3 treats this plugin's own skill block as
+// command markup and leaves out this plugin's control-server exchanges in a
+// unit started with that skill. Published v1/v2 captures remain immutable.
+export const CODEX_READER_VERSION = '3';
 // Retain every supported historical reader independently of later reader bumps.
-export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2' });
+export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2' });
+export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup' });
+const CONTROL_SERVER = 'cuefluent_control';
+// Evidence rules are a pure function of the transcript and the capture's reader
+// version, so a published unit replays to the same bytes after an upgrade or a
+// move. This plugin's skill block is therefore recognized by its exact native
+// shape and the skill name frozen with version 3, never by the installed path,
+// which changes with each plugin version. A renamed skill needs a new version.
+const MARKUP_SKILL_NAME = 'cuefluent-notes';
+const pluginSkillBlock = part => part?.type === 'skill' && part.name === MARKUP_SKILL_NAME && typeof part.path === 'string' &&
+  Object.keys(part).every(key => ['type', 'name', 'path'].includes(key));
 const structural = new Set(['compacted', 'token_usage_record', 'world_state', 'retained_context', 'security_risk_score',
   'inter_agent_communication', 'inter_agent_communication_metadata', 'realtime_item']);
 const ignoredEvents = new Set(['token_count', 'thread_goal_updated', 'thread_settings_applied', 'agent_reasoning',
@@ -71,9 +83,11 @@ export async function verifyCodexHeader(line, source) {
 export const codexRegistrationHeader = selected => async io => verifyCodexHeader(await readSessionHeader(io),
   { ...selected, projectRoot: await fs.realpath(selected.projectRoot) });
 
-function blocks(collector, record, content, kind, syntax) {
+function blocks(collector, record, content, kind, syntax, skillRules = 'retain') {
   if (!Array.isArray(content)) fail('UNSUPPORTED_CODEX_RECORD');
   for (const item of content) {
+    // Selecting this skill is command markup around the typed text, which stays.
+    if (syntax === 'user' && skillRules === 'markup' && pluginSkillBlock(item)) continue;
     if (['text', 'input_text', 'output_text', 'Text'].includes(item?.type)) {
       collector.add(kind, record, { text: textValue(item.text) });
     } else if (['image', 'input_image'].includes(item?.type)) {
@@ -100,8 +114,35 @@ function toolText(collector, record, output) {
   return texts.join('\n');
 }
 
-function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion) {
+// In a unit the person started with this skill, calls to this plugin's control
+// server are its own processing and review activity. They are identified only
+// by native identity: the call's namespace and its native MCP item's server and
+// tool, never by text. Other tools, user text and assistant text are unchanged.
+function controlExchanges(unit, skillRules) {
+  const ids = new Set();
+  if (skillRules !== 'markup') return ids;
+  const values = unit.records.map(record => record.value);
+  const item = value => value.type === 'event_msg' && value.payload?.type === 'item_completed' ? value.payload.item : null;
+  if (!values.some(value => item(value)?.type === 'UserMessage' && Array.isArray(item(value).content) &&
+    item(value).content.some(pluginSkillBlock))) return ids;
+  const native = new Map();
+  for (const value of values) {
+    const call = item(value);
+    if (call?.type !== 'McpToolCall' || typeof call.id !== 'string') continue;
+    const identity = `${call.server}\0${call.tool}`;
+    native.set(call.id, native.has(call.id) && native.get(call.id) !== identity ? null : identity);
+  }
+  for (const value of values) {
+    const p = value.payload;
+    if (value.type === 'response_item' && p?.type === 'function_call' && typeof p.call_id === 'string' &&
+        p.namespace === `mcp__${CONTROL_SERVER}` && native.get(p.call_id) === `${CONTROL_SERVER}\0${p.name}`) ids.add(p.call_id);
+  }
+  return ids;
+}
+
+function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRules = 'retain') {
   const collector = evidenceCollector(undefined, { toolRulesVersion }), calls = new Map(), seen = new Map(), outcomes = new Map(), collabIds = new Set(unit.collaborationIds);
+  const exchanges = controlExchanges(unit, skillRules);
   // Only structured native completion status can refine an observed tool outcome.
   for (const record of unit.records) {
     checkBudget();
@@ -146,11 +187,12 @@ function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion) {
       if (ignoredItems.has(item?.type)) continue;
       if (item?.type === 'UserMessage' || item?.type === 'AgentMessage') {
         if (historyMode !== 'paginated') fail('UNSUPPORTED_CODEX_HISTORY');
-        blocks(collector, record, item.content, item.type === 'UserMessage' ? 'user' : 'assistant', item.type === 'UserMessage' ? 'user' : 'assistant');
+        blocks(collector, record, item.content, item.type === 'UserMessage' ? 'user' : 'assistant', item.type === 'UserMessage' ? 'user' : 'assistant', skillRules);
       } else if (item?.type === 'CommandExecution') {
         // Status corroborates raw tool evidence; command output is not copied a second time.
         if (!unit.records.some(r => r.value.type === 'response_item' && r.value.payload.call_id === item.id)) collector.omit('native-tool-without-raw-evidence', record);
       } else if (item?.type === 'FunctionCallOutput') {
+        if (exchanges.has(item.id)) continue;
         if (!unit.records.some(r => r.value.type === 'response_item' && r.value.payload.call_id === item.id && r.value.payload.type.endsWith('_output'))) {
           if (collabIds.has(item.id)) collector.omit('child-agent-output-excluded', record);
           else collector.add('tool-result', record, { tool: toolName(item), callId: string(item.id, 256), outcome: outcomes.get(item.id) ?? 'unknown', text: toolText(collector, record, item.output) });
@@ -170,12 +212,14 @@ function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion) {
     } else if (p.type === 'function_call' || p.type === 'custom_tool_call') {
       const callId = string(p.call_id, 256), tool = toolName(p);
       if (calls.has(callId)) fail('CONFLICTING_CODEX_CALL'); calls.set(callId, tool);
+      if (exchanges.has(callId)) continue;
       if (collabIds.has(callId)) { collector.omit('child-agent-output-excluded', record); continue; }
       collector.add('tool-call', record, { tool, callId, text: p.type === 'function_call' ? p.arguments : p.input });
       if (p.encrypted_function_args?.length) collector.omit('encrypted-tool-arguments-excluded', record);
     } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
       if (p.call_id == null) { collector.omit('unattributed-tool-output', record); continue; }
       const callId = string(p.call_id, 256), tool = calls.get(callId) ?? (p.name ? toolName(p) : null);
+      if (exchanges.has(callId)) continue;
       if (collabIds.has(callId)) { collector.omit('child-agent-output-excluded', record); continue; }
       if (!tool) { collector.omit('unattributed-tool-output', record); continue; }
       collector.add('tool-result', record, { tool, callId, outcome: outcomes.get(callId) ?? 'unknown', text: toolText(collector, record, p.output) });
@@ -371,7 +415,8 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
         processingControls.push(control); eligibility.set(unit.id, 'excluded'); continue;
       }
     }
-    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget, CODEX_TOOL_RULES[choice(readerVersion, Object.keys(CODEX_TOOL_RULES))]);
+    const version = choice(readerVersion, Object.keys(CODEX_TOOL_RULES));
+    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget, CODEX_TOOL_RULES[version], CODEX_SKILL_RULES[version]);
     if (!collected.evidence.length && !collected.omissions.length) { noEvidence.push(unit.id); eligibility.set(unit.id, 'excluded'); continue; }
     const occurredAt = Number.isSafeInteger(unit.start.value.payload.started_at)
       ? new Date(unit.start.value.payload.started_at * 1000).toISOString() : unit.start.value.timestamp;

@@ -4,7 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { verifyCodexProcessingControl, verifyClaudeProcessingControl, loadClaudeProcessingSkill, isProcessingControlProof,
-  processingControlText, processingControlAction, processingControlMatches, reviewControl, reviewControlFields } from './processing-control-proof.mjs';
+  processingControlText, processingControlAction, processingControlMatches, reviewControl, reviewControlFields,
+  processingControlSuggestions, isProcessingControlSuggestion, PROCESSING_CONTROL_FORMS, REVIEW_CODE_PLACEHOLDER,
+  claudeSkillArguments, findClaudeSkillArguments } from './processing-control-proof.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
@@ -249,4 +251,98 @@ test('Claude mirrors typed review fields exactly; Codex binds typed review text 
   assert.equal(processingControlMatches('review save t7xb88', review, {}, 'claude'), false);
   assert.equal(processingControlMatches('review save t7xb88', review, {}, 'codex'), true);
   assert.equal(processingControlMatches('review', review, {}, 'codex'), true);
+});
+
+test('nearest-command suggestions cover every grammar form and its near misses', () => {
+  const code = 't7xb88', exactText = form => form.map(word => word === REVIEW_CODE_PLACEHOLDER ? code : word).join(' ');
+  const misspell = word => word.slice(0, -2) + word.slice(-1);
+  let checked = 0;
+  for (const form of PROCESSING_CONTROL_FORMS) {
+    const exact = exactText(form), last = form.filter(word => word !== REVIEW_CODE_PLACEHOLDER).at(-1);
+    assert.equal(processingControlText(exact), exact); assert.equal(isProcessingControlSuggestion(exact), true);
+    const variants = {
+      case: exact.toUpperCase(), spacing: ` ${form.map(word => word === REVIEW_CODE_PLACEHOLDER ? code : word).join('  ')} `,
+      'trailing newline': `${exact}\n`, punctuation: `${exact}.`, 'extra words': `${exact} and keep the rest pending`,
+      'second line': `${exact}\nAlso: the launch moved to Friday.`,
+      misspelling: form.map(word => word === REVIEW_CODE_PLACEHOLDER ? code : word === last ? misspell(word) : word).join(' '),
+      ...(form[0] === 'review' && form.length > 1 ? { 'missing review': exact.slice('review '.length) } : {}),
+      ...(form.includes(REVIEW_CODE_PLACEHOLDER) ? { 'confusable code': form.map(word => word === REVIEW_CODE_PLACEHOLDER ? 't7xbo8' : word).join(' '),
+        'short code': form.map(word => word === REVIEW_CODE_PLACEHOLDER ? 't7xb8' : word).join(' ') } : {}),
+    };
+    for (const [name, typed] of Object.entries(variants)) {
+      if (processingControlText(typed) !== null) continue; // `cancel` without `review` is itself an exact command.
+      // An unusable code is never repaired or guessed: the reply shows its place.
+      const expected = name.endsWith('code') ? form.join(' ') : exact;
+      assert.deepEqual(processingControlSuggestions(typed), [expected], `${exact} / ${name}: ${JSON.stringify(typed)}`);
+      assert.equal(isProcessingControlSuggestion(expected), true); checked++;
+    }
+  }
+  assert(checked > PROCESSING_CONTROL_FORMS.length * 7, `${checked} variants`);
+  // Free text with no nearby command names the general commands; output is
+  // deterministic, bounded and derived from the grammar.
+  for (const typed of ['Remember that the launch moved to Friday.', 'what is that', '', '🦉'.repeat(50000)]) {
+    assert.deepEqual(processingControlSuggestions(typed), ['review', 'status', 'process']);
+  }
+  assert.deepEqual(processingControlSuggestions('please process my notes from today'), ['process']);
+  // A filler word inside a command keeps the narrower scope the person typed.
+  assert.deepEqual(processingControlSuggestions('process my repo'), ['process repo']);
+  assert.deepEqual(processingControlSuggestions('process this chat'), ['process chat']);
+  assert.deepEqual(processingControlSuggestions('review the t7xb88 draft'), ['review t7xb88']);
+  assert.deepEqual(processingControlSuggestions('resume my work'), ['resume']);
+  assert.deepEqual(processingControlSuggestions('review save t7xb88 or review skip k2mn9p'), ['review save t7xb88', 'review skip k2mn9p']);
+  assert.deepEqual(processingControlSuggestions('ｒｅｖｉｅｗ ｓａｖｅ t7xb88'), ['review save t7xb88']);
+  assert.deepEqual(processingControlSuggestions(`${'filler '.repeat(4000)}review save t7xb88`), ['review', 'status', 'process']);
+  const long = 'review sav t7xb88 ' + 'x'.repeat(2 * 1024 * 1024);
+  assert.deepEqual(processingControlSuggestions(long), ['review save t7xb88']);
+  assert(Object.isFrozen(processingControlSuggestions('stat')));
+  for (const text of ['review sav t7xb88', 'review save T7XB88', 'save t7xb88', 'review save <draft  code>', '<draft code>', 'Saved.']) {
+    assert.equal(isProcessingControlSuggestion(text), false, text);
+  }
+});
+
+test('only the trusted skill command envelope yields typed arguments', () => {
+  const command = 'cuefluent-notes:cuefluent-notes', envelope = (args, name = command) =>
+    `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>\n<command-args>${args}</command-args>`;
+  for (const args of ['review sav t7xb88', '', ' review ', 'line one\nline two', 'a </command-args> b', '$& $1 $$']) {
+    assert.equal(claudeSkillArguments(envelope(args)), args);
+  }
+  for (const text of [envelope('review', 'other-plugin:cuefluent-notes'), envelope('review', 'cuefluent-notes:other'),
+    envelope('review').replace('\n', '\r\n'), `${envelope('review')}\n`, ` ${envelope('review')}`,
+    `<command-name>/${command}</command-name>\n<command-message>${command}</command-message>\n<command-args>review</command-args>`,
+    envelope('review').replace('</command-args>', ''), 'review', null]) {
+    assert.equal(claudeSkillArguments(text), null, JSON.stringify(text));
+  }
+});
+
+test('verified Claude typed arguments that are not an exact control are found for a reply, never as a control', async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-claude-arguments-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const skillPath = path.join(root, 'SKILL.md'), command = 'cuefluent-notes:cuefluent-notes', source = { client: 'claude', sessionId };
+  await fs.writeFile(skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic processing skill.\n');
+  const build = (typed, { content, expansionArgs = typed, mutate = () => {} } = {}) => {
+    const native = (type, uuid, body, extra = {}) => ({ type, uuid, timestamp: '2026-10-10T12:00:00.000Z', sessionId, cwd: root,
+      version: '2.1.296', isSidechain: false, parentUuid: null, message: { role: type, content: body }, ...extra });
+    const input = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${typed}</command-args>`;
+    const rows = [native('user', '33333333-3333-4333-8333-333333333333', content?.(input) ?? input, { promptId: unitId }),
+      native('user', '44444444-4444-4444-8444-444444444444', [{ type: 'text', text: `Base directory for this skill: ${root}\n\nSynthetic processing skill.\n\n\nARGUMENTS: ${expansionArgs}` }],
+        { promptId: unitId, parentUuid: '33333333-3333-4333-8333-333333333333', isMeta: true, turnCompanion: true }),
+      native('assistant', '55555555-5555-4555-8555-555555555555', [{ type: 'tool_use', id: 'call', name: 'mcp__cuefluent_control__processing_review', input: { decision: 'save', draft: 't7xb88' } }],
+        { attributionSkill: command, attributionPlugin: 'cuefluent-notes' })];
+    mutate(rows);
+    return rows.map(value => ({ value, hash: digest(JSON.stringify(value) + '\n') }));
+  };
+  const find = records => findClaudeSkillArguments(records, { source, callId: 'call', tool: 'mcp__cuefluent_control__processing_review',
+    argsHash: digest(canonicalJSON({ decision: 'save', draft: 't7xb88' })), skillPath, skillCommand: command });
+  for (const typed of ['review sav t7xb88', 'review save t7xb88 and tag it urgent', 'save t7xb88', 'Review', 'Remember the launch moved.']) {
+    const found = await find(build(typed));
+    assert.deepEqual({ ...found }, { unitId, inputId: '33333333-3333-4333-8333-333333333333', arguments: typed, mixed: false });
+  }
+  // A control with other content is mixed, so not a control either.
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/a.png' } };
+  assert.equal((await find(build('review save t7xb88', { content: input => [{ type: 'text', text: input }, image] }))).mixed, true);
+  // Exact controls belong to the control proof; unverified input finds nothing.
+  for (const records of [build('review save t7xb88'), build('review sav t7xb88', { expansionArgs: 'review save t7xb88' }),
+    build('review sav t7xb88', { mutate: rows => { rows[0].promptSource = 'sdk'; } }),
+    build('review sav t7xb88', { mutate: rows => { delete rows[2].attributionSkill; } }),
+    build('review sav t7xb88', { mutate: rows => { rows[1].turnCompanion = false; } })]) assert.equal(await find(records), null);
 });

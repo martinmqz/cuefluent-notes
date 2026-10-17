@@ -3,7 +3,8 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
 import { DISPLAY_CONTROLS, displayEscape, displayScalar } from './file-io.mjs';
-import { REVIEW_CODE, REVIEW_COMMANDS, REVIEW_DECISIONS, reviewControl } from './processing-control-proof.mjs';
+import { REVIEW_CODE, REVIEW_COMMANDS, REVIEW_DECISIONS, REVIEW_CODE_PLACEHOLDER, REVIEW_CODE_EXCLUDED, reviewControl,
+  isProcessingControlSuggestion } from './processing-control-proof.mjs';
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
@@ -129,6 +130,17 @@ function reviewText(review, { draft, drafts, commandPrefix: command }) {
   } else {
     lines.push(REVIEW_OUTCOMES[review].text);
     if (draft?.folder) lines.push(`Review folder: ${displayFolder(draft.folder)}`, choices);
+  }
+  return `Cuefluent: ${lines.join('\n')}`;
+}
+// A typed skill invocation that was not one exact action: nothing was applied.
+// The suggestions come from the grammar; any code in them is a valid draft code.
+function notACommandText({ suggestions, commandPrefix: command }) {
+  const typed = suggestions.map(text => `${command} ${text}`);
+  const choices = typed.length === 1 ? typed[0] : `${typed.slice(0, -1).join(', ')} or ${typed.at(-1)}`;
+  const lines = [`Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${choices}.`];
+  if (suggestions.some(text => text.includes(REVIEW_CODE_PLACEHOLDER))) {
+    lines.push(`A draft code has six characters and never contains ${REVIEW_CODE_EXCLUDED.join(', ')}; ${command} review shows the current draft and its code.`);
   }
   return `Cuefluent: ${lines.join('\n')}`;
 }
@@ -309,6 +321,15 @@ export function processingControlStatusView(value, args) {
       } else result.statusText = `Cuefluent: ${outcome.text}` +
         (outcome.pending === false && result.statusDetail ? ` ${STATUS_DETAILS[result.statusDetail].text}` : '');
     }
+    let commandReply = false;
+    if (value.command !== undefined) {
+      if (value.command !== 'not-a-command' || value.review !== undefined) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      list(value.suggestions, 3, { empty: false }); unique(value.suggestions);
+      if (value.suggestions.some(text => typeof text !== 'string' || !isProcessingControlSuggestion(text))) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      result.command = value.command; result.suggestions = [...value.suggestions];
+      result.commandPrefix = choice(value.commandPrefix, Object.values(REVIEW_COMMANDS));
+      result.statusText = notACommandText(result); commandReply = true;
+    }
     if (value.scope !== undefined) {
       result.scope = choice(value.scope, PROCESSING_SCOPES);
       result.statusText += ` Scope: ${result.scope}.`;
@@ -329,7 +350,7 @@ export function processingControlStatusView(value, args) {
       result.statusText += ` Inventory${incomplete ? ' (partial)' : ''}: ${counts.pending} pending, ${counts.claimed} claimed, ${counts.awaitingReview} drafts awaiting review.`;
     }
     // A review reply stays one plain paragraph; codes remain in the fields.
-    if (result.diagnostics.length && !reviewReply) result.statusText += ` ${result.diagnostics.join(', ')}. Next action: ${result.nextAction}.`;
+    if (result.diagnostics.length && !reviewReply && !commandReply) result.statusText += ` ${result.diagnostics.join(', ')}. Next action: ${result.nextAction}.`;
     if (Buffer.byteLength(result.statusText) > 4096) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
     return result;
   } catch { fail('PROCESSING_CONTROL_OUTPUT_INVALID'); }

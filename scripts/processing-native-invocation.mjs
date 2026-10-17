@@ -12,7 +12,8 @@ import { readSessionRange } from './session-jsonl.mjs';
 import { verifyCodexHeader, codexRegistrationHeader } from './codex-reader.mjs';
 import { claudeRegistrationHeader, isClaudeHumanRow } from './claude-reader.mjs';
 import { readContinuesLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
-import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, claudeProcessingCommandKind, processingControlAction, processingControlText, processingControlMatches } from './processing-control-proof.mjs';
+import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, findClaudeSkillArguments, claudeProcessingCommandKind, processingControlAction,
+  processingControlText, processingControlMatches, processingControlSuggestions } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, fail, object, isNativeId, keys, hash, integer } from './workflow-values.mjs';
 
 const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
@@ -191,13 +192,17 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     }
   }
   await guard();
-  const { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl } = found;
+  const { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions } = found;
   // typedControl is the exact verified typed action. Only a verified binding
   // carries it; a model-chosen call or a code-mode call never does.
+  // typedSuggestions marks a typed skill invocation that is not an exact action:
+  // nothing may be applied for it, whichever tool the model called; it names
+  // the nearest exact commands and is never authority.
   const result = Object.freeze({ source: Object.freeze(structuredClone(source)), selection: Object.freeze(selection),
     configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill: nested ? false : nativeSkill,
     controlExclusionUnsupported: Boolean(nested && nativeSkill), unitId, argsHash, ...call,
     ...(nativeSkill && !nested ? { typedControl } : {}),
+    ...(typedSuggestions ? { typedSuggestions } : {}),
     ...(continued ? { chatLineage: Object.freeze({ client: 'claude', sessionId: continued.link.lineage }) } : {}),
     ...(controlInput ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand'].map(key => [key, controlInput[key]])) : {}) });
   if (call.pending) pendingBindings.add(result);
@@ -241,21 +246,14 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
     if (resumed.historyMode !== read.metadata.historyMode) fail('UNSUPPORTED_CODEX_HISTORY');
   }
   const argsHash = digest(canonicalJSON(invocation.arguments));
-  let call = null, unitId = context.unitId ?? null, nativeSkill = false, typedControl = null;
+  let call = null, unitId = context.unitId ?? null, nativeSkill = false, typedControl = null, typedSuggestions = null;
   const nested = context.client === 'codex' ? codexNestedCall(records, context, invocation, argsHash) : null;
+  const users = [];
   for (const record of records) {
     const row = record.value;
     if (context.client === 'codex') {
       const p = row.payload;
-      if (row.type === 'event_msg' && p?.type === 'item_completed' && p.turn_id === unitId && p.item?.type === 'UserMessage') {
-        const content = p.item.content;
-        const typed = Array.isArray(content) && content.length === 2 && content[0]?.type === 'skill' &&
-          content[0].name === 'cuefluent-notes' && path.normalize(content[0].path ?? '') === path.normalize(skillPath) &&
-          content[1]?.type === 'text' ? content[1].text : null;
-        nativeSkill = typed !== null && processingControlMatches(typed, invocation.tool, invocation.arguments, 'codex');
-        typedControl = nativeSkill ? typed : null;
-        if (typed !== null && processingControlText(typed) !== null && !nativeSkill) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
-      }
+      if (row.type === 'event_msg' && p?.type === 'item_completed' && p.turn_id === unitId && p.item?.type === 'UserMessage') users.push(p.item);
       if (row.type !== 'response_item' || p?.type !== 'function_call' || p.call_id !== context.toolCallId) continue;
       if (call || p.internal_chat_message_metadata_passthrough?.turn_id !== unitId ||
           !/^mcp__[a-zA-Z0-9_-]*cuefluent_control$/.test(p.namespace ?? '') || p.name !== invocation.tool) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
@@ -278,6 +276,33 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
   if (call && nested) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   call ??= nested;
   if (!call) throw new MissingNativeInvocation();
+  if (context.client === 'codex') {
+    // One native user message of exactly this skill and an exact action is a
+    // typed control. This skill with anything else (other text, a control plus
+    // more words, lines, content or a second message) is a typed non-control.
+    const trusted = part => part?.type === 'skill' && part.name === 'cuefluent-notes' && path.normalize(part.path ?? '') === path.normalize(skillPath);
+    const typedText = content => Array.isArray(content) && content.length === 2 && trusted(content[0]) &&
+      content[1]?.type === 'text' && typeof content[1].text === 'string' ? content[1].text : null;
+    // Codex can persist identical mirrors of one native item: as in the reader,
+    // the same item ID with the same item is one message, and a changed mirror
+    // leaves the typed input unverifiable.
+    const messages = new Map();
+    for (const item of users) {
+      const key = typeof item.id === 'string' ? item.id : Symbol('unidentified'), value = canonicalJSON(item);
+      if (messages.has(key) && messages.get(key).value !== value) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+      messages.set(key, { value, content: item.content });
+    }
+    const contents = [...messages.values()].map(message => message.content);
+    const exact = contents.length === 1 ? processingControlText(typedText(contents[0])) : null;
+    if (exact !== null) {
+      nativeSkill = processingControlMatches(exact, invocation.tool, invocation.arguments, 'codex');
+      if (!nativeSkill) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
+      typedControl = exact;
+    } else if (contents.some(content => Array.isArray(content) && content.some(trusted))) {
+      typedSuggestions = processingControlSuggestions(contents.flatMap(content => Array.isArray(content)
+        ? content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text) : []).join('\n'));
+    }
+  }
   let controlInput = null;
   if (context.client === 'claude') {
     const skill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control: processingControlAction(invocation.tool, invocation.arguments) });
@@ -303,9 +328,12 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
         const otherSkill = await loadClaudeProcessingSkill({ skillPath, skillCommand, control });
         if (findClaudeProcessingControlInput(records, { source, ...call, argsHash, skill: otherSkill, control, sessionKinds })) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
       }
+      // The verified typed arguments of this skill, when they are no exact action.
+      const typed = await findClaudeSkillArguments(records, { source, ...call, argsHash, skillPath, skillCommand, sessionKinds });
+      if (typed) typedSuggestions = processingControlSuggestions(typed.arguments);
     }
   }
-  return { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl };
+  return { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions };
 }
 
 /** Claude may keep its MCP process across /clear. The launch UUID is a hint;

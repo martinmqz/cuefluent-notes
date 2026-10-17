@@ -482,7 +482,7 @@ test('fair tool budgets retain later native failures identically after a bounded
   const resumed = await readCodexSelection({ ...f.args, cursor });
   const full = await readCodexSelection(f.args), capture = resumed.candidates[0].capture;
   assert.deepEqual(serializeCapture(capture), serializeCapture(full.candidates[0].capture));
-  assert.equal(capture.reader.version, '2');
+  assert.equal(capture.reader.version, '3'); // Version 3 keeps the version 2 tool allocation.
   const result = capture.evidence.find(item => item.kind === 'tool-result' && item.callId === 'late');
   assert.equal(result.text, 'Failure: unchanged caller crashes.'); assert.equal(result.outcome, 'failed');
   assert(capture.evidence.some(item => item.kind === 'user' && item.text.startsWith('Correction:')));
@@ -542,4 +542,94 @@ test('malformed tool arguments after envelope exhaustion hold the unit with a wo
   const result = await readCodexSelection(f.args);
   assert.equal(result.candidates.length, 0);
   assert.deepEqual(result.pending, [{ unitId: A, reason: 'INVALID_WORKFLOW' }]);
+});
+
+// This plugin's skill selection and control server, by native identity. The
+// skill path is any install's (never this reader's own location): the rule
+// must not depend on where the plugin is installed.
+const skillPath = path.resolve('synthetic-plugin', 'skills', 'cuefluent-notes', 'SKILL.md');
+const skillUser = (turn, text, { path: selected = skillPath, name = 'cuefluent-notes', fields = {}, extra = [] } = {}) =>
+  item(turn, 'UserMessage', [{ type: 'skill', name, path: selected, ...fields }, { type: 'text', text, text_elements: [] }, ...extra]);
+const controlExchange = (turn, id, { namespace = 'mcp__cuefluent_control', server = 'cuefluent_control', tool = 'processing_review', native = true } = {}) => [
+  response(turn, 'function_call', { namespace, name: 'processing_review', call_id: id, arguments: '{}' }),
+  ...(native ? [evt('item_completed', { thread_id: S, turn_id: turn, item: { type: 'McpToolCall', id, server, tool, arguments: {}, status: 'completed',
+    result: { content: [{ type: 'text', text: '{"statusText":"Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88"}' }] } } })] : []),
+  response(turn, 'function_call_output', { call_id: id, output: '{"statusText":"Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88"}' })];
+const otherWork = turn => [response(turn, 'function_call', { name: 'exec_command', call_id: 'work', arguments: '{"cmd":"git status"}' }),
+  response(turn, 'function_call_output', { call_id: 'work', output: 'Working tree clean.' })];
+
+test('a Codex unit started with this skill keeps what the person typed and leaves out only its control exchange', async t => {
+  for (const typed of ['review sav t7xb88', 'review save t7xb88\nAlso tag it urgent.', 'Please process my notes.']) await t.test(JSON.stringify(typed), async t => {
+    const f = await fixture(t, [start(A), skillUser(A, typed), ...controlExchange(A, 'cue-1'), ...otherWork(A),
+      assistant(A, 'Nothing was applied.'), end(A)]);
+    const capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.equal(capture.reader.version, '3');
+    assert.deepEqual(capture.evidence.map(item => [item.kind, item.callId ?? null, item.text]), [
+      ['user', null, typed], ['tool-call', 'work', '{"cmd":"git status"}'], ['tool-result', 'work', 'Working tree clean.'],
+      ['assistant', null, 'Nothing was applied.']]);
+    // The skill block is command markup, not an omission: coverage is complete.
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+    assert.doesNotMatch(serializeCapture(capture).toString(), /Review folder|cuefluent_control/);
+  });
+  // A result persisted only as its native output item is left out the same way.
+  const [call, native] = controlExchange(A, 'cue-2');
+  const itemOnly = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88'), call, native,
+    evt('item_completed', { thread_id: S, turn_id: A, item: { type: 'FunctionCallOutput', id: 'cue-2', output: 'Cuefluent: Review folder: /private/review/t7xb88' } }), end(A)]);
+  const kept = (await readCodexSelection(itemOnly.args)).candidates[0].capture;
+  assert.deepEqual(kept.evidence.map(item => [item.kind, item.text]), [['user', 'review sav t7xb88']]);
+  // A control mixed with a second message in the same unit keeps both.
+  const mixed = await fixture(t, [start(A), skillUser(A, 'review save t7xb88'), user(A, 'Also: tag it urgent.'), ...controlExchange(A, 'cue-1'), end(A)]);
+  assert.deepEqual((await readCodexSelection(mixed.args)).candidates[0].capture.evidence
+    .filter(item => item.kind === 'user').map(item => item.text), ['review save t7xb88', 'Also: tag it urgent.']);
+});
+
+test('Codex control exchanges stay evidence without this skill selection or exact native identity', async t => {
+  const exchanged = capture => capture.evidence.filter(item => item.callId === 'cue-1').map(item => item.kind);
+  for (const [name, entries, { omission = false } = {}] of [
+    ['no skill block', [start(A), user(A, 'review save t7xb88'), ...controlExchange(A, 'cue-1'), end(A)]],
+    ['another skill name', [start(A), skillUser(A, 'review sav t7xb88', { name: 'other-notes' }), ...controlExchange(A, 'cue-1'), end(A)], { omission: true }],
+    ['another block shape', [start(A), skillUser(A, 'review sav t7xb88', { fields: { version: '1' } }), ...controlExchange(A, 'cue-1'), end(A)], { omission: true }],
+    ['another namespace', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { namespace: 'mcp__other_control' }), end(A)]],
+    ['another server', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { server: 'other_control' }), end(A)]],
+    ['another native tool', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { tool: 'processing_status' }), end(A)]],
+    ['no native MCP item', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { native: false }), end(A)]],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t, entries), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.deepEqual(exchanged(capture), ['tool-call', 'tool-result']);
+    assert.equal(capture.coverage.omissions.some(item => item.reason === 'unsupported-content-block'), omission);
+  });
+});
+
+test('the version 3 skill rule ignores the install path, so a published unit replays unchanged after an upgrade', async t => {
+  // Each plugin version installs at its own path and a transcript keeps the
+  // path of the version that ran; neither is this reader's location.
+  const installs = ['0.15.1', '0.16.0'].map(version => path.resolve('plugins', 'cache', 'cuefluent-notes', version, 'SKILL.md'));
+  for (const ran of installs) await t.test(path.basename(path.dirname(ran)), async t => {
+    const f = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88', { path: ran }), ...controlExchange(A, 'cue-1'), assistant(A, 'Nothing was applied.'), end(A)]);
+    const published = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.equal(published.reader.version, '3');
+    assert.deepEqual(published.evidence.map(item => [item.kind, item.text]), [['user', 'review sav t7xb88'], ['assistant', 'Nothing was applied.']]);
+    assert.deepEqual(published.coverage, { partial: false, omissions: [] });
+    // Replaying the published head reproduces its exact evidence.
+    const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: published }) })).candidates[0].capture;
+    assert.equal(replayed.reader.version, '3'); assert.equal(replayed.evidenceHash, published.evidenceHash);
+    assert.deepEqual(replayed.evidence, published.evidence); assert.deepEqual(replayed.coverage, published.coverage);
+  });
+});
+
+test('published version 2 Codex captures keep their skill-block omission and control exchange on replay', async t => {
+  const { CODEX_SKILL_RULES, CODEX_READER_VERSION } = await import('./codex-reader.mjs');
+  assert.equal(CODEX_SKILL_RULES[CODEX_READER_VERSION], 'markup');
+  const f = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1'), end(A)]);
+  const args = f.args, current = (await readCodexSelection(args)).candidates[0].capture;
+  for (const version of ['1', '2']) {
+    const prior = { ...current, reader: { ...current.reader, version } };
+    const replayed = (await readCodexSelection({ ...args, loadHead: async () => ({ capture: prior }) })).candidates[0].capture;
+    assert.equal(replayed.reader.version, version);
+    assert.deepEqual(replayed.coverage.omissions.map(item => item.reason), ['unsupported-content-block']);
+    assert.deepEqual(replayed.evidence.filter(item => item.callId === 'cue-1').map(item => item.kind), ['tool-call', 'tool-result']);
+    // Same rules, same bytes: re-reading a published v2 unit cannot replace it.
+    const again = (await readCodexSelection({ ...args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+    assert.equal(again.evidenceHash, replayed.evidenceHash);
+  }
 });

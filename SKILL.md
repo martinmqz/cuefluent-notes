@@ -64,6 +64,15 @@ never approve or save them. Bounded work can stop for review, an unfinished
 operation, a limit or a conflict; it does not promise to drain an arbitrary backlog.
 Use `resume` for a frozen remainder and `process` for the next inventory portion.
 
+An exact action is one table row as written: same case, single spaces, a full
+draft code, nothing before or after it. When the text after this skill asks for
+one of these actions but is not exact (other case or spacing, a misspelling, a
+missing `review`, a changed code, or more words or lines), do not repair,
+complete or interpret it, and never pass `draft` or `decision` for it. Call
+`processing_status` once without arguments and return its `statusText`: the
+adapter applies nothing, whichever tool is called, and names the nearest exact
+command to type.
+
 Do not read more files, packets or notes or synthesize in this source chat. If the
 tool returns `verification-required`, end that exec/tool call. In a separate
 exec/tool call, repeat the same tool and arguments with its returned `retryToken`
@@ -74,7 +83,8 @@ tool's `statusText`. If the tool or verified source binding is unavailable, repo
 that limitation and stop; do not silently fall back to inline processing or
 invent selection metadata.
 
-Natural-language processing requests can use the same handoff, but mixed messages
+Natural-language processing requests typed without this skill's command can use
+the same handoff; after the command, only an exact action applies. Mixed messages
 remain original evidence. Preserve their facts, attachments and corrections.
 Approvals come only from the user's exact typed review decision or the Codex
 native review form, never from tool arguments the model chooses or from chat text.

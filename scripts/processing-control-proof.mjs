@@ -23,16 +23,110 @@ export function reviewControl({ draft, decision } = {}) {
   if (decision !== undefined && !REVIEW_DECISIONS.includes(decision)) return null;
   return ['review', decision, draft].filter(part => part !== undefined).join(' ');
 }
+// Every typed form, as words separated by one space; the placeholder stands for
+// a draft code. Exact matching and nearest-command suggestions both derive from
+// this table, so a renamed or added command changes only the constants above.
+export const REVIEW_CODE_PLACEHOLDER = '<draft code>';
+const CONTROL_FORMS = Object.freeze([
+  ...PROCESSING_CONTROLS.map(text => text.split(' ')),
+  ['review', REVIEW_CODE_PLACEHOLDER],
+  ...REVIEW_DECISIONS.flatMap(decision => [['review', decision], ['review', decision, REVIEW_CODE_PLACEHOLDER]]),
+].map(form => Object.freeze(form)));
+export const PROCESSING_CONTROL_FORMS = CONTROL_FORMS;
+const formMatches = (form, words) => form.length === words.length &&
+  form.every((word, index) => word === REVIEW_CODE_PLACEHOLDER ? REVIEW_CODE.test(words[index]) : word === words[index]);
+// Longer than any form with a code; bounds the split of arbitrary typed text.
+const MAX_CONTROL_TEXT = 64;
 /** The exact typed control text, or null. Whitespace, case and other spellings
  * are not normalized, so a near miss stays ordinary input rather than a control. */
 export function processingControlText(text) {
-  if (typeof text !== 'string') return null;
-  if (PROCESSING_CONTROLS.includes(text)) return text;
-  const match = /^review (?:(save|skip|cancel|later)(?: ([a-z2-9]{6}))?|([a-z2-9]{6}))$/.exec(text);
-  if (!match) return null;
-  const args = match[1] ? { decision: match[1], ...(match[2] ? { draft: match[2] } : {}) } : { draft: match[3] };
-  return reviewControl(args) === text ? text : null;
+  if (typeof text !== 'string' || text.length > MAX_CONTROL_TEXT) return null;
+  const words = text.split(' ');
+  return CONTROL_FORMS.some(form => formMatches(form, words)) ? text : null;
 }
+
+// Nearest-command suggestions for typed arguments that are not an exact control.
+// Deterministic and bounded; a suggestion is display text, never authority.
+const SUGGESTION_LIMIT = 3, SUGGESTION_TEXT = 16 * 1024, SUGGESTION_WORDS = 256, SUGGESTION_COST = 2;
+const DEFAULT_SUGGESTIONS = Object.freeze(['review', 'status', 'process']);
+const GRAMMAR_WORDS = Object.freeze([...new Set(CONTROL_FORMS.flat().filter(word => word !== REVIEW_CODE_PLACEHOLDER))]);
+const TEMPLATES = new Set(CONTROL_FORMS.filter(form => form.includes(REVIEW_CODE_PLACEHOLDER)).map(form => form.join(' ')));
+if (DEFAULT_SUGGESTIONS.some(text => processingControlText(text) === null)) throw new Error('INVALID_CONTROL_GRAMMAR');
+/** Characters a draft code never contains, derived from the code pattern. */
+export const REVIEW_CODE_EXCLUDED = Object.freeze([...'abcdefghijklmnopqrstuvwxyz0123456789'].filter(char => !REVIEW_CODE.test(char.repeat(6))));
+// Optimal string alignment distance, bounded to short words.
+function distance(a, b) {
+  if (a.length > 32 || b.length > 32) return Infinity;
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => i ? (j ? 0 : i) : j));
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    rows[i][j] = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) rows[i][j] = Math.min(rows[i][j], rows[i - 2][j - 2] + 1);
+  }
+  return rows[a.length][b.length];
+}
+// A misspelling or unique abbreviation of a grammar word costs its correction.
+// Short words also keep their first letter, so ordinary words rarely match.
+function wordCost(token, word) {
+  if (token === word) return 0;
+  if (token.length >= 3 && word.startsWith(token) && GRAMMAR_WORDS.filter(item => item.startsWith(token)).length === 1) return 1;
+  if (token.length < 2 || (word.length < 6 && token[0] !== word[0])) return Infinity;
+  const edits = distance(token, word);
+  return edits <= (word.length >= 6 ? 2 : 1) ? edits : Infinity;
+}
+const nearGrammarWord = token => GRAMMAR_WORDS.some(word => wordCost(token, word) !== Infinity);
+// A valid code is kept; a code-like token that is not one becomes the placeholder.
+function codeCost(token) {
+  if (REVIEW_CODE.test(token)) return { cost: 0, word: token };
+  if (!nearGrammarWord(token) && (/^[a-z0-9]{6}$/.test(token) || (/^[a-z0-9]{5,7}$/.test(token) && /\d/.test(token)))) return { cost: 1, word: REVIEW_CODE_PLACEHOLDER };
+  return null;
+}
+// Only the review prefix of a longer form may be missing (`save <code>`).
+const OMITTABLE_PREFIXES = Object.freeze(['review']);
+// A match scores the typed words it consumes less its corrections; ties prefer
+// the match consuming more words. A missing prefix costs one, and so does each
+// filler word inside a command ("process my repo" is nearer `process repo` than
+// the broader `process`); a code is never invented: an unusable one becomes
+// the placeholder.
+const better = (a, b) => !b || a.score > b.score || (a.score === b.score && a.used > b.used);
+function alignForm(form, tokens) {
+  let best = null;
+  const walk = (i, j, cost, used, words) => {
+    if (cost > SUGGESTION_COST) return;
+    if (i === form.length) {
+      const match = { score: used - cost, used, text: words.join(' ') };
+      if (used && better(match, best)) best = match;
+      return;
+    }
+    const expected = form[i];
+    if (i === 0 && form.length > 1 && OMITTABLE_PREFIXES.includes(expected)) walk(i + 1, j, cost + 1, used, [expected]);
+    if (j >= tokens.length) return;
+    if (expected === REVIEW_CODE_PLACEHOLDER) {
+      const code = codeCost(tokens[j]);
+      if (code) walk(i + 1, j + 1, cost + code.cost, used + 1, [...words, code.word]);
+    } else {
+      const corrected = wordCost(tokens[j], expected);
+      if (corrected !== Infinity) walk(i + 1, j + 1, cost + corrected, used + 1, [...words, expected]);
+    }
+    if (used) walk(i, j + 1, cost + 1, used, words);
+  };
+  for (let start = 0; start < tokens.length; start++) walk(0, start, 0, 0, []);
+  return best;
+}
+/** Up to three exact commands (or code templates) nearest to typed text that
+ * is not an exact control: case, spacing, punctuation, a missing `review`, a
+ * misspelling or abbreviation, an invalid code, or a control among other words.
+ * Free text with no nearby command gets the general commands. */
+export function processingControlSuggestions(text) {
+  const tokens = typeof text === 'string' ? text.slice(0, SUGGESTION_TEXT).normalize('NFKC').toLowerCase()
+    .split(/[^a-z0-9]+/).filter(Boolean).slice(0, SUGGESTION_WORDS) : [];
+  // A match that needs more corrections than the words it explains is noise.
+  const matches = CONTROL_FORMS.map(form => alignForm(form, tokens)).filter(item => item && item.score >= 0);
+  const top = matches.reduce((best, item) => better(item, best) ? item : best, null);
+  const chosen = [...new Set(matches.filter(item => item.score === top.score && item.used === top.used).map(item => item.text))];
+  return Object.freeze((chosen.length ? chosen : DEFAULT_SUGGESTIONS).slice(0, SUGGESTION_LIMIT));
+}
+/** A suggestion is an exact control or a form with the draft-code placeholder. */
+export const isProcessingControlSuggestion = text => processingControlText(text) !== null || TEMPLATES.has(text);
 /** Fields of a typed review action; null when the text is not one. */
 export function reviewControlFields(text) {
   if (processingControlText(text) === null || (text !== 'review' && !text.startsWith('review '))) return null;
@@ -76,20 +170,43 @@ const claudeHuman = row => row?.type === 'user' && row.message?.role === 'user' 
 const claudeRoot = (row, source, sessionKinds = []) => row?.sessionId === source.sessionId && row.isSidechain === false &&
   row.agentId == null && row.forkedFrom == null && row.foreignToBridgeSession == null &&
   (row.sessionKind == null || sessionKinds.includes(row.sessionKind));
-const commandText = (command, control = CONTROL) => `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${control}</command-args>`;
-export function claudeProcessingCommandKind(row, skillCommand = 'cuefluent-notes:cuefluent-notes') {
+const CLAUDE_SKILL_COMMAND = 'cuefluent-notes:cuefluent-notes';
+const COMMAND_ARGS_END = '</command-args>';
+const commandText = (command, control = CONTROL) => `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${control}${COMMAND_ARGS_END}`;
+/** The typed arguments inside the trusted skill command's exact envelope, as
+ * written; null for any other text, including another skill or plugin, another
+ * order, spacing or line ending, or text outside the envelope. */
+export function claudeSkillArguments(text, skillCommand = CLAUDE_SKILL_COMMAND) {
+  if (typeof text !== 'string' || !skillCommandLike(skillCommand)) return null;
+  const head = commandText(skillCommand, '').slice(0, -COMMAND_ARGS_END.length);
+  return text.length >= head.length + COMMAND_ARGS_END.length && text.startsWith(head) && text.endsWith(COMMAND_ARGS_END)
+    ? text.slice(head.length, -COMMAND_ARGS_END.length) : null;
+}
+export function claudeProcessingCommandKind(row, skillCommand = CLAUDE_SKILL_COMMAND) {
   if (!skillCommandLike(skillCommand) || !claudeHuman(row) || row.promptSource !== undefined) return null;
-  const text = claudeText(row), prefix = commandText(skillCommand, ''), suffix = '</command-args>';
-  if (typeof text !== 'string' || !text.startsWith(prefix.slice(0, -suffix.length)) || !text.endsWith(suffix)) return null;
-  const control = processingControlText(text.slice(prefix.length - suffix.length, -suffix.length));
-  return control !== null && text === commandText(skillCommand, control) ? control : null;
+  return processingControlText(claudeSkillArguments(claudeText(row), skillCommand));
 }
 export const isClaudeProcessingCommand = (row, skillCommand) => claudeProcessingCommandKind(row, skillCommand) !== null;
+// The envelope's arguments in a typed human input: its whole text, or one text
+// block among other content (`extra`). Pasted or SDK input is not typed.
+function claudeTypedSkillInput(row, skillCommand) {
+  if (!claudeHuman(row) || row.promptSource !== undefined) return null;
+  const content = row.message.content;
+  if (typeof content === 'string') { const args = claudeSkillArguments(content, skillCommand); return args === null ? null : { args, extra: false }; }
+  if (!Array.isArray(content)) return null;
+  const found = content.filter(block => block?.type === 'text').map(block => claudeSkillArguments(block.text, skillCommand)).find(args => args !== null);
+  return found === undefined ? null : { args: found, extra: content.length > 1 };
+}
 
+const MAX_SKILL_ARGUMENT_BYTES = 2 * 1024 * 1024;
 /** Trusted installed skill only. This does not discover plugins or accept a
  * model-provided expansion. Unsupported substitutions remain unverified. */
-export async function loadClaudeProcessingSkill({ skillPath, skillCommand = 'cuefluent-notes:cuefluent-notes', control = CONTROL }) {
-  if (typeof skillPath !== 'string' || !path.isAbsolute(skillPath) || !skillCommandLike(skillCommand) || processingControlText(control) === null) return null;
+export async function loadClaudeProcessingSkill({ skillPath, skillCommand = CLAUDE_SKILL_COMMAND, control = CONTROL }) {
+  return processingControlText(control) === null ? null : loadClaudeSkill({ skillPath, skillCommand, args: control });
+}
+async function loadClaudeSkill({ skillPath, skillCommand, args }) {
+  if (typeof skillPath !== 'string' || !path.isAbsolute(skillPath) || !skillCommandLike(skillCommand) ||
+      typeof args !== 'string' || Buffer.byteLength(args) > MAX_SKILL_ARGUMENT_BYTES) return null;
   let snapshot;
   try { snapshot = await readBoundedBytes(skillPath, { maxBytes: 128 * 1024, noFollow: true, missing: true }); }
   catch { return null; }
@@ -98,9 +215,43 @@ export async function loadClaudeProcessingSkill({ skillPath, skillCommand = 'cue
   if (!header) return null;
   let body = content.slice(header[0].length).trimStart();
   if (body.includes('${') || /\$\d|\$ARGUMENTS\[/.test(body)) return null;
-  body = body.includes('$ARGUMENTS') ? body.replaceAll('$ARGUMENTS', control) : `${body}\n\nARGUMENTS: ${control}`;
+  // Literal substitution: typed arguments may contain `$` replacement patterns.
+  body = body.includes('$ARGUMENTS') ? body.replaceAll('$ARGUMENTS', () => args) : `${body}\n\nARGUMENTS: ${args}`;
   const expansion = `Base directory for this skill: ${path.dirname(skillPath)}\n\n${body}`;
   return Object.freeze({ skillPath, skillCommand, skillExpansionHash: digest(expansion) });
+}
+
+// The native call and the human input that started its skill turn: exactly one
+// matching call, attributed to the trusted skill, and the nearest earlier
+// human input as a root prompt with native identities.
+function claudeSkillTurn(records, { source, callId, tool, argsHash, skillCommand, kinds }) {
+  const plugin = skillCommand.split(':')[0], calls = [];
+  for (let index = 0; index < records.length; index++) {
+    const row = records[index].value;
+    if (row?.type !== 'assistant' || row.message?.role !== 'assistant' || !Array.isArray(row.message.content)) continue;
+    for (const block of row.message.content) if (block?.type === 'tool_use' && block.id === callId) calls.push({ index, row, block });
+  }
+  if (calls.length !== 1) return null;
+  const call = calls[0];
+  if (!claudeRoot(call.row, source, kinds) || call.row.attributionSkill !== skillCommand || call.row.attributionPlugin !== plugin ||
+      call.block.name !== tool || !object(call.block.input) || digest(canonicalJSON(call.block.input)) !== argsHash || !isNativeId(call.row.uuid)) return null;
+  let inputIndex = call.index - 1;
+  while (inputIndex >= 0 && !claudeHuman(records[inputIndex].value)) inputIndex--;
+  if (inputIndex < 0) return null;
+  const input = records[inputIndex], row = input.value;
+  if (!claudeRoot(row, source, kinds) || !isNativeId(row.uuid) || !isNativeId(row.promptId) || row.promptSource !== undefined ||
+      row.interruptedMessageId !== undefined || row.interruptedByShutdown === true) return null;
+  return { call, inputIndex, input, row };
+}
+// The one native companion carrying the trusted skill expansion for that input.
+function claudeSkillCompanion(records, { call, inputIndex, row }, { source, kinds, expansionHash }) {
+  const companions = records.slice(inputIndex + 1, call.index).filter(record => record.value?.turnCompanion === true);
+  if (companions.length !== 1) return null;
+  const companion = companions[0], meta = companion.value;
+  if (!claudeRoot(meta, source, kinds) || meta.type !== 'user' || meta.message?.role !== 'user' || meta.isMeta !== true ||
+      meta.promptId !== row.promptId || meta.parentUuid !== row.uuid || !isNativeId(meta.uuid) ||
+      digest(claudeText(meta) ?? '') !== expansionHash) return null;
+  return companion;
 }
 
 /** A typed native companion plus native skill-attributed MCP call binds the
@@ -109,34 +260,34 @@ export function findClaudeProcessingControlInput(records, { source, callId, tool
   if (!skill || !skillCommandLike(skill.skillCommand) || !hashLike(skill.skillExpansionHash)) return null;
   const kinds = claudeSessionKinds(sessionKinds);
   if (control !== undefined && processingControlText(control) === null) return null;
-  const plugin = skill.skillCommand.split(':')[0], calls = [];
-  for (let index = 0; index < records.length; index++) {
-    const row = records[index].value;
-    if (row?.type !== 'assistant' || row.message?.role !== 'assistant' || !Array.isArray(row.message.content)) continue;
-    for (const block of row.message.content) if (block?.type === 'tool_use' && block.id === callId) calls.push({ index, row, block });
-  }
-  if (calls.length !== 1) return null;
-  const call = calls[0];
-  if (!claudeRoot(call.row, source, kinds) || call.row.attributionSkill !== skill.skillCommand || call.row.attributionPlugin !== plugin ||
-      call.block.name !== tool || !object(call.block.input) || digest(canonicalJSON(call.block.input)) !== argsHash || !isNativeId(call.row.uuid)) return null;
-  let inputIndex = call.index - 1;
-  while (inputIndex >= 0 && !claudeHuman(records[inputIndex].value)) inputIndex--;
-  if (inputIndex < 0) return null;
-  const input = records[inputIndex], row = input.value;
-  if (!claudeRoot(row, source, kinds) || !isNativeId(row.uuid) || !isNativeId(row.promptId) || row.promptSource !== undefined ||
-      row.interruptedMessageId !== undefined || row.interruptedByShutdown === true) return null;
+  const turn = claudeSkillTurn(records, { source, callId, tool, argsHash, skillCommand: skill.skillCommand, kinds });
+  if (!turn) return null;
+  const { call, input, row } = turn;
   const typed = control ?? processingControlAction(tool, call.block.input);
   if (typed === null || claudeText(row) !== commandText(skill.skillCommand, typed)) return null;
-  const companions = records.slice(inputIndex + 1, call.index).filter(record => record.value?.turnCompanion === true);
-  if (companions.length !== 1) return null;
-  const companion = companions[0], meta = companion.value;
-  if (!claudeRoot(meta, source, kinds) || meta.type !== 'user' || meta.message?.role !== 'user' || meta.isMeta !== true ||
-      meta.promptId !== row.promptId || meta.parentUuid !== row.uuid || !isNativeId(meta.uuid) ||
-      digest(claudeText(meta) ?? '') !== skill.skillExpansionHash) return null;
+  const companion = claudeSkillCompanion(records, turn, { source, kinds, expansionHash: skill.skillExpansionHash });
+  if (!companion) return null;
+  const meta = companion.value;
   return { unitId: row.promptId, inputId: row.uuid, inputHash: digest(claudeText(row)),
     companionId: meta.uuid, companionHash: companion.hash, skillCommand: skill.skillCommand,
     skillExpansionHash: skill.skillExpansionHash, callRecordId: call.row.uuid,
     inputRange: { fromByte: input.startByte, endByte: input.endByte, hash: input.hash } };
+}
+
+/** The typed arguments of a trusted skill invocation that started this native
+ * call's turn but are not an exact control: other text, or a control mixed with
+ * other content. Verified like a control (attributed call, typed root input,
+ * native companion of the trusted expansion for exactly those arguments). Only
+ * a refusal and a suggestion source: never control authority or an exclusion. */
+export async function findClaudeSkillArguments(records, { source, callId, tool, argsHash, skillPath, skillCommand = CLAUDE_SKILL_COMMAND, sessionKinds = [] }) {
+  if (!skillCommandLike(skillCommand)) return null;
+  const kinds = claudeSessionKinds(sessionKinds);
+  const turn = claudeSkillTurn(records, { source, callId, tool, argsHash, skillCommand, kinds });
+  const typed = turn && claudeTypedSkillInput(turn.row, skillCommand);
+  if (!typed || (!typed.extra && processingControlText(typed.args) !== null)) return null;
+  const skill = await loadClaudeSkill({ skillPath, skillCommand, args: typed.args });
+  if (!skill || !claudeSkillCompanion(records, turn, { source, kinds, expansionHash: skill.skillExpansionHash })) return null;
+  return Object.freeze({ unitId: turn.row.promptId, inputId: turn.row.uuid, arguments: typed.args, mixed: typed.extra });
 }
 
 /** True only for a process-local proof produced after guarded native byte inspection.

@@ -12,7 +12,8 @@ import { inspectProcessing } from '../processing.mjs';
 
 // Shared native MCP harness for the processing front door. Source binding is
 // stubbed: h.nativeSkill marks a verified typed action and h.typedControl its
-// exact typed text (Codex has no review fields in its call).
+// exact typed text (Codex has no review fields in its call); h.typedSuggestions
+// marks a typed skill invocation that is not an exact action.
 export const deferred = () => {
   let resolve, reject;
   const promise = new Promise((a, b) => { resolve = a; reject = b; });
@@ -59,6 +60,7 @@ export async function harness(t, f, overrides = {}) {
         nativeSkill: h.nativeSkill, controlExclusionUnsupported: h.controlExclusionUnsupported === true, unitId: f.identity.unitId, argsHash: digest(canonicalJSON(invocation.arguments)),
         ...(h.captureActive === undefined ? {} : { captureActive: h.captureActive }),
         ...(h.nativeSkill && h.typedControl !== undefined ? { typedControl: h.typedControl } : {}),
+        ...(h.typedSuggestions !== undefined ? { typedSuggestions: Object.freeze([...h.typedSuggestions]) } : {}),
         tool: `mcp__cuefluent_control.${invocation.tool}`, callId: context.toolCallId });
     },
     async openController(context, options) {

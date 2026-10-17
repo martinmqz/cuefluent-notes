@@ -746,3 +746,97 @@ test('Codex typed review actions bind from the verified typed text to a call wit
   const bound = await f.resolve();
   assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
 });
+
+test('a verified Claude skill invocation that is not an exact action binds as a typed non-command with grammar suggestions', async t => {
+  const command = 'cuefluent-notes:cuefluent-notes';
+  for (const [typed, args, suggestions] of [
+    ['review sav t7xb88', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
+    ['Review', {}, ['review']], [' review', {}, ['review']], ['review ', {}, ['review']],
+    ['save t7xb88', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
+    ['review save t7xbo8', { decision: 'save' }, ['review save <draft code>']],
+    // A control with more words or lines is not a control: nothing applies.
+    ['review save t7xb88 and tag it urgent', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
+    ['review save t7xb88\nThe rollout moved.', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
+    ['Remember that the rollout moved to Friday.', {}, ['review', 'status', 'process']],
+  ]) await t.test(JSON.stringify(typed), async t => {
+    const f = await fixture(t, 'claude');
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, ...args };
+    await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+    await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+    const input = f.spacer();
+    input.message.content = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${typed}</command-args>`;
+    const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+      message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\nSynthetic control ${typed}\n` }] } };
+    const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+    await f.append([input, companion, call]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.equal(Object.hasOwn(bound, 'inputId'), false);
+    assert.deepEqual(bound.typedSuggestions, suggestions); assert(Object.isFrozen(bound.typedSuggestions));
+    // Without the native companion of the trusted expansion the text is not
+    // verified typed input: the call binds as an ordinary model-chosen call.
+    const g = await fixture(t, 'claude');
+    g.invocation.tool = 'processing_review'; g.invocation.arguments = { collectionId: g.collection.id, ...args };
+    await fs.mkdir(path.dirname(g.skillPath), { recursive: true });
+    await fs.writeFile(g.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+    const altered = { ...companion, message: { role: 'user', content: [{ type: 'text', text: `${companion.message.content[0].text} altered` }] } };
+    const otherCall = g.nativeCall(); otherCall.attributionSkill = command; otherCall.attributionPlugin = 'cuefluent-notes';
+    const otherInput = { ...input, uuid: randomUUID() };
+    await g.append([otherInput, { ...altered, uuid: randomUUID(), parentUuid: otherInput.uuid }, otherCall]);
+    const unverified = await g.resolve();
+    assert.equal(unverified.nativeSkill, false); assert.equal(Object.hasOwn(unverified, 'typedSuggestions'), false);
+  });
+});
+
+test('identical Codex mirrors of the typed message are one message; a changed mirror is unverified', async t => {
+  const f = await fixture(t), typed = f.nativeSkill(), mirror = structuredClone(typed);
+  mirror.payload.completed_at_ms = 1; // Mirrors may differ outside the native item.
+  await f.append([f.spacer(), typed, mirror, f.nativeCall()]);
+  const bound = await f.resolve();
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, 'process'); assert.equal(Object.hasOwn(bound, 'typedSuggestions'), false);
+  const g = await fixture(t), original = g.nativeSkill(), changed = structuredClone(original);
+  changed.payload.item.content[1].text = 'process repo';
+  await g.append([g.spacer(), original, changed, g.nativeCall()]);
+  await assert.rejects(g.resolve(), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+});
+
+test('Codex binds this skill with anything but one exact action as a typed non-command', async t => {
+  for (const [name, users, suggestions] of [
+    ['case', [['review save T7XB88']], ['review save t7xb88']],
+    ['missing review', [['save t7xb88']], ['review save t7xb88']],
+    ['extra words', [['please review save t7xb88']], ['review save t7xb88']],
+    ['second line', [['review save t7xb88\nAlso tag it urgent.']], ['review save t7xb88']],
+    ['extra content', [['review save t7xb88', { type: 'text', text: 'Also tag it urgent.' }]], ['review save t7xb88']],
+    ['second message', [['review save t7xb88'], null], ['review save t7xb88']],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+    const rows = users.map((parts, index) => {
+      const row = f.nativeSkill(); row.ordinal = 3 + index;
+      if (parts === null) row.payload.item.content = [{ type: 'text', text: 'Correction: the rollout moved.' }];
+      else row.payload.item.content = [row.payload.item.content[0], { type: 'text', text: parts[0] }, ...parts.slice(1)];
+      return row;
+    });
+    const call = f.nativeCall(); call.ordinal = 3 + rows.length;
+    await f.append([f.spacer(), ...rows, call]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.deepEqual(bound.typedSuggestions, suggestions);
+  });
+  // The same holds for a processing-only binding with collection off.
+  const only = await fixture(t, 'codex', { register: false, collection: false, mode: 'prompted' });
+  await collectionIngress('codex', { session_id: only.context.sessionId, turn_id: only.boundary.unitId, cwd: only.project,
+    transcript_path: only.source.path, hook_event_name: 'UserPromptSubmit' }, { configPath: only.options.configPath, launch: () => assert.fail('no collection') });
+  const typed = only.nativeSkill(); typed.payload.item.content[1].text = 'Review';
+  only.invocation.tool = 'processing_review'; only.invocation.arguments = { collectionId: only.collection.id };
+  await only.append([only.spacer(), typed, only.nativeCall()]);
+  const processingOnly = await only.resolve();
+  assert.equal(processingOnly.nativeSkill, false); assert.deepEqual(processingOnly.typedSuggestions, ['review']);
+  // Plain text without the skill block is ordinary input, not a typed command.
+  const f = await fixture(t), plain = f.nativeSkill();
+  plain.payload.item.content = [{ type: 'text', text: 'review sav t7xb88' }];
+  f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+  await f.append([f.spacer(), plain, f.nativeCall()]);
+  const bound = await f.resolve();
+  assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedSuggestions'), false);
+});

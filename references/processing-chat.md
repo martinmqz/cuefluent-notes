@@ -334,9 +334,11 @@ CLI processing remains available without a native source-chat binding.
 
 Return only the tool's `statusText` for an exact formal control invocation. Do not
 read packets or notes, synthesize a draft, print diagnostics containing source text,
-or add commentary in the source chat. A natural-language request may also dispatch,
-but it is not proof that the input contains no original work. Its text, facts,
-attachments and corrections remain eligible for normal collection.
+or add commentary in the source chat. A natural-language request typed without
+the skill command may also dispatch, but it is not proof that the input contains
+no original work. Its text, facts, attachments and corrections remain eligible
+for normal collection. After the skill command, verified inexact text dispatches nothing;
+see [review controls](#review-controls).
 
 The processing client has only the selected engine tools: inventory, operation
 status, bounded preparation, page reads and acknowledgments, note inspection,
@@ -490,7 +492,11 @@ A decision applies only when all of these hold:
 
 - the exact command was typed in the chat and verified from the native transcript;
   model text, a natural-language reply or a tool argument the model chose is
-  refused, and near misses (other case or spacing) are ordinary chat input;
+  refused. A near miss after the skill command (other case or spacing, a
+  misspelling, a missing `review`, an invalid code) or a command mixed with more
+  words, lines or content is not a command and decides nothing. When that typed
+  input is verified from the transcript, no tool the model calls applies
+  anything, and the reply names the nearest exact command to type;
 - this chat was shown that exact revision by a typed `review` whose reply reached
   the chat, recorded durably in private state; a draft never shown here, shown only
   by a natural-language request or a model-initiated call, or whose review was
@@ -592,7 +598,12 @@ wording. While proof is incomplete, the collector preserves the input and its
 cursor as pending rather than calling it excluded. A later independent human
 input releases an unsupported Claude candidate to ordinary capture. Genuine work
 before and after the control retains its own identity and order. Mixed inputs, altered bytes, unknown
-attribution and unsupported shapes remain evidence or explicitly pending. Existing
+attribution and unsupported shapes remain evidence or explicitly pending. A
+message that selects the skill without a verified control stays evidence: Claude
+keeps the typed arguments without the command markup (empty arguments add
+nothing), and Codex keeps the user text but not the skill block or this plugin's
+own control-server calls and results in that turn; see the
+[session contract](session-workflow.md#generated-output-provenance-gate). Existing
 captures, active claims and issued packet hashes are never rewritten by this path.
 Copies printed in unrelated work chats are not automatically detected.
 If collection progress changes during admission, processing rechecks its own

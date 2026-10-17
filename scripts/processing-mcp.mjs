@@ -243,6 +243,20 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     return owner;
   }
   const keyFor = options => digest(canonicalJSON({ ...options, client }));
+  // A typed invocation of this skill whose arguments are not one exact action
+  // applies nothing, whichever tool the model called: no dispatch, display,
+  // decision or receipt. The reply names the nearest exact commands, computed
+  // from the verified typed text by the grammar; a suggestion is not authority.
+  async function notACommand(source) {
+    if (source.typedSuggestions === undefined) return null;
+    const { options } = selected(source), job = jobs.get(keyFor(options));
+    const controller = job?.controller ?? await openController({ ...options, client }, { env });
+    try {
+      const status = await controller.status({ selection: source.selection });
+      return { ...viewOf(status), command: 'not-a-command', suggestions: [...source.typedSuggestions], commandPrefix: REVIEW_COMMANDS[client] };
+    } finally { if (!job) await controller.close(); }
+  }
+  const exactOnly = action => async request => (await notACommand(request.source)) ?? action(request);
   async function replayControl(source) {
     if (!source.nativeSkill || !source.unitId || source.captureActive === false) return null;
     const { capability } = selected(source);
@@ -700,7 +714,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     await confirmReviewPresentation(capability, { selection: source.selection, ...pending });
   }
   try {
-    await runProcessingControlServer({ client, input, output, env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse, afterResponse });
+    await runProcessingControlServer({ client, input, output, env, resolveSource, getStatus: exactOnly(getStatus),
+      requestProcessing: exactOnly(requestProcessing), requestResume: exactOnly(requestResume), requestCancel: exactOnly(requestCancel),
+      requestReview: exactOnly(requestReview), beforeResponse, afterResponse });
   } finally {
     // No automatic dispatch retry, cancellation, claim cleanup or new source read.
     for (const job of jobs.values()) job.rejectDispatch(Object.assign(new Error('PROCESSING_CONTROL_FAILED'), { code: 'PROCESSING_CONTROL_FAILED' }));

@@ -475,6 +475,40 @@ test('Codex keeps its native form, names the review folder, and accepts the same
   });
 });
 
+test('a mixed or misspelled typed review command after a delivered typed review stages nothing, in either client', async t => {
+  for (const client of ['claude', 'codex']) await t.test(client, async t => {
+    const f = await processingFixture(t, client === 'claude' ? { client } : {}), p = await proposedClaim(f);
+    const h = client === 'claude' ? await claudeReview(t, f) : await harness(t, f, { capabilities: {} });
+    const prefix = client === 'claude' ? claude : codex;
+    h.nativeSkill = true; h.typedControl = 'review';
+    const shown = await review(h), code = shown.draft.code;
+    assert.equal(shown.review, 'presented'); assert.equal(code, reviewCode(p.proposalHash));
+    const state = await fs.readFile(stateFile(f));
+    // The person typed `review save <code>` with more words; the binder found no
+    // exact action. The model may still copy a decision into the call (Claude).
+    h.nativeSkill = false; delete h.typedControl; h.typedSuggestions = [`review save ${code}`];
+    const calls = [['processing_review', client === 'claude' ? { decision: 'save', draft: code } : {}], ['processing_review', {}],
+      ['processing_status', {}], ['process_selected_captures', {}], ['processing_resume', {}], ['processing_cancel', {}]];
+    for (const [name, args] of calls) {
+      const reply = body(await h.call(name, args));
+      assert.equal(reply.command, 'not-a-command', name); assert.equal(reply.review, undefined);
+      assert.deepEqual(reply.suggestions, [`review save ${code}`]); assert.equal(reply.commandPrefix, prefix);
+      assert.equal(reply.statusText, `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${prefix} review save ${code}.`);
+      assertPlainReply(reply, f);
+    }
+    // Nothing was decided, displayed, dispatched or recorded.
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+    assert.deepEqual(await fs.readFile(stateFile(f)), state); assert(await exists(shown.draft.folder));
+    assert.equal(h.dispatches, 0); assert.equal(h.creates, 0); assert.equal(h.forms.length, 0);
+    // Typed exactly, alone, the same decision applies.
+    delete h.typedSuggestions; h.nativeSkill = true;
+    if (client === 'codex') h.typedControl = `review save ${code}`;
+    assert.equal((await review(h, client === 'claude' ? { decision: 'save', draft: code } : {})).review, 'saved');
+    assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
+  });
+});
+
 test('verified review replies are receipted canonically and replay byte-for-byte without rewriting files', async t => {
   for (const capabilities of [{}, undefined]) await t.test(capabilities ? 'review folder only' : 'form Later', async t => {
     const f = await processingFixture(t), p = await proposedClaim(f), h = await harness(t, f, { capabilities });

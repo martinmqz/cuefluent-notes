@@ -124,6 +124,25 @@ Claude candidate to ordinary capture. Mixed inputs and new corrections retain
 their evidence. Interrupted or unproven runs do not grant collection exclusion.
 Existing capture heads, packets and claims remain unchanged.
 
+Nothing else that selects the skill is excluded. A Claude human input that is
+exactly the trusted skill command's envelope
+(`<command-message>`, `<command-name>`, `<command-args>` in that order, for
+`cuefluent-notes:cuefluent-notes`) without a proof keeps its typed arguments as
+evidence, exactly as written, without the markup; when nothing was typed after
+the command the input is structural. Another skill or plugin, any other shape or
+text outside the envelope, and SDK input stay verbatim. A control mixed with
+more words or content is therefore retained in full. A Codex unit whose user
+message carries this skill's block (its exact native shape and the skill name
+`cuefluent-notes`) keeps all user text and assistant text; the block itself is
+command markup, not an omission. The installed path, which changes with each
+plugin version, is not consulted, so a published unit replays unchanged after
+an upgrade. In that unit only, calls to this plugin's control
+server and their results are left out as its own processing and review activity,
+identified by native identity alone: the call namespace `mcp__cuefluent_control`
+plus a native MCP item for the same call ID with server `cuefluent_control` and
+the same tool. Other tools, code-mode `exec` cells and units without the block
+are unchanged. Published captures keep the rules of their reader version.
+
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same
 capabilities, including the separate `isolatedProcessing` contract. These are not
@@ -381,7 +400,12 @@ Stable native item IDs deduplicate identical mirrors; distinct IDs retain repeat
 text. Native source ranges remain attached to the unit's actual records. Reasoning,
 compaction summaries, hook prompts and inter-agent content are excluded structurally.
 Native collaboration call IDs and pinned collaboration tool names exclude their
-outputs with an omission. Native user text, including IDE context supplied in
+outputs with an omission. Reader version 3 treats this plugin's own skill block
+as command markup and leaves out its control-server exchanges in a unit started
+with that skill (see [the provenance gate](#generated-output-provenance-gate));
+versions 1 and 2 record the block as an `unsupported-content-block` omission and
+keep those exchanges. A published unit is always reread under its own version.
+Native user text, including IDE context supplied in
 that text, stays attributed evidence; prose delimiters do not authorize stripping
 arbitrary parts of a user's message.
 
@@ -464,7 +488,13 @@ context, sidechain/child records, reasoning and queued attachment records are
 excluded. API request snapshot records (`api-request-shape`, `api-request-blob`
 and `api-request`, written by Claude CLI 2.1.299) are excluded transport metadata;
 their message copies never become evidence. Selected human prose is not filtered
-by instruction-like words.
+by instruction-like words. Capture reader version 2 keeps only the typed
+arguments of the trusted skill command's exact envelope (see
+[the provenance gate](#generated-output-provenance-gate)); a version 1 head
+extends with verbatim text, except that an envelope with nothing typed is
+structural under both. Both share the structural checkpoint version
+`claude-transcript/1`; an unknown capture reader version refuses that unit with
+`UNSUPPORTED_CLAUDE_READER` rather than being reinterpreted.
 Classification uses the documented native types, ownership fields and known
 injection flags. Neither reader validates every optional field: a future producer
 that changes human/injected-message semantics under a known type needs a reader

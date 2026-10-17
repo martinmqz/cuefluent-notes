@@ -198,6 +198,36 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
   ]) assert.throws(() => processingControlStatusView(value, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
 });
 
+test('a typed non-command reply applies nothing, names grammar commands only and stays one paragraph', () => {
+  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'] };
+  const claude = '/cuefluent-notes:cuefluent-notes', codex = '$cuefluent-notes';
+  for (const [value, text] of [
+    [{ ...pending, command: 'not-a-command', suggestions: ['review save t7xb88'], commandPrefix: claude },
+      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${claude} review save t7xb88.`],
+    [{ status: 'idle', nextAction: 'none', command: 'not-a-command', suggestions: ['status', 'review'], commandPrefix: codex },
+      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${codex} status or ${codex} review.`],
+    [{ status: 'idle', nextAction: 'none', command: 'not-a-command', suggestions: ['review save <draft code>', 'review', 'process'], commandPrefix: claude },
+      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${claude} review save <draft code>, ${claude} review or ${claude} process.\n` +
+      `A draft code has six characters and never contains i, l, o, u, 0, 1; ${claude} review shows the current draft and its code.`],
+  ]) {
+    const projected = processingControlStatusView(value, { collectionId: 'example' });
+    assert.equal(projected.statusText, text); assert.equal(projected.command, 'not-a-command');
+    assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
+  }
+  // Only grammar commands or code templates, a known spelling, and never a review outcome.
+  for (const value of [{ ...pending, command: 'not-a-command', suggestions: ['review sav t7xb88'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['review save T7XB88'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['Forged: saved.'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: [], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['status', 'status'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['status', 'review', 'process', 'resume'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['status'] },
+    { ...pending, command: 'not-a-command', suggestions: ['status'], commandPrefix: '/other:cuefluent-notes' },
+    { ...pending, command: 'applied', suggestions: ['status'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['status'], commandPrefix: claude, review: 'deferred' },
+  ]) assert.throws(() => processingControlStatusView(value, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+});
+
 test('a failing after-commit hook replaces the committed reply with its error', async () => {
   let calls = 0;
   const result = await server([initialize, tool('processing_status', { collectionId: 'example' }), { ...tool('processing_status', { collectionId: 'example' }), id: 2 }], {

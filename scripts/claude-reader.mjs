@@ -9,14 +9,22 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
 import { createCapture, validateCapture, assertCaptureExtension, clientVersion, captureReader } from './capture-contract.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
-import { loadClaudeProcessingSkill, claudeProcessingCommandKind, isClaudeProcessingCommand, verifyClaudeProcessingControl, isProcessingControlProof } from './processing-control-proof.mjs';
+import { loadClaudeProcessingSkill, claudeProcessingCommandKind, isClaudeProcessingCommand, verifyClaudeProcessingControl, isProcessingControlProof, claudeSkillArguments } from './processing-control-proof.mjs';
 import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { nativeId, timestamp, canonicalJSON, fail, integer, hash, keys, isNativeId } from './workflow-values.mjs';
 
-export const CLAUDE_READER_VERSION = '1';
+// The capture reader version names its evidence text rules. Every supported
+// version keeps a mapping, so a published head extends under its own rules:
+// 1 copies human text verbatim; 2 keeps the typed arguments of the trusted
+// skill command's envelope without its markup.
+export const CLAUDE_READER_VERSION = '2';
+export const CLAUDE_EVIDENCE_RULES = Object.freeze({ '1': 'verbatim', '2': 'skill-arguments' });
+// Structural checkpoint metadata (record kinds, ancestry, units) has its own
+// version, unchanged by evidence text rules.
+const CLAUDE_CHECKPOINT_READER = 'claude-transcript/1';
 // Bump when compatibility or classification rules change. This expires only
 // disposable suspensions, independently of immutable captures/checkpoints.
-export const CLAUDE_READER_RULES_REVISION = 3;
+export const CLAUDE_READER_RULES_REVISION = 4;
 // Claude CLI background sessions (CLAUDE_CODE_SESSION_KIND=bg) stamp every
 // record with this kind, including the history a session moved there carries.
 // Accepted only for a session verified as the continuation of a registered root
@@ -44,8 +52,11 @@ const synthetic = row => row.isMeta === true || row.isVirtual === true || row.is
   row.isCompactSummary === true || (row.origin !== undefined && row.origin?.kind !== 'human');
 const human = row => row.type === 'user' && row.message?.role === 'user' && !toolResult(row) && !synthetic(row) &&
   row.interruptedMessageId === undefined && row.interruptedByShutdown !== true;
-const emptyHuman = row => row.message.content === '' || (Array.isArray(row.message.content) &&
-  row.message.content.every(block => (block.type === 'text' && block.text === '') || ['thinking', 'redacted_thinking'].includes(block.type)));
+// The trusted skill command's envelope with nothing typed after the command is
+// markup only. Like empty text, it is structural input under every rule set.
+const markupOnly = (row, text) => row.promptSource === undefined && claudeSkillArguments(text) === '';
+const emptyHuman = row => row.message.content === '' || markupOnly(row, row.message.content) || (Array.isArray(row.message.content) &&
+  row.message.content.every(block => (block.type === 'text' && (block.text === '' || markupOnly(row, block.text))) || ['thinking', 'redacted_thinking'].includes(block.type)));
 
 /** Claude can prepend metadata before its first native identity row. Never scan past 64 KiB. */
 export async function readClaudeHeader({ readHeader, size }) {
@@ -108,12 +119,20 @@ export function claudeContinuedIn(row, source) {
   return row.continuedInSessionId;
 }
 
-function normalizeHuman(record, out) {
+function normalizeHuman(record, out, rules) {
   const content = record.value.message.content;
   const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : content;
   if (!Array.isArray(blocks)) fail('UNSUPPORTED_CLAUDE_CONTENT');
+  // A typed text block that is exactly the trusted skill command's envelope is
+  // client markup around what the person typed: keep those arguments, as
+  // written. Any other text, another skill's envelope or SDK input is verbatim.
+  const typed = rules === 'skill-arguments' && record.value.promptSource === undefined;
   for (const block of blocks) {
-    if (block.type === 'text' && typeof block.text === 'string') out.add('user', record, { text: block.text });
+    if (block.type === 'text' && typeof block.text === 'string') {
+      const args = typed ? claudeSkillArguments(block.text) : null;
+      if (args === null) out.add('user', record, { text: block.text });
+      else if (args !== '') out.add('user', record, { text: args });
+    }
     else if (['image', 'document'].includes(block.type)) {
       if (block.source?.type === 'url' && typeof block.source.url === 'string') out.add('attachment', record, { reference: block.source.url });
       else out.omit(block.source?.type === 'base64' ? 'inline-attachment-not-copied' : 'attachment-without-reusable-reference', record,
@@ -164,9 +183,9 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   if (from.offset > floor && !checkpoint) fail('READER_CHECKPOINT_REQUIRED');
   if (checkpoint) validateReaderCheckpoint(checkpoint, { identity: source, scopeId, sourceIdentity: source.fileIdentity, offset: from.offset });
   if (checkpoint?.records.some(record => record.startByte < floor)) fail('READER_CHECKPOINT_CONFLICT');
-  if (checkpoint && checkpoint.reader !== `claude-transcript/${CLAUDE_READER_VERSION}`) fail('READER_CHECKPOINT_CONFLICT');
+  if (checkpoint && checkpoint.reader !== CLAUDE_CHECKPOINT_READER) fail('READER_CHECKPOINT_CONFLICT');
   const carry = structuredClone(checkpoint ?? { format: 'cuefluent-reader-checkpoint', version: 1,
-    reader: `claude-transcript/${CLAUDE_READER_VERSION}`, client: 'claude', sessionId: source.sessionId,
+    reader: CLAUDE_CHECKPOINT_READER, client: 'claude', sessionId: source.sessionId,
     scopeId, sourceIdentity: source.fileIdentity, offset: from.offset, records: [], units: [] });
   const pager = checkpointPageBuilder(carry);
   let checkpointBytes = Buffer.byteLength(canonicalJSON(carry));
@@ -353,8 +372,12 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
         validateCapture(baseline);
         if (baseline.identity.client !== 'claude' || baseline.identity.sessionId !== source.sessionId || baseline.identity.unitId !== unitId ||
             baseline.source.fileIdentity !== source.fileIdentity || baseline.source.path !== source.path || baseline.projectRoot !== source.projectRoot ||
-            baseline.reader.name !== 'claude-transcript' || baseline.reader.version !== CLAUDE_READER_VERSION || captureReader(baseline.reader).headerClientVersion !== scan.metadata.version) fail('CAPTURE_REVISION_CONFLICT');
+            baseline.reader.name !== 'claude-transcript' || captureReader(baseline.reader).headerClientVersion !== scan.metadata.version) fail('CAPTURE_REVISION_CONFLICT');
+        // An unknown (newer) rule set is never reinterpreted under these rules.
+        if (!Object.hasOwn(CLAUDE_EVIDENCE_RULES, baseline.reader.version)) fail('UNSUPPORTED_CLAUDE_READER');
       }
+      // A published head extends under the evidence rules it was captured with.
+      const readerVersion = baseline?.reader.version ?? CLAUDE_READER_VERSION;
       const provenInputs = new Set();
       if (!baseline && !previous?.head && typeof loadHead === 'function') {
         if (typeof resolveProcessingExecution === 'function') {
@@ -404,12 +427,12 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       // observed frames, which the intake helper verifies against the live head.
       if (baseline?.source.ranges.some(range => range.startByte < floor || (scope.end && range.endByte > scope.end.endByte))) fail('CAPTURE_REVISION_SCOPE_CONFLICT');
       const out = evidenceCollector(baseline ? { evidence: baseline.evidence, omissions: baseline.coverage.omissions } : undefined);
-      for (const record of additions) { checkBudget(); normalizeHuman(record, out); }
+      for (const record of additions) { checkBudget(); normalizeHuman(record, out, CLAUDE_EVIDENCE_RULES[readerVersion]); }
       if (!out.evidence.length && !out.omissions.length) { noEvidence.push(unitId); eligibility.set(unitId, 'structural'); continue; }
       const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity: { client: 'claude', sessionId: source.sessionId, unitId },
         projectRoot: source.projectRoot, source: { path: source.path, fileIdentity: source.fileIdentity,
           ranges: [...(baseline?.source.ranges ?? []), ...additions.map(captureRange)] },
-        reader: { name: 'claude-transcript', version: CLAUDE_READER_VERSION, headerClientVersion: scan.metadata.version },
+        reader: { name: 'claude-transcript', version: readerVersion, headerClientVersion: scan.metadata.version },
         occurredAt: baseline?.occurredAt ?? carry.units.find(unit => unit.id === unitId).occurredAt, capturedAt, terminal: 'unconfirmed',
         coverage: { partial: true, omissions: out.omissions }, evidence: out.evidence });
       if (baseline) assertCaptureExtension(baseline, capture);
