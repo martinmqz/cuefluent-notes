@@ -11,6 +11,7 @@ import { resolveProcessingInvocation, isProcessingInvocation } from './processin
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { collectionIngress, processingSourcePath } from './collection-ingress.mjs';
+import { processingControlCall } from './processing-control-proof.mjs';
 
 const stamp = '2026-10-10T12:00:00.000Z';
 const line = value => JSON.stringify(value) + '\n';
@@ -99,10 +100,9 @@ test('Codex invocation rechecks resumed metadata in its selected tail', async t 
 });
 
 test('Claude maps formal shortcut controls through trusted companion and native skill attribution', async t => {
-  for (const control of ['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel']) await t.test(control, async t => {
-    const f = await fixture(t, 'claude');
-    f.invocation.tool = control.startsWith('process') ? 'process_selected_captures' : `processing_${control}`;
-    if (control.startsWith('process ')) f.invocation.arguments.scope = control.split(' ')[1];
+  for (const control of ['help', 'status', 'status --verbose', 'process', 'process repo', 'process chat', 'process resume', 'process cancel', 'review']) await t.test(control, async t => {
+    const f = await fixture(t, 'claude'), mapped = processingControlCall(control);
+    f.invocation.tool = mapped.tool; Object.assign(f.invocation.arguments, mapped.fields);
     await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
     await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
     const skillCommand = 'cuefluent-notes:cuefluent-notes', input = f.spacer();
@@ -117,6 +117,7 @@ test('Claude maps formal shortcut controls through trusted companion and native 
     assert.equal(bound.companionHash, digest(line(companion)));
     assert.equal(bound.inputHash, digest(input.message.content));
     assert.equal(bound.skillExpansionHash, digest(companion.message.content[0].text));
+    assert.equal(bound.typedControl, control);
   });
 });
 
@@ -688,21 +689,25 @@ test('exact Claude shortcut scope cannot be broadened despite a valid native too
 test('Claude typed review actions bind exact draft and decision arguments and report the typed action', async t => {
   const command = 'cuefluent-notes:cuefluent-notes';
   for (const [typed, args, expected] of [
-    ['review save t7xb88', { decision: 'save', draft: 't7xb88' }, true],
-    ['review later t7xb88', { decision: 'later', draft: 't7xb88' }, true],
+    ['save t7xb88', { decision: 'save', draft: 't7xb88' }, true],
+    ['skip t7xb88', { decision: 'skip', draft: 't7xb88' }, true],
+    ['review cancel t7xb88', { decision: 'cancel', draft: 't7xb88' }, true],
     ['review t7xb88', { draft: 't7xb88' }, true],
-    ['review save', { decision: 'save' }, true],
+    ['save', { decision: 'save' }, true], ['skip', { decision: 'skip' }, true], ['review cancel', { decision: 'cancel' }, true],
     ['review', {}, true],
     // A model cannot turn a typed display request into a decision, change the
     // decision, retarget the draft code or drop the code from a typed decision.
     ['review t7xb88', { decision: 'save', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
-    ['review later t7xb88', { decision: 'save', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
-    ['review save t7xb88', { decision: 'save', draft: 'k2mn9p' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
-    ['review save t7xb88', { decision: 'save' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
-    // Near misses and plain text stay ordinary input; they never verify a decision.
-    ['review save T7XB88', { decision: 'save', draft: 't7xb88' }, false],
-    ['review  save t7xb88', { decision: 'save', draft: 't7xb88' }, false],
-    ['review save t7xb81', { decision: 'save', draft: 't7xb88' }, false],
+    ['skip t7xb88', { decision: 'save', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['save t7xb88', { decision: 'save', draft: 'k2mn9p' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['save t7xb88', { decision: 'save' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['review cancel t7xb88', { decision: 'skip', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    // Near misses, old spellings and plain text stay ordinary input; they never verify a decision.
+    ['save T7XB88', { decision: 'save', draft: 't7xb88' }, false],
+    ['save  t7xb88', { decision: 'save', draft: 't7xb88' }, false],
+    ['save t7xb81', { decision: 'save', draft: 't7xb88' }, false],
+    ['review save t7xb88', { decision: 'save', draft: 't7xb88' }, false],
+    ['review skip t7xb88', { decision: 'skip', draft: 't7xb88' }, false],
   ]) await t.test(`${typed} -> ${JSON.stringify(args)}`, async t => {
     const f = await fixture(t, 'claude');
     f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, ...args };
@@ -724,11 +729,13 @@ test('Claude typed review actions bind exact draft and decision arguments and re
 
 test('Codex typed review actions bind from the verified typed text to a call without review fields', async t => {
   for (const [typed, tool, expected] of [
-    ['review save t7xb88', 'processing_review', true], ['review later', 'processing_review', true],
-    ['review t7xb88', 'processing_review', true], ['review', 'processing_review', true],
+    ['save t7xb88', 'processing_review', true], ['skip', 'processing_review', true], ['review cancel', 'processing_review', true],
+    ['review cancel t7xb88', 'processing_review', true], ['review t7xb88', 'processing_review', true], ['review', 'processing_review', true],
+    ['status --verbose', 'processing_status', true], ['help', 'processing_status', true],
     // Exact text only; a mismatched tool is refused rather than reinterpreted.
-    ['review save T7XB88', 'processing_review', false], ['please review save t7xb88', 'processing_review', false],
-    ['review save t7xb88', 'processing_status', 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['save T7XB88', 'processing_review', false], ['please save t7xb88', 'processing_review', false], ['review save t7xb88', 'processing_review', false],
+    ['save t7xb88', 'processing_status', 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['help', 'processing_review', 'PROCESSING_CONTROL_SELECTION_MISMATCH'], ['status --verbose', 'processing_review', 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
   ]) await t.test(`${typed} -> ${tool}`, async t => {
     const f = await fixture(t);
     f.invocation.tool = tool; f.invocation.arguments = { collectionId: f.collection.id };
@@ -750,14 +757,18 @@ test('Codex typed review actions bind from the verified typed text to a call wit
 test('a verified Claude skill invocation that is not an exact action binds as a typed non-command with grammar suggestions', async t => {
   const command = 'cuefluent-notes:cuefluent-notes';
   for (const [typed, args, suggestions] of [
-    ['review sav t7xb88', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
+    ['sav t7xb88', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
     ['Review', {}, ['review']], [' review', {}, ['review']], ['review ', {}, ['review']],
-    ['save t7xb88', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
-    ['review save t7xbo8', { decision: 'save' }, ['review save <draft code>']],
+    // Old spellings are near misses that name the new forms.
+    ['review save t7xb88', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
+    ['resume', {}, ['process resume']],
+    ['save t7xbo8', { decision: 'save' }, ['save <draft code>']],
     // A control with more words or lines is not a control: nothing applies.
-    ['review save t7xb88 and tag it urgent', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
-    ['review save t7xb88\nThe rollout moved.', { decision: 'save', draft: 't7xb88' }, ['review save t7xb88']],
-    ['Remember that the rollout moved to Friday.', {}, ['review', 'status', 'process']],
+    ['save t7xb88 and tag it urgent', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
+    ['save t7xb88\nThe rollout moved.', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
+    // A plain-language request starting with an action word is never a decision.
+    ['save this meeting note: the rollout moved to Friday', { decision: 'save' }, ['save']],
+    ['Remember that the rollout moved to Friday.', {}, ['help', 'review', 'status']],
   ]) await t.test(JSON.stringify(typed), async t => {
     const f = await fixture(t, 'claude');
     f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, ...args };
@@ -802,12 +813,15 @@ test('identical Codex mirrors of the typed message are one message; a changed mi
 
 test('Codex binds this skill with anything but one exact action as a typed non-command', async t => {
   for (const [name, users, suggestions] of [
-    ['case', [['review save T7XB88']], ['review save t7xb88']],
-    ['missing review', [['save t7xb88']], ['review save t7xb88']],
-    ['extra words', [['please review save t7xb88']], ['review save t7xb88']],
-    ['second line', [['review save t7xb88\nAlso tag it urgent.']], ['review save t7xb88']],
-    ['extra content', [['review save t7xb88', { type: 'text', text: 'Also tag it urgent.' }]], ['review save t7xb88']],
-    ['second message', [['review save t7xb88'], null], ['review save t7xb88']],
+    ['case', [['SAVE T7XB88']], ['save t7xb88']],
+    ['old spelling', [['review save t7xb88']], ['save t7xb88']],
+    ['old resume', [['resume']], ['process resume']],
+    ['extra words', [['please save t7xb88']], ['save t7xb88']],
+    ['second line', [['save t7xb88\nAlso tag it urgent.']], ['save t7xb88']],
+    ['extra content', [['save t7xb88', { type: 'text', text: 'Also tag it urgent.' }]], ['save t7xb88']],
+    ['second message', [['save t7xb88'], null], ['save t7xb88']],
+    ['plain-language save', [['save this meeting note: the rollout moved to Friday']], ['save']],
+    ['nothing typed with an attachment', [['', { type: 'image', url: 'synthetic.png' }]], ['help', 'review', 'status']],
   ]) await t.test(name, async t => {
     const f = await fixture(t);
     f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
@@ -839,4 +853,46 @@ test('Codex binds this skill with anything but one exact action as a typed non-c
   await f.append([f.spacer(), plain, f.nativeCall()]);
   const bound = await f.resolve();
   assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedSuggestions'), false);
+});
+
+test('the skill typed with nothing after it binds as a request for the command list in both clients', async t => {
+  // Claude records it as the two-line envelope, and its expansion of a body
+  // without $ARGUMENTS then has no ARGUMENTS line.
+  const command = 'cuefluent-notes:cuefluent-notes', head = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>`;
+  for (const [name, body, expansion, content, expected] of [
+    ['real shape', 'Synthetic control.\n', 'Synthetic control.\n', head, 'help'],
+    ['$ARGUMENTS body', 'Synthetic control $ARGUMENTS\n', 'Synthetic control \n', head, 'help'],
+    ['empty arguments element', 'Synthetic control.\n', 'Synthetic control.\n', `${head}\n<command-args></command-args>`, 'help'],
+    ['with an attachment', 'Synthetic control.\n', 'Synthetic control.\n', [{ type: 'text', text: head }, { type: 'image', source: { type: 'url', url: 'https://example.invalid/a.png' } }], 'suggestions'],
+    ['an ARGUMENTS line for nothing typed', 'Synthetic control.\n', 'Synthetic control.\n\n\nARGUMENTS: ', head, 'unverified'],
+  ]) await t.test(`Claude ${name}`, async t => {
+    const f = await fixture(t, 'claude');
+    f.invocation.tool = 'processing_status'; f.invocation.arguments = { collectionId: f.collection.id };
+    await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+    await fs.writeFile(f.skillPath, `---\nname: cuefluent-notes\n---\n\n${body}`);
+    const input = f.spacer(); input.message.content = content;
+    const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+      message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\n${expansion}` }] } };
+    const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+    await f.append([input, companion, call]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false); assert.equal(Object.hasOwn(bound, 'inputId'), false);
+    assert.equal(bound.typedHelp === true, expected === 'help');
+    assert.deepEqual(bound.typedSuggestions, expected === 'suggestions' ? ['help', 'review', 'status'] : undefined);
+  });
+  for (const [name, parts, expected] of [
+    ['skill alone', [], 'help'], ['empty text', [{ type: 'text', text: '', text_elements: [] }], 'help'],
+    ['empty text without elements', [{ type: 'text', text: '' }], 'help'],
+    ['whitespace', [{ type: 'text', text: ' ', text_elements: [] }], 'suggestions'],
+    ['attachment', [{ type: 'image', url: 'synthetic.png' }], 'suggestions'],
+  ]) await t.test(`Codex ${name}`, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = 'processing_status'; f.invocation.arguments = { collectionId: f.collection.id };
+    const user = f.nativeSkill(); user.payload.item.content = [user.payload.item.content[0], ...parts];
+    await f.append([f.spacer(), user, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.equal(bound.typedHelp === true, expected === 'help');
+    assert.deepEqual(bound.typedSuggestions, expected === 'suggestions' ? ['help', 'review', 'status'] : undefined);
+  });
 });

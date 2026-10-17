@@ -9,49 +9,96 @@ const proofs = new WeakSet();
 const MAX_CONTROL_BYTES = 2 * 1024 * 1024;
 const MAX_CONTROL_RECORDS = 1024;
 const CONTROL = 'process';
-export const PROCESSING_CONTROLS = Object.freeze(['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel']);
-// Review drafts are named by a short code (no i, l, o, u, 0 or 1). A typed
-// review action may name a draft, a decision, or both; nothing is normalized.
+// One skill. Its name is the Codex skill block and the receipt skill name;
+// Claude records it as this command whichever spelling was typed (the bare
+// `/cuefluent-notes` or the full `/cuefluent-notes:cuefluent-notes`).
+export const SKILL_NAME = 'cuefluent-notes';
+export const CLAUDE_SKILL_COMMAND = `cuefluent-notes:${SKILL_NAME}`;
+// How a person types a command in each client: this, one space, then the
+// words. Display only; the typed text is verified from the native transcript.
+export const REVIEW_COMMANDS = Object.freeze({ claude: '/cuefluent-notes', codex: `$${SKILL_NAME}` });
+// Review drafts are named by a short code (no i, l, o, u, 0 or 1).
 export const REVIEW_CODE = /^[a-hjkmnp-tv-z2-9]{6}$/;
-export const REVIEW_DECISIONS = Object.freeze(['save', 'skip', 'cancel', 'later']);
-// How a person types a formal action in each client. Display only; the typed
-// text itself is verified from the native transcript.
-export const REVIEW_COMMANDS = Object.freeze({ claude: '/cuefluent-notes:cuefluent-notes', codex: '$cuefluent-notes' });
+export const REVIEW_CODE_PLACEHOLDER = '<draft code>';
+// Typed review decisions. The Codex native form also offers Later; a typed
+// Later waits for the ready line it would silence.
+export const REVIEW_DECISIONS = Object.freeze(['save', 'skip', 'cancel']);
+const CODE = REVIEW_CODE_PLACEHOLDER;
+// Every typed form and the one tool call it is, as words separated by one
+// space; `#` stands for a draft code. Exact matching, the tool mapping, the
+// help list and nearest-command suggestions all derive from this table.
+const GRAMMAR = Object.freeze([
+  ['help', 'processing_status', { help: true }],
+  ['status', 'processing_status', {}], ['status --verbose', 'processing_status', { verbose: true }],
+  ['process', 'process_selected_captures', {}], ['process repo', 'process_selected_captures', { scope: 'repo' }],
+  ['process chat', 'process_selected_captures', { scope: 'chat' }],
+  ['process resume', 'processing_resume', {}], ['process cancel', 'processing_cancel', {}],
+  ['review', 'processing_review', {}], ['review #', 'processing_review', { draft: CODE }],
+  ['review cancel', 'processing_review', { decision: 'cancel' }], ['review cancel #', 'processing_review', { decision: 'cancel', draft: CODE }],
+  ['save', 'processing_review', { decision: 'save' }], ['save #', 'processing_review', { decision: 'save', draft: CODE }],
+  ['skip', 'processing_review', { decision: 'skip' }], ['skip #', 'processing_review', { decision: 'skip', draft: CODE }],
+].map(([text, tool, fields]) => Object.freeze({ words: Object.freeze(text.split(' ').map(word => word === '#' ? CODE : word)),
+  tool, fields: Object.freeze(fields) })));
+export const PROCESSING_CONTROL_FORMS = Object.freeze(GRAMMAR.map(form => form.words));
+// A known word that is not a formal control: setup starts the setup workflow,
+// calls no control tool, and so has no receipt and excludes nothing.
+export const PROCESSING_KNOWN_WORDS = Object.freeze(['setup']);
+const formMatches = (form, words) => form.length === words.length &&
+  form.every((word, index) => word === CODE ? REVIEW_CODE.test(words[index]) : word === words[index]);
+// Longer than any form with a code; bounds the split of arbitrary typed text.
+const MAX_CONTROL_TEXT = 64;
+function exactForm(text) {
+  if (typeof text !== 'string' || text.length > MAX_CONTROL_TEXT) return null;
+  const words = text.split(' ');
+  return GRAMMAR.find(form => formMatches(form.words, words)) ?? null;
+}
+/** The exact typed control text, or null. Whitespace, case and other spellings
+ * are not normalized, so a near miss stays ordinary input rather than a control. */
+export function processingControlText(text) {
+  return exactForm(text) === null ? null : text;
+}
+const formFields = (form, text) => Object.fromEntries(Object.entries(form.fields)
+  .map(([key, value]) => [key, value === CODE ? text.split(' ')[form.words.indexOf(CODE)] : value]));
+/** The one tool call an exact typed control is: its tool and fields. */
+export function processingControlCall(text) {
+  const form = exactForm(text);
+  return form && Object.freeze({ tool: form.tool, fields: Object.freeze(formFields(form, text)) });
+}
 /** Canonical typed review action for review tool fields, or null. */
 export function reviewControl({ draft, decision } = {}) {
   if (draft !== undefined && (typeof draft !== 'string' || !REVIEW_CODE.test(draft))) return null;
   if (decision !== undefined && !REVIEW_DECISIONS.includes(decision)) return null;
-  return ['review', decision, draft].filter(part => part !== undefined).join(' ');
+  const words = decision === undefined ? ['review'] : decision === 'cancel' ? ['review', 'cancel'] : [decision];
+  return [...words, ...(draft === undefined ? [] : [draft])].join(' ');
 }
-// Every typed form, as words separated by one space; the placeholder stands for
-// a draft code. Exact matching and nearest-command suggestions both derive from
-// this table, so a renamed or added command changes only the constants above.
-export const REVIEW_CODE_PLACEHOLDER = '<draft code>';
-const CONTROL_FORMS = Object.freeze([
-  ...PROCESSING_CONTROLS.map(text => text.split(' ')),
-  ['review', REVIEW_CODE_PLACEHOLDER],
-  ...REVIEW_DECISIONS.flatMap(decision => [['review', decision], ['review', decision, REVIEW_CODE_PLACEHOLDER]]),
-].map(form => Object.freeze(form)));
-export const PROCESSING_CONTROL_FORMS = CONTROL_FORMS;
-const formMatches = (form, words) => form.length === words.length &&
-  form.every((word, index) => word === REVIEW_CODE_PLACEHOLDER ? REVIEW_CODE.test(words[index]) : word === words[index]);
-// Longer than any form with a code; bounds the split of arbitrary typed text.
-const MAX_CONTROL_TEXT = 64;
-/** The exact typed control text, or null. Whitespace, case and other spellings
- * are not normalized, so a near miss stays ordinary input rather than a control. */
-export function processingControlText(text) {
-  if (typeof text !== 'string' || text.length > MAX_CONTROL_TEXT) return null;
-  const words = text.split(' ');
-  return CONTROL_FORMS.some(form => formMatches(form, words)) ? text : null;
+/** Fields of a typed review action; null when the text is not one. */
+export function reviewControlFields(text) {
+  const call = processingControlCall(text);
+  return call?.tool === 'processing_review' ? { ...call.fields } : null;
 }
 
 // Nearest-command suggestions for typed arguments that are not an exact control.
 // Deterministic and bounded; a suggestion is display text, never authority.
 const SUGGESTION_LIMIT = 3, SUGGESTION_TEXT = 16 * 1024, SUGGESTION_WORDS = 256, SUGGESTION_COST = 2;
-const DEFAULT_SUGGESTIONS = Object.freeze(['review', 'status', 'process']);
-const GRAMMAR_WORDS = Object.freeze([...new Set(CONTROL_FORMS.flat().filter(word => word !== REVIEW_CODE_PLACEHOLDER))]);
-const TEMPLATES = new Set(CONTROL_FORMS.filter(form => form.includes(REVIEW_CODE_PLACEHOLDER)).map(form => form.join(' ')));
-if (DEFAULT_SUGGESTIONS.some(text => processingControlText(text) === null)) throw new Error('INVALID_CONTROL_GRAMMAR');
+const DEFAULT_SUGGESTIONS = Object.freeze(['help', 'review', 'status']);
+const SUGGESTION_FORMS = Object.freeze([...PROCESSING_CONTROL_FORMS, ...PROCESSING_KNOWN_WORDS.map(word => Object.freeze([word]))]);
+// The help list: each first word with what it does and its other forms.
+const HELP_SUMMARIES = Object.freeze({
+  setup: 'choose collection and processing settings',
+  status: 'show processing, captures and drafts',
+  process: 'draft notes from pending captures',
+  review: 'write a pending draft to a private review folder',
+  save: 'save the draft your last typed review showed, exactly as shown',
+  skip: 'handle that draft\'s captures without saving',
+  help: 'show this list',
+});
+export const PROCESSING_HELP = Object.freeze(Object.entries(HELP_SUMMARIES).map(([word, summary]) => Object.freeze({ word, summary,
+  also: Object.freeze(SUGGESTION_FORMS.filter(form => form[0] === word && form.length > 1).map(form => form.join(' '))) })));
+if (SUGGESTION_FORMS.some(form => !Object.hasOwn(HELP_SUMMARIES, form[0]))) throw new Error('INVALID_CONTROL_GRAMMAR');
+// Typed text is compared as letters and digits only (`--verbose` as `verbose`).
+const matchWord = word => word.replace(/[^a-z0-9]/g, '');
+const GRAMMAR_WORDS = Object.freeze([...new Set(SUGGESTION_FORMS.flat().filter(word => word !== CODE).map(matchWord))]);
+const TEMPLATES = new Set(PROCESSING_CONTROL_FORMS.filter(form => form.includes(CODE)).map(form => form.join(' ')));
 /** Characters a draft code never contains, derived from the code pattern. */
 export const REVIEW_CODE_EXCLUDED = Object.freeze([...'abcdefghijklmnopqrstuvwxyz0123456789'].filter(char => !REVIEW_CODE.test(char.repeat(6))));
 // Optimal string alignment distance, bounded to short words.
@@ -77,11 +124,12 @@ const nearGrammarWord = token => GRAMMAR_WORDS.some(word => wordCost(token, word
 // A valid code is kept; a code-like token that is not one becomes the placeholder.
 function codeCost(token) {
   if (REVIEW_CODE.test(token)) return { cost: 0, word: token };
-  if (!nearGrammarWord(token) && (/^[a-z0-9]{6}$/.test(token) || (/^[a-z0-9]{5,7}$/.test(token) && /\d/.test(token)))) return { cost: 1, word: REVIEW_CODE_PLACEHOLDER };
+  if (!nearGrammarWord(token) && (/^[a-z0-9]{6}$/.test(token) || (/^[a-z0-9]{5,7}$/.test(token) && /\d/.test(token)))) return { cost: 1, word: CODE };
   return null;
 }
-// Only the review prefix of a longer form may be missing (`save <code>`).
-const OMITTABLE_PREFIXES = Object.freeze(['review']);
+// Only the first word of a longer form may be missing (`resume` is nearer
+// `process resume`, `cancel k2mn9p` nearer `review cancel k2mn9p`).
+const OMITTABLE_PREFIXES = Object.freeze(['status', 'process', 'review']);
 // A match scores the typed words it consumes less its corrections; ties prefer
 // the match consuming more words. A missing prefix costs one, and so does each
 // filler word inside a command ("process my repo" is nearer `process repo` than
@@ -100,11 +148,11 @@ function alignForm(form, tokens) {
     const expected = form[i];
     if (i === 0 && form.length > 1 && OMITTABLE_PREFIXES.includes(expected)) walk(i + 1, j, cost + 1, used, [expected]);
     if (j >= tokens.length) return;
-    if (expected === REVIEW_CODE_PLACEHOLDER) {
+    if (expected === CODE) {
       const code = codeCost(tokens[j]);
       if (code) walk(i + 1, j + 1, cost + code.cost, used + 1, [...words, code.word]);
     } else {
-      const corrected = wordCost(tokens[j], expected);
+      const corrected = wordCost(tokens[j], matchWord(expected));
       if (corrected !== Infinity) walk(i + 1, j + 1, cost + corrected, used + 1, [...words, expected]);
     }
     if (used) walk(i, j + 1, cost + 1, used, words);
@@ -113,28 +161,22 @@ function alignForm(form, tokens) {
   return best;
 }
 /** Up to three exact commands (or code templates) nearest to typed text that
- * is not an exact control: case, spacing, punctuation, a missing `review`, a
- * misspelling or abbreviation, an invalid code, or a control among other words.
- * Free text with no nearby command gets the general commands. */
+ * is not an exact control: case, spacing, punctuation, a missing first word,
+ * an old spelling, a misspelling or abbreviation, an invalid code, or a
+ * control among other words. Free text with no nearby command gets the
+ * general commands. */
 export function processingControlSuggestions(text) {
   const tokens = typeof text === 'string' ? text.slice(0, SUGGESTION_TEXT).normalize('NFKC').toLowerCase()
     .split(/[^a-z0-9]+/).filter(Boolean).slice(0, SUGGESTION_WORDS) : [];
   // A match that needs more corrections than the words it explains is noise.
-  const matches = CONTROL_FORMS.map(form => alignForm(form, tokens)).filter(item => item && item.score >= 0);
+  const matches = SUGGESTION_FORMS.map(form => alignForm(form, tokens)).filter(item => item && item.score >= 0);
   const top = matches.reduce((best, item) => better(item, best) ? item : best, null);
   const chosen = [...new Set(matches.filter(item => item.score === top.score && item.used === top.used).map(item => item.text))];
   return Object.freeze((chosen.length ? chosen : DEFAULT_SUGGESTIONS).slice(0, SUGGESTION_LIMIT));
 }
-/** A suggestion is an exact control or a form with the draft-code placeholder. */
-export const isProcessingControlSuggestion = text => processingControlText(text) !== null || TEMPLATES.has(text);
-/** Fields of a typed review action; null when the text is not one. */
-export function reviewControlFields(text) {
-  if (processingControlText(text) === null || (text !== 'review' && !text.startsWith('review '))) return null;
-  const parts = text.split(' ').slice(1), fields = {};
-  if (REVIEW_DECISIONS.includes(parts[0])) fields.decision = parts.shift();
-  if (parts.length) fields.draft = parts[0];
-  return fields;
-}
+/** A suggestion is an exact control, a form with the draft-code placeholder,
+ * or a known word. */
+export const isProcessingControlSuggestion = text => processingControlText(text) !== null || TEMPLATES.has(text) || PROCESSING_KNOWN_WORDS.includes(text);
 /** Exact action/argument binding, shared by native invocation and retained proof.
  * No keyword or substring classifies ordinary user work as processing output. */
 export function processingControlAction(tool, args = {}) {
@@ -144,15 +186,25 @@ export function processingControlAction(tool, args = {}) {
     return scope === 'collection' ? 'process' : ['repo', 'chat'].includes(scope) ? `process ${scope}` : null;
   }
   if (name === 'processing_review') return reviewControl(args);
-  return { processing_resume: 'resume', processing_status: 'status', processing_cancel: 'cancel' }[name] ?? null;
+  if (name === 'processing_status') {
+    if (args.help !== undefined) return args.help === true && args.verbose === undefined ? 'help' : null;
+    return args.verbose === undefined ? 'status' : args.verbose === true ? 'status --verbose' : null;
+  }
+  return { processing_resume: 'process resume', processing_cancel: 'process cancel' }[name] ?? null;
 }
-/** Claude copies typed review fields into its tool call, verified exactly.
- * Codex refuses those fields: its verified typed text alone names the draft
- * and decision, so its call to the review tool carries no review fields. */
+// The table and the tool mapping must agree; a known word is never a control.
+for (const form of GRAMMAR) {
+  const text = form.words.map(word => word === CODE ? 'k2mn9p' : word).join(' ');
+  if (processingControlAction(form.tool, formFields(form, text)) !== text) throw new Error('INVALID_CONTROL_GRAMMAR');
+}
+if (DEFAULT_SUGGESTIONS.some(text => processingControlText(text) === null) || PROCESSING_KNOWN_WORDS.some(word => exactForm(word))) throw new Error('INVALID_CONTROL_GRAMMAR');
+/** Claude copies typed fields into its tool call, verified exactly. Codex
+ * refuses those fields: its verified typed text alone names the draft, the
+ * decision, verbosity or help, so its review and status calls carry none. */
 export function processingControlMatches(command, tool, args, client) {
-  const action = processingControlAction(tool, args);
-  if (action === null || processingControlText(command) === null) return false;
-  return command === action || (client === 'codex' && action === 'review' && reviewControlFields(command) !== null);
+  const action = processingControlAction(tool, args), typed = processingControlCall(command);
+  if (action === null || typed === null) return false;
+  return command === action || (client === 'codex' && ['review', 'status'].includes(action) && typed.tool === processingControlCall(action).tool);
 }
 const hashLike = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const textBlocks = (blocks, kind) => Array.isArray(blocks) && blocks.length > 0 &&
@@ -170,17 +222,21 @@ const claudeHuman = row => row?.type === 'user' && row.message?.role === 'user' 
 const claudeRoot = (row, source, sessionKinds = []) => row?.sessionId === source.sessionId && row.isSidechain === false &&
   row.agentId == null && row.forkedFrom == null && row.foreignToBridgeSession == null &&
   (row.sessionKind == null || sessionKinds.includes(row.sessionKind));
-const CLAUDE_SKILL_COMMAND = 'cuefluent-notes:cuefluent-notes';
 const COMMAND_ARGS_END = '</command-args>';
-const commandText = (command, control = CONTROL) => `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${control}${COMMAND_ARGS_END}`;
+// Claude records a skill command by its registered name and, only when
+// something was typed after it, an arguments element holding that text.
+const commandHead = command => `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>`;
+const commandText = (command, control = CONTROL) => `${commandHead(command)}\n<command-args>${control}${COMMAND_ARGS_END}`;
 /** The typed arguments inside the trusted skill command's exact envelope, as
- * written; null for any other text, including another skill or plugin, another
- * order, spacing or line ending, or text outside the envelope. */
+ * written ('' when nothing was typed and the arguments element is absent);
+ * null for any other text, including another skill or plugin, another order,
+ * spacing or line ending, or text outside the envelope. */
 export function claudeSkillArguments(text, skillCommand = CLAUDE_SKILL_COMMAND) {
   if (typeof text !== 'string' || !skillCommandLike(skillCommand)) return null;
-  const head = commandText(skillCommand, '').slice(0, -COMMAND_ARGS_END.length);
-  return text.length >= head.length + COMMAND_ARGS_END.length && text.startsWith(head) && text.endsWith(COMMAND_ARGS_END)
-    ? text.slice(head.length, -COMMAND_ARGS_END.length) : null;
+  const head = commandHead(skillCommand), open = `${head}\n<command-args>`;
+  if (text === head) return '';
+  return text.length >= open.length + COMMAND_ARGS_END.length && text.startsWith(open) && text.endsWith(COMMAND_ARGS_END)
+    ? text.slice(open.length, -COMMAND_ARGS_END.length) : null;
 }
 export function claudeProcessingCommandKind(row, skillCommand = CLAUDE_SKILL_COMMAND) {
   if (!skillCommandLike(skillCommand) || !claudeHuman(row) || row.promptSource !== undefined) return null;
@@ -216,7 +272,8 @@ async function loadClaudeSkill({ skillPath, skillCommand, args }) {
   let body = content.slice(header[0].length).trimStart();
   if (body.includes('${') || /\$\d|\$ARGUMENTS\[/.test(body)) return null;
   // Literal substitution: typed arguments may contain `$` replacement patterns.
-  body = body.includes('$ARGUMENTS') ? body.replaceAll('$ARGUMENTS', () => args) : `${body}\n\nARGUMENTS: ${args}`;
+  // Without `$ARGUMENTS`, Claude appends them only when something was typed.
+  body = body.includes('$ARGUMENTS') ? body.replaceAll('$ARGUMENTS', () => args) : args === '' ? body : `${body}\n\nARGUMENTS: ${args}`;
   const expansion = `Base directory for this skill: ${path.dirname(skillPath)}\n\n${body}`;
   return Object.freeze({ skillPath, skillCommand, skillExpansionHash: digest(expansion) });
 }
@@ -299,7 +356,7 @@ function receiptMatches(receipt, query, source) {
   if (!object(receipt) || !Object.isFrozen(receipt) ||
       Object.entries(query).some(([key, value]) => receipt[key] !== value) ||
       receipt.sourceIdentity !== source.fileIdentity || receipt.sourcePath !== source.path ||
-      receipt.skillName !== 'cuefluent-notes' || typeof receipt.skillPath !== 'string' ||
+      receipt.skillName !== SKILL_NAME || typeof receipt.skillPath !== 'string' ||
       !path.isAbsolute(receipt.skillPath) || !hashLike(receipt.requestHash) || !hashLike(receipt.resultHash) ||
       typeof receipt.statusText !== 'string' || !receipt.statusText ||
       Buffer.byteLength(receipt.statusText) > 4096) return false;
@@ -355,7 +412,7 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
       if (item.type === 'UserMessage') {
         if (user || !Array.isArray(item.content) || item.content.length !== 2) return null;
         const [skill, command] = item.content;
-        if (skill?.type !== 'skill' || skill.name !== 'cuefluent-notes' || typeof skill.path !== 'string' ||
+        if (skill?.type !== 'skill' || skill.name !== SKILL_NAME || typeof skill.path !== 'string' ||
             Object.keys(skill).some(k => !['type', 'name', 'path'].includes(k)) || command?.type !== 'text' ||
             processingControlText(command.text) === null || !Array.isArray(command.text_elements) || command.text_elements.length ||
             Object.keys(command).some(k => !['type', 'text', 'text_elements'].includes(k))) return null;

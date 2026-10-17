@@ -98,15 +98,15 @@ for this user. Clone the repository and run its install:codex npm script
    Prompted (approve Save / Skip), or Automatic within your chosen scope.
 
 **Processing starts with an explicit request.** For the reusable processing chat,
-select the Cuefluent Notes skill in Codex and enter `process`, or use
-`/cuefluent-notes:cuefluent-notes process` in Claude. Invoke the same skill with
-`review` to write an exact proposal to a private review folder (Codex also opens its
-native form), then decide by typing `review save <code>`, `review skip <code>` or
-`review later <code>`.
+type `/cuefluent-notes process` in Claude or `$cuefluent-notes process` in Codex.
+Invoke the same skill with `review` to write an exact proposal to a private review
+folder (Codex also opens its native form), then decide by typing `save <code>` or
+`skip <code>`; `help` lists every action.
 Plain `process` covers pending captures across the existing collection; use
-`process repo` or `process chat` to narrow it, `resume` for saved unfinished work,
-`status` for progress, and `cancel` to stop owned work while keeping captures
-pending. Processing prepares drafts; only an exact review decision saves them.
+`process repo` or `process chat` to narrow it, `process resume` for saved
+unfinished work, `status` for progress, and `process cancel` to stop owned work
+while keeping captures pending. Processing prepares drafts; only your exact typed
+`save` (or Save in the Codex form) saves them.
 The controller uses the existing native client and processing engine; it does not
 require the Cuefluent app. See [processing chats](references/processing-chat.md)
 for prerequisites, capture prevention and recovery.

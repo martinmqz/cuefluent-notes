@@ -53,6 +53,74 @@ test('native source refusals identify only the exact Codex source, never a Claud
   }
 });
 
+test('a status request in a chat with nothing set up gets the command list; other tools, codes, failed bindings and retries still refuse', async () => {
+  const unverified = () => Object.assign(new Error('no binding'), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED', noSource: true });
+  for (const client of ['codex', 'claude']) {
+    const meta = client === 'codex' ? codexMeta : claudeMeta, prefix = client === 'codex' ? '$cuefluent-notes' : '/cuefluent-notes';
+    let hooks = 0;
+    const result = await server([initialize, tool('processing_status', client === 'claude' ? { help: true } : {}, meta()),
+      { ...tool('processing_review', {}, meta()), id: 2 }], {
+      client, env: { CLAUDE_CODE_SESSION_ID: sessionId }, resolveSource: async () => { throw unverified(); },
+      unboundStatus: () => ({ status: 'missing', statusDetail: 'unbound', nextAction: 'none', diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix: prefix }),
+      beforeResponse: async () => { hooks++; }, afterResponse: async () => { hooks++; } });
+    const helpRow = result.rows.find(row => row.id === 1), reviewRow = result.rows.find(row => row.id === 2);
+    const reply = view(helpRow);
+    assert.equal(reply.help, true); assert.equal(reply.statusDetail, 'unbound'); assert.equal(reply.collectionId, null);
+    assert(reply.statusText.startsWith(`Cuefluent: Nothing was applied: this chat has no verified Cuefluent Notes source yet. To set up Cuefluent Notes, type ${prefix} setup.`));
+    assert.deepEqual(reviewRow.error, { code: -32600, message: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+    assert.equal(result.calls.length, 0); assert.equal(hooks, 0);
+  }
+  // Another refusal keeps its own code, and without the callback nothing changes.
+  const other = await server([initialize, tool('processing_status', {})], {
+    resolveSource: async () => { throw Object.assign(new Error('x'), { code: 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED' }); },
+    unboundStatus: () => assert.fail('only an unverified source gets the list') });
+  assert.equal(other.rows[1].error.message, 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
+  const bare = await server([initialize, tool('processing_status', {})], { resolveSource: async () => { throw unverified(); } });
+  assert.equal(bare.rows[1].error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  // A failed binding of a source that exists stays visible as its refusal.
+  const failed = await server([initialize, tool('processing_status', {})], {
+    resolveSource: async () => { throw Object.assign(new Error('x'), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' }); },
+    unboundStatus: () => assert.fail('a failed binding is never answered with the list') });
+  assert.equal(failed.rows[1].error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  // A verification retry that cannot bind stays a refusal: the token comes from
+  // the same running server, and the retry is a new native call.
+  const input = new PassThrough(), waiting = [];
+  const output = new Writable({ write(chunk, _encoding, done) {
+    for (const line of chunk.toString().trim().split('\n')) waiting.shift()?.(JSON.parse(line));
+    done();
+  } });
+  const next = message => { const row = new Promise(resolve => waiting.push(resolve)); input.write(`${JSON.stringify(message)}\n`); return row; };
+  let resolved = 0;
+  const running = runProcessingControlServer({ client: 'codex', input, output, env: {},
+    resolveSource: async () => { if (resolved++ === 0) return { pending: true }; throw unverified(); },
+    getStatus: async () => assert.fail('no status without a source'), requestProcessing: async () => assert.fail('no dispatch'),
+    unboundStatus: () => assert.fail('a retry is never answered with the list') });
+  await next(initialize);
+  const pending = JSON.parse((await next(tool('processing_status', {}))).result.content[0].text);
+  assert.equal(pending.status, 'verification-required');
+  const retry = tool('processing_status', { retryToken: pending.retryToken }, { ...codexMeta(), callId: 'call_retry', itemId: 'fc_retry' });
+  const refused = await next({ ...retry, id: 2 });
+  assert.deepEqual(refused.error, { code: -32600, message: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+  assert.equal(resolved, 2);
+  input.end(); await running;
+});
+
+test('a completed decision keeps its outcome and still says when something needs attention', () => {
+  const prefix = '/cuefluent-notes', draft = { code: 't7xb88', path: 'meetings/rollout.md', fileCount: 1 };
+  for (const review of ['saved', 'skipped', 'cancelled']) {
+    const base = { status: 'completed', statusDetail: 'completed', nextAction: 'inspect', review, commandPrefix: prefix };
+    for (const named of [{ draft }, {}]) {
+      const flagged = processingControlStatusView({ ...base, ...named, diagnostics: ['PROCESSING_CHAT_CONFLICT'] }, { collectionId: 'example' });
+      assert(flagged.statusText.startsWith('Cuefluent: Review completed:'), review);
+      if (named.draft) assert(flagged.statusText.includes('draft t7xb88 ("meetings/rollout.md")'), review);
+      assert(flagged.statusText.endsWith(`\nSomething needs attention; for details, type ${prefix} status --verbose.`), review);
+      assert.doesNotMatch(flagged.statusText, /PROCESSING_/);
+      const clean = processingControlStatusView({ ...base, ...named, nextAction: 'none', diagnostics: [] }, { collectionId: 'example' });
+      assert(!clean.statusText.includes('needs attention') && !clean.statusText.includes('status --verbose'), review);
+    }
+  }
+});
+
 test('Codex native identity is separate from explicit evidence selection', async () => {
   const requestId = randomUUID(), selected = { client: 'claude', sessionId: randomUUID(), cwd: path.resolve('other-project'), unitId: randomUUID() };
   const result = await server([initialize, tool('process_selected_captures', { collectionId: 'example', requestId, selection: selected })]);
@@ -122,6 +190,26 @@ test('request schema rejects serialized authority, configuration, model and appr
   });
 });
 
+test('Claude mirrors a typed status --verbose or help in status arguments; Codex refuses those fields', async () => {
+  const listed = await server([initialize, { jsonrpc: '2.0', id: 1, method: 'tools/list' }], { client: 'claude', env: { CLAUDE_CODE_SESSION_ID: sessionId } });
+  assert.deepEqual(Object.keys(listed.rows[1].result.tools[0].inputSchema.properties).sort(), ['collectionId', 'help', 'retryToken', 'verbose']);
+  assert.deepEqual(listed.rows[1].result.tools.find(item => item.name === 'processing_review').inputSchema.properties.decision.enum, ['save', 'skip', 'cancel']);
+  const codexListed = await server([initialize, { jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
+  assert.deepEqual(Object.keys(codexListed.rows[1].result.tools[0].inputSchema.properties), ['collectionId', 'retryToken']);
+  for (const args of [{ verbose: true }, { help: true }]) {
+    const claude = await server([initialize, tool('processing_status', { collectionId: 'example', ...args }, claudeMeta())], { client: 'claude', env: { CLAUDE_CODE_SESSION_ID: sessionId } });
+    assert.deepEqual(claude.calls[1].args.verbose ?? claude.calls[1].args.help, true); assert.equal(claude.rows[1].error, undefined);
+    assert.deepEqual(claude.calls[0].invocation.arguments, { collectionId: 'example', ...args });
+    const codex = await server([initialize, tool('processing_status', { collectionId: 'example', ...args })]);
+    assert.equal(codex.rows[1].error.message, 'PROCESSING_CONTROL_INVALID_REQUEST'); assert.equal(codex.calls.length, 0);
+  }
+  for (const args of [{ verbose: false }, { help: false }, { verbose: true, help: true }, { verbose: 'yes' }, { decision: 'later' }]) {
+    const name = args.decision ? 'processing_review' : 'processing_status';
+    const refused = await server([initialize, tool(name, { collectionId: 'example', ...args }, claudeMeta())], { client: 'claude', env: { CLAUDE_CODE_SESSION_ID: sessionId } });
+    assert.equal(refused.rows[1].error.message, 'PROCESSING_CONTROL_INVALID_REQUEST', JSON.stringify(args)); assert.equal(refused.calls.length, 0);
+  }
+});
+
 test('unverified source cannot dispatch and pure status never invokes processing', async () => {
   const refused = await server([initialize, tool('process_selected_captures', { collectionId: 'example', requestId: randomUUID() })], { resolveSource: async () => null });
   assert.equal(refused.rows[1].error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED'); assert.equal(refused.calls.length, 0);
@@ -135,21 +223,32 @@ test('result projection drops private evidence and callback prose and builds sta
       evidence: 'secret', output: 'secret', statusText: 'secret', path: '/private/secret', diagnostics: ['PROCESSING_APPROVAL_REQUIRED'] })
   });
   assert.ok(!JSON.stringify(result.rows).includes('secret'));
-  assert.equal(view(result.rows[1]).statusText, 'Cuefluent processing: awaiting-review. PROCESSING_APPROVAL_REQUIRED. Next action: review.');
+  // Codes stay in the fields; the visible text says where to see them.
+  assert.equal(view(result.rows[1]).statusText, 'Cuefluent processing: awaiting-review.\nFor details, type status --verbose.');
+  assert.deepEqual(view(result.rows[1]).diagnostics, ['PROCESSING_APPROVAL_REQUIRED']);
 });
 
 test('review outcomes are projected separately from draft state and replay unchanged', () => {
-  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' }, command = '/cuefluent-notes';
+  const named = { code: 't7xb88', path: 'notes/launch.md', fileCount: 2 };
   for (const [value, text] of [
     [{ ...pending, review: 'deferred' }, 'Cuefluent: Review deferred with Later. The draft remains pending; nothing was saved.'],
     [{ ...pending, review: 'declined' }, 'Cuefluent: Review not completed: the client declined or closed the review form, which may not have been displayed. The draft remains pending; nothing was saved.'],
     [{ ...pending, review: 'display-altered' }, 'Cuefluent: Review not completed: the client changed the preview text, so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; the draft remains pending.'],
-    [{ ...pending, review: 'unavailable', diagnostics: ['PROCESSING_REVIEW_UNSUPPORTED'] }, 'Cuefluent: Review unavailable: this client did not report review form support. The draft remains pending; nothing was saved. PROCESSING_REVIEW_UNSUPPORTED. Next action: review.'],
+    [{ ...pending, review: 'unavailable', diagnostics: ['PROCESSING_REVIEW_UNSUPPORTED'] }, 'Cuefluent: Review unavailable: this client did not report review form support. The draft remains pending; nothing was saved.\nFor details, type status --verbose.'],
     [{ status: 'idle', statusDetail: 'inactive', nextAction: 'none', review: 'saved' }, 'Cuefluent: Review completed: the exact reviewed proposal was saved. No processing run is active.'],
     // A completed review can leave another draft pending; say both.
     [{ ...pending, review: 'skipped' }, 'Cuefluent: Review completed: these captures were skipped without saving. Draft ready for review.'],
     [{ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: 'cancelled' },
-      'Cuefluent: Review completed: the operation was cancelled; its captures remain pending. Processing operation completed. PROCESSING_CHAT_CONFLICT. Next action: inspect.'],
+      'Cuefluent: Review completed: the operation was cancelled; its captures remain pending. Processing operation completed.\nSomething needs attention; for details, type status --verbose.'],
+    // A decided draft is named by its code and note path.
+    [{ status: 'idle', statusDetail: 'inactive', nextAction: 'none', review: 'saved', commandPrefix: command, draft: named },
+      'Cuefluent: Review completed: the exact reviewed proposal of draft t7xb88 ("notes/launch.md" and 1 more file) was saved. No processing run is active.'],
+    [{ ...pending, review: 'skipped', commandPrefix: '$cuefluent-notes', draft: { ...named, fileCount: 1 } },
+      'Cuefluent: Review completed: the captures of draft t7xb88 ("notes/launch.md") were skipped without saving. Draft ready for review.'],
+    // A named draft never hides that something else needs attention.
+    [{ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: 'cancelled', commandPrefix: command, draft: { code: 't7xb88' } },
+      'Cuefluent: Review completed: the operation for draft t7xb88 was cancelled; its captures remain pending. Processing operation completed.\nSomething needs attention; for details, type /cuefluent-notes status --verbose.'],
   ]) {
     const projected = processingControlStatusView(value, { collectionId: 'example' });
     assert.equal(projected.statusText, text); assert.equal(projected.review, value.review);
@@ -161,71 +260,180 @@ test('review outcomes are projected separately from draft state and replay uncha
 
 test('review folder replies are bounded, escaped, canonical and omit diagnostic codes', () => {
   const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'] };
-  const folder = path.resolve('private-state', 'review', 't7xb88'), command = '/cuefluent-notes:cuefluent-notes';
+  const folder = path.resolve('private-state', 'review', 't7xb88'), command = '/cuefluent-notes';
   const draft = { code: 't7xb88', folder, fileCount: 7, files: Array.from({ length: 5 }, (_, index) => ({
-    path: `meetings/${index ? 'note' : 'forged\u2028Saved.\u202e'}${index}.md`, bytes: 12 + index, change: index ? 'create' : 'update' })) };
-  const drafts = [{ code: 'k2mn9p', path: 'meetings/other.md', fileCount: 2 }];
+    path: `meetings/${index ? 'note' : 'forged Saved.‮'}${index}.md`, bytes: 12 + index, change: index ? 'create' : 'update' })) };
+  const drafts = [{ code: 'k2mn9p', path: 'meetings/other.md', fileCount: 2 }, { code: 'm3np4q', path: 'meetings/third.md', fileCount: 1 }];
   const presented = processingControlStatusView({ ...pending, review: 'presented', commandPrefix: command, draft, drafts }, { collectionId: 'example' });
-  assert.equal(presented.statusText, [`Cuefluent: Draft t7xb88 is ready for review; nothing has been saved. Review folder: ${folder}`,
+  assert.equal(presented.statusText, ['Cuefluent: Draft t7xb88 ("meetings/forged\\u2028Saved.\\u202e0.md" and 6 more files) is ready for review; nothing has been saved.',
+    `Review folder: ${folder}`,
     '- "meetings/forged\\u2028Saved.\\u202e0.md" (update, 12 bytes)', ...[1, 2, 3, 4].map(index => `- "meetings/note${index}.md" (new note, ${12 + index} bytes)`),
     '- and 2 more files listed in summary.txt',
-    `To decide, type ${command} review save t7xb88, ${command} review skip t7xb88 or ${command} review later t7xb88.`,
-    'Other drafts: k2mn9p "meetings/other.md" (+1 more).'].join('\n'));
+    `To decide, type ${command} save t7xb88 or ${command} skip t7xb88.`,
+    'Other drafts:', 'k2mn9p  "meetings/other.md" (+1 more)', 'm3np4q  "meetings/third.md"'].join('\n'));
   assert.deepEqual(presented.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
   assert.deepEqual(processingControlStatusView(presented, { collectionId: 'example' }), presented);
+  const named = { code: 't7xb88', path: 'meetings/launch.md', fileCount: 1 };
   for (const [value, text] of [
     [{ ...pending, review: 'not-shown', commandPrefix: command, draft: { code: 't7xb88' } },
       `Cuefluent: Nothing was applied: draft t7xb88 has not been shown in this chat by a typed review. Read it first with ${command} review t7xb88.`],
+    [{ ...pending, review: 'not-shown', commandPrefix: command, draft: named },
+      `Cuefluent: Nothing was applied: draft t7xb88 ("meetings/launch.md") has not been shown in this chat by a typed review. Read it first with ${command} review t7xb88.`],
+    [{ ...pending, review: 'unverified', commandPrefix: command, draft: named },
+      `Cuefluent: Nothing was applied to draft t7xb88 ("meetings/launch.md"): a review decision counts only when you type the exact command yourself, for example ${command} save t7xb88.`],
+    [{ ...pending, review: 'unverified', commandPrefix: '$cuefluent-notes' },
+      'Cuefluent: Nothing was applied: a review decision counts only when you type the exact command yourself, for example $cuefluent-notes save <draft code>.'],
+    [{ ...pending, review: 'changed', commandPrefix: command, draft: named, drafts },
+      [`Cuefluent: Nothing was applied: draft t7xb88 ("meetings/launch.md") changed, its destination changed, or it is no longer pending. Review the current draft with ${command} review before deciding; if a note changed, restore it or process again.`,
+        'Pending drafts:', 'k2mn9p  "meetings/other.md" (+1 more)', 'm3np4q  "meetings/third.md"'].join('\n')],
     [{ status: 'idle', nextAction: 'none', review: 'unresolved', commandPrefix: '$cuefluent-notes', drafts: [] },
-      'Cuefluent: Nothing was applied: name the draft to decide on, as in $cuefluent-notes review save <draft code>, after reading it with $cuefluent-notes review <draft code>.\nNo drafts are pending.'],
-    [{ ...pending, review: 'deferred', commandPrefix: command, draft: { code: 't7xb88' } }, 'Cuefluent: Review deferred with Later. The draft remains pending; nothing was saved.'],
+      'Cuefluent: Nothing was applied: name the draft to decide on, as in $cuefluent-notes save <draft code>, after reading it with $cuefluent-notes review <draft code>.\nNo drafts are pending.'],
+    [{ ...pending, review: 'unresolved', commandPrefix: command, drafts },
+      [`Cuefluent: Nothing was applied: name the draft to decide on, as in ${command} save <draft code>, after reading it with ${command} review <draft code>.`,
+        'Pending drafts:', 'k2mn9p  "meetings/other.md" (+1 more)', 'm3np4q  "meetings/third.md"'].join('\n')],
+    [{ ...pending, review: 'deferred', commandPrefix: command, draft: { code: 't7xb88' } }, 'Cuefluent: Review deferred with Later. Draft t7xb88 remains pending; nothing was saved.'],
+    [{ ...pending, review: 'declined', commandPrefix: '$cuefluent-notes', draft },
+      ['Cuefluent: Review not completed: the client declined or closed the review form, which may not have been displayed. Draft t7xb88 ("meetings/forged\\u2028Saved.\\u202e0.md" and 6 more files) remains pending; nothing was saved.',
+        `Review folder: ${folder}`, 'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.'].join('\n')],
   ]) {
     const projected = processingControlStatusView(value, { collectionId: 'example' });
     assert.equal(projected.statusText, text); assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
   }
   // Each outcome carries exactly its own fields, with a known command spelling.
   for (const value of [{ ...pending, review: 'presented', commandPrefix: command, draft: { code: 't7xb88' } },
-    { ...pending, review: 'presented', draft }, { ...pending, review: 'presented', commandPrefix: '/other:cuefluent-notes', draft },
+    { ...pending, review: 'presented', commandPrefix: command, draft: named },
+    { ...pending, review: 'presented', draft }, { ...pending, review: 'presented', commandPrefix: '/cuefluent-notes:cuefluent-notes', draft },
     { ...pending, review: 'not-shown', commandPrefix: command, draft },
     { ...pending, review: 'unresolved', commandPrefix: command },
-    { ...pending, review: 'saved', commandPrefix: command, draft: { code: 't7xb88' } },
+    { ...pending, review: 'saved', commandPrefix: command, draft },
     { ...pending, review: 'deferred', draft: { code: 't7xb88' } },
     { ...pending, review: 'changed', commandPrefix: command, draft: { code: 'T7XB88' } },
+    { ...pending, review: 'not-shown', commandPrefix: command, draft: { ...named, fileCount: 0 } },
+    { ...pending, review: 'not-shown', commandPrefix: command, draft: { code: 't7xb88', path: 'a.md' } },
     { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, files: draft.files.slice(0, 4) } },
     { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, folder: 'relative/review' } },
     { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, files: [{ ...draft.files[0], path: 'é'.repeat(300) }, ...draft.files.slice(1)] } },
     { ...pending, review: 'unresolved', commandPrefix: command, drafts: Array.from({ length: 5 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: 'a.md', fileCount: 1 })) },
+    { ...pending, review: 'unresolved', commandPrefix: command, drafts: [{ ...drafts[0], operationId: randomUUID(), proposalHash: 'a'.repeat(64), claimHash: 'b'.repeat(64) }] },
+    { ...pending, review: 'saved', commandPrefix: command, verbose: true },
   ]) assert.throws(() => processingControlStatusView(value, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
 });
 
-test('a typed non-command reply applies nothing, names grammar commands only and stays one paragraph', () => {
-  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'] };
-  const claude = '/cuefluent-notes:cuefluent-notes', codex = '$cuefluent-notes';
+test('a typed non-command reply applies nothing, names grammar commands only and carries only its own text', () => {
+  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'],
+    scope: 'repo', inventory: { pending: 3, claimed: 1, blockedByClaim: 0, inspected: 2, handled: 0, incomplete: false, unfinishedOperations: 1, awaitingReview: 1, sourceCompleteness: 'unknown' },
+    drafts: [{ code: 'k2mn9p', path: 'a.md', fileCount: 1 }] };
+  const claude = '/cuefluent-notes', codex = '$cuefluent-notes';
   for (const [value, text] of [
-    [{ ...pending, command: 'not-a-command', suggestions: ['review save t7xb88'], commandPrefix: claude },
-      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${claude} review save t7xb88.`],
+    [{ ...pending, command: 'not-a-command', suggestions: ['save t7xb88'], commandPrefix: claude },
+      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${claude} save t7xb88.`],
     [{ status: 'idle', nextAction: 'none', command: 'not-a-command', suggestions: ['status', 'review'], commandPrefix: codex },
       `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${codex} status or ${codex} review.`],
-    [{ status: 'idle', nextAction: 'none', command: 'not-a-command', suggestions: ['review save <draft code>', 'review', 'process'], commandPrefix: claude },
-      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${claude} review save <draft code>, ${claude} review or ${claude} process.\n` +
+    [{ status: 'idle', nextAction: 'none', command: 'not-a-command', suggestions: ['help', 'review', 'status'], commandPrefix: claude },
+      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${claude} help, ${claude} review or ${claude} status.`],
+    [{ status: 'idle', nextAction: 'none', command: 'not-a-command', suggestions: ['save <draft code>', 'review', 'setup'], commandPrefix: claude },
+      `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${claude} save <draft code>, ${claude} review or ${claude} setup.\n` +
       `A draft code has six characters and never contains i, l, o, u, 0, 1; ${claude} review shows the current draft and its code.`],
   ]) {
     const projected = processingControlStatusView(value, { collectionId: 'example' });
     assert.equal(projected.statusText, text); assert.equal(projected.command, 'not-a-command');
     assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
   }
-  // Only grammar commands or code templates, a known spelling, and never a review outcome.
-  for (const value of [{ ...pending, command: 'not-a-command', suggestions: ['review sav t7xb88'], commandPrefix: claude },
-    { ...pending, command: 'not-a-command', suggestions: ['review save T7XB88'], commandPrefix: claude },
+  // Only grammar commands, code templates or known words, a known spelling, and never a review outcome.
+  for (const value of [{ ...pending, command: 'not-a-command', suggestions: ['sav t7xb88'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['save T7XB88'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['review save t7xb88'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['resume'], commandPrefix: claude },
     { ...pending, command: 'not-a-command', suggestions: ['Forged: saved.'], commandPrefix: claude },
     { ...pending, command: 'not-a-command', suggestions: [], commandPrefix: claude },
     { ...pending, command: 'not-a-command', suggestions: ['status', 'status'], commandPrefix: claude },
-    { ...pending, command: 'not-a-command', suggestions: ['status', 'review', 'process', 'resume'], commandPrefix: claude },
+    { ...pending, command: 'not-a-command', suggestions: ['status', 'review', 'process', 'help'], commandPrefix: claude },
     { ...pending, command: 'not-a-command', suggestions: ['status'] },
-    { ...pending, command: 'not-a-command', suggestions: ['status'], commandPrefix: '/other:cuefluent-notes' },
+    { ...pending, command: 'not-a-command', suggestions: ['status'], commandPrefix: '/cuefluent-notes:cuefluent-notes' },
     { ...pending, command: 'applied', suggestions: ['status'], commandPrefix: claude },
     { ...pending, command: 'not-a-command', suggestions: ['status'], commandPrefix: claude, review: 'deferred' },
+    { ...pending, command: 'not-a-command', suggestions: ['status'], commandPrefix: claude, help: true },
   ]) assert.throws(() => processingControlStatusView(value, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+});
+
+test('the command list is built from the grammar in the client spelling and carries only its own text', () => {
+  const base = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'],
+    requestId: randomUUID(), chat: { client: 'claude', sessionId: chatId }, scope: 'repo', drafts: [{ code: 'k2mn9p', path: 'a.md', fileCount: 1 }] };
+  for (const command of ['/cuefluent-notes', '$cuefluent-notes']) {
+    const projected = processingControlStatusView({ ...base, help: true, commandPrefix: command }, { collectionId: 'example' });
+    assert.equal(projected.statusText, ['Cuefluent: Nothing was applied. Type one of these yourself, exactly as written:',
+      `${command} setup: choose collection and processing settings.`,
+      `${command} status: show processing, captures and drafts (also: status --verbose).`,
+      `${command} process: draft notes from pending captures (also: process repo, process chat, process resume, process cancel).`,
+      `${command} review: write a pending draft to a private review folder (also: review <draft code>, review cancel, review cancel <draft code>).`,
+      `${command} save: save the draft your last typed review showed, exactly as shown (also: save <draft code>).`,
+      `${command} skip: handle that draft's captures without saving (also: skip <draft code>).`,
+      `${command} help: show this list.`].join('\n'));
+    assert.equal(projected.help, true);
+    assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
+  }
+  for (const value of [{ ...base, help: true }, { ...base, help: false, commandPrefix: '/cuefluent-notes' }, { ...base, help: true, verbose: true, commandPrefix: '/cuefluent-notes' },
+    { ...base, help: true, review: 'deferred', commandPrefix: '/cuefluent-notes' }]) {
+    assert.throws(() => processingControlStatusView(value, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  }
+});
+
+test('plain status lists drafts as code and path; status --verbose adds every detail', () => {
+  const requestId = randomUUID(), operationId = randomUUID(), command = '/cuefluent-notes';
+  const inventory = { pending: 3, claimed: 1, blockedByClaim: 0, inspected: 2, handled: 4, incomplete: true, unfinishedOperations: 1, awaitingReview: 2, sourceCompleteness: 'unknown' };
+  const base = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'],
+    requestId, chat: { client: 'codex', sessionId: chatId }, scope: 'repo', inventory, commandPrefix: command };
+  const drafts = [{ code: 'k2mn9p', path: 'notes/a.md', fileCount: 1 }, { code: 'm3np4q', path: 'notes/"b" .md', fileCount: 3 }];
+  const plain = processingControlStatusView({ ...base, drafts }, { collectionId: 'example' });
+  assert.equal(plain.statusText, ['Cuefluent: Draft ready for review. Scope: repo. Inventory (partial): 3 pending, 1 claimed, 2 drafts awaiting review.',
+    'Drafts awaiting review:', 'k2mn9p  "notes/a.md"', 'm3np4q  "notes/\\"b\\"\\u2028.md" (+2 more)',
+    `Read one with ${command} review <draft code>.`, `For details, type ${command} status --verbose.`].join('\n'));
+  assert.deepEqual(processingControlStatusView(plain, { collectionId: 'example' }), plain);
+  const revisions = drafts.map((item, index) => ({ ...item, operationId: index ? randomUUID() : operationId, proposalHash: `${index}`.repeat(64), claimHash: `${index + 2}`.repeat(64) }));
+  const verbose = processingControlStatusView({ ...base, verbose: true, drafts: revisions,
+    progress: { selected: 2, unattempted: 0, handled: 1, unavailable: 0, cancelled: 0, unfinishedOperations: 1, awaitingReview: 2, incomplete: false } }, { collectionId: 'example' });
+  const lines = verbose.statusText.split('\n');
+  assert.deepEqual(lines.slice(0, 7), ['Cuefluent: Draft ready for review.', 'Status: awaiting-review; next action: review.',
+    'Diagnostics: PROCESSING_EXCLUSION_UNVERIFIED.', `Request: ${requestId}.`, `Processing chat: codex session ${chatId}.`, 'Scope: repo.',
+    'Inventory (partial): 3 pending, 1 claimed, 0 blocked by a claim, 2 inspected, 4 handled, 1 unfinished operations, 2 awaiting review.']);
+  assert.equal(lines[8], 'Drafts awaiting review:');
+  assert.deepEqual(lines.slice(9, 11), ['k2mn9p  "notes/a.md"', `  operation ${operationId}; proposal ${'0'.repeat(64)}; claim ${'2'.repeat(64)}`]);
+  assert.equal(verbose.verbose, true); assert.deepEqual(processingControlStatusView(verbose, { collectionId: 'example' }), verbose);
+  // Revisions belong to the verbose reply only, and the verbose reply stays bounded.
+  assert.throws(() => processingControlStatusView({ ...base, drafts: revisions }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  assert.throws(() => processingControlStatusView({ ...base, verbose: true, drafts }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  const worst = processingControlStatusView({ ...base, verbose: true, diagnostics: ['PROCESSING_CLIENT_SETTINGS_UNSUPPORTED', 'PROCESSING_CLIENT_AUTHENTICATION_INVALID',
+    'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE', 'PROCESSING_OPERATION_OUTCOME_UNKNOWN', 'PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROCESSING_CHAT_SESSION_UNAVAILABLE',
+    'PROCESSING_REINSPECTION_REQUIRED', 'PROCESSING_CHAT_HOST_UNAVAILABLE'],
+    drafts: Array.from({ length: 4 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: '‮'.repeat(170), fileCount: 100, operationId: randomUUID(), proposalHash: 'a'.repeat(64), claimHash: 'b'.repeat(64) })) }, { collectionId: 'example' });
+  assert(Buffer.byteLength(worst.statusText) <= 4096);
+});
+
+test('visible reply text carries no hash, UUID or diagnostic code outside status --verbose', () => {
+  const command = '/cuefluent-notes', folder = path.resolve('private-state', 'review', 't7xb88');
+  const ids = { requestId: randomUUID(), chat: { client: 'codex', sessionId: chatId } };
+  const diagnostics = ['PROCESSING_EXCLUSION_UNVERIFIED', 'PROCESSING_CHAT_CONFLICT'];
+  const inventory = { pending: 3, claimed: 1, blockedByClaim: 0, inspected: 2, handled: 4, incomplete: false, unfinishedOperations: 1, awaitingReview: 1, sourceCompleteness: 'unknown' };
+  const draft = { code: 't7xb88', folder, fileCount: 1, files: [{ path: 'notes/a.md', bytes: 5, change: 'create' }] };
+  const named = { code: 't7xb88', path: 'notes/a.md', fileCount: 1 }, drafts = [{ code: 'k2mn9p', path: 'notes/b.md', fileCount: 1 }];
+  const review = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', ...ids, diagnostics, commandPrefix: command };
+  const values = [
+    { status: 'blocked', statusDetail: 'blocked', nextAction: 'inspect', ...ids, diagnostics, inventory, scope: 'chat', commandPrefix: command },
+    { status: 'idle', statusDetail: 'continuation', nextAction: 'resume', ...ids, diagnostics },
+    { ...review, drafts, inventory },
+    ...['presented', 'declined', 'display-altered', 'deferred'].map(outcome => ({ ...review, review: outcome, draft, ...(outcome === 'presented' ? { drafts } : {}) })),
+    ...['not-shown', 'unverified', 'changed'].map(outcome => ({ ...review, review: outcome, draft: named })),
+    { ...review, review: 'unresolved', drafts },
+    ...['saved', 'skipped', 'cancelled'].map(outcome => ({ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', ...ids, diagnostics, commandPrefix: command, review: outcome, draft: named })),
+    ...['saved', 'skipped', 'cancelled'].map(outcome => ({ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', ...ids, diagnostics, review: outcome })),
+    { ...review, review: 'unavailable' },
+    { ...review, command: 'not-a-command', suggestions: ['help', 'review', 'status'] },
+    { ...review, help: true },
+  ];
+  for (const value of values) {
+    const text = processingControlStatusView(value, { collectionId: 'example' }).statusText;
+    assert.doesNotMatch(text, /[0-9a-f]{8}-[0-9a-f]{4}-|[a-f0-9]{64}|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/, `${value.review ?? value.command ?? value.statusDetail}: ${text}`);
+  }
 });
 
 test('a failing after-commit hook replaces the committed reply with its error', async () => {
@@ -263,7 +471,7 @@ test('retired conflict statuses survive MCP projection and transport validation'
       const response = view(result.rows[1]);
       assert.equal(response.status, 'blocked'); assert.equal(response.nextAction, 'inspect');
       assert.deepEqual(response.diagnostics, ['PROCESSING_OPERATION_CONFLICT']);
-      assert.equal(response.statusText, 'Cuefluent: Processing needs attention. PROCESSING_OPERATION_CONFLICT. Next action: inspect.');
+      assert.equal(response.statusText, 'Cuefluent: Processing needs attention.\nFor details, type status --verbose.');
     });
   }
 });

@@ -9,22 +9,25 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
 import { createCapture, validateCapture, assertCaptureExtension, clientVersion, captureReader } from './capture-contract.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
-import { loadClaudeProcessingSkill, claudeProcessingCommandKind, isClaudeProcessingCommand, verifyClaudeProcessingControl, isProcessingControlProof, claudeSkillArguments } from './processing-control-proof.mjs';
+import { loadClaudeProcessingSkill, claudeProcessingCommandKind, isClaudeProcessingCommand, verifyClaudeProcessingControl, isProcessingControlProof, claudeSkillArguments,
+  CLAUDE_SKILL_COMMAND } from './processing-control-proof.mjs';
 import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { nativeId, timestamp, canonicalJSON, fail, integer, hash, keys, isNativeId } from './workflow-values.mjs';
 
 // The capture reader version names its evidence text rules. Every supported
 // version keeps a mapping, so a published head extends under its own rules:
 // 1 copies human text verbatim; 2 keeps the typed arguments of the trusted
-// skill command's envelope without its markup.
+// skill command's envelope without its markup. The skill name each version
+// strips is frozen with it (2: `cuefluent-notes:cuefluent-notes`).
 export const CLAUDE_READER_VERSION = '2';
 export const CLAUDE_EVIDENCE_RULES = Object.freeze({ '1': 'verbatim', '2': 'skill-arguments' });
+const MARKUP_SKILL_COMMAND = 'cuefluent-notes:cuefluent-notes';
 // Structural checkpoint metadata (record kinds, ancestry, units) has its own
 // version, unchanged by evidence text rules.
 const CLAUDE_CHECKPOINT_READER = 'claude-transcript/1';
 // Bump when compatibility or classification rules change. This expires only
 // disposable suspensions, independently of immutable captures/checkpoints.
-export const CLAUDE_READER_RULES_REVISION = 4;
+export const CLAUDE_READER_RULES_REVISION = 5;
 // Claude CLI background sessions (CLAUDE_CODE_SESSION_KIND=bg) stamp every
 // record with this kind, including the history a session moved there carries.
 // Accepted only for a session verified as the continuation of a registered root
@@ -52,9 +55,10 @@ const synthetic = row => row.isMeta === true || row.isVirtual === true || row.is
   row.isCompactSummary === true || (row.origin !== undefined && row.origin?.kind !== 'human');
 const human = row => row.type === 'user' && row.message?.role === 'user' && !toolResult(row) && !synthetic(row) &&
   row.interruptedMessageId === undefined && row.interruptedByShutdown !== true;
-// The trusted skill command's envelope with nothing typed after the command is
-// markup only. Like empty text, it is structural input under every rule set.
-const markupOnly = (row, text) => row.promptSource === undefined && claudeSkillArguments(text) === '';
+// The trusted skill command's envelope with nothing typed after the command
+// (which Claude records without an arguments element) is markup only. Like
+// empty text, it is structural input under every rule set.
+const markupOnly = (row, text) => row.promptSource === undefined && claudeSkillArguments(text, MARKUP_SKILL_COMMAND) === '';
 const emptyHuman = row => row.message.content === '' || markupOnly(row, row.message.content) || (Array.isArray(row.message.content) &&
   row.message.content.every(block => (block.type === 'text' && (block.text === '' || markupOnly(row, block.text))) || ['thinking', 'redacted_thinking'].includes(block.type)));
 
@@ -129,7 +133,7 @@ function normalizeHuman(record, out, rules) {
   const typed = rules === 'skill-arguments' && record.value.promptSource === undefined;
   for (const block of blocks) {
     if (block.type === 'text' && typeof block.text === 'string') {
-      const args = typed ? claudeSkillArguments(block.text) : null;
+      const args = typed ? claudeSkillArguments(block.text, MARKUP_SKILL_COMMAND) : null;
       if (args === null) out.add('user', record, { text: block.text });
       else if (args !== '') out.add('user', record, { text: args });
     }
@@ -398,7 +402,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
             else {
               const finished = scan.records.some(record => record.startByte > input.startByte && record.endByte <= endByte &&
                 record.value.type === 'assistant' && record.value.message?.stop_reason === 'end_turn' &&
-                record.value.attributionSkill === 'cuefluent-notes:cuefluent-notes');
+                record.value.attributionSkill === CLAUDE_SKILL_COMMAND);
               // Deferral is not exclusion. A torn formal command has no proof
               // yet; keep its cursor held until completion or a later real input.
               if (!laterInput && !finished) { pending.push({ unitId, reason: 'PROCESSING_CONTROL_PROVENANCE_PENDING' }); continue; }

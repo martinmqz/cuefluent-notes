@@ -110,8 +110,7 @@ function fileNames(files) {
     return { proposed: `${prefix}proposed.md`, current: file.original === null ? null : `${prefix}current.md` };
   });
 }
-const commandLine = (code, decision) =>
-  `${REVIEW_COMMANDS.claude} review ${decision} ${code} (Codex: ${REVIEW_COMMANDS.codex} review ${decision} ${code})`;
+const commandLine = words => `${REVIEW_COMMANDS.claude} ${words} (Codex: ${REVIEW_COMMANDS.codex} ${words})`;
 
 // "1-3, 7, 9-12": every file a source supports, as the numbers of the file
 // entries above. Complete and compact, so attribution never depends on length.
@@ -156,10 +155,10 @@ function summaryText(preview, code, names) {
   }
   lines.push('', 'Inspection', `${preview.inspection.acknowledgedPages} of ${preview.inspection.totalPages} retained evidence pages inspected. This does not establish completeness of the original sources.`,
     '', 'Decide by typing one of these commands yourself in the chat that showed this draft:',
-    `- Save this exact proposal: ${commandLine(code, 'save')}`,
-    `- Skip these captures without saving: ${commandLine(code, 'skip')}`,
-    `- Keep the draft pending: ${commandLine(code, 'later')}`,
-    `- Cancel the draft; its captures stay pending: ${commandLine(code, 'cancel')}`,
+    `- Save this exact proposal: ${commandLine(`save ${code}`)}`,
+    `- Skip these captures without saving: ${commandLine(`skip ${code}`)}`,
+    `- Cancel the draft; its captures stay pending: ${commandLine(`review cancel ${code}`)}`,
+    'To keep the draft pending, type nothing.',
     '', 'Exact revision', `Operation: ${preview.operationId}`, `Claim hash: ${preview.claimHash}`, `Proposal hash: ${preview.proposalHash}`, '');
   return lines.join('\n');
 }

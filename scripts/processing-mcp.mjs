@@ -19,7 +19,7 @@ import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
 import { presentReviewFiles, confirmReviewPresentation, settleReviewFiles, readReviewPresentations, reviewChatLineage, reviewCode, sameReviewRevision } from './processing-review-files.mjs';
-import { REVIEW_COMMANDS, reviewControlFields } from './processing-control-proof.mjs';
+import { REVIEW_COMMANDS, SKILL_NAME, reviewControlFields } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
 
@@ -182,14 +182,20 @@ async function sourcePresence(collection, context, policyHash, capability = null
 export async function runProcessingMcp({ client, configPath, input, output, env = process.env } = {}, dependencies = {}) {
   choice(client, CLIENTS);
   const jobs = new Map(), owners = new WeakMap(), committedReviews = new WeakMap(), replayed = new WeakMap(), controls = new WeakMap();
+  const commandPrefix = REVIEW_COMMANDS[client];
   // Presentations written in this request, confirmed only after its reply commits.
   const pendingPresentations = new WeakMap();
   const openController = dependencies.openController ?? openProcessingController;
   const resolveInvocation = dependencies.resolveInvocation ?? resolveProcessingInvocation;
+  // Nothing is set up for this chat: no configuration, no route for this client,
+  // or no registration, selection or processing source for this session in any
+  // routed collection. Still a refusal; only a status request may answer it with
+  // the command list. A failed binding of a source that exists is never this.
+  const noSource = () => Object.assign(new Error('PROCESSING_CONTROL_SOURCE_UNVERIFIED'), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED', noSource: true });
   async function resolveSource(context, invocation, { signal, requireCompleted } = {}) {
     const selectedConfig = configPath ?? await workflowConfigPath();
     const snapshot = await readWorkflowSnapshot(selectedConfig);
-    if (!snapshot.config) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    if (!snapshot.config) throw noSource();
     const requested = invocation.arguments.collectionId;
     if (snapshot.config.collections.length > 64) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
     const matches = [], registrationCollections = [];
@@ -215,6 +221,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     }
     if (matches.length === 1) return matches[0];
     if (matches.length > 1 || failedBinding) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    if (requested === undefined && !registrationCollections.length) throw noSource();
     // Diagnose only after all real bindings miss. Pending-only metadata cannot
     // prevent a valid match or supply an invocation, even if its JSON is broken.
     const registrationUnverified = await withStorageProbes(async () => {
@@ -247,16 +254,26 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // applies nothing, whichever tool the model called: no dispatch, display,
   // decision or receipt. The reply names the nearest exact commands, computed
   // from the verified typed text by the grammar; a suggestion is not authority.
-  async function notACommand(source) {
-    if (source.typedSuggestions === undefined) return null;
+  async function currentView(source) {
     const { options } = selected(source), job = jobs.get(keyFor(options));
     const controller = job?.controller ?? await openController({ ...options, client }, { env });
-    try {
-      const status = await controller.status({ selection: source.selection });
-      return { ...viewOf(status), command: 'not-a-command', suggestions: [...source.typedSuggestions], commandPrefix: REVIEW_COMMANDS[client] };
-    } finally { if (!job) await controller.close(); }
+    try { return viewOf(await controller.status({ selection: source.selection })); }
+    finally { if (!job) await controller.close(); }
   }
-  const exactOnly = action => async request => (await notACommand(request.source)) ?? action(request);
+  // The skill typed with nothing after it gets the command list, also with no
+  // dispatch, display, decision or receipt.
+  async function notACommand(source) {
+    if (source.typedHelp === true) return { ...await currentView(source), help: true, commandPrefix };
+    if (source.typedSuggestions === undefined) return null;
+    return { ...await currentView(source), command: 'not-a-command', suggestions: [...source.typedSuggestions], commandPrefix };
+  }
+  // Every reply spells commands for this client, except a replayed receipt,
+  // which returns its original response exactly.
+  const spelled = action => async request => {
+    const response = await action(request);
+    return response?.commandPrefix !== undefined || replayed.has(request.source) ? response : { ...response, commandPrefix };
+  };
+  const exactOnly = action => spelled(async request => (await notACommand(request.source)) ?? action(request));
   async function replayControl(source) {
     if (!source.nativeSkill || !source.unitId || source.captureActive === false) return null;
     const { capability } = selected(source);
@@ -289,9 +306,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     return persist ? controller.finishReview({ expectedChatHash: status.chatHash, requestId: status.requestId, operationId: status.operationId })
       : { ...status, state: 'idle', operationState: 'completed', recoveryRequired: false };
   }
-  async function getStatus({ source }) {
+  async function getStatus({ source, verbose, help }) {
     const { options, capability } = selected(source), key = keyFor(options);
     const replay = await replayControl(source); if (replay) return replay;
+    // Claude mirrors a typed `status --verbose` or `help` in its arguments;
+    // Codex carries it in the verified typed text alone.
+    if (help === true || source.typedControl === 'help') return { ...await currentView(source), help: true };
+    const details = verbose === true || source.typedControl === 'status --verbose' ? { verbose: true } : {};
     const job = jobs.get(key), controller = job?.controller ?? await openController({ ...options, client }, { env });
     try {
       let native = await acknowledgeFinishedReview(controller, capability, await controller.status({ selection: source.selection }), { persist: false });
@@ -306,9 +327,16 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       catch (error) {
         if (error.code !== 'PROCESSING_INVENTORY_CHANGED') throw error;
         const view = processingStatusView(native, shortcut, { sequence: job?.sequence });
-        return { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_INVENTORY_INCOMPLETE'])].slice(0, 8) };
+        return { ...view, ...details, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_INVENTORY_INCOMPLETE'])].slice(0, 8) };
       }
-      return processingStatusView(native, shortcut, { inventory, sequence: job?.sequence });
+      // Drafts awaiting review, one per line by code and note path; the
+      // verbose reply also names each exact revision.
+      const reviews = authorizedReviews(inventory).map(item => ({ item, code: reviewCode(item.proposalHash) }));
+      const drafts = (await shownDrafts(capability, reviews)).map(listed => {
+        const { item } = reviews.find(entry => entry.code === listed.code);
+        return details.verbose ? { ...listed, operationId: item.operationId, proposalHash: item.proposalHash, claimHash: item.claimHash } : listed;
+      });
+      return { ...processingStatusView(native, shortcut, { inventory, sequence: job?.sequence }), ...details, ...(drafts.length ? { drafts } : {}) };
     } finally { if (!job) await controller.close(); }
   }
   async function activeJob(key, source, signal) {
@@ -463,12 +491,19 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const listed = [];
     for (const { item, code } of entries) {
       if (listed.length >= 4) break;
+      if (listed.some(entry => entry.code === code)) continue; // A shared code is listed once.
       try {
         const named = await withStorageProbes(() => processingProposalPaths(capability, item.operationId));
         if (named.proposalHash === item.proposalHash) listed.push({ code, path: reviewNotePath(named.paths[0]), fileCount: named.paths.length });
       } catch (error) { if (!reviewChanged(error)) throw error; }
     }
     return listed;
+  }
+  // Display only: a listing that cannot be read is left out rather than
+  // failing a status or a decision, whose own reads keep every check.
+  async function shownDrafts(capability, entries, signal) {
+    try { return await draftListing(capability, entries); }
+    catch (error) { if (signal?.aborted) throw error; return []; }
   }
   const draftView = presentation => ({ code: presentation.code, folder: presentation.folder,
     files: presentation.files.slice(0, 5).map(file => ({ ...file, path: reviewNotePath(file.path) })), fileCount: presentation.files.length });
@@ -514,12 +549,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       return presented();
     }
     if (result.status === 'awaiting-review') return { response: reviewView(result.review, { draft }) };
-    return { result, proposal: target.item, revision: presentation };
+    return { result, proposal: target.item, revision: presentation,
+      draft: { code: draft.code, path: draft.files[0].path, fileCount: draft.fileCount } };
   }
   // A typed decision applies only through a verified typed action, to a
   // revision presented to this chat lineage, whose engine hashes still match.
-  async function decideReview({ source, capability, proposals, coded, asked, verified, signal, commitResponse, reviewView, refuseChanged }) {
-    if (!verified) return { response: reviewView('unverified', asked.draft === undefined ? {} : { draft: { code: asked.draft } }) };
+  async function decideReview({ source, capability, proposals, coded, asked, verified, signal, commitResponse, reviewView, refuseChanged, named }) {
+    if (!verified) return { response: reviewView('unverified', asked.draft === undefined ? {} : { draft: await named(asked.draft) }) };
     const { bindings, recent } = await readReviewPresentations(capability, reviewChatLineage(source));
     let binding;
     if (asked.draft !== undefined) {
@@ -529,7 +565,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (matches.length > 1) return refuseChanged(asked.draft, matches[0]);
       // Even with its code, a draft counts as shown only when a typed review
       // presented it here; a natural-language or model-initiated display does not.
-      if (!matches.length) return { response: reviewView('not-shown', { draft: { code: asked.draft } }) };
+      if (!matches.length) return { response: reviewView('not-shown', { draft: await named(asked.draft) }) };
       binding = matches[0];
     } else {
       // Only the revision this chat was most recently shown by a verified
@@ -542,13 +578,14 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     }
     const proposal = proposals.find(item => item.operationId === binding.operationId);
     if (!proposal || proposal.proposalHash !== binding.proposalHash || proposal.claimHash !== binding.claimHash) return refuseChanged(reviewCode(binding.proposalHash), binding);
-    if (asked.decision === 'later') return { response: reviewView('deferred', { draft: { code: reviewCode(binding.proposalHash) } }) };
+    // Named before the decision: a saved or skipped draft is no longer pending.
+    const draft = await named(reviewCode(binding.proposalHash));
     let committed = false;
     try {
       const result = await applyReviewDecision(capability, { selection: proposal.selection, operationId: proposal.operationId }, {
         decision: asked.decision, expectedClaimHash: binding.claimHash, expectedProposalHash: binding.proposalHash, signal,
         commitResponse: () => { committed = true; commitResponse?.(); } });
-      return { result, proposal, revision: binding };
+      return { result, proposal, revision: binding, draft };
     } catch (error) {
       if (committed || signal?.aborted || !reviewChanged(error)) throw error;
       return refuseChanged(reviewCode(binding.proposalHash), binding);
@@ -567,7 +604,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     // model-chosen fields can only display a draft or be refused.
     const verified = source.nativeSkill === true;
     const asked = verified && typeof source.typedControl === 'string' ? reviewControlFields(source.typedControl) ?? {} : { draft, decision };
-    const lineage = reviewChatLineage(source), commandPrefix = REVIEW_COMMANDS[client];
+    const lineage = reviewChatLineage(source);
     const controller = await openController({ ...options, client }, { env });
     let response;
     try {
@@ -584,6 +621,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       const coded = proposals.map(item => ({ item, code: reviewCode(item.proposalHash) }));
       const reviewView = (review, extra = {}) => ({ ...viewOf(status),
         ...(proposals.length ? { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' } : {}), review, commandPrefix, ...extra });
+      // A draft named in a reply: its code, with its first note path while it is pending.
+      const named = async code => (await shownDrafts(capability, coded.filter(entry => entry.code === code), signal))[0] ?? { code };
       // A revision that changed or is no longer pending: nothing applies, and
       // this chat's stale presentation record and review folder are removed.
       // Cleanup cannot replace the refusal; a leftover record stays harmless
@@ -594,18 +633,18 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           if (stale) await settleReviewFiles(capability, { selection: source.selection, chatLineage: lineage, revision: stale });
         } catch (error) { if (signal?.aborted) throw error; }
         const drafts = await draftListing(capability, coded.filter(entry => entry.code !== code));
-        return { response: reviewView('changed', { draft: { code }, ...(drafts.length ? { drafts } : {}) }) };
+        return { response: reviewView('changed', { draft: await named(code), ...(drafts.length ? { drafts } : {}) }) };
       };
-      const request = { source, capability, status, proposals, coded, asked, verified, elicit, signal, commitResponse, reviewView, refuseChanged };
+      const request = { source, capability, status, proposals, coded, asked, verified, elicit, signal, commitResponse, reviewView, refuseChanged, named };
       const outcome = asked.decision === undefined ? await showReview(request) : await decideReview(request);
       if (outcome.response) response = outcome.response;
       else {
-        const { result, proposal, revision } = outcome;
+        const { result, proposal, revision } = outcome, decided = outcome.draft ? { draft: outcome.draft } : {};
         // The decision is committed and settles its own presentation; there is
         // nothing left to confirm, and bookkeeping must not fail this reply.
         pendingPresentations.delete(source);
         committedReviews.set(source, { status: 'completed', statusDetail: 'completed', requestId: status.requestId, chat: status.chat,
-          nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: result.review });
+          nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: result.review, ...decided, commandPrefix });
         // The decision is committed; the review folder is only a copy. Removing
         // it and this chat's record is housekeeping that cannot undo the result.
         try { await settleReviewFiles(capability, { selection: source.selection, chatLineage: lineage, revision }); } catch {}
@@ -616,7 +655,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
             : status.restartSupported ? await controller.status({ selection: source.selection }) : status;
           response = processingStatusView(next, await withStorageProbes(() => inspectProcessingShortcut(capability, { selection: source.selection })));
           if (!ownReview && response.status === 'missing') response = { ...response, status: 'completed', statusDetail: 'completed' };
-          response = { ...response, review: result.review };
+          response = { ...response, review: result.review, ...decided };
         } catch { response = committedReviews.get(source); }
       }
     } finally {
@@ -677,7 +716,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         source: source.source, selectionHash: source.selectionHash,
         dispatch: { client, sessionId: source.selection.sessionId, unitId: source.unitId, callId: source.callId,
           tool: source.tool, argsHash: source.argsHash, sourceIdentity: source.source.fileIdentity, sourcePath: source.source.path,
-          requestHash: digest(canonicalJSON(invocation.arguments)), skillName: 'cuefluent-notes', skillPath,
+          requestHash: digest(canonicalJSON(invocation.arguments)), skillName: SKILL_NAME, skillPath,
           statusText: view.statusText, resultHash: digest(canonicalJSON(client === 'claude' ? result.content : result)), response: view,
           ...(client === 'claude' ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand']
             .map(key => [key, source[key]])) : {}) },
@@ -714,7 +753,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     await confirmReviewPresentation(capability, { selection: source.selection, ...pending });
   }
   try {
-    await runProcessingControlServer({ client, input, output, env, resolveSource, getStatus: exactOnly(getStatus),
+    // With nothing set up for the chat, a status request still gets the command
+    // list and the way to set up; nothing is read from or written to storage.
+    const unboundStatus = () => ({ status: 'missing', statusDetail: 'unbound', nextAction: 'none',
+      diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix });
+    await runProcessingControlServer({ client, input, output, env, resolveSource, unboundStatus, getStatus: exactOnly(getStatus),
       requestProcessing: exactOnly(requestProcessing), requestResume: exactOnly(requestResume), requestCancel: exactOnly(requestCancel),
       requestReview: exactOnly(requestReview), beforeResponse, afterResponse });
   } finally {

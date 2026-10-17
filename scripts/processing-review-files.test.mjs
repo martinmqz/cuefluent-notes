@@ -65,14 +65,15 @@ test('Claude review writes the exact proposal to a private review folder and rep
   const summary = await fs.readFile(path.join(folder, 'summary.txt'), 'utf8');
   for (const expected of [`draft ${code}`, 'Create "meetings/rollout.md"', `Proposed: proposed.md (${Buffer.byteLength(content)} bytes)`,
     `claude session ${f.identity.sessionId}, turn ${f.identity.unitId}`, '1 of 1 retained evidence pages inspected',
-    `${claude} review save ${code}`, `${claude} review skip ${code}`, `${claude} review later ${code}`, `${claude} review cancel ${code}`,
-    `${codex} review save ${code}`, `Operation: ${f.operationId}`, `Claim hash: ${p.claimHash}`, `Proposal hash: ${p.proposalHash}`]) {
+    `${claude} save ${code} (Codex: ${codex} save ${code})`, `${claude} skip ${code}`, `${claude} review cancel ${code}`,
+    'To keep the draft pending, type nothing.', `Operation: ${f.operationId}`, `Claim hash: ${p.claimHash}`, `Proposal hash: ${p.proposalHash}`]) {
     assert(summary.includes(expected), expected);
   }
   assert(!summary.includes('Keep the rollout paused'), 'note content stays in proposed.md');
-  assert(shown.statusText.startsWith(`Cuefluent: Draft ${code} is ready for review; nothing has been saved. Review folder: ${folder}\n`));
+  assert(!summary.includes('later') && !summary.includes('review save'), 'only current command spellings');
+  assert(shown.statusText.startsWith(`Cuefluent: Draft ${code} ("meetings/rollout.md") is ready for review; nothing has been saved.\nReview folder: ${folder}\n`));
   assert(shown.statusText.includes(`- "meetings/rollout.md" (new note, ${Buffer.byteLength(content)} bytes)`));
-  assert(shown.statusText.includes(`${claude} review save ${code}, ${claude} review skip ${code} or ${claude} review later ${code}`));
+  assert(shown.statusText.includes(`To decide, type ${claude} save ${code} or ${claude} skip ${code}.`));
   assertPlainReply(shown, f);
   // The durable presentation binding names this chat and the exact revision.
   const state = await reviewState(f);
@@ -143,7 +144,7 @@ test('typed decisions need a verified command and a presentation to this chat; S
   const code = reviewCode(p.proposalHash);
   const unseen = await review(h, { decision: 'save', draft: code });
   assert.equal(unseen.review, 'not-shown'); assert.equal(unseen.status, 'awaiting-review');
-  assert.equal(unseen.statusText, `Cuefluent: Nothing was applied: draft ${code} has not been shown in this chat by a typed review. Read it first with ${claude} review ${code}.`);
+  assert.equal(unseen.statusText, `Cuefluent: Nothing was applied: draft ${code} ("meetings/rollout.md") has not been shown in this chat by a typed review. Read it first with ${claude} review ${code}.`);
   const shown = await review(h), folder = shown.draft.folder;
   // Model-chosen decision fields are not an approval channel.
   h.nativeSkill = false;
@@ -151,13 +152,15 @@ test('typed decisions need a verified command and a presentation to this chat; S
   assert.equal(model.review, 'unverified'); assertPlainReply(model, f);
   h.nativeSkill = true;
   assert.equal((await review(h, { decision: 'save', draft: 'k2mn9p' })).review, 'not-shown');
-  const later = await review(h, { decision: 'later', draft: code });
-  assert.equal(later.review, 'deferred'); assert.equal(later.statusText, 'Cuefluent: Review deferred with Later. The draft remains pending; nothing was saved.');
+  // A typed Later waits for Phase 2: a model cannot pass it either.
+  assert.equal((await h.call('processing_review', { decision: 'later', draft: code })).error.message, 'PROCESSING_CONTROL_INVALID_REQUEST');
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []); assert(await exists(folder));
   // An editor's swap file is not this module's to delete; it keeps the folder.
   await fs.writeFile(path.join(folder, '.proposed.md.swp'), 'editor state', { mode: 0o600 });
   const saved = await review(h, { decision: 'save', draft: code });
-  assert.equal(saved.review, 'saved'); assert.match(saved.statusText, /^Cuefluent: Review completed: the exact reviewed proposal was saved\./);
+  assert.equal(saved.review, 'saved');
+  assert.match(saved.statusText, new RegExp(`^Cuefluent: Review completed: the exact reviewed proposal of draft ${code} \\("meetings/rollout\\.md"\\) was saved\\.`));
+  assert.deepEqual(saved.draft, { code, path: 'meetings/rollout.md', fileCount: 1 }); assertPlainReply(saved, f);
   assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
   assert.deepEqual(await fs.readdir(folder), ['.proposed.md.swp']);
@@ -192,7 +195,7 @@ test('a replaced revision needs a fresh verified review: bare save and the old c
   const bare = await review(h, { decision: 'save' });
   assert.equal(bare.review, 'unresolved');
   assert.deepEqual(bare.drafts, [{ code: codeB, path: 'meetings/rollout.md', fileCount: 1 }]);
-  assert(bare.statusText.includes(`Pending drafts: ${codeB} "meetings/rollout.md".`)); assertPlainReply(bare, f);
+  assert(bare.statusText.endsWith(`\nPending drafts:\n${codeB}  "meetings/rollout.md"`)); assertPlainReply(bare, f);
   // Naming B's code does not bypass the typed review: B's only display was unverified.
   const coded = await review(h, { decision: 'save', draft: codeB });
   assert.equal(coded.review, 'not-shown'); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
@@ -388,7 +391,7 @@ test('a changed destination is refused before staging and clears the stale revie
   await fs.mkdir(path.dirname(p.target), { recursive: true }); await fs.writeFile(p.target, '# Human edit\n');
   const refused = await review(h, { decision: 'save', draft: code });
   assert.equal(refused.review, 'changed'); assert.equal(refused.draft.code, code);
-  assert.match(refused.statusText, /^Cuefluent: Nothing was applied: draft [a-z2-9]{6} changed, its destination changed, or it is no longer pending\./);
+  assert.match(refused.statusText, /^Cuefluent: Nothing was applied: draft [a-z2-9]{6} \("meetings\/rollout\.md"\) changed, its destination changed, or it is no longer pending\./);
   assertPlainReply(refused, f);
   assert.equal(await fs.readFile(p.target, 'utf8'), '# Human edit\n');
   const pending = await inspectProcessing(f.capability, f.operationId);
@@ -440,10 +443,10 @@ test('Codex keeps its native form, names the review folder, and accepts the same
     h.answer(await next, { action: 'accept', content: { decision: 'later' } });
     const later = body(await call), code = later.draft.code;
     assert.equal(later.review, 'deferred');
-    assert.equal(later.statusText, `Cuefluent: Review deferred with Later. The draft remains pending; nothing was saved.\nReview folder: ${later.draft.folder}\n` +
-      `To decide, type ${codex} review save ${code}, ${codex} review skip ${code} or ${codex} review later ${code}.`);
+    assert.equal(later.statusText, `Cuefluent: Review deferred with Later. Draft ${code} ("meetings/rollout.md") remains pending; nothing was saved.\nReview folder: ${later.draft.folder}\n` +
+      `To decide, type ${codex} save ${code} or ${codex} skip ${code}.`);
     // The typed text alone carries the decision; the call has no review fields.
-    h.typedControl = `review save ${code}`;
+    h.typedControl = `save ${code}`;
     const saved = body(await h.call('processing_review', {}));
     assert.equal(saved.review, 'saved'); assert.equal(h.forms.length, 1);
     assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
@@ -456,8 +459,8 @@ test('Codex keeps its native form, names the review folder, and accepts the same
     const shown = body(await h.call('processing_review', {})), code = reviewCode(p.proposalHash);
     assert.equal(shown.review, 'presented'); assert.equal(shown.draft.code, code); assert.equal(h.forms.length, 0);
     assert.deepEqual(await fs.readFile(path.join(shown.draft.folder, 'proposed.md')), Buffer.from(big));
-    assert(shown.statusText.includes(`${codex} review save ${code}`));
-    h.typedControl = `review save ${code}`;
+    assert(shown.statusText.includes(`${codex} save ${code}`));
+    h.typedControl = `save ${code}`;
     assert.equal(body(await h.call('processing_review', {})).review, 'saved');
     assert.deepEqual(await fs.readFile(p.target), Buffer.from(big));
     assert.equal(await exists(shown.draft.folder), false);
@@ -484,16 +487,16 @@ test('a mixed or misspelled typed review command after a delivered typed review 
     const shown = await review(h), code = shown.draft.code;
     assert.equal(shown.review, 'presented'); assert.equal(code, reviewCode(p.proposalHash));
     const state = await fs.readFile(stateFile(f));
-    // The person typed `review save <code>` with more words; the binder found no
+    // The person typed `save <code>` with more words; the binder found no
     // exact action. The model may still copy a decision into the call (Claude).
-    h.nativeSkill = false; delete h.typedControl; h.typedSuggestions = [`review save ${code}`];
+    h.nativeSkill = false; delete h.typedControl; h.typedSuggestions = [`save ${code}`];
     const calls = [['processing_review', client === 'claude' ? { decision: 'save', draft: code } : {}], ['processing_review', {}],
       ['processing_status', {}], ['process_selected_captures', {}], ['processing_resume', {}], ['processing_cancel', {}]];
     for (const [name, args] of calls) {
       const reply = body(await h.call(name, args));
       assert.equal(reply.command, 'not-a-command', name); assert.equal(reply.review, undefined);
-      assert.deepEqual(reply.suggestions, [`review save ${code}`]); assert.equal(reply.commandPrefix, prefix);
-      assert.equal(reply.statusText, `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${prefix} review save ${code}.`);
+      assert.deepEqual(reply.suggestions, [`save ${code}`]); assert.equal(reply.commandPrefix, prefix);
+      assert.equal(reply.statusText, `Cuefluent: Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${prefix} save ${code}.`);
       assertPlainReply(reply, f);
     }
     // Nothing was decided, displayed, dispatched or recorded.
@@ -503,7 +506,7 @@ test('a mixed or misspelled typed review command after a delivered typed review 
     assert.equal(h.dispatches, 0); assert.equal(h.creates, 0); assert.equal(h.forms.length, 0);
     // Typed exactly, alone, the same decision applies.
     delete h.typedSuggestions; h.nativeSkill = true;
-    if (client === 'codex') h.typedControl = `review save ${code}`;
+    if (client === 'codex') h.typedControl = `save ${code}`;
     assert.equal((await review(h, client === 'claude' ? { decision: 'save', draft: code } : {})).review, 'saved');
     assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
   });
@@ -526,5 +529,110 @@ test('verified review replies are receipted canonically and replay byte-for-byte
     assert.equal(h.forms.length, capabilities ? 0 : 1);
     assert.deepEqual(await fs.readFile(stateFile(f)), state);
     assert.equal(view.draft.code, reviewCode(p.proposalHash));
+  });
+});
+
+// Every file under root, relative and sorted (listing order is not portable).
+async function fileTree(root) {
+  const out = [];
+  const walk = async directory => {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) await walk(file); else out.push(path.relative(root, file));
+    }
+  };
+  await walk(root); return out.sort();
+}
+
+test('help works before setup: with no configuration a status request lists the commands and touches no storage', async t => {
+  for (const client of ['claude', 'codex']) await t.test(client, async t => {
+    const f = await processingFixture(t, client === 'claude' ? { client } : {});
+    const h = client === 'claude' ? await claudeReview(t, f) : await harness(t, f, { capabilities: {} });
+    const prefix = client === 'claude' ? claude : codex;
+    // Before setup there is no configuration file at all.
+    await fs.rm(f.options.configPath);
+    const before = await fileTree(f.root);
+    // Claude mirrors a typed `help`; the skill typed alone and Codex call with no arguments.
+    for (const args of client === 'claude' ? [{ help: true }, {}] : [{}]) {
+      const reply = body(await h.call('processing_status', args));
+      assert.equal(reply.help, true); assert.equal(reply.status, 'missing'); assert.equal(reply.statusDetail, 'unbound');
+      assert.equal(reply.collectionId, null); assert.equal(reply.commandPrefix, prefix);
+      assert.deepEqual(reply.diagnostics, ['PROCESSING_CONTROL_SOURCE_UNVERIFIED']);
+      const lines = reply.statusText.split('\n');
+      assert.equal(lines[0], `Cuefluent: Nothing was applied: this chat has no verified Cuefluent Notes source yet. To set up Cuefluent Notes, type ${prefix} setup. The commands, typed exactly as written:`);
+      assert(lines.includes(`${prefix} setup: choose collection and processing settings.`));
+      assert(lines.includes(`${prefix} help: show this list.`));
+      assertPlainReply(reply, f);
+    }
+    // Every other control still refuses; nothing was opened, dispatched or written.
+    for (const name of ['processing_review', 'process_selected_captures', 'processing_resume', 'processing_cancel']) {
+      assert.equal((await h.call(name, {})).error?.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED', name);
+    }
+    assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
+    assert.deepEqual(await fileTree(f.root), before);
+  });
+});
+
+test('help, the bare skill, status and status --verbose reply in the client spelling and apply nothing', async t => {
+  for (const client of ['claude', 'codex']) await t.test(client, async t => {
+    const f = await processingFixture(t, client === 'claude' ? { client } : {}), p = await proposedClaim(f);
+    const h = client === 'claude' ? await claudeReview(t, f) : await harness(t, f, { capabilities: {} });
+    const prefix = client === 'claude' ? claude : codex, code = reviewCode(p.proposalHash);
+    const receipts = path.join(f.collection.intakeStateDir, 'control-dispatch', client, f.identity.sessionId);
+    const receiptCount = async () => (await exists(receipts)) ? (await fs.readdir(receipts)).length : 0;
+    const status = async (typed, args) => {
+      h.nativeSkill = true; h.typedControl = typed; h.callId = `call_${randomUUID()}`;
+      return body(await h.call('processing_status', client === 'claude' ? args : {}));
+    };
+    // A typed `help` is a formal read-only control, receipted (and so excluded) like `status`.
+    const help = await status('help', { help: true });
+    assert.equal(help.help, true); assert.equal(help.commandPrefix, prefix);
+    assert.equal(help.statusText.split('\n')[0], 'Cuefluent: Nothing was applied. Type one of these yourself, exactly as written:');
+    assert(help.statusText.includes(`\n${prefix} process: draft notes from pending captures (also: process repo, process chat, process resume, process cancel).`));
+    assertPlainReply(help, f);
+    if (client === 'codex') assert.equal(await receiptCount(), 1);
+    // The skill typed alone gets the same list; it is no control, so no receipt.
+    h.nativeSkill = false; delete h.typedControl; h.typedHelp = true; h.callId = `call_${randomUUID()}`;
+    for (const name of ['processing_status', 'processing_review', 'process_selected_captures']) {
+      const bare = body(await h.call(name, {}));
+      assert.equal(bare.help, true, name); assert.equal(bare.statusText, help.statusText, name); assert.equal(bare.review, undefined, name);
+    }
+    delete h.typedHelp;
+    if (client === 'codex') assert.equal(await receiptCount(), 1);
+    // Plain status lists the pending draft by code and note path, without codes.
+    const plain = await status('status', {});
+    assert.deepEqual(plain.drafts, [{ code, path: 'meetings/rollout.md', fileCount: 1 }]);
+    assert(plain.statusText.includes(`\nDrafts awaiting review:\n${code}  "meetings/rollout.md"\nRead one with ${prefix} review <draft code>.`));
+    assertPlainReply(plain, f);
+    // The verbose reply names the exact revision and every detail.
+    const verbose = await status('status --verbose', { verbose: true });
+    assert.equal(verbose.verbose, true);
+    assert.deepEqual(verbose.drafts, [{ code, path: 'meetings/rollout.md', fileCount: 1, operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash }]);
+    assert(verbose.statusText.includes(`\n${code}  "meetings/rollout.md"\n  operation ${f.operationId}; proposal ${p.proposalHash}; claim ${p.claimHash}`));
+    assert.match(verbose.statusText, /\nDiagnostics: [^\n]+\.\n/);
+    // Nothing was displayed, decided, dispatched or written.
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+    assert.equal(await exists(stateFile(f)), false);
+    assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
+  });
+});
+
+test('a plain-language request that starts with save is never a decision, in either client', async t => {
+  for (const client of ['claude', 'codex']) await t.test(client, async t => {
+    const f = await processingFixture(t, client === 'claude' ? { client } : {}), p = await proposedClaim(f);
+    const h = client === 'claude' ? await claudeReview(t, f) : await harness(t, f, { capabilities: {} });
+    h.nativeSkill = true; h.typedControl = 'review';
+    const shown = await review(h), code = shown.draft.code;
+    // "save this meeting note: ..." binds as a typed non-command (the skill
+    // routes it to its normal workflows); a control call still applies nothing.
+    h.nativeSkill = false; delete h.typedControl; h.typedSuggestions = ['save'];
+    for (const args of client === 'claude' ? [{ decision: 'save' }, { decision: 'save', draft: code }, {}] : [{}]) {
+      const reply = await review(h, args);
+      assert.equal(reply.command, 'not-a-command'); assert.equal(reply.review, undefined); assertPlainReply(reply, f);
+    }
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+    assert.equal(p.proposalHash.length, 64);
   });
 });

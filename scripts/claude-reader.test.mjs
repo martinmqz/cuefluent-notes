@@ -532,6 +532,45 @@ test('empty skill arguments are structural; other plugins, malformed markup and 
     ['review save t7xb88', 'https://example.invalid/board.png', 'Board photo.']);
 });
 
+test('nothing typed after the skill (the two-line envelope) is markup only, as one text block too', async t => {
+  // Claude CLI 2.1.302 omits the arguments element when nothing was typed.
+  const bare = (name = skillCommand) => `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>`;
+  for (const [name, content] of [['string', bare()], ['one block', [{ type: 'text', text: bare() }]],
+    ['with an empty block', [{ type: 'text', text: bare() }, { type: 'text', text: '' }]]]) await t.test(name, async t => {
+    const f = await fixture(t, [human(A, content), assistant()]), result = await readClaudeSelection(f.args);
+    assert.equal(result.candidates.length, 0); assert.deepEqual(result.noEvidence, [A]);
+    assert.equal(claudePublicationPlan(result).checkpoint.records.find(row => row.unitId === A).kind, 'human-empty');
+  });
+  // Another command, a trailing line or SDK input stays verbatim evidence.
+  for (const [name, text, extra] of [['another skill', bare('cuefluent-notes:other')], ['trailing newline', `${bare()}\n`],
+    ['SDK input', bare(), { promptSource: 'sdk' }]]) await t.test(name, async t => {
+    const f = await fixture(t, [human(A, text, extra)]);
+    assert.deepEqual((await readClaudeSelection(f.args)).candidates[0].capture.evidence.map(item => item.text), [text]);
+  });
+  // With other content, the envelope contributes nothing and the rest stays.
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/board.png' } };
+  const mixed = await fixture(t, [human(A, [{ type: 'text', text: bare() }, image])]);
+  assert.deepEqual((await readClaudeSelection(mixed.args)).candidates[0].capture.evidence.map(item => item.reference), ['https://example.invalid/board.png']);
+});
+
+test('published heads that kept the two-line envelope verbatim replay unchanged at every reader version', async t => {
+  // Before this rule a reader captured the bare envelope as typed text. A held
+  // cursor rereads it: the published head covers it, nothing is re-captured.
+  const bare = `<command-message>${skillCommand}</command-message>\n<command-name>/${skillCommand}</command-name>`;
+  for (const version of ['1', '2']) await t.test(`version ${version}`, async t => {
+    const f = await fixture(t, [human(A, bare), assistant()]), [anchor] = f.anchors;
+    const range = { startByte: anchor.startByte, endByte: anchor.endByte, recordIds: [anchor.id] };
+    const old = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity: { client: 'claude', sessionId: S, unitId: A }, projectRoot: f.root,
+      source: { path: f.source.path, fileIdentity: f.source.fileIdentity, ranges: [{ ...range, hash: anchor.hash }] },
+      reader: { name: 'claude-transcript', version, headerClientVersion: '2.1.280' }, occurredAt: stamp, capturedAt: stamp, terminal: 'unconfirmed',
+      coverage: { partial: true, omissions: [] }, evidence: [{ kind: 'user', recordId: anchor.id, range, text: bare }] });
+    const head = { capture: old, head: { fileHash: 'f'.repeat(64) }, hash: 'e'.repeat(64) };
+    const replay = await readClaudeSelection({ ...f.args, heads: new Map([[A, head]]) });
+    assert.equal(replay.candidates.length, 0); assert.deepEqual(replay.pending, []); assert.equal(replay.blocked, null);
+    assert.deepEqual(replay.covered, [{ unitId: A, evidenceHash: old.evidenceHash, fileHash: 'f'.repeat(64) }]);
+  });
+});
+
 test('a version 1 head keeps its verbatim rules; an unknown reader version refuses explicitly', async t => {
   const f = await fixture(t, [human(A, envelope('review sav t7xb88'))]);
   const result = await readClaudeSelection(f.args), current = result.candidates[0].capture;

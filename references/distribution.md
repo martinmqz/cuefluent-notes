@@ -276,8 +276,10 @@ package for that session rather than installing it permanently:
 claude --plugin-dir /absolute/extracted/cuefluent-notes
 ```
 
-The plugin skill name is `/cuefluent-notes:cuefluent-notes`; ordinary requests
-can also select it by purpose. Claude documents local loading and plugin skill
+Type the skill as `/cuefluent-notes`; its full plugin name
+`/cuefluent-notes:cuefluent-notes` also works and is needed when another command
+takes the bare name. Ordinary requests can also select it by purpose. Claude
+documents local loading and plugin skill
 namespacing in [Create plugins](https://code.claude.com/docs/en/plugins#test-your-plugins-locally).
 
 For persistent personal use, place the complete chosen Claude plugin at

@@ -14,6 +14,7 @@ import { processScope } from './collection-worker.mjs';
 import { recordProcessingControlDispatch, createProcessingControlResolver } from './processing-control-receipts.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
 import { verifyProcessingExecution } from './processing-execution-proof.mjs';
+import { processingControlCall } from './processing-control-proof.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -47,8 +48,9 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
   const input = row('user', `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${control}</command-args>`, { promptId: unitId, parentUuid: before.uuid });
   const companion = row('user', [{ type: 'text', text: expansion }],
     { promptId: unitId, isMeta: true, turnCompanion: true, parentUuid: input.uuid });
-  const tool = control === 'review' ? 'processing_review' : 'process_selected_captures';
-  const call = row('assistant', [{ type: 'tool_use', id: 'dispatch-call', name: `mcp__cuefluent_control__${tool}`, input: args }],
+  // Claude mirrors the typed fields in its call.
+  const mapped = processingControlCall(control), tool = mapped.tool, callArgs = { ...args, ...mapped.fields };
+  const call = row('assistant', [{ type: 'tool_use', id: 'dispatch-call', name: `mcp__cuefluent_control__${tool}`, input: callArgs }],
     { attributionSkill: command, attributionPlugin: 'cuefluent-notes', parentUuid: companion.uuid });
   const output = row('user', [{ type: 'tool_result', tool_use_id: 'dispatch-call', content: result.content }],
     { promptId: unitId, sourceToolAssistantUUID: call.uuid, toolUseResult: result.content, parentUuid: call.uuid });
@@ -75,7 +77,7 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
     boundary, request: { id: randomUUID(), client: 'claude', sessionId, expectedRevision: 0, operation: 'start', unitId: beforeId } }));
   const scopeId = selection.state.intervals[0].id;
   const dispatch = { client: 'claude', sessionId, unitId, callId: 'dispatch-call', tool: `mcp__cuefluent_control__${tool}`,
-    argsHash: digest(canonicalJSON(args)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
+    argsHash: digest(canonicalJSON(callArgs)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
     requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result.content)),
     inputId: input.uuid, inputHash: digest(input.message.content), companionId: companion.uuid, companionHash: digest(lines[1]),
     skillExpansionHash: digest(companion.message.content[0].text), skillCommand: command };
@@ -86,8 +88,8 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
       loadHead: id => readCaptureHead(store, { client: 'claude', sessionId, unitId: id }), resolveProcessingDispatch: resolve(tx), ...extra }) };
 }
 
-test('Claude formal process and review inputs advance without raw captures and remain excluded on checkpoint replay', async t => {
-  for (const control of ['process', 'review']) await t.test(control, async t => {
+test('Claude formal process, review, help and decision inputs advance without raw captures and remain excluded on checkpoint replay', async t => {
+  for (const control of ['process', 'review', 'help', 'status --verbose', 'save k2mn9p']) await t.test(control, async t => {
     const f = await claudeFixture(t, { control });
     await withIntakeLock(f.store, async tx => {
       await f.record(tx); const read = await f.read(tx), plan = claudePublicationPlan(read);

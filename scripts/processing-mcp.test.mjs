@@ -50,7 +50,9 @@ test('MCP admission returns while native processing is pending, and shutdown wai
   assert.equal(duplicate.requestId, admitted.requestId);
   assert.equal(duplicate.statusDetail, 'already-processing');
   assert.match(duplicate.statusText, /Already processing; no additional run was started/);
-  assert.match(duplicate.statusText, /PROCESSING_CHAT_BUSY/);
+  // The code stays in the field; the visible text says where to see it.
+  assert.doesNotMatch(duplicate.statusText, /PROCESSING_/);
+  assert.match(duplicate.statusText, /For details, type \S+ status --verbose\.$/);
   h.end(); let ended = false; h.server.then(() => { ended = true; });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(ended, false); assert.equal(h.closes, 0);
@@ -428,7 +430,7 @@ test('editing the native preview refuses Save and preserves the exact proposal f
   const refused = body(await review);
   assert.equal(refused.status, 'awaiting-review'); assert.equal(refused.review, 'display-altered');
   assert.equal(refused.nextAction, 'review'); assert.deepEqual(refused.diagnostics, []);
-  assert.match(refused.statusText, /Nothing was saved, skipped or cancelled; the draft remains pending\./);
+  assert.match(refused.statusText, /Nothing was saved, skipped or cancelled; draft [a-hjkmnp-tv-z2-9]{6} \("meetings\/rollout\.md"\) remains pending\./);
   const after = await inspectProcessing(f.capability, f.operationId);
   assert.equal(after.state, 'awaiting-review'); assert.equal(after.outcome, null);
   assert.equal(after.claimHash, before.claimHash); assert.equal(after.proposalHash, before.proposalHash);
@@ -479,7 +481,7 @@ test('observed Claude review responses keep the exact draft pending with truthfu
   // The same pending draft still saves exactly when a host round-trips its display.
   const saved = body(await review(() => ({ action: 'accept', content: { decision: 'save' } })));
   assert.equal(saved.review, 'saved');
-  assert.match(saved.statusText, /^Cuefluent: Review completed: the exact reviewed proposal was saved\./);
+  assert.match(saved.statusText, /^Cuefluent: Review completed: the exact reviewed proposal of draft [a-hjkmnp-tv-z2-9]{6} \("meetings\/rollout\.md"\) was saved\./);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
   assert(!JSON.stringify(h.responses.filter(row => row.method !== 'elicitation/create')).includes('PRIVATE-SYNTHETIC-PROPOSAL'));
@@ -608,6 +610,9 @@ test('committed source Save stays successful when the chat registry requires lat
   assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
   assert.equal(result.statusDetail, 'completed');
   assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
+  // The visible reply keeps the saved outcome and still says to look further.
+  assert.match(result.statusText, /^Cuefluent: Review completed: the exact reviewed proposal of draft [a-hjkmnp-tv-z2-9]{6} \("meetings\/rollout\.md"\) was saved\./);
+  assert(result.statusText.endsWith('\nSomething needs attention; for details, type $cuefluent-notes status --verbose.'), result.statusText);
   assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
@@ -630,6 +635,9 @@ test('committed source Save survives revoked receipt authorization without fabri
   assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
   assert.equal(result.statusDetail, 'completed');
   assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
+  // The visible reply keeps the saved outcome and still says to look further.
+  assert.match(result.statusText, /^Cuefluent: Review completed: the exact reviewed proposal of draft [a-hjkmnp-tv-z2-9]{6} \("meetings\/rollout\.md"\) was saved\./);
+  assert(result.statusText.endsWith('\nSomething needs attention; for details, type $cuefluent-notes status --verbose.'), result.statusText);
   assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
   await assert.rejects(fs.lstat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
@@ -650,6 +658,9 @@ test('controller close failure after source Save preserves its committed outcome
   assert.equal(result.status, 'completed'); assert.equal(result.nextAction, 'inspect');
   assert.equal(result.statusDetail, 'completed');
   assert.deepEqual(result.diagnostics, ['PROCESSING_CHAT_CONFLICT']);
+  // The visible reply keeps the saved outcome and still says to look further.
+  assert.match(result.statusText, /^Cuefluent: Review completed: the exact reviewed proposal of draft [a-hjkmnp-tv-z2-9]{6} \("meetings\/rollout\.md"\) was saved\./);
+  assert(result.statusText.endsWith('\nSomething needs attention; for details, type $cuefluent-notes status --verbose.'), result.statusText);
   assert.equal(result.requestId, first.requestId); assert.deepEqual(result.chat, first.chat);
   assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
@@ -951,9 +962,12 @@ test('missing exact registration never borrows an unrelated registration or a co
     assert.notEqual(file, path.join(f.collection.intakeStateDir, 'ingress/status/record.json'));
     return original.call(this, file, ...args);
   });
-  for (const args of [{}, { collectionId: f.collection.id }]) {
-    assert.equal((await h.call('processing_status', args)).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
-  }
+  // With no record for this session, a plain status gets the command list; an
+  // explicit collection still refuses. Neither reads the other session.
+  const unbound = body(await h.call('processing_status', {}));
+  assert.equal(unbound.statusDetail, 'unbound'); assert.equal(unbound.help, true);
+  assert.equal((await h.call('processing_status', { collectionId: f.collection.id })).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal((await h.call('processing_review', {})).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
 });
 
@@ -1001,7 +1015,11 @@ test('old registrations without current collection consent do not request grant 
     });
     for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) for (const args of [{}, { collectionId: f.collection.id }]) {
       const result = await h.call(tool, args);
-      assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+      // With no route left for this client, nothing is set up for the chat: a
+      // plain status gets the command list. A retired registration still refuses.
+      if (variant === 'unconfigured' && tool === 'processing_status' && args.collectionId === undefined) {
+        assert.equal(body(result).statusDetail, 'unbound'); assert.equal(body(result).help, true);
+      } else assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
     }
     assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
     assert.equal((await readSelection(parent.store, f.identity)).state, null);

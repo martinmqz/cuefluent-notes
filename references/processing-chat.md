@@ -240,10 +240,12 @@ Provider setup belongs to the native client; see its
 
 ## Entry and reuse
 
-Use the existing skill with the exact argument `process`: select Cuefluent Notes
-in Codex and enter `process`, or use `/cuefluent-notes:cuefluent-notes process` in
-Claude. Loading the skill, setup, status and direct saves do not start a processing
-session. In a configured source chat the skill calls
+Use the existing skill with the exact argument `process`: type
+`$cuefluent-notes process` in Codex or `/cuefluent-notes process` in Claude.
+Claude records the bare `/cuefluent-notes` as its full name
+`/cuefluent-notes:cuefluent-notes`, which also works; type the full name when
+another command takes the bare one. Loading the skill, setup, status and direct
+saves do not start a processing session. In a configured source chat the skill calls
 `cuefluent_control.process_selected_captures`. The source adapter verifies
 native call metadata against that selected session's actual call record. If the
 collection is omitted, bounded existing binding metadata (selection or
@@ -350,8 +352,8 @@ before processing starts. Collection settings in the work project stay unchanged
 ### Shortcut scopes and continuation
 
 Use the [formal skill actions](../SKILL.md#formal-processing-controls) in either
-client. In Claude, append the action to `/cuefluent-notes:cuefluent-notes`; in
-Codex, select Cuefluent Notes and type the action. Plain `process` selects pending
+client: type `/cuefluent-notes` in Claude or `$cuefluent-notes` in Codex, then the
+action; `help` lists them all. Plain `process` selects pending
 retained evidence across the existing collection, including configured repos and
 both clients. `process repo` uses the nearest verified Git checkout and excludes
 separate nested repositories. `process chat` selects the invoking native session.
@@ -371,7 +373,7 @@ run limit. A completed no-change operation allows another batch. Already handled
 revisions are not admitted again. A changed head is new evidence, not permission
 to replace an existing conflicted claim.
 
-`resume` keeps the saved evidence selection and inspection checkpoints. It does
+`process resume` keeps the saved evidence selection and inspection checkpoints. It does
 not add captures that arrived later, and reports a no-op when no unfinished work
 exists. A `process` request also resumes saved unfinished work first; it reports
 that selection's actual scope. A conflicting narrower request is refused rather
@@ -415,16 +417,16 @@ assuming the background work completed.
 A native request cancellation received while admission is pending releases that
 admission without starting the model turn or returning a response. Once admission
 has completed, cancelling that finished request does not cancel the separate run
-or undo a saved note. The separate `cancel` action stops only native execution
+or undo a saved note. The separate `process cancel` action stops only native execution
 owned by this connected controller and waits for a verified terminal result
 before releasing unapplied claims. Unknown or externally owned execution reports
 `PROCESSING_CANCEL_UNVERIFIED`; preserve it for recovery. Cancellation is durable
-and resumable if interrupted; invoke `cancel` again to finish it. It never adopts
+and resumable if interrupted; invoke `process cancel` again to finish it. It never adopts
 unrelated standalone claims or drafts. Within the saved selection, it also cancels
 owned unsaved proposals, which can no longer be saved through review. The evidence
 and operation history remain on disk; generating a replacement proposal requires
-processing again and can incur model usage. Choose **Later** in review to preserve
-a proposal for later approval. Cancellation keeps captures pending, preserves saved notes,
+processing again and can incur model usage. To preserve a proposal for later
+approval, leave it undecided (or choose **Later** in the Codex form) instead. Cancellation keeps captures pending, preserves saved notes,
 and leaves collection/processing preferences unchanged. A new `process` request
 can select those pending captures after cancellation completes. This also provides
 a fresh selection after a policy change or an unavailable frozen input, without
@@ -446,14 +448,14 @@ reference was never recorded. An operation's existence is not proof that its
 processor is stopped. The shortcut does not invent ownership or replace its claim.
 
 Before a fresh selection, unfinished work is checked across the collection;
-unverified work can block `process` and `resume` even when only another repository
+unverified work can block `process` and `process resume` even when only another repository
 or chat was requested. An operation outside a narrower requested scope can instead
 report `PROCESSING_SHORTCUT_SCOPE_CONFLICT`. Existing authorized proposals remain
 available through `review`, subject to the usual execution and recovery guards.
 
 Confirm that the prior processor has stopped, inspect the affected operation and
 use the [explicit processing workflow](processing.md#outcomes-and-recovery) to
-finish it or safely cancel unapplied work. Shortcut `cancel` refuses with
+finish it or safely cancel unapplied work. Shortcut `process cancel` refuses with
 `PROCESSING_CANCEL_UNVERIFIED` when it cannot establish ownership; it is not a way
 to clear standalone or unverified operations. Keep claims, proposals and recovery
 state intact until the supported operation succeeds.
@@ -481,20 +483,20 @@ and lists the others by code and note path.
 
 A draft code is six letters and digits derived from the exact proposal. A
 replaced proposal gets a new code. Decide by typing one command yourself:
-`review save <code>` writes the exact proposal through the existing writer,
-`review skip <code>` handles only those captures without saving, `review cancel
-<code>` releases the unapplied operation and keeps its captures pending, and
-`review later <code>` keeps the draft pending. In Claude, prefix these with
-`/cuefluent-notes:cuefluent-notes`; in Codex, select Cuefluent Notes and type the
-action.
+`save <code>` writes the exact proposal through the existing writer,
+`skip <code>` handles only those captures without saving, and `review cancel
+<code>` releases the unapplied operation and keeps its captures pending. To keep
+the draft pending, type nothing. In Claude, prefix these with `/cuefluent-notes`;
+in Codex, with `$cuefluent-notes`.
 
 A decision applies only when all of these hold:
 
 - the exact command was typed in the chat and verified from the native transcript;
   model text, a natural-language reply or a tool argument the model chose is
   refused. A near miss after the skill command (other case or spacing, a
-  misspelling, a missing `review`, an invalid code) or a command mixed with more
-  words, lines or content is not a command and decides nothing. When that typed
+  misspelling, an old spelling such as `review save`, an invalid code) or a
+  command mixed with more words, lines or content is not a command and decides
+  nothing; neither does a plain-language request that starts with `save`. When that typed
   input is verified from the transcript, no tool the model calls applies
   anything, and the reply names the nearest exact command to type;
 - this chat was shown that exact revision by a typed `review` whose reply reached
@@ -506,8 +508,7 @@ A decision applies only when all of these hold:
   folder are removed, and a fresh `review` is needed; if a note changed, restore it
   or process again.
 
-Without a code, `review save`, `review skip`, `review cancel` and `review later`
-apply only to the revision this chat was most recently shown by a typed `review`.
+Without a code, `save`, `skip` and `review cancel` apply only to the revision this chat was most recently shown by a typed `review`.
 If that display came from a natural-language request or a model-initiated call, or
 nothing was shown, the reply lists the pending drafts and nothing is applied. Being
 the only pending draft or the only review folder never selects a draft. No
@@ -524,7 +525,7 @@ action is selected by default. The host's own **Skip** or dismiss control is not
 proposal's Skip action; it leaves the proposal pending. A host response is distinct
 from a model tool argument; it does not establish that a person physically clicked
 rather than a host policy answering the form. Codex accepts the same typed decisions,
-for example after choosing Later. A Codex host without form support reviews through
+for example after choosing Later; a typed Later is not an action yet. A Codex host without form support reviews through
 the folder and typed decisions only.
 
 A form decision applies only when the host returns the preview unchanged. Changes to
@@ -653,7 +654,7 @@ operation and use its ordinary resume, review or recovery commands. Abandonment
 does not mark evidence handled, save a note or prove an exclusion. Only a later
 explicit request with a new request ID can create a replacement session in the
 same namespace; it never resumes the retired native chat. Retries of the abandoned
-request are refused. After retirement, invoke `resume` to continue the saved
+request are refused. After retirement, invoke `process resume` to continue the saved
 selection, or `process` to apply its ordinary unfinished-selection-first behavior.
 Both require a fresh native call and current launch authentication; neither
 automatically resolves an unfinished claim or bypasses recovery. Status clears

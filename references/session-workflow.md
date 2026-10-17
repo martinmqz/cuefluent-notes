@@ -127,9 +127,12 @@ Existing capture heads, packets and claims remain unchanged.
 Nothing else that selects the skill is excluded. A Claude human input that is
 exactly the trusted skill command's envelope
 (`<command-message>`, `<command-name>`, `<command-args>` in that order, for
-`cuefluent-notes:cuefluent-notes`) without a proof keeps its typed arguments as
-evidence, exactly as written, without the markup; when nothing was typed after
-the command the input is structural. Another skill or plugin, any other shape or
+`cuefluent-notes:cuefluent-notes`, the name Claude records whether the bare
+`/cuefluent-notes` or the full name was typed) without a proof keeps its typed
+arguments as evidence, exactly as written, without the markup. When nothing was
+typed after the command, Claude records only the first two lines (CLI 2.1.302),
+and that input, like an empty arguments element, is structural under every reader
+version; a published head that kept it as text replays unchanged. Another skill or plugin, any other shape or
 text outside the envelope, and SDK input stay verbatim. A control mixed with
 more words or content is therefore retained in full. A Codex unit whose user
 message carries this skill's block (its exact native shape and the skill name

@@ -20,7 +20,9 @@ const line = value => JSON.stringify(value) + '\n';
 const CONTROLS = {
   status: { tool: 'processing_status', arguments: {} },
   review: { tool: 'processing_review', arguments: {} },
-  'review save k2mn9p': { tool: 'processing_review', arguments: { decision: 'save', draft: 'k2mn9p' } },
+  help: { tool: 'processing_status', arguments: { help: true } },
+  'status --verbose': { tool: 'processing_status', arguments: { verbose: true } },
+  'save k2mn9p': { tool: 'processing_review', arguments: { decision: 'save', draft: 'k2mn9p' } },
 };
 
 async function claudeFixture(t, { collect = true } = {}) {
@@ -390,11 +392,11 @@ test('a fresh session continued right after its first-prompt control still links
   assert.equal((await readContinuesLink(f.store, B.sessionId)).link.lineage, A.sessionId);
   assert.deepEqual(sessionCodes(settled, A.sessionId), []);
   assert.equal((await A.selection()).state, null);
-  const Q1 = randomUUID(), [input, companion] = B.control('review save k2mn9p', Q1), decision = B.call('review save k2mn9p');
+  const Q1 = randomUUID(), [input, companion] = B.control('save k2mn9p', Q1), decision = B.call('save k2mn9p');
   await B.append([input, companion]); await B.hook('UserPromptSubmit', Q1); await f.run();
   await B.append([decision]);
   const bound = await B.resolve(decision);
-  assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, 'review save k2mn9p');
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, 'save k2mn9p');
   assert.deepEqual(bound.chatLineage, { client: 'claude', sessionId: A.sessionId });
   assert.equal((await B.head(P1)).head, null);
 });

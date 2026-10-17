@@ -69,9 +69,9 @@ paths to bypass a refusal; follow
 
 ## Processing
 
-Prefer the reusable processing chat: select Cuefluent Notes with `process` in
-Codex, or use `/cuefluent-notes:cuefluent-notes process` in Claude. Invoke the same
-skill with `review` to review the exact proposal through a supported host form.
+Prefer the reusable processing chat: type `$cuefluent-notes process` in Codex or
+`/cuefluent-notes process` in Claude. Invoke the same skill with `review` to
+review the exact proposal, and `help` to list every action.
 This remains an explicit request in every mode, including Automatic.
 The restricted session disables inherited collection hooks; formal controls use
 verified native identities. Mixed work and corrections remain eligible evidence.
