@@ -34,11 +34,19 @@ contracts for supported commands, formats, permissions and recovery procedures.
   and decides nothing. These channels resist the chat model, not a local
   process: any process running as the user can drive the client or the helper
   commands. See [review controls](processing-chat.md#review-controls).
-- A Codex control run through code mode, which Codex CLI 0.163 uses for tool
-  calls, gets no capture-exclusion receipt: that control turn, its typed mention
-  and its code-mode cells can enter a later capture. A Claude Desktop session
-  connected for Remote Control stops collection at its first `bridge-session`
-  record. See [capture prevention](processing-chat.md#capture-prevention-and-limits).
+- A verified Codex control turn, direct or in code mode, is kept out of captures
+  only when the whole completed turn has exactly the verified shape. Anything
+  else in it, such as commentary, the assistant reading a file or calling another
+  tool, keeps that turn collectible with the assistant's own words; its exact
+  command, command markup, this plugin's control calls and the assistant's
+  repetition of the plugin's reply are still left out. A mention typed out by hand
+  is collected as typed. Code-mode cells are
+  bound through the IDs Codex sends with the call, which Codex CLI 0.163's source
+  shows model-written code cannot set; other Codex versions and the installed
+  binaries themselves are not checked. A nested tool that leaves no native record
+  is not visible to the check. A Claude Desktop session connected for Remote
+  Control stops collection at its first `bridge-session` record. See
+  [capture prevention](processing-chat.md#capture-prevention-and-limits).
 - Routing text typed after the skill command, such as a plain-language request
   that starts with `save`, depends on the model following
   [the skill](../SKILL.md#formal-processing-controls). Verified inexact text

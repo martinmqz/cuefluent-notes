@@ -247,7 +247,7 @@ test('formal native-call replay while busy returns the original admission withou
 
 test('formal processing cannot replace its verified source selection with model arguments', async t => {
   for (const nested of [false, true]) await t.test(nested ? 'code-mode handshake' : 'direct native call', async t => {
-    const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = !nested; h.controlExclusionUnsupported = nested;
+    const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true; h.codeMode = nested;
     const row = await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID(),
       selection: { ...selectedInput(f), sessionId: randomUUID() } });
     assert.equal(row.error.data.code, 'PROCESSING_CONTROL_SELECTION_MISMATCH');
@@ -263,7 +263,7 @@ test('formal processing existing evidence remains available with collection disa
     f.options.expectedConfigHash = digest(bytes);
     f.capability = await verifyWorkflowStorage(f.options);
     f.store = await openWorkflowIntake(f.capability);
-    const h = await harness(t, f); h.nativeSkill = !nested; h.controlExclusionUnsupported = nested;
+    const h = await harness(t, f); h.nativeSkill = true; h.codeMode = nested;
     const closed = h.whenClosed();
     const result = await h.call('process_selected_captures', { collectionId: f.collection.id });
     assert.equal(result.error, undefined);
@@ -1251,12 +1251,21 @@ test('cancellation during receipt publication preserves admitted dispatch and it
 });
 
 
-test('a formal code-mode handshake dispatches but reports the unsealed source control honestly', async t => {
-  const f = await processingFixture(t), h = await harness(t, f); h.controlExclusionUnsupported = true;
+test('a formal code-mode control records an exclusion receipt naming both cells and the retry call', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true; h.codeMode = true;
   const closed = h.whenClosed();
   const value = body(await h.call('process_selected_captures', { collectionId: f.collection.id }));
-  assert.deepEqual(value.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
+  assert.deepEqual(value.diagnostics, []);
   await closed; assert.equal(h.dispatches, 1);
+  // The binding's callId is the handshake's nested call; this call is the retry.
+  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('exec-handshake-call_1').slice(0, 24)}.json`);
+  const { dispatch } = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.deepEqual([dispatch.callId, dispatch.outerItemId, dispatch.retryItemId, dispatch.retryCallId, dispatch.handshakeResultHash],
+    ['exec-handshake-call_1', 'ctc_handshake_item_1', 'item_1', 'call_1', digest('synthetic handshake result')]);
+  // Without collection there is nothing to exclude and no receipt.
+  const off = await processingFixture(t), g = await harness(t, off); g.nativeSkill = true; g.codeMode = true; g.captureActive = false;
+  assert.deepEqual(body(await g.call('processing_status', { collectionId: off.collection.id })).diagnostics, []);
+  await assert.rejects(fs.lstat(path.join(off.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
 });
 
 async function completeNextBatch(call, f) {

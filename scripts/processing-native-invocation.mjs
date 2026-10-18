@@ -9,7 +9,7 @@ import { assertWorkflowStorage, workflowProcessingContext, workflowCollectionGra
 import { currentIntervals, inspectSourceBoundary } from './capture-selection.mjs';
 import { processingSourceDirectory, processingSourcePath, validateProcessingSource, readRegistration, registrationPath, registrationFloorPath } from './collection-ingress.mjs';
 import { readSessionRange } from './session-jsonl.mjs';
-import { verifyCodexHeader, codexRegistrationHeader } from './codex-reader.mjs';
+import { verifyCodexHeader, codexRegistrationHeader, codexSkillSelection, codexMentionText } from './codex-reader.mjs';
 import { claudeRegistrationHeader, isClaudeHumanRow } from './claude-reader.mjs';
 import { readContinuesLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
 import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, findClaudeSkillArguments, claudeProcessingCommandKind, processingControlAction,
@@ -201,13 +201,14 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     } catch (error) { await settle(attempt, error, MissingNativeInvocation); }
   }
   await guard();
-  const { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached } = found;
+  const { call, unitId, nativeSkill, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached } = found;
   // typedControl is the exact verified typed action. Only a verified binding
   // carries it; a model-chosen call never does. A Codex code-mode call carries
   // it too: the typed text and skill selection are the same native turn's, the
   // inner native MCP item has the exact arguments and the single-use handshake
-  // completed; the model's code is never read. Its turn gets no exclusion
-  // receipt (controlExclusionUnsupported), so it stays collectible.
+  // completed; the model's code is never read. Its exclusion receipt names the
+  // handshake's first cell here and the retry's cell and call from the retry's
+  // own native metadata, so the reader can prove the whole turn.
   // typedSuggestions marks a typed skill invocation that is not an exact action:
   // nothing may be applied for it, whichever tool the model called; it names
   // the nearest exact commands and is never authority. typedHelp marks the
@@ -215,7 +216,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   // is the command list.
   const result = Object.freeze({ source: Object.freeze(structuredClone(source)), selection: Object.freeze(selection),
     configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill,
-    controlExclusionUnsupported: Boolean(nested && nativeSkill), unitId, argsHash, ...call,
+    unitId, argsHash, ...call,
     ...(nativeSkill ? { typedControl } : {}),
     ...(typedSuggestions ? { typedSuggestions } : {}),
     ...(typedHelp ? { typedHelp: true } : {}),
@@ -390,43 +391,15 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
       else if (typed) typedSuggestions = processingControlSuggestions(typed.arguments);
     }
   }
-  return { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached };
+  return { call, unitId, nativeSkill, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached };
 }
 
-// The two mentions Codex shows for this skill: the plugin-qualified one its
-// `$` menu inserts, and the bare skill name.
-const CODEX_MENTIONS = Object.freeze([`$${SKILL_NAME}:${SKILL_NAME}`, `$${SKILL_NAME}`]);
-/** A Codex 0.163 selected-skill item for exactly this installed skill: one
- * text block opening with its name and SKILL.md path. */
+/** A Codex 0.163 selected-skill item for exactly this installed skill. */
 function trustedSelection(item, skillPath) {
-  const kinds = item.internal_chat_message_metadata_passthrough.content_item_kinds;
-  if (kinds.length !== 1 || !Array.isArray(item.content) || item.content.length !== 1) return false;
-  const [block] = item.content;
-  if (block?.type !== 'input_text' || typeof block.text !== 'string' || Object.keys(block).some(key => !['type', 'text'].includes(key))) return false;
-  const header = /^<skill>\n<name>([^<\n]{1,128})<\/name>\n<path>([^<\n]{1,4096})<\/path>\n/.exec(block.text);
-  return Boolean(header) && [`${SKILL_NAME}:${SKILL_NAME}`, SKILL_NAME].includes(header[1]) && path.isAbsolute(header[2]) &&
-    path.normalize(header[2]) === path.normalize(skillPath);
+  const selected = codexSkillSelection(item);
+  return selected !== null && path.normalize(selected) === path.normalize(skillPath);
 }
-/** The text after this skill's leading mention in a one-part Codex message:
- * '' for the mention alone, else what follows it, starting with its
- * separator. The mention may be recorded as the menu's one placeholder
- * element covering exactly it, or not at all. Anything else is null. */
-function mentionedText(content) {
-  if (!Array.isArray(content) || content.length !== 1) return null;
-  const [part] = content;
-  if (part?.type !== 'text' || typeof part.text !== 'string' || Object.keys(part).some(key => !['type', 'text', 'text_elements'].includes(key))) return null;
-  const mention = CODEX_MENTIONS.find(value => part.text === value || part.text.startsWith(`${value} `) || (part.text.startsWith(value) && !/^[a-z0-9:_-]/i.test(part.text.slice(value.length))));
-  if (mention === undefined) return null;
-  const elements = part.text_elements ?? [];
-  if (!Array.isArray(elements) || elements.length > 1) return null;
-  if (elements.length) {
-    const [element] = elements;
-    if (!object(element) || Object.keys(element).some(key => !['byte_range', 'placeholder'].includes(key)) || element.placeholder !== mention ||
-        !object(element.byte_range) || Object.keys(element.byte_range).some(key => !['start', 'end'].includes(key)) ||
-        element.byte_range.start !== 0 || element.byte_range.end !== Buffer.byteLength(mention)) return null;
-  }
-  return part.text.slice(mention.length);
-}
+const mentionedText = codexMentionText;
 
 /** Claude may keep its MCP process across /clear. The launch UUID is a hint;
  * a fallback binds only the exact native tool-use ID in already registered,

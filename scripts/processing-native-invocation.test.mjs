@@ -440,15 +440,16 @@ test('Codex outer exec can request a handshake but only a completed exact inner 
   const pending = await f.resolve(); assert.equal(pending.pending, true); assert.equal(isProcessingInvocation(pending), false);
   await f.append([rows.call, rows.output]);
   const bound = await f.resolve(); assert.equal(isProcessingInvocation(bound), true);
-  // The typed text verifies through code mode as well; only its exclusion
-  // receipt is unavailable.
+  // The typed text verifies through code mode as well. The binding names the
+  // handshake's first cell and result, which its exclusion receipt records.
   assert.equal(bound.handshakeResultHash, digest(canonicalJSON(result))); assert.equal(bound.nativeSkill, true);
-  assert.equal(bound.typedControl, 'process'); assert.equal(bound.controlExclusionUnsupported, true);
+  assert.equal(bound.typedControl, 'process'); assert.equal(bound.outerItemId, f.context.itemId);
+  assert.equal(bound.callId, f.context.toolCallId);
   // Without the typed skill input, a code-mode call carries no typed authority.
   const g = await fixture(t), other = nestedRows(g, result);
   await g.append([g.spacer(), other.outer, other.call, other.output]);
   const plain = await g.resolve();
-  assert.equal(plain.nativeSkill, false); assert.equal(Object.hasOwn(plain, 'typedControl'), false); assert.equal(plain.controlExclusionUnsupported, false);
+  assert.equal(plain.nativeSkill, false); assert.equal(Object.hasOwn(plain, 'typedControl'), false);
 });
 
 // Codex 0.163: a skill picked from the `$` menu arrives as its own user context
@@ -483,7 +484,7 @@ test('Codex 0.163 typed controls verify from the menu mention and its selected-s
     } else await f.append([f.spacer(), ...input, f.nativeCall()]);
     const bound = await f.resolve();
     assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, typed);
-    assert.equal(bound.controlExclusionUnsupported, nested);
+    assert.equal(bound.handshakeResultHash !== undefined, nested);
   });
   await t.test('a typed control that names another tool is refused', async t => {
     const f = await fixture(t); f.invocation.tool = 'processing_status'; f.invocation.arguments = { collectionId: f.collection.id };

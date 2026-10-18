@@ -10,11 +10,21 @@ const MAX_RECEIPT_BYTES = 32 * 1024;
 const FIELDS = ['client', 'sessionId', 'unitId', 'callId', 'tool', 'argsHash', 'sourceIdentity', 'sourcePath',
   'requestHash', 'skillName', 'skillPath', 'statusText', 'resultHash'];
 const CLAUDE_FIELDS = ['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand'];
+// A Codex code-mode control: the handshake's first cell (its item ID), the
+// retry's cell and nested call, and the handshake result, all from native
+// metadata. callId is the handshake's nested call. All four or none.
+const CODEX_CODE_MODE_FIELDS = ['outerItemId', 'retryItemId', 'retryCallId', 'handshakeResultHash'];
+const nativeToken = value => { string(value, 128); if (!/^[a-zA-Z0-9_-]+$/.test(value)) fail('INVALID_PROCESSING_CONTROL_RECEIPT'); };
 
 function dispatchDescriptor(value) {
-  keys(value, value?.client === 'claude' ? [...FIELDS, ...CLAUDE_FIELDS] : FIELDS, ['response']);
+  keys(value, value?.client === 'claude' ? [...FIELDS, ...CLAUDE_FIELDS] : FIELDS, ['response', ...(value?.client === 'codex' ? CODEX_CODE_MODE_FIELDS : [])]);
   if (!['codex', 'claude'].includes(value.client) || value.skillName !== 'cuefluent-notes') fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   nativeId(value.sessionId); nativeId(value.unitId); string(value.callId, 512);
+  if (value.client === 'codex' && CODEX_CODE_MODE_FIELDS.some(field => value[field] !== undefined)) {
+    if (CODEX_CODE_MODE_FIELDS.some(field => value[field] === undefined)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+    nativeToken(value.outerItemId); nativeToken(value.retryItemId); nativeToken(value.retryCallId); hash(value.handshakeResultHash);
+    if (value.outerItemId === value.retryItemId || value.retryCallId === value.callId) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+  }
   if (!(value.client === 'codex' ? /^mcp__[a-zA-Z0-9_-]{1,128}\.[a-zA-Z0-9_-]{1,128}$/
     : /^mcp__[a-zA-Z0-9_-]*cuefluent_control__(?:process_selected_captures|processing_review|processing_status|processing_resume|processing_cancel)$/).test(value.tool)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   if (value.client === 'claude') {

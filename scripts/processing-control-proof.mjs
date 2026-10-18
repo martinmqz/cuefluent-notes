@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { readBoundedBytes } from './file-io.mjs';
 import { readSessionRange } from './session-jsonl.mjs';
-import { verifyCodexHeader } from './codex-reader.mjs';
+import { verifyCodexHeader, codexSkillSelection, codexMentionText, codexCellOutput, codexToolRenderings } from './codex-reader.mjs';
 import { claudeRegistrationHeader, claudeSessionKinds } from './claude-reader.mjs';
 import { canonicalJSON, digest, integer, isNativeId, object } from './workflow-values.mjs';
 
@@ -366,6 +366,15 @@ function receiptMatches(receipt, query, source) {
 /** Only the controller supplies resolveDispatch, backed by its private invocation receipts.
  * It is an internal callback, never a CLI request field or a model-supplied assertion.
  * Unknown/mixed native units return null and remain collectible in their entirety.
+ *
+ * The whole completed unit must be exactly one verified control turn: the typed
+ * input (the older skill part plus text, or the Codex 0.163 leading mention plus
+ * the selection item), native context, the one call (direct, or in code mode
+ * the two cells of the verification handshake and any `wait` on the second)
+ * and the one final reply, which is the receipt's status text. Any other
+ * record refuses: another tool or nested item, reading a file, commentary or
+ * another message, an unknown record. Model-written
+ * JavaScript is never read; cells are bound by native IDs the receipt names.
  */
 export async function verifyCodexProcessingControl({ source, fromByte, endByte, unitId }, { resolveDispatch }) {
   integer(fromByte); integer(endByte);
@@ -383,11 +392,10 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
       first.payload.turn_id !== unitId || first.payload.root_turn_id !== unitId ||
       last.type !== 'event_msg' || last.payload?.type !== 'task_complete' || last.payload.turn_id !== unitId ||
       last.payload.error != null) return null;
-  let user = null, userText = null, invocation = null, nativeCall = null, nativeOutput = null;
-  let contextSeen = false;
-  const assistant = [], assistantNative = [];
-  for (const row of rows.slice(1, -1)) {
-    const p = row.payload;
+  let user = null, userText = null, selection = null, invocation = null, contextSeen = false;
+  const assistant = [], assistantNative = [], nativeCalls = [], cells = [], waits = [], outputs = new Map();
+  for (let index = 1; index < rows.length - 1; index++) {
+    const row = rows[index], p = row.payload;
     if (!object(p)) return null;
     if (row.type === 'turn_context') {
       if (contextSeen || p.turn_id !== unitId || p.root_turn_id !== unitId) return null;
@@ -406,28 +414,26 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
     if (row.type === 'event_msg') {
       if (p.type === 'token_count') continue;
       if (['agent_reasoning', 'agent_reasoning_raw_content'].includes(p.type) && p.turn_id === unitId) continue;
+      // A session's first turn applies its settings; settings are no input.
+      if (p.type === 'thread_settings_applied' && p.thread_id === source.sessionId) continue;
       if (p.type !== 'item_completed' || p.thread_id !== source.sessionId || p.turn_id !== unitId || !object(p.item)) return null;
       const item = p.item;
       if (item.type === 'Reasoning') continue;
       if (item.type === 'UserMessage') {
-        if (user || !Array.isArray(item.content) || item.content.length !== 2) return null;
-        const [skill, command] = item.content;
-        if (skill?.type !== 'skill' || skill.name !== SKILL_NAME || typeof skill.path !== 'string' ||
-            Object.keys(skill).some(k => !['type', 'name', 'path'].includes(k)) || command?.type !== 'text' ||
-            processingControlText(command.text) === null || !Array.isArray(command.text_elements) || command.text_elements.length ||
-            Object.keys(command).some(k => !['type', 'text', 'text_elements'].includes(k))) return null;
-        user = { skillName: skill.name, skillPath: skill.path, command: command.text }; continue;
+        if (user || !Array.isArray(item.content)) return null;
+        user = { index, content: item.content }; continue;
       }
       if (item.type === 'McpToolCall') {
-        if (nativeCall || typeof item.id !== 'string' || item.status !== 'completed' ||
+        if (nativeCalls.length === 2 || typeof item.id !== 'string' || item.status !== 'completed' || item.error != null ||
+            Object.keys(item).some(key => !MCP_ITEM_KEYS.includes(key)) ||
             typeof item.server !== 'string' || typeof item.tool !== 'string' || !object(item.arguments) ||
             !object(item.result) || item.result.isError === true) return null;
-        nativeCall = item; continue;
+        nativeCalls.push({ index, item }); continue;
       }
       if (item.type === 'AgentMessage') {
         const text = textBlocks(item.content, 'Text');
-        if (text === null || !text || Buffer.byteLength(text) > 4096) return null;
-        assistantNative.push({ id: item.id, text }); continue;
+        if (text === null || !text || Object.keys(item).some(key => !['type', 'id', 'content', 'phase'].includes(key))) return null;
+        assistantNative.push({ index, id: item.id, phase: item.phase, text }); continue;
       }
       return null;
     }
@@ -445,65 +451,177 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
       }
       if (p.role === 'user') {
         if (!Array.isArray(kinds) || kinds.length !== p.content?.length) return null;
-        if (kinds.every(k => ['environments.environment_context', 'skills.instructions'].includes(k))) {
+        if (kinds.length === 1 && kinds[0] === 'skills.selected_skill_instructions') {
+          const selected = codexSkillSelection(p);
+          if (selection !== null || selected === null) return null;
+          selection = { index, skillPath: selected }; continue;
+        }
+        if (kinds.every(k => USER_CONTEXT_KINDS.includes(k))) {
           if (textBlocks(p.content, 'input_text') === null) return null;
           continue;
         }
-        if (userText !== null || kinds.length !== 1 || kinds[0] !== 'user.text' ||
-            processingControlText(textBlocks(p.content, 'input_text')) === null) return null;
+        if (userText !== null || kinds.length !== 1 || kinds[0] !== 'user.text' || textBlocks(p.content, 'input_text') === null) return null;
         userText = textBlocks(p.content, 'input_text'); continue;
       }
       if (p.role === 'assistant') {
-        const text = textBlocks(p.content, 'output_text');
-        if (text === null || !text || Buffer.byteLength(text) > 4096) return null;
-        assistant.push({ id: p.id, text }); continue;
+        const text = outputText(p.content);
+        if (text === null || !text) return null;
+        assistant.push({ index, id: p.id, phase: p.phase, text }); continue;
       }
       return null;
     }
     if (p.type === 'function_call') {
-      if (invocation || typeof p.call_id !== 'string' || !p.call_id || p.call_id.length > 512 ||
-          typeof p.namespace !== 'string' || !/^mcp__[a-zA-Z0-9_-]{1,128}$/.test(p.namespace) ||
-          typeof p.name !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(p.name) || typeof p.arguments !== 'string') return null;
+      if (typeof p.call_id !== 'string' || !p.call_id || p.call_id.length > 512 || typeof p.arguments !== 'string' || outputs.has(p.call_id)) return null;
       let args;
       try { args = JSON.parse(p.arguments); } catch { return null; }
       if (!object(args)) return null;
+      // Code mode's `wait` on a running cell; the cell's own ID is checked below.
+      if (p.name === 'wait' && p.namespace == null) {
+        if (waits.length === MAX_WAITS || Object.keys(args).some(key => !['cell_id', 'yield_time_ms', 'max_tokens'].includes(key)) ||
+            typeof args.cell_id !== 'string') return null;
+        waits.push({ index, callId: p.call_id, cellId: args.cell_id }); continue;
+      }
+      if (invocation || typeof p.namespace !== 'string' || !/^mcp__[a-zA-Z0-9_-]{1,128}$/.test(p.namespace) ||
+          typeof p.name !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(p.name)) return null;
       invocation = { callId: p.call_id, tool: `${p.namespace}.${p.name}`, argsHash: digest(canonicalJSON(args)) }; continue;
     }
-    if (p.type === 'function_call_output') {
-      if (nativeOutput || typeof p.call_id !== 'string') return null;
-      nativeOutput = p; continue;
+    if (p.type === 'custom_tool_call') {
+      if (cells.length === 2 || p.name !== 'exec' || p.namespace != null || typeof p.call_id !== 'string' || !p.call_id ||
+          p.call_id.length > 512 || typeof p.id !== 'string' || typeof p.input !== 'string') return null;
+      cells.push({ index, id: p.id, callId: p.call_id }); continue;
+    }
+    if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
+      if (typeof p.call_id !== 'string' || outputs.has(p.call_id)) return null;
+      outputs.set(p.call_id, { index, type: p.type, output: p.output, clientAuthored: row.metadata?.client_authored }); continue;
     }
     return null;
   }
-  if (!user || userText !== user.command || !contextSeen || !invocation || !nativeCall || !nativeOutput ||
-      assistant.length !== 1 || assistantNative.length !== 1 || assistant[0].id !== assistantNative[0].id ||
-      assistant[0].text !== assistantNative[0].text || last.payload.last_agent_message !== assistant[0].text ||
-      nativeCall.id !== invocation.callId || nativeOutput.call_id !== invocation.callId ||
-      `mcp__${nativeCall.server}.${nativeCall.tool}` !== invocation.tool ||
-      digest(canonicalJSON(nativeCall.arguments)) !== invocation.argsHash) return null;
-  if (!processingControlMatches(user.command, invocation.tool, nativeCall.arguments, 'codex')) return null;
+  if (!user || !contextSeen || userText === null) return null;
+  // The typed control: the words after the 0.163 mention and one space with
+  // this skill's selection item, or the text after the older skill part.
+  let command, skillPath;
+  if (selection) {
+    const after = codexMentionText(user.content);
+    if (after === null || !after.startsWith(' ') || userText !== user.content[0].text) return null;
+    command = after.slice(1); skillPath = selection.skillPath;
+  } else {
+    if (user.content.length !== 2) return null;
+    const [skill, typed] = user.content;
+    if (skill?.type !== 'skill' || skill.name !== SKILL_NAME || typeof skill.path !== 'string' ||
+        Object.keys(skill).some(k => !['type', 'name', 'path'].includes(k)) || typed?.type !== 'text' ||
+        typeof typed.text !== 'string' || !Array.isArray(typed.text_elements) || typed.text_elements.length ||
+        Object.keys(typed).some(k => !['type', 'text', 'text_elements'].includes(k)) || userText !== typed.text) return null;
+    command = typed.text; skillPath = skill.path;
+  }
+  if (processingControlText(command) === null) return null;
+  const reply = assistantReply(assistant, assistantNative);
+  if (!reply || last.payload.last_agent_message !== reply.text) return null;
+  // The one dispatched call and the native result the receipt names.
+  let nativeCall, codeMode = null;
+  if (cells.length) {
+    codeMode = codeModeCall({ cells, waits, outputs, nativeCalls, invocation, reply });
+    if (!codeMode) return null;
+    invocation = codeMode.invocation; nativeCall = codeMode.retry;
+  } else {
+    if (!invocation || waits.length || nativeCalls.length !== 1 || outputs.size !== 1) return null;
+    nativeCall = nativeCalls[0].item;
+    const nativeOutput = outputs.get(invocation.callId);
+    if (!nativeOutput || nativeOutput.type !== 'function_call_output' || nativeCall.id !== invocation.callId ||
+        `mcp__${nativeCall.server}.${nativeCall.tool}` !== invocation.tool ||
+        digest(canonicalJSON(nativeCall.arguments)) !== invocation.argsHash || !directOutput(nativeOutput.output, nativeCall.result)) return null;
+  }
+  if (!processingControlMatches(command, invocation.tool, codeMode ? codeMode.handshake.arguments : nativeCall.arguments, 'codex')) return null;
   const query = { client: 'codex', sessionId: source.sessionId, unitId, ...invocation };
   const receipt = await resolveDispatch(Object.freeze(query));
-  if (!receiptMatches(receipt, query, source) || user.skillPath !== receipt.skillPath ||
-      digest(canonicalJSON(nativeCall.result)) !== receipt.resultHash || assistant[0].text !== receipt.statusText) return null;
-  const resultText = textBlocks(nativeCall.result.content, 'text');
-  if (resultText === null) return null;
-  // The native CLI adds a wall-time framing block. Only that observed wrapper is
-  // permitted around the byte-exact controller response; no arbitrary echoed prose.
-  const output = nativeOutput.output;
-  if (typeof output === 'string') {
-    if (output !== resultText) return null;
-  } else {
-    if (!Array.isArray(output) || output.length !== 2 || output[0]?.type !== 'input_text' ||
-        typeof output[0].text !== 'string' || !/^Wall time: \d+(?:\.\d+)? seconds\nOutput:$/.test(output[0].text) ||
-        textBlocks(output.slice(1), 'input_text') !== resultText) return null;
-  }
+  if (!receiptMatches(receipt, query, source) || path.normalize(skillPath) !== path.normalize(receipt.skillPath) ||
+      digest(canonicalJSON(nativeCall.result)) !== receipt.resultHash || reply.text !== receipt.statusText) return null;
+  // A code-mode receipt names both cells and the retry; a direct one names none.
+  if (codeMode ? receipt.outerItemId !== codeMode.cells[0].id || receipt.retryItemId !== codeMode.cells[1].id ||
+      receipt.retryCallId !== codeMode.retry.id || receipt.handshakeResultHash !== digest(canonicalJSON(codeMode.handshake.result))
+    : CODE_MODE_RECEIPT_FIELDS.some(key => receipt[key] !== undefined)) return null;
   const proof = Object.freeze({ version: 1, kind: 'codex-processing-control', client: 'codex',
     sessionId: source.sessionId, unitId, sourceIdentity: source.fileIdentity, sourcePath: source.path,
     fromByte, endByte, requestHash: receipt.requestHash, callId: invocation.callId,
     recordsHash: digest(canonicalJSON(read.records.map(r => r.hash))) });
   proofs.add(proof);
   return proof;
+}
+
+const MCP_ITEM_KEYS = Object.freeze(['type', 'id', 'server', 'tool', 'arguments', 'pluginId', 'readOnlyHint', 'status', 'result', 'duration']);
+// Native context a control turn may carry; never the person's input.
+const USER_CONTEXT_KINDS = Object.freeze(['environments.environment_context', 'skills.instructions', 'agents_md.instructions']);
+const CODE_MODE_RECEIPT_FIELDS = Object.freeze(['outerItemId', 'retryItemId', 'retryCallId', 'handshakeResultHash']);
+const MAX_WAITS = 8;
+// The assistant mirror's text: output text blocks with no annotations.
+const outputText = blocks => Array.isArray(blocks) && blocks.length > 0 &&
+  blocks.every(b => object(b) && b.type === 'output_text' && typeof b.text === 'string' &&
+    Object.keys(b).every(k => ['type', 'text', 'annotations', 'logprobs'].includes(k)) &&
+    ['annotations', 'logprobs'].every(k => b[k] === undefined || (Array.isArray(b[k]) && !b[k].length)))
+  ? blocks.map(b => b.text).join('') : null;
+/** The one final reply with its identical mirror. Any other assistant message,
+ * commentary included, is the assistant's own text: it keeps the turn
+ * collectible, never part of an excluded control. Null for anything else. */
+function assistantReply(mirrors, natives) {
+  if (mirrors.length !== 1 || natives.length !== 1) return null;
+  const [a] = mirrors, [reply] = natives;
+  if (a.id !== reply.id || a.text !== reply.text || a.phase !== reply.phase) return null;
+  if (![undefined, 'final_answer'].includes(reply.phase) || Buffer.byteLength(reply.text) > 4096) return null;
+  return { text: reply.text, index: Math.max(reply.index, a.index) };
+}
+// The native CLI adds a wall-time framing block. Only that observed wrapper is
+// permitted around the byte-exact controller response; no arbitrary echoed prose.
+function directOutput(output, result) {
+  const resultText = textBlocks(result.content, 'text');
+  if (resultText === null) return false;
+  if (typeof output === 'string') return output === resultText;
+  return Array.isArray(output) && output.length === 2 && output[0]?.type === 'input_text' &&
+    typeof output[0].text === 'string' && /^Wall time: \d+(?:\.\d+)? seconds\nOutput:$/.test(output[0].text) &&
+    textBlocks(output.slice(1), 'input_text') === resultText;
+}
+/** Code mode: the verification handshake's two cells, in native order. Cell 1
+ * makes the call and prints the handshake; cell 2 repeats it with that retry
+ * token and prints the response, either at once or through `wait` calls on
+ * that cell. Each cell has its one output, framed by Codex around exactly what
+ * its call returned; nothing else is printed or called. */
+function codeModeCall({ cells, waits, outputs, nativeCalls, invocation, reply }) {
+  if (invocation || cells.length !== 2 || nativeCalls.length !== 2 || outputs.size !== 2 + waits.length) return null;
+  const [handshake, retry] = nativeCalls.map(entry => entry.item), [outer, inner] = cells;
+  if (retry.server !== handshake.server || retry.tool !== handshake.tool || Object.hasOwn(handshake.arguments, 'retryToken')) return null;
+  const token = handshakeToken(handshake.result);
+  if (token === null || canonicalJSON(retry.arguments) !== canonicalJSON({ ...handshake.arguments, retryToken: token })) return null;
+  const printed = (callId, item) => {
+    const output = outputs.get(callId), value = output?.clientAuthored === false ? codexCellOutput(output.output) : null;
+    return value && { ...value, index: output.index, shows: item !== null && codexToolRenderings(item).includes(value.text) };
+  };
+  const first = printed(outer.callId, handshake);
+  if (!first || first.running || !first.shows || !(outer.index < nativeCalls[0].index && nativeCalls[0].index < first.index && first.index < inner.index)) return null;
+  // The second cell either completes at once or yields; a yielded cell is
+  // finished only by `wait` calls on exactly that cell, each after the last.
+  let done = printed(inner.callId, retry);
+  if (!done || done.index < inner.index) return null;
+  if (done.running) {
+    const cellId = done.cellId;
+    if (done.text !== '' || !waits.length) return null;
+    for (const [i, wait] of waits.entries()) {
+      const next = printed(wait.callId, retry);
+      if (wait.cellId !== cellId || wait.index < done.index || !next || next.index < wait.index ||
+          (i < waits.length - 1 ? !next.running || next.cellId !== cellId || next.text !== '' : next.running)) return null;
+      done = next;
+    }
+  } else if (waits.length) return null;
+  if (!done.shows || !(inner.index < nativeCalls[1].index && nativeCalls[1].index < done.index) || reply.index < done.index) return null;
+  return { cells, handshake, retry,
+    invocation: { callId: handshake.id, tool: `mcp__${handshake.server}.${handshake.tool}`, argsHash: digest(canonicalJSON(handshake.arguments)) } };
+}
+/** The retry token of this server's verification handshake result, or null. */
+function handshakeToken(result) {
+  const text = textBlocks(result?.content, 'text');
+  if (text === null || result.isError === true || Object.keys(result).some(key => !['content', 'isError'].includes(key))) return null;
+  let value;
+  try { value = JSON.parse(text); } catch { return null; }
+  if (!object(value) || Object.keys(value).length !== 4 || value.interfaceVersion !== 1 || value.status !== 'verification-required' ||
+      typeof value.instruction !== 'string' || !isNativeId(value.retryToken)) return null;
+  return value.retryToken;
 }
 
 /** The Claude reader retains human inputs only. This proof excludes only the

@@ -88,7 +88,10 @@ with this skill's normal workflows, such as a direct save, without a control too
 something only a control does (processing, a review or a decision), call
 `processing_status` once without arguments and return its `statusText`.
 
-Do not read more files, packets or notes or synthesize in this source chat. If the
+Do not read more files, packets or notes or synthesize in this source chat. In
+Codex code mode, run the control call alone in its exec cell and print only its
+result; call no other tool and print nothing else in that turn, so the control
+turn can be kept out of captures. If the
 tool returns `verification-required`, end that exec/tool call. In a separate
 exec/tool call, repeat the same tool and arguments with its returned `retryToken`
 once. This handshake does not start processing or approve a proposal. Do not

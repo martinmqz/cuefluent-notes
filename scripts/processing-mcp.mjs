@@ -722,7 +722,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         // separate call; redelivery cannot rewrite immutable proof or dispatch.
         return;
       }
-      if ((!source.nativeSkill && !source.controlExclusionUnsupported) || !source.unitId || source.captureActive === false) {
+      if (!source.nativeSkill || !source.unitId || source.captureActive === false) {
         await release();
         return;
       }
@@ -735,11 +735,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
         await release(); return;
       }
-      if (source.controlExclusionUnsupported) {
-        const replacement = { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
-        await release(processingControlStatusView(replacement, { collectionId: source.collectionId }));
-        return replacement;
-      }
+      // A code-mode control was bound through the handshake's first cell; this
+      // retry's own native metadata names its cell and nested call.
+      const codeMode = source.handshakeResultHash === undefined ? {} : { outerItemId: source.outerItemId,
+        retryItemId: context.itemId, retryCallId: context.toolCallId, handshakeResultHash: source.handshakeResultHash };
       const store = await withStorageProbes(() => openWorkflowIntake(capability, source.selection, 'collect'));
       const authorize = async () => { signal?.throwIfAborted(); await assertWorkflowStorage(capability, source.selection, 'collect'); signal?.throwIfAborted(); return true; };
       await withStorageProbes(() => withIntakeLock(store, tx => recordProcessingControlDispatch(tx, {
@@ -747,7 +746,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         dispatch: { client, sessionId: source.selection.sessionId, unitId: source.unitId, callId: source.callId,
           tool: source.tool, argsHash: source.argsHash, sourceIdentity: source.source.fileIdentity, sourcePath: source.source.path,
           requestHash: digest(canonicalJSON(invocation.arguments)), skillName: SKILL_NAME, skillPath,
-          statusText: view.statusText, resultHash: digest(canonicalJSON(client === 'claude' ? result.content : result)), response: view,
+          statusText: view.statusText, resultHash: digest(canonicalJSON(client === 'claude' ? result.content : result)), response: view, ...codeMode,
           ...(client === 'claude' ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand']
             .map(key => [key, source[key]])) : {}) },
       }, { authorize, beforePublish: commitAdmission })));

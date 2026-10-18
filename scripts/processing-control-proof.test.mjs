@@ -7,7 +7,9 @@ import { verifyCodexProcessingControl, verifyClaudeProcessingControl, loadClaude
   processingControlText, processingControlAction, processingControlMatches, processingControlCall, reviewControl, reviewControlFields,
   processingControlSuggestions, isProcessingControlSuggestion, PROCESSING_CONTROL_FORMS, PROCESSING_HELP, REVIEW_CODE_PLACEHOLDER,
   claudeSkillArguments, findClaudeSkillArguments } from './processing-control-proof.mjs';
+import { randomUUID } from 'node:crypto';
 import { stableSourceIdentity } from './capture-selection.mjs';
+import { codexControlTurn } from './test-support/codex-control-turn.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -414,4 +416,109 @@ test('verified Claude typed arguments that are not an exact control are found fo
     build('review sav t7xb88', { mutate: rows => { rows[0].promptSource = 'sdk'; } }),
     build('review sav t7xb88', { mutate: rows => { delete rows[2].attributionSkill; } }),
     build('review sav t7xb88', { mutate: rows => { rows[1].turnCompanion = false; } })]) assert.equal(await find(records), null);
+});
+
+// Codex CLI 0.163 control turns: the `$` list's mention plus its selection
+// item, or the older skill part; the call in code mode (the verification
+// handshake's two cells, optionally finished by `wait`) or direct.
+async function turnFixture(t, options = {}, mutate = () => {}, receiptChange = receipt => receipt) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-codex-turn-')));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'session.jsonl'), skillPath = path.join(root, 'plugin', 'SKILL.md');
+  const turn = codexControlTurn({ sessionId, unitId, skillPath, ...options });
+  mutate(turn.rows, turn);
+  const rows = [{ type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cli_version: '0.163.0', cwd: root, source: 'cli', history_mode: 'paginated' } },
+    ...turn.rows];
+  const lines = rows.map((row, ordinal) => JSON.stringify({ timestamp: '2026-10-17T12:00:00.000Z', ordinal, ...row }) + '\n');
+  await fs.writeFile(file, lines.join(''), { mode: 0o600 });
+  const source = { client: 'codex', sessionId, projectRoot: root, path: file, fileIdentity: stableSourceIdentity(await fs.lstat(file, { bigint: true })) };
+  const receipt = Object.freeze(receiptChange({ client: 'codex', sessionId, unitId, sourcePath: file, sourceIdentity: source.fileIdentity,
+    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', ...turn.receipt }));
+  return { source, receipt, turn, request: { source, fromByte: Buffer.byteLength(lines[0]), endByte: Buffer.byteLength(lines.join('')), unitId },
+    resolveDispatch: async query => Object.entries(query).every(([key, value]) => receipt[key] === value) ? receipt : null };
+}
+const proven = async f => isProcessingControlProof(await verifyCodexProcessingControl(f.request, f));
+const at = (rows, test) => rows.findIndex(test);
+const isItem = type => row => row.payload?.item?.type === type;
+const isPayload = (type, name) => row => row.type === 'response_item' && row.payload.type === type && (name === undefined || row.payload.name === name);
+
+test('Codex 0.163 control turns prove in both message forms, in code mode with or without wait, and direct', async t => {
+  for (const [name, options] of [
+    ['menu, code mode', {}], ['menu, code mode finished by wait', { waits: 1 }], ['menu, code mode finished by three waits', { waits: 3 }],
+    ['older skill part, code mode', { form: 'block' }], ['menu, direct call', { mode: 'direct' }],
+    ['menu, first turn of a session', { firstTurn: true }],
+  ]) await t.test(name, async t => {
+    const f = await turnFixture(t, options), proof = await verifyCodexProcessingControl(f.request, f);
+    assert.equal(isProcessingControlProof(proof), true);
+    assert.equal(proof.callId, f.receipt.callId); assert.equal(proof.unitId, unitId);
+  });
+  for (const control of PROCESSING_CONTROL_FORMS.map(form => form.map(word => word === REVIEW_CODE_PLACEHOLDER ? 't7xb88' : word).join(' '))) {
+    await t.test(control, async t => assert.equal(await proven(await turnFixture(t, { control })), true));
+  }
+});
+
+test('Codex 0.163 control turns with anything outside the exact shape stay collectible', async t => {
+  const command = { id: 'exec-command', type: 'CommandExecution', status: 'completed', exit_code: 0 };
+  const changes = {
+    'mention typed by hand': [{ form: 'typed' }],
+    'selection of another install': [{}, rows => { rows[at(rows, row => row.payload?.internal_chat_message_metadata_passthrough?.content_item_kinds?.[0] === 'skills.selected_skill_instructions')]
+      .payload.content[0].text = '<skill>\n<name>cuefluent-notes:cuefluent-notes</name>\n<path>/other/SKILL.md</path>\n</skill>'; }],
+    'second selection': [{}, rows => { const i = at(rows, row => row.payload?.internal_chat_message_metadata_passthrough?.content_item_kinds?.[0] === 'skills.selected_skill_instructions');
+      rows.splice(i, 0, structuredClone(rows[i])); }],
+    'words around the mention': [{}, rows => { rows[at(rows, isItem('UserMessage'))].payload.item.content[0].text += ' and tag it urgent'; }],
+    'mirror differs': [{}, rows => { rows[at(rows, row => row.payload?.internal_chat_message_metadata_passthrough?.content_item_kinds?.[0] === 'user.text')].payload.content[0].text = 'review'; }],
+    'a correction': [{}, rows => { rows.splice(-2, 0, { type: 'event_msg', payload: { type: 'item_completed', thread_id: sessionId, turn_id: unitId,
+      item: { type: 'UserMessage', id: 'correction', content: [{ type: 'text', text: 'Correction: 20 minutes.' }] } } }); }],
+    'the model reads SKILL.md': [{}, rows => { rows.splice(at(rows, isPayload('custom_tool_call')) + 1, 0, { type: 'event_msg', payload: { type: 'item_completed',
+      thread_id: sessionId, turn_id: unitId, item: command } }); }],
+    'a third cell': [{}, rows => { const i = at(rows, isPayload('custom_tool_call')); rows.splice(i, 0, { ...structuredClone(rows[i]),
+      payload: { ...structuredClone(rows[i].payload), id: 'ctc_extra', call_id: 'call_extra' } }); }],
+    'another tool in the turn': [{}, rows => { rows.splice(-3, 0, { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'work',
+      arguments: '{"cmd":"git status"}', internal_chat_message_metadata_passthrough: { turn_id: unitId } } }); }],
+    'notify output': [{}, rows => { const i = at(rows, isPayload('custom_tool_call_output')); rows.splice(i, 0, { ...structuredClone(rows[i]),
+      payload: { ...structuredClone(rows[i].payload), output: 'A fact the cell printed.' } }); }],
+    'cell printed more': [{}, rows => { rows[at(rows, isPayload('custom_tool_call_output'))].payload.output[1].text += '\nAlso: the SDK supports 605.'; }],
+    'failed script': [{}, rows => { rows[at(rows, isPayload('custom_tool_call_output'))].payload.output[0].text = 'Script failed\nWall time 0.1 seconds\nOutput:\n'; }],
+    'client-authored output': [{}, rows => { rows[at(rows, isPayload('custom_tool_call_output'))].metadata.client_authored = true; }],
+    'retry without the token': [{}, rows => { const i = rows.findLastIndex(isItem('McpToolCall')); delete rows[i].payload.item.arguments.retryToken; }],
+    'retry with another token': [{}, rows => { rows[rows.findLastIndex(isItem('McpToolCall'))].payload.item.arguments.retryToken = randomUUID(); }],
+    'handshake not ours': [{}, rows => { rows[at(rows, isItem('McpToolCall'))].payload.item.result.content[0].text = '{"status":"accepted"}'; }],
+    'nested call to another server': [{}, rows => { rows[rows.findLastIndex(isItem('McpToolCall'))].payload.item.server = 'imposter'; }],
+    'unknown MCP item field': [{}, rows => { rows[rows.findLastIndex(isItem('McpToolCall'))].payload.item.progress = 'Working on it.'; }],
+    'retry before the handshake output': [{}, rows => { const i = at(rows, isPayload('custom_tool_call_output')), j = rows.findLastIndex(isPayload('custom_tool_call'));
+      const [cell] = rows.splice(j, 1); rows.splice(i, 0, cell); }],
+    'wait on another cell': [{ waits: 1 }, rows => { const i = at(rows, isPayload('function_call', 'wait')); rows[i].payload.arguments = '{"cell_id":"5"}'; }],
+    'wait with extra fields': [{ waits: 1 }, rows => { rows[at(rows, isPayload('function_call', 'wait'))].payload.arguments = '{"cell_id":"4","terminate":true}'; }],
+    // Commentary is the assistant's own text, however short: it stays collectible.
+    'a short commentary message': [{ commentary: ['I will run the Cuefluent Notes control.'] }],
+    'commentary with a conclusion': [{ commentary: ['Diagnosis: the Cedar cache bug is the 25-minute TTL.'] }],
+    'commentary in direct mode': [{ mode: 'direct', commentary: ['Diagnosis: the Cedar cache bug is the 25-minute TTL.'] }],
+    'annotated reply': [{}, rows => { rows[rows.findLastIndex(row => row.payload?.role === 'assistant')].payload.content[0].annotations = [{ url: 'https://example.invalid' }]; }],
+    'reply is not the status': [{}, rows => { for (const row of rows) if (row.payload?.item?.phase === 'final_answer') row.payload.item.content[0].text += ' Also 605.';
+      rows[rows.findLastIndex(row => row.payload?.role === 'assistant')].payload.content[0].text += ' Also 605.'; }],
+    'final reply before the result': [{}, rows => { const final = rows.splice(rows.findLastIndex(isItem('AgentMessage')), 2);
+      rows.splice(at(rows, isPayload('custom_tool_call')), 0, ...final); }],
+    'unknown record': [{}, rows => { rows.splice(-2, 0, { type: 'future-user-content', payload: { text: 'correction' } }); }],
+    'an output of no call': [{}, rows => { rows.splice(-3, 0, { type: 'response_item', metadata: { client_authored: false }, payload: { type: 'custom_tool_call_output',
+      call_id: 'call_other', output: 'Script completed\nWall time 0.1 seconds\nOutput:\n', internal_chat_message_metadata_passthrough: { turn_id: unitId } } }); }],
+  };
+  for (const [name, [options, mutate]] of Object.entries(changes)) await t.test(name, async t => {
+    assert.equal(await proven(await turnFixture(t, options, mutate)), false);
+  });
+});
+
+test('a Codex code-mode proof needs the receipt to name both cells and the retry call', async t => {
+  for (const [name, change] of [
+    ['no code-mode fields', ({ outerItemId, retryItemId, retryCallId, handshakeResultHash, ...rest }) => rest],
+    ['other first cell', receipt => ({ ...receipt, outerItemId: 'ctc_other' })],
+    ['other retry cell', receipt => ({ ...receipt, retryItemId: 'ctc_other' })],
+    ['other retry call', receipt => ({ ...receipt, retryCallId: `exec-${randomUUID()}` })],
+    ['other handshake result', receipt => ({ ...receipt, handshakeResultHash: 'b'.repeat(64) })],
+    ['other result', receipt => ({ ...receipt, resultHash: 'b'.repeat(64) })],
+    ['other skill path', receipt => ({ ...receipt, skillPath: '/other/SKILL.md' })],
+  ]) await t.test(name, async t => assert.equal(await proven(await turnFixture(t, {}, () => {}, change)), false));
+  // A direct call's receipt names no cells.
+  const direct = await turnFixture(t, { mode: 'direct' }, () => {}, receipt => ({ ...receipt, outerItemId: 'ctc_first', retryItemId: 'ctc_second',
+    retryCallId: `exec-${randomUUID()}`, handshakeResultHash: 'b'.repeat(64) }));
+  assert.equal(await proven(direct), false);
 });

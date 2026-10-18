@@ -651,15 +651,25 @@ proof covers the completed restricted unit, including native code-mode cells
 whose inner tool events are restricted to the engine contract. Claude proof covers its exact controller
 input; ordinary assistant/tool parentage still does not establish Claude ownership.
 
-The Codex code-mode handshake currently leaves its small source control turn
-collectible and reports `PROCESSING_EXCLUSION_UNVERIFIED` for formal controls,
-including typed decisions made that way. This does not disable the restricted
-processing chat's verified exclusion, and it never hides genuine work or
-corrections in the source chat. Codex CLI 0.163 runs tool calls through code mode
-and attaches a skill picked from its `$` list as a separate item rather than a
-skill part of the message, so such a turn keeps the typed mention
-(`$cuefluent-notes:cuefluent-notes …`) and its code-mode cells as evidence; the
-capture reader does not yet treat that form as command markup.
+A verified Codex control turn is excluded with its receipt in either message
+form (the skill part of the message, or Codex CLI 0.163's mention from the `$`
+list with its selection item) and either call form (a direct call, or code
+mode's two verification cells with any `wait` on the second). The proof covers
+the whole completed turn and admits only: the typed message and its mirror, the
+selection item, native and hook context, the call with its native MCP items and
+outputs, and the one final reply, which must be the control's own status text.
+Commentary or any other assistant message is the assistant's own text and keeps
+the turn collectible, however short. Each code-mode cell must print exactly what its
+call returned. The receipt names both cells and the retry call by the native IDs
+Codex sent with the call; model-written code is never read, so a nested tool that
+leaves no native record is not visible to the proof. Anything else in the turn,
+such as reading a file, another tool, another message or other printed output,
+keeps the turn collectible as described below, so recorded work and corrections
+are never hidden. Such a turn still never contributes its exact command, this
+plugin's control calls or the assistant's repetition of the plugin's reply; see
+the [command markup rules](session-workflow.md#generated-output-provenance-gate). A verified control that could not record that receipt, for example
+because collection progressed during admission, reports
+`PROCESSING_EXCLUSION_UNVERIFIED`.
 
 Claude Desktop records a `bridge-session` row in a session connected for Remote
 Control. The Claude reader does not read past such a record, so automatic
@@ -680,11 +690,14 @@ before and after the control retains its own identity and order. Mixed inputs, a
 attribution and unsupported shapes remain evidence or explicitly pending. A
 message that selects the skill without a verified control stays evidence: Claude
 keeps the typed arguments without the command markup (empty arguments add
-nothing), and Codex keeps the user text but not the skill block or this plugin's
-own control-server calls and results in that turn; see the
-[session contract](session-workflow.md#generated-output-provenance-gate). Existing
-captures, active claims and issued packet hashes are never rewritten by this path.
-Copies printed in unrelated work chats are not automatically detected.
+nothing), and Codex keeps the user text but not the skill block, the selection
+item, the mention the `$` list inserted, or this plugin's own control-server
+calls, results and code-mode cells that only made such calls in that turn. A
+Codex mention typed out by hand attaches no skill, so its message is kept
+exactly as typed; only this plugin's control calls in that turn are left out.
+See the [session contract](session-workflow.md#generated-output-provenance-gate).
+Existing captures, active claims and issued packet hashes are never rewritten by
+this path. Copies printed in unrelated work chats are not automatically detected.
 If collection progress changes during admission, processing rechecks its own
 authorization and may continue without a parent exclusion receipt, reporting
 `PROCESSING_EXCLUSION_UNVERIFIED`. The inspected selection hash is never silently

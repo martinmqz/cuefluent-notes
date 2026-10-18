@@ -380,7 +380,9 @@ single placeholder element, plus exactly one `skills.selected_skill_instructions
 item of the same turn naming this skill at its installed `SKILL.md` path; the
 typed text is what follows the mention and one space. A mention typed out without
 that item is no command. A code-mode call verifies the same typed text through
-its native MCP item and the completed handshake; it gets no exclusion receipt.
+its native MCP item and the completed handshake; its exclusion receipt also names
+both cells and the retry call, so the reader can prove the whole turn (see
+[capture prevention](processing-chat.md#capture-prevention-and-limits)).
 A decision applies only through a verified typed action, to a
 revision that a delivered typed review presented to the invoking chat lineage (a
 model-initiated or natural-language display records `verified: false` and does

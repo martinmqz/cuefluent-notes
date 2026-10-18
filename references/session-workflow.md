@@ -115,9 +115,12 @@ the native client's tools to the existing engine, and seals exact native executi
 records. Codex can prove a completed restricted unit; Claude can prove its exact
 controller input without inferring ownership of assistant/tool rows. Source-chat
 exclusion requires an actual formal skill invocation, its verified native control
-call and the matching helper receipt. Claude additionally verifies the exact
-installed skill expansion and native companion, excluding only the formal input
-after its actual MCP result; assistant parentage or final wording is not proof.
+call and the matching helper receipt. Codex proves the whole completed control
+turn, including code-mode cells, as described under
+[capture prevention](processing-chat.md#capture-prevention-and-limits). Claude
+additionally verifies the exact installed skill expansion and native companion,
+excluding only the formal input after its actual MCP result; assistant parentage
+or final wording is not proof.
 Pure controls can be deferred while their proof is incomplete, retaining the
 original input and cursor. A later independent human input releases an unsupported
 Claude candidate to ordinary capture. Mixed inputs and new corrections retain
@@ -134,17 +137,38 @@ typed after the command, Claude can record only the first two lines,
 and that input, like an empty arguments element, is structural under every reader
 version; a published head that kept it as text replays unchanged. Another skill or plugin, any other shape or
 text outside the envelope, and SDK input stay verbatim. A control mixed with
-more words or content is therefore retained in full. A Codex unit whose user
-message carries this skill's block (its exact native shape and the skill name
-`cuefluent-notes`) keeps all user text and assistant text; the block itself is
-command markup, not an omission. The installed path, which changes with each
-plugin version, is not consulted, so a published unit replays unchanged after
-an upgrade. In that unit only, calls to this plugin's control
-server and their results are left out as its own processing and review activity,
-identified by native identity alone: the call namespace `mcp__cuefluent_control`
-plus a native MCP item for the same call ID with server `cuefluent_control` and
-the same tool. Other tools, code-mode `exec` cells and units without the block
-are unchanged. Published captures keep the rules of their reader version.
+more words or content is therefore retained in full. A Codex unit started with
+this skill keeps all user text and assistant text, without its command markup,
+which is never an omission. It is started with this skill when its user message
+carries this skill's block (its exact native shape and the skill name
+`cuefluent-notes`) or, from reader version 4, when the turn carries Codex CLI
+0.163's `skills.selected_skill_instructions` item naming
+`cuefluent-notes:cuefluent-notes` or `cuefluent-notes`. The block, the selection
+item and, on the message the selection was made for (the turn's latest user
+message before the item), its leading mention (`$cuefluent-notes:cuefluent-notes`
+or `$cuefluent-notes`) plus one space are the markup; any other message in the
+turn keeps its text, even one that starts with the mention. From version 4, a
+message whose text after that markup (or after the block) is exactly one action
+is only the command and leaves no evidence, and an assistant message that only
+repeats the status text or refusal message of one of the unit's control calls is
+that reply, not evidence. Commentary and all other assistant text stay. The
+installed path, which changes with each plugin version, is not
+consulted, so a published unit replays unchanged after an upgrade. In that unit,
+and from version 4 also in a unit whose message starts with this skill's mention
+typed by hand (kept exactly as typed, since Codex attached no skill), calls to
+this plugin's control server and their results are left out as its own
+processing and review activity, identified by native identity alone: the call
+namespace `mcp__cuefluent_control` plus a native MCP item for the same call ID
+with server `cuefluent_control` and the same tool. From version 4, a code-mode
+`exec` cell is left out too, with its `wait` calls, outputs and nested MCP
+items, when every nested native item within the cell's span (from its call to
+its last output) is a call to `cuefluent_control` and every output of the cell
+is Codex's own framing around nothing or around exactly what one of those calls
+returned; other cells stay. A nested item outside every cell or within two open
+cells, or a child agent in the unit, keeps every code-mode record. Other tools
+and units without this skill are unchanged. Published captures keep the rules of
+their reader version: versions 1 and 2 keep the block as an omission and the
+exchanges, version 3 applies the block rules only, version 4 the rules above.
 
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same

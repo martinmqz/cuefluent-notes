@@ -268,11 +268,11 @@ test('acceptance, in either client: A typed-reviewed and replaced by B shown unv
 });
 
 // Codex CLI 0.163 runs every tool call through code mode. The typed text and
-// the skill selection verify the same way; only the exclusion receipt is missing.
-test('Codex code mode: a typed review and a bare save decide the exact draft; the turn gets no exclusion receipt', async t => {
+// the skill selection verify the same way, and the turn gets its exclusion receipt.
+test('Codex code mode: a typed review and a bare save decide the exact draft; each turn gets an exclusion receipt', async t => {
   const f = await processingFixture(t), p = await proposedClaim(f), h = await harness(t, f, { capabilities: {} });
   const typed = async line => {
-    h.nativeSkill = true; h.controlExclusionUnsupported = true; h.typedControl = line; h.callId = `exec-${randomUUID()}`;
+    h.nativeSkill = true; h.codeMode = true; h.typedControl = line; h.callId = `exec-${randomUUID()}`;
     return body(await h.call(processingControlCall(line).tool, {}));
   };
   const shown = await typed('review'), code = reviewCode(p.proposalHash);
@@ -280,10 +280,10 @@ test('Codex code mode: a typed review and a bare save decide the exact draft; th
   assert.deepEqual((await reviewState(f)).bindings.map(item => [item.verified, item.delivered, item.typedDelivered]), [[true, true, true]]);
   const saved = await typed('save');
   assert.equal(saved.review, 'saved'); assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
-  // The notice that this control turn stays collectible is in the fields only.
-  assert(saved.diagnostics.includes('PROCESSING_EXCLUSION_UNVERIFIED'));
+  assert(!saved.diagnostics.includes('PROCESSING_EXCLUSION_UNVERIFIED'));
   assert(!saved.statusText.includes('status --verbose')); assertPlainReply(saved, f);
-  assert.equal(await exists(path.join(f.collection.intakeStateDir, 'control-dispatch')), false);
+  const receipts = await fs.readdir(path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId));
+  assert.equal(receipts.length, 2);
   assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
 });
 
@@ -341,7 +341,7 @@ test('a verified continuation keeps the chat lineage: a bare decision after the 
   h = await harness(t, f, { client: 'claude', async resolveInvocation(capability, context, invocation) {
     const selected = await readSelection(f.store, { client: 'claude', sessionId: origin });
     return Object.freeze({ source: f.source, selection: { ...f.selection, sessionId: chat.sessionId }, selectionHash: selected.hash,
-      nativeSkill: h.nativeSkill, controlExclusionUnsupported: false, unitId: f.identity.unitId, argsHash: digest(canonicalJSON(invocation.arguments)),
+      nativeSkill: h.nativeSkill, unitId: f.identity.unitId, argsHash: digest(canonicalJSON(invocation.arguments)),
       captureActive: false, tool: `mcp__cuefluent_control.${invocation.tool}`, callId: context.toolCallId,
       ...(chat.lineage ? { chatLineage: { client: 'claude', sessionId: chat.lineage } } : {}) });
   } });

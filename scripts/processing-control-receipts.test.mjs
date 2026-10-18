@@ -15,6 +15,7 @@ import { recordProcessingControlDispatch, createProcessingControlResolver } from
 import { SKILL_ROOT } from './runtime-paths.mjs';
 import { verifyProcessingExecution } from './processing-execution-proof.mjs';
 import { processingControlCall } from './processing-control-proof.mjs';
+import { codexControlTurn } from './test-support/codex-control-turn.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -203,12 +204,14 @@ test('unsupported native markup cannot stall later human work or become an exclu
   });
 });
 
-async function fixture(t, { mixed = false, ending = 'completed', mutate = () => {} } = {}) {
+async function fixture(t, { mixed = false, ending = 'completed', mutate = () => {}, turn = null } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-control-receipt-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = { client: 'codex', sessionId, projectRoot: root, path: path.join(root, 'native.jsonl'), fileIdentity: '' };
   const skillPath = path.join(root, 'SKILL.md');
-  const controls = [evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
+  // A Codex 0.163 turn (test-support/codex-control-turn.mjs) replaces the older one.
+  const built = turn ? codexControlTurn({ sessionId, unitId, skillPath, ...turn }) : null;
+  const controls = built ? built.rows : [evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
     { type: 'turn_context', payload: { turn_id: unitId, root_turn_id: unitId } },
     response({ type: 'message', id: 'native-user', role: 'user', content: [{ type: 'input_text', text: 'process' }] }, ['user.text']),
     item(unitId, { type: 'UserMessage', id: 'user', content: [{ type: 'skill', name: 'cuefluent-notes', path: skillPath },
@@ -239,7 +242,7 @@ async function fixture(t, { mixed = false, ending = 'completed', mutate = () => 
       scope: { unitIds: mixed ? [beforeId, unitId, afterId] : [unitId], start: anchors[1], end: anchors.at(-1) } } }));
   const dispatch = { client: 'codex', sessionId, unitId, callId: 'dispatch-call', tool: 'mcp__cuefluent.process',
     argsHash: digest(canonicalJSON(args)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
-    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result)) };
+    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result)), ...built?.receipt };
   const name = `control-dispatch/codex/${sessionId}/${digest(dispatch.callId).slice(0, 24)}.json`;
   const query = Object.fromEntries(['client', 'sessionId', 'unitId', 'callId', 'tool', 'argsHash'].map(k => [k, dispatch[k]]));
   const record = (tx, d = dispatch, hash = selection.hash, auth = authorize) =>
@@ -402,5 +405,60 @@ test('receipt resolution rechecks the exact active selection and does not outliv
     await controlSelection(tx, { source: f.source, expectedHash: selected.hash, authorize,
       request: { id: randomUUID(), client: 'codex', sessionId, expectedRevision: selected.state.revision, operation: 'exclude', unitId } });
     await assert.rejects(resolve(f.query), { code: 'STALE_SELECTION' });
+  });
+});
+
+test('Codex 0.163 code-mode receipts name both cells and the retry call, and exclude exactly the proven turn', async t => {
+  for (const [name, turn] of [['code mode', {}], ['code mode finished by wait', { waits: 1 }], ['older skill part, code mode', { form: 'block' }],
+    ['direct call', { mode: 'direct' }]]) await t.test(name, async t => {
+    for (const mixed of [false, true]) {
+      const f = await fixture(t, { mixed, turn: { control: 'save t7xb88', ...turn } });
+      await withIntakeLock(f.store, async tx => {
+        assert.equal((await f.record(tx)).status, 'recorded');
+        assert.deepEqual(await f.resolve(tx)(f.query), f.dispatch);
+        const first = await processScope(tx, f.store, f.selection, f.scopeId, authorize);
+        assert.deepEqual(first, { saved: mixed ? 2 : 0, pending: null, incomplete: false, drained: true });
+        assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId, unitId })).head, null);
+        if (mixed) for (const id of [beforeId, afterId])
+          assert.match((await readCaptureHead(f.store, { client: 'codex', sessionId, unitId: id })).capture.evidence[0].text, /Genuine work/);
+      });
+    }
+  });
+  // Without its receipt the turn is not excluded, yet the exact command, the
+  // cells and the assistant's repetition of the plugin's reply are never
+  // evidence: nothing is captured.
+  const f = await fixture(t, { turn: { control: 'save t7xb88' } });
+  await withIntakeLock(f.store, async tx => {
+    const read = await f.read(tx);
+    assert.equal(read.processingControls.length, 0); assert.deepEqual(read.candidates, []); assert.deepEqual(read.noEvidence, [unitId]);
+  });
+  // With its receipt, commentary keeps the turn collectible: the assistant's
+  // own words are captured, never the command or the plugin's reply.
+  for (const mode of ['code', 'direct']) await t.test(`commentary in a receipted turn (${mode})`, async t => {
+    const g = await fixture(t, { turn: { control: 'save t7xb88', mode, commentary: ['Diagnosis: the Cedar cache bug is the 25-minute TTL.'] } });
+    await withIntakeLock(g.store, async tx => {
+      assert.equal((await g.record(tx)).status, 'recorded');
+      const read = await g.read(tx);
+      assert.equal(read.processingControls.length, 0);
+      assert.deepEqual(read.candidates.map(candidate => candidate.capture.evidence.map(item => [item.kind, item.text])),
+        [[['assistant', 'Diagnosis: the Cedar cache bug is the 25-minute TTL.']]]);
+    });
+  });
+});
+
+test('Codex code-mode receipt fields come all together, only for Codex, and name distinct cells and calls', async t => {
+  const f = await fixture(t, { turn: {} });
+  await withIntakeLock(f.store, async tx => {
+    const { outerItemId, retryItemId, retryCallId, handshakeResultHash, ...direct } = f.dispatch;
+    // Some fields without the others, or the same cell or call twice.
+    for (const dispatch of [{ ...direct, outerItemId }, { ...direct, outerItemId, retryItemId, retryCallId },
+      { ...f.dispatch, retryItemId: outerItemId }, { ...f.dispatch, retryCallId: f.dispatch.callId }]) {
+      await assert.rejects(f.record(tx, dispatch), { code: 'INVALID_PROCESSING_CONTROL_RECEIPT' });
+    }
+    for (const dispatch of [{ ...f.dispatch, outerItemId: 'ctc first' }, { ...f.dispatch, handshakeResultHash: 'not-a-hash' }]) {
+      await assert.rejects(f.record(tx, dispatch), { code: /INVALID_PROCESSING_CONTROL_RECEIPT|INVALID_WORKFLOW/ });
+    }
+    assert.equal((await intakeSnapshot(f.store, 'state', f.name)).bytes, null);
+    void handshakeResultHash; void retryCallId; void retryItemId;
   });
 });

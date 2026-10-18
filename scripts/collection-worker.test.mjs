@@ -7,7 +7,7 @@ import { collectionIngress, snapshotSourceMetadata, registrationPath, READER_SUS
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock, openWorkflowIntake } from './intake-io.mjs';
 import { readSelection, readCaptureHead, controlSelection, publishCapture, inspectPendingPublication, recoverPendingPublication } from './intake-store.mjs';
-import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
+import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint, CODEX_READER_VERSION } from './codex-reader.mjs';
 import { inspectSourceBoundary } from './capture-selection.mjs';
 import { randomUUID } from 'node:crypto';
 import { withWorkflowBudget, consumeWorkflowBytes, workflowTimeout } from './workflow-budget.mjs';
@@ -172,7 +172,7 @@ for (const held of [false, true]) test(`v1 Codex progress and published units co
   assert.equal(run.saved, 1);
   assert(!run.pending.includes('READER_CHECKPOINT_CONFLICT')); assert(!run.pending.includes('FINAL_CAPTURE_CONFLICT'));
   if (held) assert(run.pending.includes('SOURCE_ANCHOR_LIMIT'));
-  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: D })).capture.reader.version, '3');
+  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: D })).capture.reader.version, CODEX_READER_VERSION);
   const retained = await readCaptureHead(f.store, old.identity);
   assert.equal(retained.hash, saved.headHash); assert.deepEqual(serializeCapture(retained.capture), serializeCapture(old));
   assert.equal((await f.run()).saved, 0);

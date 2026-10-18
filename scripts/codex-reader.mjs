@@ -6,7 +6,7 @@ import { createCapture, validateCapture, clientVersion } from './capture-contrac
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
 import { absolutePath } from './workflow-paths.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
-import { verifyCodexProcessingControl, isProcessingControlProof } from './processing-control-proof.mjs';
+import { verifyCodexProcessingControl, isProcessingControlProof, processingControlText } from './processing-control-proof.mjs';
 import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
@@ -14,11 +14,15 @@ import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fa
 // v2 allocates separate bounded call/result text pools and preserves native
 // descriptors after text exhaustion. v3 treats this plugin's own skill block as
 // command markup and leaves out this plugin's control-server exchanges in a
-// unit started with that skill. Published v1/v2 captures remain immutable.
-export const CODEX_READER_VERSION = '3';
+// unit started with that skill. v4 adds the Codex 0.163 forms: a skill picked
+// from the `$` list (its selection item and leading mention are markup), a
+// mention typed out by hand (kept as typed), and control exchanges made in code
+// mode. Published v1-v3 captures remain immutable under their own rules.
+export const CODEX_READER_VERSION = '4';
 // Retain every supported historical reader independently of later reader bumps.
-export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2' });
-export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup' });
+export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2' });
+export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup', '4': 'mention' });
+const SKILL_MARKUP_RULES = Object.freeze(['markup', 'mention']);
 const CONTROL_SERVER = 'cuefluent_control';
 // Evidence rules are a pure function of the transcript and the capture's reader
 // version, so a published unit replays to the same bytes after an upgrade or a
@@ -28,6 +32,74 @@ const CONTROL_SERVER = 'cuefluent_control';
 const MARKUP_SKILL_NAME = 'cuefluent-notes';
 const pluginSkillBlock = part => part?.type === 'skill' && part.name === MARKUP_SKILL_NAME && typeof part.path === 'string' &&
   Object.keys(part).every(key => ['type', 'name', 'path'].includes(key));
+// Codex 0.163 records a skill picked from the `$` list as a user context item
+// of its own and the message as one text part starting with the mention the
+// list inserted. These shapes are frozen with reader version 4 and shared with
+// the binder and the exclusion proof; a changed shape or name needs a new
+// reader version. The installed path is returned, never used by the reader.
+export const CODEX_SKILL_MENTIONS = Object.freeze([`$${MARKUP_SKILL_NAME}:${MARKUP_SKILL_NAME}`, `$${MARKUP_SKILL_NAME}`]);
+const SELECTION_NAMES = Object.freeze([`${MARKUP_SKILL_NAME}:${MARKUP_SKILL_NAME}`, MARKUP_SKILL_NAME]);
+const SELECTION_HEADER = /^<skill>\n<name>([^<\n]{1,128})<\/name>\n<path>([^<\n]{1,4096})<\/path>\n/;
+/** This skill's selection item (a user message payload): the SKILL.md path it
+ * names, or null for anything else. */
+export function codexSkillSelection(payload) {
+  const kinds = payload?.internal_chat_message_metadata_passthrough?.content_item_kinds;
+  if (payload?.type !== 'message' || payload.role !== 'user' || !Array.isArray(kinds) || kinds.length !== 1 ||
+      kinds[0] !== 'skills.selected_skill_instructions' || !Array.isArray(payload.content) || payload.content.length !== 1) return null;
+  const [block] = payload.content;
+  if (block?.type !== 'input_text' || typeof block.text !== 'string' || Object.keys(block).some(key => !['type', 'text'].includes(key))) return null;
+  const header = SELECTION_HEADER.exec(block.text);
+  return header && SELECTION_NAMES.includes(header[1]) && path.isAbsolute(header[2]) ? header[2] : null;
+}
+/** The text after this skill's leading mention in a one-part message: '' for
+ * the mention alone, else what follows it, starting with its separator. The
+ * mention may be recorded as the list's one placeholder element covering
+ * exactly it, or not at all. Anything else is null. */
+export function codexMentionText(content) {
+  if (!Array.isArray(content) || content.length !== 1) return null;
+  const [part] = content;
+  if (part?.type !== 'text' || typeof part.text !== 'string' || Object.keys(part).some(key => !['type', 'text', 'text_elements'].includes(key))) return null;
+  const mention = CODEX_SKILL_MENTIONS.find(value => part.text === value || part.text.startsWith(`${value} `) ||
+    (part.text.startsWith(value) && !/^[a-z0-9:_-]/i.test(part.text.slice(value.length))));
+  if (mention === undefined) return null;
+  const elements = part.text_elements ?? [];
+  if (!Array.isArray(elements) || elements.length > 1) return null;
+  if (elements.length) {
+    const [element] = elements;
+    if (!element || typeof element !== 'object' || Object.keys(element).some(key => !['byte_range', 'placeholder'].includes(key)) || element.placeholder !== mention ||
+        !element.byte_range || typeof element.byte_range !== 'object' || Object.keys(element.byte_range).some(key => !['start', 'end'].includes(key)) ||
+        element.byte_range.start !== 0 || element.byte_range.end !== Buffer.byteLength(mention)) return null;
+  }
+  return part.text.slice(mention.length);
+}
+// Code mode frames each cell's output with this host status line; what the
+// cell printed follows it. A cell still running has printed nothing yet here.
+const CELL_FRAMING = /^Script (completed|running with cell ID ([A-Za-z0-9_-]{1,64}))\nWall time \d+(?:\.\d+)? seconds(?: \(code-mode \d+(?:\.\d+)? seconds; overhead -?\d+(?:\.\d+)? seconds\))?\nOutput:\n/;
+/** A code-mode cell output: { running, cellId, text } with the printed text,
+ * or null for any other shape (an error, other content, no framing). */
+export function codexCellOutput(output) {
+  let framed, rest;
+  if (typeof output === 'string') {
+    framed = CELL_FRAMING.exec(output); rest = framed ? output.slice(framed[0].length) : null;
+  } else if (Array.isArray(output) && output.length && output.every(block => block?.type === 'input_text' && typeof block.text === 'string' &&
+      Object.keys(block).every(key => ['type', 'text'].includes(key)))) {
+    framed = CELL_FRAMING.exec(output[0].text);
+    rest = framed && framed[0].length === output[0].text.length ? output.slice(1).map(block => block.text).join('') : null;
+  }
+  if (!framed || rest === null) return null;
+  return { running: framed[1] !== 'completed', cellId: framed[2] ?? null, text: rest };
+}
+/** The text a cell prints for a native MCP item's result: the result object
+ * as JSON, or its one text block. A failed call is shown as an error result. */
+export function codexToolRenderings(item) {
+  const result = item?.result != null && typeof item.result === 'object' ? item.result
+    : typeof item?.error?.message === 'string' ? { content: [{ type: 'text', text: item.error.message }], isError: true } : null;
+  if (!result) return [];
+  const renderings = [JSON.stringify(result)], content = result.content;
+  if (Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string' &&
+      Object.keys(content[0]).every(key => ['type', 'text'].includes(key))) renderings.push(content[0].text);
+  return renderings;
+}
 const structural = new Set(['compacted', 'token_usage_record', 'world_state', 'retained_context', 'security_risk_score',
   'inter_agent_communication', 'inter_agent_communication_metadata', 'realtime_item']);
 const ignoredEvents = new Set(['token_count', 'thread_goal_updated', 'thread_settings_applied', 'agent_reasoning',
@@ -83,11 +155,29 @@ export async function verifyCodexHeader(line, source) {
 export const codexRegistrationHeader = selected => async io => verifyCodexHeader(await readSessionHeader(io),
   { ...selected, projectRoot: await fs.realpath(selected.projectRoot) });
 
-function blocks(collector, record, content, kind, syntax, skillRules = 'retain') {
+function blocks(collector, record, content, kind, syntax, skillRules = 'retain', selected = false, replies = null) {
   if (!Array.isArray(content)) fail('UNSUPPORTED_CODEX_RECORD');
+  if (skillRules === 'mention') {
+    // On the message that selected this skill from the `$` list, the leading
+    // mention the list inserted is markup; the words after it and one space
+    // stay, unless they are exactly one action: then the message is only the
+    // command. Other messages, and a mention typed by hand, stay as typed.
+    const after = syntax === 'user' && selected ? codexMentionText(content) : null;
+    if (after !== null) {
+      if (after.startsWith(' ') && processingControlText(after.slice(1)) !== null) return;
+      collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
+    }
+    // The older skill part with exactly one action is only the command too.
+    if (syntax === 'user' && content.length === 2 && pluginSkillBlock(content[0]) && content[1]?.type === 'text' &&
+        processingControlText(content[1].text) !== null) return;
+    // An assistant message that only repeats this plugin's reply in this turn
+    // is that reply, not the assistant's own text.
+    if (kind === 'assistant' && replies?.size && content.length && content.every(item => ['text', 'output_text', 'Text'].includes(item?.type) && typeof item.text === 'string') &&
+        replies.has(content.map(item => item.text).join(''))) return;
+  }
   for (const item of content) {
     // Selecting this skill is command markup around the typed text, which stays.
-    if (syntax === 'user' && skillRules === 'markup' && pluginSkillBlock(item)) continue;
+    if (syntax === 'user' && SKILL_MARKUP_RULES.includes(skillRules) && pluginSkillBlock(item)) continue;
     if (['text', 'input_text', 'output_text', 'Text'].includes(item?.type)) {
       collector.add(kind, record, { text: textValue(item.text) });
     } else if (['image', 'input_image'].includes(item?.type)) {
@@ -114,17 +204,20 @@ function toolText(collector, record, output) {
   return texts.join('\n');
 }
 
-// In a unit the person started with this skill, calls to this plugin's control
-// server are its own processing and review activity. They are identified only
-// by native identity: the call's namespace and its native MCP item's server and
-// tool, never by text. Other tools, user text and assistant text are unchanged.
+const completedItem = value => value.type === 'event_msg' && value.payload?.type === 'item_completed' ? value.payload.item : null;
+// In a unit the person started with this skill (and, from version 4, in one
+// whose message starts with this skill's mention typed by hand), calls to this
+// plugin's control server are its own processing and review activity. They are
+// identified only by native identity: the call's namespace and its native MCP
+// item's server and tool, never by text. Other tools, user text and assistant
+// text are unchanged.
 function controlExchanges(unit, skillRules) {
   const ids = new Set();
-  if (skillRules !== 'markup') return ids;
-  const values = unit.records.map(record => record.value);
-  const item = value => value.type === 'event_msg' && value.payload?.type === 'item_completed' ? value.payload.item : null;
-  if (!values.some(value => item(value)?.type === 'UserMessage' && Array.isArray(item(value).content) &&
-    item(value).content.some(pluginSkillBlock))) return ids;
+  if (!SKILL_MARKUP_RULES.includes(skillRules)) return ids;
+  const values = unit.records.map(record => record.value), item = completedItem;
+  const started = values.some(value => item(value)?.type === 'UserMessage' && Array.isArray(item(value).content) &&
+    (item(value).content.some(pluginSkillBlock) || (skillRules === 'mention' && codexMentionText(item(value).content) !== null)));
+  if (!started && !(skillRules === 'mention' && unit.selected)) return ids;
   const native = new Map();
   for (const value of values) {
     const call = item(value);
@@ -137,12 +230,89 @@ function controlExchanges(unit, skillRules) {
     if (value.type === 'response_item' && p?.type === 'function_call' && typeof p.call_id === 'string' &&
         p.namespace === `mcp__${CONTROL_SERVER}` && native.get(p.call_id) === `${CONTROL_SERVER}\0${p.name}`) ids.add(p.call_id);
   }
+  if (skillRules === 'mention') for (const id of codeModeExchanges(unit, values)) ids.add(id);
+  return ids;
+}
+
+// The plain replies this plugin's control calls in the unit returned: the
+// status text of each result, or a refusal's message. Identified through the
+// native items already proven to be control exchanges, never by text alone.
+function controlReplies(unit, exchanges) {
+  const replies = new Set();
+  for (const record of unit.records) {
+    const item = completedItem(record.value);
+    if (item?.type !== 'McpToolCall' || item.server !== CONTROL_SERVER || !exchanges.has(item.id)) continue;
+    const content = item.result?.content;
+    if (Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string') {
+      try { const value = JSON.parse(content[0].text); if (typeof value?.statusText === 'string' && value.statusText) replies.add(value.statusText); }
+      catch { /* Not a control reply. */ }
+    }
+    if (typeof item.error?.message === 'string' && item.error.message) replies.add(item.error.message);
+  }
+  return replies;
+}
+
+// Native items a tool call can leave. In code mode a cell's nested calls have
+// such an item and no model call record of their own.
+const toolItems = new Set(['McpToolCall', 'CommandExecution', 'FileChange', 'DynamicToolCall', 'WebSearch', 'ImageView',
+  'ImageGeneration', 'Extension', 'Plan', 'EnteredReviewMode', 'ExitedReviewMode']);
+// Code-mode cells are model JavaScript, which is never read. A cell is this
+// plugin's exchange only when nothing else can have happened in it: every
+// nested native item inside the cell's span (from its call to its last output,
+// including `wait` calls on it) is a call to this plugin's control server, and
+// every output of the cell is Codex's framing around nothing or around exactly
+// what one of those calls returned. Such a cell, its waits, outputs and nested
+// items are left out; other cells stay. A nested item outside every cell, or
+// inside two open cells, keeps every code-mode record, and so does a child agent.
+function codeModeExchanges(unit, values) {
+  if (unit.collaborationIds.size) return [];
+  const calls = [], outputs = new Map(), nested = [];
+  values.forEach((value, index) => {
+    const p = value.payload, item = completedItem(value);
+    if (value.type === 'response_item' && ['function_call', 'custom_tool_call'].includes(p?.type) && typeof p.call_id === 'string') calls.push({ index, p });
+    const callId = item?.type === 'FunctionCallOutput' ? item.id
+      : value.type === 'response_item' && ['function_call_output', 'custom_tool_call_output'].includes(p?.type) ? p.call_id : null;
+    if (typeof callId === 'string') outputs.set(callId, [...(outputs.get(callId) ?? []), { index, printed: codexCellOutput(item ? item.output : p.output) }]);
+    if (toolItems.has(item?.type)) nested.push({ index, item });
+  });
+  const direct = new Set(calls.map(call => call.p.call_id));
+  const cells = calls.filter(call => call.p.type === 'custom_tool_call' && call.p.name === 'exec' && call.p.namespace == null)
+    .map(call => ({ index: call.index, callId: call.p.call_id, waits: [], nested: [], outputs: [...(outputs.get(call.p.call_id) ?? [])] }));
+  if (!cells.length) return [];
+  // A running cell announces its runtime ID; `wait` calls name it.
+  const running = new Map();
+  for (const cell of cells) for (const output of cell.outputs) if (output.printed?.running) {
+    running.set(output.printed.cellId, running.has(output.printed.cellId) && running.get(output.printed.cellId) !== cell ? null : cell);
+  }
+  for (const call of calls.filter(entry => entry.p.type === 'function_call' && entry.p.name === 'wait' && entry.p.namespace == null)) {
+    let cellId = null;
+    try { cellId = JSON.parse(call.p.arguments)?.cell_id; } catch { /* An unreadable wait names no cell. */ }
+    const cell = typeof cellId === 'string' ? running.get(cellId) : null;
+    if (cell) { cell.waits.push(call.p.call_id); cell.outputs.push(...(outputs.get(call.p.call_id) ?? [])); }
+  }
+  for (const cell of cells) cell.end = cell.outputs.length ? Math.max(...cell.outputs.map(output => output.index)) : values.length;
+  for (const entry of nested.filter(entry => !direct.has(entry.item.id))) {
+    const owners = cells.filter(cell => cell.index < entry.index && entry.index < cell.end);
+    if (owners.length !== 1) return [];
+    owners[0].nested.push(entry.item);
+  }
+  const ids = [];
+  for (const cell of cells) {
+    if (!cell.nested.length || cell.nested.some(item => item.type !== 'McpToolCall' || item.server !== CONTROL_SERVER || typeof item.id !== 'string' ||
+        typeof item.tool !== 'string' || !['completed', 'failed'].includes(item.status))) continue;
+    const shown = new Set(cell.nested.flatMap(codexToolRenderings));
+    if (cell.outputs.some(({ printed }) => !printed || (printed.text !== '' && (printed.running || !shown.has(printed.text))))) continue;
+    ids.push(cell.callId, ...cell.waits, ...cell.nested.map(item => item.id));
+  }
   return ids;
 }
 
 function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRules = 'retain') {
   const collector = evidenceCollector(undefined, { toolRulesVersion }), calls = new Map(), seen = new Map(), outcomes = new Map(), collabIds = new Set(unit.collaborationIds);
   const exchanges = controlExchanges(unit, skillRules);
+  const replies = skillRules === 'mention' ? controlReplies(unit, exchanges) : null;
+  // Markup belongs only to the message the `$` list selection was made for.
+  const selectedMessage = id => skillRules === 'mention' && unit.selectedMessages.has(id);
   // Only structured native completion status can refine an observed tool outcome.
   for (const record of unit.records) {
     checkBudget();
@@ -187,7 +357,8 @@ function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRu
       if (ignoredItems.has(item?.type)) continue;
       if (item?.type === 'UserMessage' || item?.type === 'AgentMessage') {
         if (historyMode !== 'paginated') fail('UNSUPPORTED_CODEX_HISTORY');
-        blocks(collector, record, item.content, item.type === 'UserMessage' ? 'user' : 'assistant', item.type === 'UserMessage' ? 'user' : 'assistant', skillRules);
+        blocks(collector, record, item.content, item.type === 'UserMessage' ? 'user' : 'assistant', item.type === 'UserMessage' ? 'user' : 'assistant', skillRules,
+          item.type === 'UserMessage' && selectedMessage(item.id), replies);
       } else if (item?.type === 'CommandExecution') {
         // Status corroborates raw tool evidence; command output is not copied a second time.
         if (!unit.records.some(r => r.value.type === 'response_item' && r.value.payload.call_id === item.id)) collector.omit('native-tool-without-raw-evidence', record);
@@ -198,6 +369,7 @@ function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRu
           else collector.add('tool-result', record, { tool: toolName(item), callId: string(item.id, 256), outcome: outcomes.get(item.id) ?? 'unknown', text: toolText(collector, record, item.output) });
         }
       } else if (['Plan', 'FileChange', 'McpToolCall', 'DynamicToolCall', 'WebSearch', 'ImageView', 'ImageGeneration', 'Extension', 'EnteredReviewMode', 'ExitedReviewMode'].includes(item?.type)) {
+        if (exchanges.has(item.id)) continue;
         const represented = unit.records.some(r => r.value.type === 'response_item' && r.value.payload.call_id === item.id);
         if (!represented) collector.omit('unsupported-native-item', record);
       }
@@ -296,7 +468,7 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
       // overlapping starts cannot establish succession or legacy event ownership.
       if (scan.metadata.historyMode === 'legacy' && [...units.values()].some(unit => !unit.end)) fail('UNSUPPORTED_CODEX_ORDER');
       if (units.size >= 4096) fail('SESSION_UNIT_LIMIT');
-      units.set(unitId, { id: unitId, start: record, records: [record], end: null, terminal: null, collaborationIds: new Set() });
+      units.set(unitId, { id: unitId, start: record, records: [record], end: null, terminal: null, collaborationIds: new Set(), selected: false, selectedMessages: new Set() });
       if (unanchoredUnits.has(unitId)) units.get(unitId).fault = 'EVIDENCE_BEFORE_CODEX_START';
       remember(unitId, record); frames.push({ ...range(record), kind: 'unit', unitId }); continue;
     }
@@ -332,6 +504,16 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
       if (line.type === 'event_msg' && p.type === 'user_message' && scan.metadata.historyMode !== 'legacy') fail('UNSUPPORTED_CODEX_HISTORY');
       if (line.type === 'response_item' && (ignoredResponses.has(p.type) ||
           (p.type === 'message' && ['user', 'developer', 'system'].includes(p.role)) || line.metadata?.inherited_user_message)) {
+        // Model context, never evidence. A Codex 0.163 selection of this skill
+        // still marks its own open turn as started with this skill.
+        const selecting = !line.metadata?.inherited_user_message && codexSkillSelection(p) !== null ? units.get(p.internal_chat_message_metadata_passthrough?.turn_id) : null;
+        if (selecting && !selecting.end) {
+          selecting.selected = true;
+          // The selection is made for the message just submitted: the turn's
+          // latest user message before it.
+          const message = selecting.records.findLast(entry => completedItem(entry.value)?.type === 'UserMessage');
+          if (typeof message?.value.payload.item.id === 'string') selecting.selectedMessages.add(message.value.payload.item.id);
+        }
         frames.push({ ...range(record), kind: 'structural' }); continue;
       }
       let unitId = line.type === 'response_item' ? p.internal_chat_message_metadata_passthrough?.turn_id : p.turn_id;
@@ -389,7 +571,9 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
     // Only a trusted native controller receipt plus a complete byte-level proof
     // can exclude a control-only turn. Published evidence keeps its old identity
     // and content; absent head loading is not evidence that no head exists.
-    const selectedSkill = unit.records.some(record => record.value.payload?.item?.type === 'UserMessage' &&
+    // Either native form of selecting this skill: the older skill part of the
+    // message, or the Codex 0.163 selection item. The proof checks the rest.
+    const selectedSkill = unit.selected || unit.records.some(record => record.value.payload?.item?.type === 'UserMessage' &&
       record.value.payload.item.content?.some?.(part => part.type === 'skill' && part.name === 'cuefluent-notes'));
     if (!prior && !loadedHead?.head && typeof loadHead === 'function' && typeof resolveProcessingExecution === 'function' && unit.terminal === 'completed') {
       const receipt = await resolveProcessingExecution({ client: 'codex', sessionId: source.sessionId, unitId: unit.id });
