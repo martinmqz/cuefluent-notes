@@ -446,6 +446,24 @@ test('Codex 0.163 code-mode receipts name both cells and the retry call, and exc
   });
 });
 
+test('a plain-language Codex request is captured as typed, without this plugin\'s control traffic or the relayed reply', async t => {
+  // No skill picked, no mention: no receipt exists and none is looked for, yet
+  // the worker publishes only the person's words, beside genuine work.
+  const typed = 'Please process my notes.';
+  for (const mode of ['code', 'direct']) await t.test(mode, async t => {
+    const f = await fixture(t, { mixed: true, turn: { form: 'plain', control: typed, calledTool: 'process_selected_captures', mode } });
+    await withIntakeLock(f.store, async tx => {
+      assert.equal(await f.resolve(tx)(f.query), null);
+      assert.deepEqual(await processScope(tx, f.store, f.selection, f.scopeId, authorize), { saved: 3, pending: null, incomplete: false, drained: true });
+      const capture = (await readCaptureHead(f.store, { client: 'codex', sessionId, unitId })).capture;
+      assert.deepEqual(capture.evidence.map(item => [item.kind, item.text]), [['user', typed]]);
+      assert.doesNotMatch(JSON.stringify(capture), /cuefluent_control|Review folder|statusText/);
+      for (const id of [beforeId, afterId])
+        assert.match((await readCaptureHead(f.store, { client: 'codex', sessionId, unitId: id })).capture.evidence[0].text, /Genuine work/);
+    });
+  });
+});
+
 test('Codex code-mode receipt fields come all together, only for Codex, and name distinct cells and calls', async t => {
   const f = await fixture(t, { turn: {} });
   await withIntakeLock(f.store, async tx => {

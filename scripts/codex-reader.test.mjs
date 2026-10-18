@@ -12,7 +12,8 @@ import { digest } from './workflow-values.mjs';
 import { inspectIntakeStore, withIntakeLock, intakeSnapshot } from './intake-io.mjs';
 import { controlSelection, publishCapture, readCaptureHead } from './intake-store.mjs';
 import { serializeCapture, createCapture, captureRelativePath } from './capture-contract.mjs';
-import { codexControlTurn, MENU_MENTION, framing } from './test-support/codex-control-turn.mjs';
+import { codexControlTurn, MENU_MENTION, framing, codexToolError } from './test-support/codex-control-turn.mjs';
+import { processingControlStatusView, processingControlRefusalText } from './processing-control-server.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -584,21 +585,35 @@ test('a Codex unit started with this skill keeps what the person typed and leave
     .filter(item => item.kind === 'user').map(item => item.text), ['review save t7xb88', 'Also: tag it urgent.']);
 });
 
-test('Codex control exchanges stay evidence without this skill selection or exact native identity', async t => {
+test('Codex control exchanges are left out in every unit by native identity alone, never by a name or text', async t => {
   const exchanged = capture => capture.evidence.filter(item => item.callId === 'cue-1').map(item => item.kind);
-  for (const [name, entries, { omission = false } = {}] of [
-    ['no skill block', [start(A), user(A, 'review save t7xb88'), ...controlExchange(A, 'cue-1'), end(A)]],
-    ['another skill name', [start(A), skillUser(A, 'review sav t7xb88', { name: 'other-notes' }), ...controlExchange(A, 'cue-1'), end(A)], { omission: true }],
-    ['another block shape', [start(A), skillUser(A, 'review sav t7xb88', { fields: { version: '1' } }), ...controlExchange(A, 'cue-1'), end(A)], { omission: true }],
-    ['another namespace', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { namespace: 'mcp__other_control' }), end(A)]],
-    ['another server', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { server: 'other_control' }), end(A)]],
-    ['another native tool', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { tool: 'processing_status' }), end(A)]],
-    ['no native MCP item', [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1', { native: false }), end(A)]],
+  // Without this skill (none, another skill, another block shape) the person's
+  // words stay and so does a skill block that is not this plugin's markup; the
+  // control exchange is left out all the same.
+  for (const [name, typed, { omission = false } = {}] of [
+    ['no skill block', user(A, 'review save t7xb88')],
+    ['another skill name', skillUser(A, 'review sav t7xb88', { name: 'other-notes' }), { omission: true }],
+    ['another block shape', skillUser(A, 'review sav t7xb88', { fields: { version: '1' } }), { omission: true }],
   ]) await t.test(name, async t => {
-    const f = await fixture(t, entries), capture = (await readCodexSelection(f.args)).candidates[0].capture;
-    assert.deepEqual(exchanged(capture), ['tool-call', 'tool-result']);
+    const f = await fixture(t, [start(A), typed, ...controlExchange(A, 'cue-1'), end(A)]), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.deepEqual(exchanged(capture), []);
+    assert.deepEqual(capture.evidence.map(item => item.kind), ['user']);
     assert.equal(capture.coverage.omissions.some(item => item.reason === 'unsupported-content-block'), omission);
+    // Version 3 left such an exchange in: a published v3 head replays unchanged.
+    const v3 = { ...capture, reader: { ...capture.reader, version: '3' } };
+    const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: v3 }) })).candidates[0].capture;
+    assert.deepEqual(exchanged(replayed), ['tool-call', 'tool-result']);
+    const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+    assert.equal(again.evidenceHash, replayed.evidenceHash);
   });
+  // Anything short of the exact native identity stays, with or without the skill.
+  for (const [name, options] of [['another namespace', { namespace: 'mcp__other_control' }], ['another server', { server: 'other_control' }],
+    ['another native tool', { tool: 'processing_status' }], ['no native MCP item', { native: false }]]) {
+    for (const [form, typed] of [['skill', skillUser(A, 'review sav t7xb88')], ['no skill', user(A, 'Please review the draft.')]]) await t.test(`${name}, ${form}`, async t => {
+      const f = await fixture(t, [start(A), typed, ...controlExchange(A, 'cue-1', options), end(A)]), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+      assert.deepEqual(exchanged(capture), ['tool-call', 'tool-result']);
+    });
+  }
 });
 
 // Codex CLI 0.163 attaches a skill picked from the `$` list as a separate user
@@ -678,10 +693,11 @@ test('Codex 0.163: a code-mode cell stays evidence when anything else could have
     ['two cells open at once', rows => { const second = rows.findIndex((row, i) => firstCell(row) && i > rows.findIndex(firstCell));
       const [cell] = rows.splice(second, 1); rows.splice(rows.findIndex(firstCell) + 1, 0, cell); return rows; }, ['call_cell_1', 'call_cell_2']],
     ['a child agent ran', rows => insertAfter(rows, firstCell, nestedItem({ type: 'CollabAgentToolCall', id: 'collab-1' })), ['call_cell_1', 'call_cell_2']],
-  ]) await t.test(name, async t => {
-    const f = await fixture(t, mutate(turn({ control: 'sav t7xb88' }).rows)), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+  ]) for (const [form, control] of [['menu', 'sav t7xb88'], ['plain', 'Please save the draft.']]) await t.test(`${name} (${form})`, async t => {
+    // The same per-cell rule applies whether or not the skill was picked.
+    const f = await fixture(t, mutate(turn({ form, control }).rows)), capture = (await readCodexSelection(f.args)).candidates[0].capture;
     assert.deepEqual(capture.evidence.filter(entry => entry.kind === 'tool-call').map(entry => entry.callId), keptCells);
-    assert.deepEqual(capture.evidence.filter(entry => entry.kind === 'user').map(entry => entry.text), ['sav t7xb88']);
+    assert.deepEqual(capture.evidence.filter(entry => entry.kind === 'user').map(entry => entry.text), [control]);
   });
 });
 
@@ -702,7 +718,7 @@ test('Codex 0.163: a mention typed by hand is kept as typed while its control ex
     evt('item_completed', { thread_id: S, turn_id: A, item: { type: 'CommandExecution', id: `exec-${randomUUID()}`, status: 'completed', exit_code: 0 } }),
     { type: 'response_item', metadata: { client_authored: false }, payload: { type: 'custom_tool_call_output', call_id: 'call_read', output: [
       { type: 'input_text', text: framing() }, { type: 'input_text', text: 'SYNTHETIC SKILL TEXT' }], internal_chat_message_metadata_passthrough: { turn_id: A } } });
-  const refusal = rows.find(row => row.payload?.item?.type === 'McpToolCall').payload.item, message = 'Synthetic refusal: not a command.';
+  const refusal = rows.find(row => row.payload?.item?.type === 'McpToolCall').payload.item, message = codexToolError(refusal.tool, 'Synthetic refusal: not a command.');
   Object.assign(refusal, { status: 'failed', error: { message } }); delete refusal.result;
   rows.find(row => row.payload?.call_id === 'call_cell_1' && row.payload.type === 'custom_tool_call_output').payload.output[1].text =
     JSON.stringify({ content: [{ type: 'text', text: message }], isError: true });
@@ -710,11 +726,126 @@ test('Codex 0.163: a mention typed by hand is kept as typed while its control ex
   assert.deepEqual(read.evidence.filter(entry => entry.kind.startsWith('tool-')).map(entry => [entry.kind, entry.callId]),
     [['tool-call', 'call_read'], ['tool-result', 'call_read']]);
   assert.doesNotMatch(serializeCapture(read).toString(), /Synthetic refusal|cuefluent_control/);
-  // Text that merely names the plugin elsewhere is ordinary and keeps its exchanges.
+  // Text that merely names the plugin elsewhere is the person's own words and
+  // stays as typed; the control exchange is left out as in every unit.
   const later = turn({ form: 'typed', control: 'sav t7xb88', mode: 'direct' }).rows.map(row => row.payload?.item?.type === 'UserMessage'
     ? { ...row, payload: { ...row.payload, item: { ...row.payload.item, content: [{ type: 'text', text: 'Please run $cuefluent-notes status.', text_elements: [] }] } } } : row);
   const ordinaryUnit = (await readCodexSelection((await fixture(t, later)).args)).candidates[0].capture;
-  assert.deepEqual(ordinaryUnit.evidence.filter(entry => entry.kind.startsWith('tool-')).map(entry => entry.callId), ['dispatch-call', 'dispatch-call']);
+  assert.deepEqual(kept(ordinaryUnit), [['user', 'Please run $cuefluent-notes status.']]);
+});
+
+// A Codex unit with no skill picked and no mention, such as a request in the
+// person's own words that the model answers by calling this plugin's control.
+const commandPrefix = '$cuefluent-notes';
+const helpReply = processingControlStatusView({ status: 'idle', nextAction: 'none', commandPrefix, help: true }, { collectionId: 'example' }).statusText;
+const notCommandReply = processingControlStatusView({ status: 'idle', nextAction: 'none', commandPrefix, command: 'not-a-command', suggestions: ['save'] },
+  { collectionId: 'example' }).statusText;
+// What a chat with nothing set up gets (processing-mcp.mjs unboundStatus).
+const unboundReply = processingControlStatusView({ status: 'missing', statusDetail: 'unbound', nextAction: 'none',
+  diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix }, { collectionId: null }).statusText;
+const refusalReply = processingControlRefusalText('PROCESSING_CONTROL_SOURCE_UNVERIFIED', { client: 'codex', stage: 'binding', tool: 'processing_status' });
+// The control call is refused: its native item fails with the error as Codex
+// records it (`recorded`, by default its framing around the refusal), which
+// the cell prints as Codex shows a failed call, and the assistant relays
+// `relay` (by default the plain refusal, as it is told to).
+function refused(rows, message, mode, { recorded, relay = message } = {}) {
+  const calls = rows.filter(row => row.payload?.item?.type === 'McpToolCall'), call = calls.at(-1).payload.item;
+  const error = recorded ?? codexToolError(call.tool, message);
+  Object.assign(call, { status: 'failed', error: { message: error } }); delete call.result;
+  const output = rows.findLast(row => row.payload?.call_id === (mode === 'direct' ? 'dispatch-call' : 'call_cell_2') && row.payload.type.endsWith('_output')).payload;
+  if (mode === 'direct') output.output = error;
+  else output.output[1].text = JSON.stringify({ content: [{ type: 'text', text: error }], isError: true });
+  for (const row of rows) {
+    if (row.payload?.item?.phase === 'final_answer') row.payload.item.content[0].text = relay;
+    if (row.type === 'response_item' && row.payload.role === 'assistant' && row.payload.phase === 'final_answer') row.payload.content[0].text = relay;
+    if (row.payload?.type === 'task_complete') row.payload.last_agent_message = relay;
+  }
+  return rows;
+}
+test('Codex: a plain-language request keeps its words while this plugin\'s control traffic and repeated replies are left out', async t => {
+  const typed = 'Please process my notes.', plain = options => turn({ form: 'plain', control: typed, calledTool: 'process_selected_captures', ...options });
+  for (const [name, rows] of [
+    ['code mode', plain().rows], ['code mode finished by wait', plain({ waits: 2 }).rows], ['direct call', plain({ mode: 'direct' }).rows],
+    ['a first turn', plain({ firstTurn: true }).rows],
+    ['the command list', plain({ statusText: helpReply, calledTool: 'processing_status' }).rows],
+    ['a not-a-command reply', plain({ statusText: notCommandReply, calledTool: 'processing_status', mode: 'direct' }).rows],
+    ['the reply before setup', plain({ statusText: unboundReply, calledTool: 'processing_status' }).rows],
+    ['a refusal in code mode', refused(plain({ calledTool: 'processing_status' }).rows, refusalReply, 'code')],
+    ['a refusal, direct', refused(plain({ calledTool: 'processing_status', mode: 'direct' }).rows, refusalReply, 'direct')],
+    ['a refusal relayed with Codex\'s framing', refused(plain({ calledTool: 'processing_status' }).rows, refusalReply, 'code',
+      { relay: codexToolError('processing_status', refusalReply) })],
+    ['a refusal of several lines', refused(plain({ calledTool: 'processing_status' }).rows, `${refusalReply}\n\nType $cuefluent-notes status.`, 'code')],
+  ]) await t.test(name, async t => {
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.equal(capture.reader.version, '4');
+    // The person's words stay exactly as typed; the cells, calls, outputs,
+    // nested items, waits and the assistant's repetition of the reply do not.
+    assert.deepEqual(kept(capture), [['user', typed]]);
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+    assert.doesNotMatch(serializeCapture(capture).toString(), /cuefluent_control|tools\.mcp|verification-required|statusText|Cuefluent:|Cuefluent processing/);
+  });
+  // Only Codex's exact framing yields the plain refusal: any other framing keeps
+  // the relay, while the call itself is still left out by native identity.
+  for (const [name, recorded, relay = refusalReply] of [
+    ['another tool in the framing', codexToolError('processing_review', refusalReply)],
+    ['another server in the framing', codexToolError('processing_status', refusalReply, { server: 'other_control' })],
+    ['no error data', codexToolError('processing_status', refusalReply, { data: null })],
+    ['other error data', codexToolError('processing_status', refusalReply, { data: { code: 'X', detail: 'y' } })],
+    // Four other characters where the indent belongs: stripping them would yield the relay.
+    ['a line not indented', codexToolError('processing_status', `${refusalReply}\nmore`).replace('\n    more', '\nXXXXmore'), `${refusalReply}\nmore`],
+    ['several causes', codexToolError('processing_status', refusalReply).replace('Caused by:\n    ', 'Caused by:\n    0: transport\n    1: ')],
+    ['no code', codexToolError('processing_status', refusalReply).replace('-32600: ', '')],
+  ]) for (const mode of ['code', 'direct']) await t.test(`${name} keeps the relay (${mode})`, async t => {
+    const rows = refused(plain({ calledTool: 'processing_status', mode }).rows, refusalReply, mode, { recorded, relay });
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', typed], ['assistant', relay]]);
+    assert.doesNotMatch(serializeCapture(capture).toString(), /cuefluent_control|tool call error/);
+  });
+  // Text alone never identifies anything: an exact action typed without the
+  // skill is the person's own words and stays.
+  await t.test('an exact action typed without the skill', async t => {
+    const capture = (await readCodexSelection((await fixture(t, turn({ form: 'plain', control: 'review' }).rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', 'review']]);
+  });
+  await t.test('commentary and a reply with added words stay', async t => {
+    const rows = plain({ commentary: ['Diagnosis: the Cedar cache bug is the 25-minute TTL.'] }).rows;
+    for (const row of rows) {
+      if (row.payload?.item?.phase === 'final_answer') row.payload.item.content[0].text += ' The audit ends Friday.';
+      if (row.type === 'response_item' && row.payload.role === 'assistant' && row.payload.phase === 'final_answer') row.payload.content[0].text += ' The audit ends Friday.';
+    }
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', typed], ['assistant', 'Diagnosis: the Cedar cache bug is the 25-minute TTL.'],
+      ['assistant', 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88 The audit ends Friday.']]);
+  });
+  // Only the assistant can repeat a reply: the person pasting it is their input.
+  await t.test('the person pasting the reply keeps it', async t => {
+    const rows = plain().rows, pasted = 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88';
+    rows.splice(rows.findIndex(row => row.payload?.item?.phase === 'final_answer'), 0, evt('item_completed', { thread_id: S, turn_id: A,
+      item: { type: 'UserMessage', id: 'pasted-message', content: [{ type: 'text', text: pasted, text_elements: [] }] } }));
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', typed], ['user', pasted]]);
+  });
+  // A reply is the reply of a control call in its own unit: the same words in
+  // another unit, with no control call there, are that unit's assistant text.
+  await t.test('the same words in another unit stay', async t => {
+    const echo = 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88';
+    const capture = (await readCodexSelection((await fixture(t, [...plain().rows, start(B), user(B, 'What did it say?'), assistant(B, echo), end(B)])).args))
+      .candidates.find(entry => entry.capture.identity.unitId === B).capture;
+    assert.deepEqual(kept(capture), [['user', 'What did it say?'], ['assistant', echo]]);
+  });
+  // Published version 1-3 heads keep their rules: the cells and the relayed
+  // reply stay, and every replay reproduces the same bytes.
+  for (const mode of ['code', 'direct']) for (const version of ['1', '2', '3']) await t.test(`a published v${version} head replays unchanged (${mode})`, async t => {
+    const f = await fixture(t, plain({ mode, statusText: helpReply, calledTool: 'processing_status' }).rows);
+    const current = (await readCodexSelection(f.args)).candidates[0].capture;
+    const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: { ...current, reader: { ...current.reader, version } } }) })).candidates[0].capture;
+    assert.equal(replayed.reader.version, version);
+    assert.deepEqual(replayed.evidence.filter(entry => entry.kind === 'tool-call').map(entry => entry.callId), mode === 'code' ? ['call_cell_1', 'call_cell_2'] : ['dispatch-call']);
+    assert.deepEqual(replayed.evidence.filter(entry => entry.kind !== 'tool-call' && entry.kind !== 'tool-result').map(entry => [entry.kind, entry.text]),
+      [['user', typed], ['assistant', helpReply]]);
+    const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+    assert.equal(again.evidenceHash, replayed.evidenceHash); assert.deepEqual(serializeCapture(again), serializeCapture(replayed));
+  });
 });
 
 test('reader version 3 replays a published 0.163 unit unchanged: its mention and code-mode cells stay', async t => {

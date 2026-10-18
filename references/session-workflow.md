@@ -149,26 +149,35 @@ message before the item), its leading mention (`$cuefluent-notes:cuefluent-notes
 or `$cuefluent-notes`) plus one space are the markup; any other message in the
 turn keeps its text, even one that starts with the mention. From version 4, a
 message whose text after that markup (or after the block) is exactly one action
-is only the command and leaves no evidence, and an assistant message that only
-repeats the status text or refusal message of one of the unit's control calls is
-that reply, not evidence. Commentary and all other assistant text stay. The
-installed path, which changes with each plugin version, is not
-consulted, so a published unit replays unchanged after an upgrade. In that unit,
-and from version 4 also in a unit whose message starts with this skill's mention
-typed by hand (kept exactly as typed, since Codex attached no skill), calls to
-this plugin's control server and their results are left out as its own
-processing and review activity, identified by native identity alone: the call
-namespace `mcp__cuefluent_control` plus a native MCP item for the same call ID
-with server `cuefluent_control` and the same tool. From version 4, a code-mode
-`exec` cell is left out too, with its `wait` calls, outputs and nested MCP
-items, when every nested native item within the cell's span (from its call to
-its last output) is a call to `cuefluent_control` and every output of the cell
-is Codex's own framing around nothing or around exactly what one of those calls
-returned; other cells stay. A nested item outside every cell or within two open
-cells, or a child agent in the unit, keeps every code-mode record. Other tools
-and units without this skill are unchanged. Published captures keep the rules of
-their reader version: versions 1 and 2 keep the block as an omission and the
-exchanges, version 3 applies the block rules only, version 4 the rules above.
+is only the command and leaves no evidence. The installed path, which changes
+with each plugin version, is not consulted, so a published unit replays
+unchanged after an upgrade.
+
+Calls to this plugin's control server and their results are left out as its own
+processing and review activity: under version 3 in a unit started with this
+skill, and from version 4 in every Codex unit, whether the skill was picked, its
+mention typed by hand (kept exactly as typed, since Codex attached no skill) or
+the request made in the person's own words. They are identified by native
+identity alone: the call namespace `mcp__cuefluent_control` plus a native MCP
+item for the same call ID with server `cuefluent_control` and the same tool.
+From version 4, a code-mode `exec` cell is left out too, with its `wait` calls,
+outputs and nested MCP items, when every nested native item within the cell's
+span (from its call to its last output) is a call to `cuefluent_control` and
+every output of the cell is Codex's own framing around nothing or around exactly
+what one of those calls returned; other cells stay. A nested item outside every
+cell or within two open cells, or a child agent in the unit, keeps every
+code-mode record. From version 4, an assistant message that only repeats the
+status text (including the command list and a not-a-command reply) or the
+refusal message of one of those left-out calls in the same unit (as Codex
+recorded it, or the plain message inside Codex CLI 0.163's own error framing)
+is that reply, not evidence. Text alone never identifies anything: the person's
+words stay as typed, even an exact action typed without the skill, and
+commentary, any other assistant text, a reply with words added and other tools
+stay. Legacy history records MCP calls without native MCP items, so its control
+calls and replies stay. Published captures keep the rules of their reader
+version: versions 1 and 2 keep the block as an omission and the exchanges,
+version 3 applies the block rules and leaves out exchanges only in units
+started with this skill, version 4 the rules above.
 
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same
@@ -429,9 +438,10 @@ compaction summaries, hook prompts and inter-agent content are excluded structur
 Native collaboration call IDs and pinned collaboration tool names exclude their
 outputs with an omission. Reader version 3 treats this plugin's own skill block
 as command markup and leaves out its control-server exchanges in a unit started
-with that skill (see [the provenance gate](#generated-output-provenance-gate));
-versions 1 and 2 record the block as an `unsupported-content-block` omission and
-keep those exchanges. A published unit is always reread under its own version.
+with that skill; version 4 leaves them out in every unit (see
+[the provenance gate](#generated-output-provenance-gate)); versions 1 and 2
+record the block as an `unsupported-content-block` omission and keep those
+exchanges. A published unit is always reread under its own version.
 Native user text, including IDE context supplied in
 that text, stays attributed evidence; prose delimiters do not authorize stripping
 arbitrary parts of a user's message.

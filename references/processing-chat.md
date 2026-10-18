@@ -382,8 +382,9 @@ read packets or notes, synthesize a draft, print diagnostics containing source t
 or add commentary in the source chat. A natural-language request typed without
 the skill command may also dispatch, but it is not proof that the input contains
 no original work. Its text, facts, attachments and corrections remain eligible
-for normal collection. After the skill command, verified inexact text dispatches nothing;
-see [review controls](#review-controls).
+for normal collection; this plugin's control traffic in that turn does not (see
+[capture prevention](#capture-prevention-and-limits)). After the skill command,
+verified inexact text dispatches nothing; see [review controls](#review-controls).
 
 The processing client has only the selected engine tools: inventory, operation
 status, bounded preparation, page reads and acknowledgments, note inspection,
@@ -694,7 +695,14 @@ nothing), and Codex keeps the user text but not the skill block, the selection
 item, the mention the `$` list inserted, or this plugin's own control-server
 calls, results and code-mode cells that only made such calls in that turn. A
 Codex mention typed out by hand attaches no skill, so its message is kept
-exactly as typed; only this plugin's control calls in that turn are left out.
+exactly as typed, and so is a request in the person's own words without the
+skill. In every Codex turn, with or without the skill, this plugin's control
+calls, their results, code-mode cells that only made such calls and an
+assistant message that only repeats one of their replies (a status, the command
+list, a not-a-command reply or a refusal) are left out, identified by native
+identity, never by text. The assistant's own words, a reply with words added,
+other tools and a cell that also did other work stay. Claude captures only human
+input, so no tool call, result or assistant reply is captured from it in any turn.
 See the [session contract](session-workflow.md#generated-output-provenance-gate).
 Existing captures, active claims and issued packet hashes are never rewritten by
 this path. Copies printed in unrelated work chats are not automatically detected.

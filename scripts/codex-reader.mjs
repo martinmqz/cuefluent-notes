@@ -16,8 +16,10 @@ import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fa
 // command markup and leaves out this plugin's control-server exchanges in a
 // unit started with that skill. v4 adds the Codex 0.163 forms: a skill picked
 // from the `$` list (its selection item and leading mention are markup), a
-// mention typed out by hand (kept as typed), and control exchanges made in code
-// mode. Published v1-v3 captures remain immutable under their own rules.
+// mention typed out by hand (kept as typed) and control exchanges made in code
+// mode, and leaves out this plugin's control exchanges and the assistant's
+// repetition of their replies in every unit, with or without this skill.
+// Published v1-v3 captures remain immutable under their own rules.
 export const CODEX_READER_VERSION = '4';
 // Retain every supported historical reader independently of later reader bumps.
 export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2' });
@@ -205,19 +207,19 @@ function toolText(collector, record, output) {
 }
 
 const completedItem = value => value.type === 'event_msg' && value.payload?.type === 'item_completed' ? value.payload.item : null;
-// In a unit the person started with this skill (and, from version 4, in one
-// whose message starts with this skill's mention typed by hand), calls to this
-// plugin's control server are its own processing and review activity. They are
-// identified only by native identity: the call's namespace and its native MCP
-// item's server and tool, never by text. Other tools, user text and assistant
-// text are unchanged.
+// Calls to this plugin's control server are its own processing and review
+// activity: version 3 leaves them out in a unit the person started with this
+// skill, version 4 in every unit, whether the person picked the skill, typed a
+// mention or asked in their own words. They are identified only by native
+// identity: the call's namespace and its native MCP item's server and tool,
+// never by text. Other tools and user text are unchanged; assistant text is
+// left out only when it repeats one of these calls' replies (see `blocks`).
 function controlExchanges(unit, skillRules) {
   const ids = new Set();
   if (!SKILL_MARKUP_RULES.includes(skillRules)) return ids;
   const values = unit.records.map(record => record.value), item = completedItem;
-  const started = values.some(value => item(value)?.type === 'UserMessage' && Array.isArray(item(value).content) &&
-    (item(value).content.some(pluginSkillBlock) || (skillRules === 'mention' && codexMentionText(item(value).content) !== null)));
-  if (!started && !(skillRules === 'mention' && unit.selected)) return ids;
+  if (skillRules === 'markup' && !values.some(value => item(value)?.type === 'UserMessage' && Array.isArray(item(value).content) &&
+    item(value).content.some(pluginSkillBlock))) return ids;
   const native = new Map();
   for (const value of values) {
     const call = item(value);
@@ -234,9 +236,26 @@ function controlExchanges(unit, skillRules) {
   return ids;
 }
 
+// Codex CLI 0.163 records a refused call's JSON-RPC error in its own framing
+// (codex-rs `mcp_tool_call.rs` and `codex-mcp/src/binding.rs` at
+// rust-v0.163.0): its context line, then anyhow's "Caused by:" block holding
+// rmcp's `Mcp error: <code>: <message>` followed by the error's data, which for
+// this server is `{"code":…}`, with every further line indented four spaces.
+// The message inside is the plain reply the assistant is told to return. Any
+// other framing yields nothing, so its relay stays.
+function codexErrorReply(item) {
+  const prefix = `tool call error: tool call failed for \`${CONTROL_SERVER}/${item.tool}\`\n\nCaused by:\n    Mcp error: `;
+  if (!item.error.message.startsWith(prefix)) return null;
+  const [first, ...rest] = item.error.message.slice(prefix.length).split('\n');
+  if (rest.some(line => !line.startsWith('    '))) return null;
+  return /^-?\d+: ([\s\S]+?)\(\{"code":"[A-Z_]+"\}\)$/.exec([first, ...rest.map(line => line.slice(4))].join('\n'))?.[1] ?? null;
+}
+
 // The plain replies this plugin's control calls in the unit returned: the
-// status text of each result, or a refusal's message. Identified through the
-// native items already proven to be control exchanges, never by text alone.
+// status text of each result (including the command list and a not-a-command
+// reply), or a refusal's message, both as Codex recorded it and as the plain
+// message inside its framing. Identified through the native items already
+// proven to be control exchanges, never by text alone.
 function controlReplies(unit, exchanges) {
   const replies = new Set();
   for (const record of unit.records) {
@@ -247,7 +266,11 @@ function controlReplies(unit, exchanges) {
       try { const value = JSON.parse(content[0].text); if (typeof value?.statusText === 'string' && value.statusText) replies.add(value.statusText); }
       catch { /* Not a control reply. */ }
     }
-    if (typeof item.error?.message === 'string' && item.error.message) replies.add(item.error.message);
+    if (typeof item.error?.message === 'string' && item.error.message) {
+      replies.add(item.error.message);
+      const reply = codexErrorReply(item);
+      if (reply) replies.add(reply);
+    }
   }
   return replies;
 }

@@ -73,6 +73,29 @@ test('Claude retains human-supplied processing copies and corrections without tr
   assert.deepEqual(await fs.readFile(f.source.path), f.bytes);
 });
 
+test('a plain-language Claude request is captured as typed, never this plugin\'s tool traffic or the relayed reply', async t => {
+  // No skill command: the model answers the person's own words by calling this
+  // plugin's control. Its call, the result (a draft reply, the command list, a
+  // not-a-command reply or a refusal) and the assistant's exact relay are not
+  // human input, so none of them is copied.
+  const typed = 'Please process my notes.';
+  for (const [name, reply, isError] of [['draft', 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88', false],
+    ['command list', 'Cuefluent: Type one of these yourself, exactly as written:\n- /cuefluent-notes status: show processing.', false],
+    ['not a command', 'Cuefluent: Nothing was applied: that was not an exact command.', false],
+    ['refusal', 'Cuefluent: Nothing was applied and nothing was saved.', true]]) await t.test(name, async t => {
+    const call = message('assistant', [{ type: 'tool_use', id: 'toolu_control', name: 'mcp__cuefluent_control__processing_status', input: {} }], { promptId: A });
+    const result = message('user', [{ type: 'tool_result', tool_use_id: 'toolu_control', is_error: isError,
+      content: [{ type: 'text', text: isError ? reply : JSON.stringify({ interfaceVersion: 1, status: 'idle', statusText: reply }) }] }],
+    { promptId: A, sourceToolAssistantUUID: call.uuid });
+    const f = await fixture(t, [human(A, typed), call, result, assistant(reply, { promptId: A })]);
+    const read = await readClaudeSelection(f.args), [{ capture }] = read.candidates;
+    assert.deepEqual(capture.evidence.map(item => [item.kind, item.text]), [['user', typed]]);
+    // The call, its result and the relay are unowned rows: not even an omission.
+    assert.deepEqual(capture.coverage.omissions, []); assert.equal(read.diagnostics.unownedRecords, 3);
+    assert.doesNotMatch(serializeCapture(capture).toString() + JSON.stringify(read.checkpoint), /cuefluent_control|toolu_control|Cuefluent:|statusText/);
+  });
+});
+
 test('Claude captures proven human input, never claims a transcript finality fence', async t => {
   const f = await fixture(t, [human(), assistant(), message('system', '', { subtype: 'turn_duration', durationMs: 100 })]);
   const result = await readClaudeSelection(f.args), capture = result.candidates[0].capture;

@@ -47,6 +47,15 @@ contracts for supported commands, formats, permissions and recovery procedures.
   is not visible to the check. A Claude Desktop session connected for Remote
   Control stops collection at its first `bridge-session` record. See
   [capture prevention](processing-chat.md#capture-prevention-and-limits).
+- In every Codex turn, including a plain-language request without the skill,
+  this plugin's control calls, their results, code-mode cells that only made such
+  calls and the assistant's exact repetition of a control reply are left out of
+  captures by native identity. The request's own words stay, and so do
+  commentary, a paraphrase or a reply with words added, a cell that also did other
+  work, every code-mode record of a turn with a nested call no single cell owns or
+  a child agent, and transcripts in legacy history, whose MCP calls have no
+  native MCP items. Copies of a reply in another turn or chat are not detected.
+  These rules are tested with synthetic transcripts, not live Codex sessions.
 - Routing text typed after the skill command, such as a plain-language request
   that starts with `save`, depends on the model following
   [the skill](../SKILL.md#formal-processing-controls). Verified inexact text

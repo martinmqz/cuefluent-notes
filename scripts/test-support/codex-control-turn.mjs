@@ -4,7 +4,8 @@ import { canonicalJSON, digest } from '../workflow-values.mjs';
 
 // One synthetic Codex control turn in the shapes Codex CLI 0.163 records:
 // typed input (`menu`: the `$` list's mention plus its selection item; `block`:
-// the older skill part; `typed`: the mention typed by hand), the control call
+// the older skill part; `typed`: the mention typed by hand; `plain`: the
+// person's own words with no skill and no mention), the control call
 // (`code`: the two cells of the verification handshake, optionally finished by
 // `wait` calls; `direct`: one MCP function call), commentary and the final
 // reply. Rows have no ordinals or timestamps; fixtures add them. The receipt
@@ -15,6 +16,11 @@ export const HAND_MENTION = '$cuefluent-notes';
 export const handshakeResult = retryToken => ({ content: [{ type: 'text', text: canonicalJSON({ interfaceVersion: 1,
   status: 'verification-required', retryToken, instruction: 'Synthetic handshake instruction.' }) }], isError: false });
 export const framing = (status = 'Script completed') => `${status}\nWall time 0.1 seconds\nOutput:\n`;
+// The error message Codex CLI 0.163 records for a call the server refused with a
+// JSON-RPC error: its context line, rmcp's code and message with the error's
+// data, and anyhow's four-space indent on every further line.
+export const codexToolError = (tool, message, { server = 'cuefluent_control', code = -32600, data = { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' } } = {}) =>
+  `tool call error: tool call failed for \`${server}/${tool}\`\n\nCaused by:\n    Mcp error: ${code}: ${message.split('\n').join('\n    ')}${data ? `(${JSON.stringify(data)})` : ''}`;
 
 export function codexControlTurn({ sessionId, unitId, skillPath, control = 'review', form = 'menu', mode = 'code', waits = 0,
   commentary = [], statusText = 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88',
