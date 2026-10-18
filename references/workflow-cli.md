@@ -287,7 +287,8 @@ Status also returns `inventory` with pending, claimed, blockedByClaim, inspected
 handled, unfinishedOperations, awaitingReview, incomplete and sourceCompleteness.
 Inventory is collection-wide but bounded to one metadata page; counts are not an
 atomic total. `nextAction` can additionally be `process` for another inventory
-portion or `cancel` for an unchanged frozen selection that cannot continue. Tool arguments accept no approval or source-proof object.
+portion or `cancel` (type `process cancel`) for an unchanged frozen selection
+that cannot continue. Tool arguments accept no approval or source-proof object.
 New responses also include `statusDetail`: `accepted`, `already-processing`,
 `processing`, `preparing`, `draft-ready`, `unfinished`, `inactive`, `missing`,
 `blocked`, `completed` or `unbound`, plus `nothing-pending`, `nothing-to-resume`,
@@ -352,17 +353,17 @@ domain-separated hash of the proposal hash. Claude's optional `draft` (that code
 and `decision` (`save`, `skip` or `cancel`) mirror the typed action `review`,
 `review <code>`, `save`, `save <code>`, `skip`, `skip <code>`, `review cancel` or
 `review cancel <code>`; the native transcript must show exactly that typed text,
-so changed or model-chosen fields are refused. A typed Later is not an action;
-the Codex form keeps its Later choice. Codex refuses these fields with
+so changed or model-chosen fields are refused. Later exists only as a choice in
+the Codex form. Codex refuses these fields with
 `PROCESSING_CONTROL_INVALID_REQUEST`; its verified typed text alone names the
 draft and decision. A decision applies only through a verified typed action, to a
-revision presented to the invoking session by a verified typed review (a
+revision that a delivered typed review presented to the invoking chat lineage (a
 model-initiated or natural-language display records `verified: false` and does
 not count, even with the code), whose claim and proposal hashes still
 match; Save, Skip and Cancel then use the existing exact-hash engine paths. A
-decision without a code uses only the session's most recent presentation, and
-only when that presentation was verified. Tool arguments cannot substitute for
-the typed text or a host response.
+decision without a code uses only the lineage's most recent presentation attempt,
+and only when that attempt was a delivered typed review. Tool arguments cannot
+substitute for the typed text or a host response.
 
 Codex with form support also sends the same exact proposal through the correlated
 native host form, whose header names the review folder; an unsupported or closed

@@ -71,7 +71,8 @@ paths to bypass a refusal; follow
 
 Prefer the reusable processing chat: type `$cuefluent-notes process` in Codex or
 `/cuefluent-notes process` in Claude. Invoke the same skill with `review` to
-review the exact proposal, and `help` to list every action.
+write the exact proposal to a private review folder, then type `save <code>` or
+`skip <code>` to decide; `help` lists every action.
 This remains an explicit request in every mode, including Automatic.
 The restricted session disables inherited collection hooks; formal controls use
 verified native identities. Mixed work and corrections remain eligible evidence.

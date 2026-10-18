@@ -27,6 +27,23 @@ contracts for supported commands, formats, permissions and recovery procedures.
   Opening or reading the review folder is not verified by the plugin. Installation grants
   neither collection nor processing consent. See [installation](distribution.md)
   and [setup](setup.md).
+- Typed controls and decisions are verified against the client's native
+  transcript: Claude's skill command with its skill expansion, or Codex's skill
+  block with the typed text. Input recorded in another shape is treated as
+  unverified and decides nothing. These channels resist the chat model, not a
+  local process: any process running as the user can drive the client or the
+  helper commands. See [review controls](processing-chat.md#review-controls).
+- Routing text typed after the skill command, such as a plain-language request
+  that starts with `save`, depends on the model following
+  [the skill](../SKILL.md#formal-processing-controls). Verified inexact text
+  applies nothing whichever control is called; text that cannot be verified
+  binds as a model-chosen call, which can display a draft or run another control
+  but never decides a draft.
+- A control typed as the first prompt of a fresh Claude session binds through
+  its registration within a bounded read; a Codex control binds once the session
+  has a collection selection or processing-only binding. A continued Claude CLI
+  session joins the review lineage only under the
+  [continuation conditions](session-workflow.md#claude-reader-contract).
 - Windows profile, package visibility and indexing policies vary by host. Existing
   package stores have limits on additions and replacement setup, and automatic
   migration is unsupported. No universal protection from third-party indexing or

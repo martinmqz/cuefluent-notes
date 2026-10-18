@@ -20,6 +20,32 @@ registry recovery read the local client profile and stored state without
 launching a native client. A native executable is needed only when a request
 actually creates or resumes a processing run.
 
+## Commands and replies
+
+Type the skill, then one action: `/cuefluent-notes <action>` in Claude or
+`$cuefluent-notes <action>` in Codex, for example `/cuefluent-notes review`.
+Claude records the bare `/cuefluent-notes` as its full plugin name
+`/cuefluent-notes:cuefluent-notes`, which also works; type the full name when
+another command takes the bare one. The actions are the
+[formal processing controls](../SKILL.md#formal-processing-controls), typed
+exactly as written. `help`, or the skill typed with nothing after it, lists them
+and applies nothing. `help` also works before setup: the reply then says how to
+start `setup`, which follows the [setup workflow](setup.md) and is not itself a
+processing control.
+
+Replies are short and plain. They name a draft by its code and first note path,
+list other drafts one per line as code and path, and contain no hashes,
+identifiers or diagnostic codes. A status reply or completed decision that has
+diagnostics says to type `status --verbose`; that reply adds the status, next
+action, diagnostics, request and chat identifiers, scope, counts and each draft's
+exact revision. The review folder's `summary.txt` also records the revision.
+
+Text after the skill that is not one exact action, such as a near miss or an
+action mixed with other words, is not a command. When its typed input verifies
+from the native transcript, no control applies anything and the reply names the
+nearest exact commands to type. That text stays evidence, as described under
+[capture prevention](#capture-prevention-and-limits).
+
 ## Claude launch settings
 
 ### Select the processor's authentication
@@ -242,10 +268,8 @@ Provider setup belongs to the native client; see its
 
 Use the existing skill with the exact argument `process`: type
 `$cuefluent-notes process` in Codex or `/cuefluent-notes process` in Claude.
-Claude records the bare `/cuefluent-notes` as its full name
-`/cuefluent-notes:cuefluent-notes`, which also works; type the full name when
-another command takes the bare one. Loading the skill, setup, status and direct
-saves do not start a processing session. In a configured source chat the skill calls
+Loading the skill, setup, status and direct saves do not start a processing
+session. In a configured source chat the skill calls
 `cuefluent_control.process_selected_captures`. The source adapter verifies
 native call metadata against that selected session's actual call record. If the
 collection is omitted, bounded existing binding metadata (selection or
@@ -351,11 +375,9 @@ before processing starts. Collection settings in the work project stay unchanged
 
 ### Shortcut scopes and continuation
 
-Use the [formal skill actions](../SKILL.md#formal-processing-controls) in either
-client: type `/cuefluent-notes` in Claude or `$cuefluent-notes` in Codex, then the
-action; `help` lists them all. Plain `process` selects pending
-retained evidence across the existing collection, including configured repos and
-both clients. `process repo` uses the nearest verified Git checkout and excludes
+The [commands](#commands-and-replies) work alike in both clients. Plain `process`
+selects pending retained evidence across the existing collection, including
+configured repos and both clients. `process repo` uses the nearest verified Git checkout and excludes
 separate nested repositories. `process chat` selects the invoking native session.
 The invoking chat proves the request; it is not the default evidence boundary.
 These actions never create a new route or change collection settings.
@@ -494,11 +516,11 @@ A decision applies only when all of these hold:
 - the exact command was typed in the chat and verified from the native transcript;
   model text, a natural-language reply or a tool argument the model chose is
   refused. A near miss after the skill command (other case or spacing, a
-  misspelling, an old spelling such as `review save`, an invalid code) or a
-  command mixed with more words, lines or content is not a command and decides
-  nothing; neither does a plain-language request that starts with `save`. When that typed
-  input is verified from the transcript, no tool the model calls applies
-  anything, and the reply names the nearest exact command to type;
+  misspelling, a missing or extra word, an invalid code) or a command mixed with
+  more words, lines or content is not a command and decides nothing; neither
+  does a plain-language request that starts with `save`. When that typed input
+  is verified from the transcript, no tool the model calls applies anything, and
+  the reply names the nearest exact command to type;
 - this chat was shown that exact revision by a typed `review` whose reply reached
   the chat, recorded durably in private state; a draft never shown here, shown only
   by a natural-language request or a model-initiated call, or whose review was
@@ -508,7 +530,8 @@ A decision applies only when all of these hold:
   folder are removed, and a fresh `review` is needed; if a note changed, restore it
   or process again.
 
-Without a code, `save`, `skip` and `review cancel` apply only to the revision this chat was most recently shown by a typed `review`.
+Without a code, `save`, `skip` and `review cancel` apply only to the revision this
+chat was most recently shown by a typed `review`.
 If that display came from a natural-language request or a model-initiated call, or
 nothing was shown, the reply lists the pending drafts and nothing is applied. Being
 the only pending draft or the only review folder never selects a draft. No
@@ -525,8 +548,8 @@ action is selected by default. The host's own **Skip** or dismiss control is not
 proposal's Skip action; it leaves the proposal pending. A host response is distinct
 from a model tool argument; it does not establish that a person physically clicked
 rather than a host policy answering the form. Codex accepts the same typed decisions,
-for example after choosing Later; a typed Later is not an action yet. A Codex host without form support reviews through
-the folder and typed decisions only.
+for example after choosing Later in the form. A Codex host without form support
+reviews through the folder and typed decisions only.
 
 A form decision applies only when the host returns the preview unchanged. Changes to
 note contents, proposals, inputs or policy preserve a conflict and require fresh
@@ -555,22 +578,32 @@ to the user; do not describe a pending draft as a review that was displayed.
 ### Claude limitations
 
 Claude Desktop 2.42304.0 declines review forms without displaying them, and Claude
-CLI 2.1.294 and 2.1.299 clip form text, so Claude never uses the review form. Claude
-CLI also collapses tool results until Ctrl-O; the review reply is short so the
-assistant can repeat it. In a new Claude session its hooks registered, a typed
-control also works as the first prompt; no warm-up prompt is needed. If Claude
-keeps its tool process across `/clear`, the new session is found only among sources
-that already have a selection or a processing-only binding, so a control as its
-first prompt can still be refused until its collection is armed. A presentation belongs to the chat
-that showed it. When Claude CLI continues a session into a new session ID and both
-sessions are registered for collection, the new session joins the same chat
-lineage once both transcripts agree, so a typed decision there applies to a draft
-reviewed before the move. Until then, drafts reviewed before the move are not
+CLI 2.1.294 and 2.1.299 clip form text, so Claude never uses the review form: it
+reviews through the review folder and typed decisions. The review reply is a short
+paragraph, and the skill has the assistant return it as its own reply, so the
+folder path and commands stay visible however the client displays tool results.
+
+A typed control also works as the first prompt of a new Claude session whose
+hooks registered it: the control binds through that registration record within a
+bounded read of the transcript's start, as described under
+[processing chat controls](workflow-cli.md#processing-chat-controls). If Claude
+keeps its tool process across `/clear`, the new session is found only among
+sources that already have a selection or a processing-only binding, so a control
+as its first prompt can still be refused until its collection is armed.
+
+A presentation belongs to the chat lineage that showed it. When Claude CLI
+continues a session into a new session ID, for example when it moves the session
+to the background, and both sessions are registered for collection, the new
+session joins the same lineage once both transcripts agree; see the
+[Claude reader contract](session-workflow.md#claude-reader-contract). A typed
+decision there, including a bare `save`, then applies to a draft reviewed before
+the move. Until the link is recorded, drafts reviewed before the move are not
 decidable there, and controls in a Claude CLI background session are refused as
 unverified. Continuations on processing-only routes are not joined.
 
-For a factual correction, choose Later and provide the correction in the ordinary
-work chat. Capture it through the existing selected-source workflow before using
+For a factual correction, leave the draft undecided (or choose Later in the Codex
+form) and provide the correction in the ordinary work chat. Capture it through
+the existing selected-source workflow before using
 it to revise the proposal. A message combining approval and a correction remains
 original input, never a pure control. The restricted processing session does not
 silently admit new chat text as evidence. If original-input intake is unavailable,

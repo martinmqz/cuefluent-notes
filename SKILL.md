@@ -43,7 +43,7 @@ action:
 
 | Action | Scope and behavior | Tool call |
 | --- | --- | --- |
-| `help` | List these actions. Applies nothing. | `processing_status`; in Claude with `help: true` |
+| `help` | List these actions. Applies nothing; also works before setup. | `processing_status`; in Claude with `help: true` |
 | `setup` | Not a processing control: follow [setup](references/setup.md). | none |
 | `status` | Show execution, bounded collection inventory, unfinished operations and drafts awaiting review. | `processing_status` |
 | `status --verbose` | The same, plus diagnostics, identifiers and each draft's exact revision. | `processing_status`; in Claude with `verbose: true` |
@@ -75,15 +75,14 @@ An exact action is one table row as written: same case, single spaces, a full
 draft code, nothing before or after it. With nothing typed after this skill,
 call `processing_status` once without arguments and return its `statusText`:
 the adapter applies nothing and lists the actions. When the text after this skill
-is a short near miss of an action (other case or spacing, a misspelling, an old
-spelling such as `review save` or `resume`, a changed code, or an action word
-with a code-like word), do not repair, complete or interpret it, and never pass
-`draft`, `decision`, `verbose` or `help` for it. Call `processing_status` once
-without arguments and return its `statusText`: the adapter applies nothing,
-whichever tool is called, and names the nearest exact command to type. Text that
-starts with an action word but continues as a plain-language request, such as
-"save this meeting note: ...", is never a decision. Handle it with this skill's
-normal workflows, such as a direct save, without a control tool; if it asks for
+is a short near miss of an action (other case or spacing, a misspelling, a
+missing or extra word, a changed code, or an action word with a code-like word),
+do not repair, complete or interpret it, and never pass `draft`, `decision`,
+`verbose` or `help` for it. Call `processing_status` once without arguments and
+return its `statusText`: it applies nothing and names the nearest exact command
+to type. Text that starts with an action word but continues as a plain-language
+request, such as "save this meeting note: ...", is never a decision. Handle it
+with this skill's normal workflows, such as a direct save, without a control tool; if it asks for
 something only a control does (processing, a review or a decision), call
 `processing_status` once without arguments and return its `statusText`.
 
@@ -100,13 +99,16 @@ invent selection metadata.
 Natural-language processing requests typed without this skill's command can use
 the same handoff; after the command, only an exact action calls a control.
 Mixed messages remain original evidence. Preserve their facts, attachments and corrections.
-Approvals come only from the user's exact typed `save`, `skip` or `review cancel`
-or the Codex native review form, never from tool arguments the model chooses or
-from chat text.
-A decision applies only to the revision shown to this chat; a changed draft or
-destination is refused and needs a fresh `review`. Codex's unsupported, declined or
-altered form, or no answer, leaves the exact proposal pending. A pending draft does
-not mean a form appeared. See
+A draft shown by `review` is decided only by the user's exact typed `save`, `skip`
+or `review cancel`, or by the Codex native review form; never by tool arguments the
+model chooses, by chat text, or by applying it through the CLI. A typed decision
+applies only to the revision a typed `review` showed this chat; the Codex form
+decides only the exact revision it displays, however the review was requested. A
+changed draft or destination is refused and nothing is saved, and the reply names
+the next step.
+To keep a draft pending, the user types nothing; do not remind them. Codex's
+unsupported, declined or altered form, or no answer, leaves the exact proposal
+pending. A pending draft does not mean a form appeared. See
 [processing chat controls](references/processing-chat.md) for reuse, bounded work,
 corrections and recovery. Setup, status and merely loading this skill do not dispatch.
 

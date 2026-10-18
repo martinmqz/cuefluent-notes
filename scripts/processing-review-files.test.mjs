@@ -8,7 +8,7 @@ import { body, harness } from './test-support/processing-mcp.mjs';
 import { inspectProcessing, completeProcessing, proposeProcessing } from './processing.mjs';
 import { reviewCode, presentReviewFiles, readReviewPresentations } from './processing-review-files.mjs';
 import { readReviewPreview } from './processing-host-review.mjs';
-import { REVIEW_CODE, REVIEW_COMMANDS } from './processing-control-proof.mjs';
+import { REVIEW_CODE, REVIEW_COMMANDS, processingControlCall } from './processing-control-proof.mjs';
 import { fingerprint } from './safe-update.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { readSelection } from './intake-store.mjs';
@@ -211,6 +211,56 @@ test('a replaced revision needs a fresh verified review: bare save and the old c
   assert.equal(saved.review, 'saved');
   assert.deepEqual(await fs.readFile(b.target), Buffer.from(contentB));
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+});
+
+// The plan's automated acceptance, typed as a person types it after the skill
+// command: every step is one exact line, mapped to its call by the grammar.
+test('acceptance, in either client: A typed-reviewed and replaced by B shown unverified; bare save and A\'s code are refused, B saves only after a typed review', async t => {
+  for (const client of ['claude', 'codex']) await t.test(client, async t => {
+    const f = await processingFixture(t, client === 'claude' ? { client } : {}), a = await proposedClaim(f);
+    const h = client === 'claude' ? await claudeReview(t, f) : await harness(t, f, { capabilities: {} });
+    const prefix = client === 'claude' ? claude : codex;
+    // A verified typed line. Claude mirrors the typed fields in its call; Codex's
+    // call carries none and the verified typed text alone names them.
+    const typed = async line => {
+      const call = processingControlCall(line);
+      assert(call, line);
+      h.nativeSkill = true; h.typedControl = line;
+      return body(await h.call(call.tool, client === 'claude' ? { ...call.fields } : {}));
+    };
+    const shownA = await typed('review'), codeA = shownA.draft.code;
+    assert.equal(shownA.review, 'presented'); assert.equal(codeA, reviewCode(a.proposalHash));
+    // B replaces A: A's operation is cancelled and the same capture is drafted again.
+    await completeProcessing(f.capability, { ...f.args, expectedClaimHash: a.claimHash, outcome: 'cancelled' });
+    f.operationId = randomUUID(); f.args = { ...f.args, operationId: f.operationId };
+    const contentB = '# Rollout meeting\n\n## Decision\n\nResume the rollout on Monday.\n';
+    const b = await proposedClaim(f, { content: contentB }), codeB = reviewCode(b.proposalHash);
+    // B's folder comes from an unverified display: no typed review.
+    h.nativeSkill = false; delete h.typedControl;
+    const shownB = body(await h.call('processing_review', {}));
+    assert.equal(shownB.review, 'presented'); assert.equal(shownB.draft.code, codeB);
+    assert.deepEqual(await fs.readFile(path.join(shownB.draft.folder, 'proposed.md')), Buffer.from(contentB));
+    const bare = await typed('save');
+    assert.equal(bare.review, 'unresolved');
+    assert.equal(bare.statusText, `Cuefluent: Nothing was applied: name the draft to decide on, as in ${prefix} save <draft code>, after reading it with ${prefix} review <draft code>.` +
+      `\nPending drafts:\n${codeB}  "meetings/rollout.md"`);
+    const old = await typed(`save ${codeA}`);
+    assert.equal(old.review, 'changed'); assert.equal(old.draft.code, codeA);
+    assert(old.statusText.includes(`Review the current draft with ${prefix} review before deciding`), old.statusText);
+    const coded = await typed(`save ${codeB}`);
+    assert.equal(coded.review, 'not-shown');
+    assert(coded.statusText.endsWith(`Read it first with ${prefix} review ${codeB}.`), coded.statusText);
+    for (const reply of [bare, old, coded]) assertPlainReply(reply, f);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+    // A typed review of B makes the bare save resolve to B, with exact bytes.
+    assert.equal((await typed(`review ${codeB}`)).review, 'presented');
+    const saved = await typed('save');
+    assert.equal(saved.review, 'saved'); assert.deepEqual(saved.draft, { code: codeB, path: 'meetings/rollout.md', fileCount: 1 });
+    assert.deepEqual(await fs.readFile(b.target), Buffer.from(contentB));
+    assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
+    assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
+  });
 });
 
 test('bare decisions never pick the only draft and refuse an unverified latest display', async t => {

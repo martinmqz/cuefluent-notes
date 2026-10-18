@@ -101,7 +101,10 @@ for this user. Clone the repository and run its install:codex npm script
 type `/cuefluent-notes process` in Claude or `$cuefluent-notes process` in Codex.
 Invoke the same skill with `review` to write an exact proposal to a private review
 folder (Codex also opens its native form), then decide by typing `save <code>` or
-`skip <code>`; `help` lists every action.
+`skip <code>`, or type nothing to keep the draft pending. Without a code, `save`
+applies only to the draft your last typed `review` showed. A draft or destination
+that changed after your review is refused and nothing is saved. `help` lists
+every action, also before setup.
 Plain `process` covers pending captures across the existing collection; use
 `process repo` or `process chat` to narrow it, `process resume` for saved
 unfinished work, `status` for progress, and `process cancel` to stop owned work
