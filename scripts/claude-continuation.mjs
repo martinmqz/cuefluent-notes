@@ -5,7 +5,7 @@ import { readSelection } from './intake-store.mjs';
 import { inspectSourceBoundary } from './capture-selection.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { workflowReadLimit } from './workflow-budget.mjs';
-import { claudeHeaderRow, claudeRegistrationHeader, claudeContinuedIn, claudeSessionKinds, isClaudeHumanRow } from './claude-reader.mjs';
+import { claudeHeaderRow, claudeRegistrationHeader, claudeContinuedIn, claudeSessionKinds, isClaudeHumanRow, readClaudeMarkerTail } from './claude-reader.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { collectionGrantHash } from './collection-grant.mjs';
 import { canonicalWorkflowProject } from './workflow-paths.mjs';
@@ -134,20 +134,33 @@ const ownedBy = (row, sessionId, kinds) => row.sessionId === sessionId && row.is
  * once. Runs inside the worker's intake transaction with collection authority
  * for the origin. Returns the link, or null when the successor is not (yet)
  * proven: unregistered, another route, already collected, or a mismatched or
- * unbounded prefix. Reads only the two registered sources. */
-export async function linkClaudeContinuation(transaction, store, { source, registration, originKinds = [], hint, config, authorize, observeRead = () => {} }) {
+ * unbounded prefix. Reads only the two registered sources, and the origin never
+ * past `ceiling`, the paused scope's saved EOF. */
+export async function linkClaudeContinuation(transaction, store, { source, registration, originKinds = [], hint, config, authorize, observeRead = () => {}, ceiling }) {
   keys(hint, ['sessionId', 'record']); nativeId(hint.sessionId); anchor(hint.record);
   const A = source.sessionId, B = hint.sessionId;
   if (source.client !== 'claude' || registration.sessionId !== A || B === A) return null;
   const originSelected = { client: 'claude', sessionId: A, path: source.path, projectRoot: source.projectRoot };
-  // 1. The exact marker is the origin's final record.
+  // 1. The exact marker, followed by nothing but the session bookkeeping the
+  // client writes after it (no root row or other discontinuity).
   const origin = claudeHeaderRow(originSelected, { sessionKinds: originKinds });
   const marker = await readSessionRange({ source, from: hint.record.startByte, endByte: hint.record.endByte, observeRead,
     readHeader: origin.verify, verifyHeader: value => value, maxBytes: 64 * 1024, maxRecords: 1 });
-  if (marker.blocked || marker.limited || marker.records.length !== 1 || marker.snapshotEnd !== hint.record.endByte) return null;
+  if (marker.blocked || marker.limited || marker.records.length !== 1 || marker.readEnd !== hint.record.endByte) return null;
   const markerRecord = marker.records[0];
   if (markerRecord.hash !== hint.record.hash || markerRecord.startByte !== hint.record.startByte ||
       claudeContinuedIn(markerRecord.value, source) !== B) return null;
+  // Under a pause, bytes past the saved EOF are never read: they could hold
+  // anything, so the marker cannot be shown to end the origin yet.
+  if (ceiling !== undefined && marker.snapshotEnd > ceiling) return null;
+  if (marker.snapshotEnd > hint.record.endByte) {
+    // Read only up to what the marker read observed, which is within any
+    // ceiling. The file can keep growing meanwhile: those bytes stay unread,
+    // and under a pause they leave the marker unproven, as above.
+    const tail = await readClaudeMarkerTail({ source, from: hint.record.endByte, endByte: marker.snapshotEnd, observeRead,
+      readHeader: claudeRegistrationHeader(originSelected, { sessionKinds: originKinds }), verifyHeader: value => value });
+    if (tail.kind !== 'metadata' || (ceiling !== undefined && tail.snapshotEnd > ceiling)) return null;
+  }
   const originHeader = origin.out.row;
   // 2. The origin's last human input before the marker, from a bounded window.
   const windowStart = Math.max(0, hint.record.startByte - TAIL_WINDOW);

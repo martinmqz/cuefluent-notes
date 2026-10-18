@@ -4,9 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { workflowConfigPath, readWorkflowSnapshot } from './workflow-config.mjs';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
-import { openWorkflowIntake, withIntakeLock, intakeSnapshot } from './intake-io.mjs';
+import { openWorkflowIntake, withIntakeLock, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readSelection, selectionPath } from './intake-store.mjs';
-import { processingSourceDirectory, processingSourcePath, registrationPath, readRegistration, assertRegistrationGrant } from './collection-ingress.mjs';
+import { processingSourceDirectory, processingSourcePath, registrationPath, readRegistration, assertRegistrationGrant, collectionStatusPath } from './collection-ingress.mjs';
 import { collectionGrantHash } from './collection-grant.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { recordProcessingControlDispatch, createProcessingControlResolver } from './processing-control-receipts.mjs';
@@ -14,7 +14,7 @@ import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessin
 import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingShortcut, beginProcessingShortcutControl, readProcessingShortcutControl, finishProcessingShortcutControl } from './processing-shortcuts.mjs';
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
-import { runProcessingControlServer, processingControlStatusView, reviewNotePath } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView, reviewNotePath, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -72,6 +72,10 @@ const REVIEW_REVISION_CHANGED = new Set(['PROCESSING_REVIEW_REQUIRED', 'PROCESSI
   'PROCESSING_HEAD_CHANGED', 'PROCESSING_INPUT_CHANGED']);
 const reviewChanged = error => REVIEW_REVISION_CHANGED.has(error?.code) || (error?.code === 'SAFE_UPDATE_REJECTED' &&
   /changed since inspection|Reviewed processing (?:directories|manifest) changed/.test(error.safeMessage ?? ''));
+// The cause a refused decision names: its destination, a revision no longer
+// pending, or a changed revision.
+const changedReason = error => ['PROCESSING_OUTPUT_CHANGED', 'PROCESSING_NOTES_ROOT_CHANGED', 'SAFE_UPDATE_REJECTED'].includes(error?.code) ? 'destination'
+  : ['PROCESSING_REVIEW_REQUIRED', 'PROCESSING_OPERATION_COMPLETE', 'PROCESSING_CLAIM_MISSING'].includes(error?.code) ? 'not-pending' : 'changed';
 const selectionConflicts = new Set(['WORKFLOW_POLICY_CHANGED', 'PROCESSING_HEAD_CHANGED', 'CAPTURE_PRUNED',
   'PROCESSING_SELECTION_CHANGED', 'PROCESSING_INPUT_CLAIMED', 'PROCESSING_INPUT_CHANGED',
   'PROCESSING_INPUT_ALREADY_HANDLED', 'PROCESSING_SHORTCUT_CAPACITY']);
@@ -264,6 +268,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // dispatch, display, decision or receipt.
   async function notACommand(source) {
     if (source.typedHelp === true) return { ...await currentView(source), help: true, commandPrefix };
+    // A Codex mention typed out by hand attached no skill: it says how to type it.
+    if (source.typedUnattached !== undefined) return { ...await currentView(source), command: 'skill-not-attached', suggestions: [...source.typedUnattached], commandPrefix };
     if (source.typedSuggestions === undefined) return null;
     return { ...await currentView(source), command: 'not-a-command', suggestions: [...source.typedSuggestions], commandPrefix };
   }
@@ -336,7 +342,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         const { item } = reviews.find(entry => entry.code === listed.code);
         return details.verbose ? { ...listed, operationId: item.operationId, proposalHash: item.proposalHash, claimHash: item.claimHash } : listed;
       });
-      return { ...processingStatusView(native, shortcut, { inventory, sequence: job?.sequence }), ...details, ...(drafts.length ? { drafts } : {}) };
+      return { ...processingStatusView(native, shortcut, { inventory, sequence: job?.sequence }), ...details, ...(drafts.length ? { drafts } : {}),
+        ...await collectionStop(capability, source) };
     } finally { if (!job) await controller.close(); }
   }
   async function activeJob(key, source, signal) {
@@ -507,6 +514,19 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   }
   const draftView = presentation => ({ code: presentation.code, folder: presentation.folder,
     files: presentation.files.slice(0, 5).map(file => ({ ...file, path: reviewNotePath(file.path) })), fileCount: presentation.files.length });
+  // Why automatic collection stopped for this chat, as the latest worker pass
+  // reported it for exactly this session while collection still applies to it.
+  // Display only: a missing or unreadable record shows nothing.
+  async function collectionStop(capability, source) {
+    try {
+      await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect'));
+      const store = await withStorageProbes(() => openWorkflowIntake(capability));
+      const notice = intakeJSON(await intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 }));
+      const found = Array.isArray(notice?.diagnostics) ? notice.diagnostics.find(item => item?.client === source.selection.client &&
+        item.sessionId === source.selection.sessionId && COLLECTION_STOP_CODES.includes(item.code)) : undefined;
+      return found ? { collection: { state: 'stopped', code: found.code } } : {};
+    } catch { return {}; }
+  }
   // Show one exact revision: write its private review folder and record that
   // this chat lineage was shown it. Codex then opens its native form for the
   // same preview; Claude (and Codex without a form) decides by typed command.
@@ -514,7 +534,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     let target;
     if (asked.draft !== undefined) {
       const matches = coded.filter(entry => entry.code === asked.draft);
-      if (matches.length !== 1) return refuseChanged(asked.draft); // A shared code names no draft.
+      // No pending draft has that code, or a shared code names none.
+      if (matches.length !== 1) return refuseChanged(asked.draft, null, matches.length ? 'changed' : 'not-pending');
       target = matches[0];
     } else if (elicit && coded.length > 1) {
       const chosen = await elicit({ choices: coded.map(({ item }, index) => ({ operationId: item.operationId,
@@ -526,8 +547,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const context = { selection: target.item.selection, operationId: target.item.operationId };
     let preview;
     try { preview = await readReviewPreview(capability, context); }
-    catch (error) { if (signal?.aborted || !reviewChanged(error)) throw error; return refuseChanged(target.code); }
-    if (reviewCode(preview.proposalHash) !== target.code) return refuseChanged(target.code);
+    catch (error) { if (signal?.aborted || !reviewChanged(error)) throw error; return refuseChanged(target.code, null, changedReason(error)); }
+    if (reviewCode(preview.proposalHash) !== target.code) return refuseChanged(target.code, null, 'changed');
     signal?.throwIfAborted();
     const presentation = await presentReviewFiles(capability, { selection: source.selection, preview,
       chatLineage: reviewChatLineage(source), verified });
@@ -561,8 +582,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (asked.draft !== undefined) {
       const matches = bindings.filter(item => reviewCode(item.proposalHash) === asked.draft);
       // A code shared by two presented revisions names neither; both need a fresh review.
-      for (const extra of matches.slice(1)) await refuseChanged(asked.draft, extra);
-      if (matches.length > 1) return refuseChanged(asked.draft, matches[0]);
+      for (const extra of matches.slice(1)) await refuseChanged(asked.draft, extra, 'stale');
+      if (matches.length > 1) return refuseChanged(asked.draft, matches[0], 'stale');
       // Even with its code, a draft counts as shown only when a typed review
       // presented it here; a natural-language or model-initiated display does not.
       if (!matches.length) return { response: reviewView('not-shown', { draft: await named(asked.draft) }) };
@@ -574,10 +595,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       // whose reply failed, or one the model started, blocks the bare form.
       if (!recent?.verified || !recent.delivered) return { response: reviewView('unresolved', { drafts: await draftListing(capability, coded) }) };
       binding = bindings.find(item => sameReviewRevision(item, recent));
-      if (!binding) return refuseChanged(reviewCode(recent.proposalHash), null);
+      if (!binding) return refuseChanged(reviewCode(recent.proposalHash), null, revisionReason(proposals, recent, 'stale'));
     }
     const proposal = proposals.find(item => item.operationId === binding.operationId);
-    if (!proposal || proposal.proposalHash !== binding.proposalHash || proposal.claimHash !== binding.claimHash) return refuseChanged(reviewCode(binding.proposalHash), binding);
+    if (!proposal || proposal.proposalHash !== binding.proposalHash || proposal.claimHash !== binding.claimHash) {
+      return refuseChanged(reviewCode(binding.proposalHash), binding, revisionReason(proposals, binding, 'changed'));
+    }
     // Named before the decision: a saved or skipped draft is no longer pending.
     const draft = await named(reviewCode(binding.proposalHash));
     let committed = false;
@@ -588,8 +611,15 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       return { result, proposal, revision: binding, draft };
     } catch (error) {
       if (committed || signal?.aborted || !reviewChanged(error)) throw error;
-      return refuseChanged(reviewCode(binding.proposalHash), binding);
+      return refuseChanged(reviewCode(binding.proposalHash), binding, changedReason(error));
     }
+  }
+  // A presented revision no longer decidable: gone from the pending drafts, or
+  // pending with other hashes; `same` when its hashes still match.
+  function revisionReason(proposals, revision, same) {
+    const proposal = proposals.find(item => item.operationId === revision.operationId);
+    if (!proposal) return 'not-pending';
+    return proposal.proposalHash === revision.proposalHash && proposal.claimHash === revision.claimHash ? same : 'changed';
   }
   async function requestReview({ source, draft, decision, elicit, signal, commitResponse }) {
     signal?.throwIfAborted();
@@ -627,13 +657,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       // this chat's stale presentation record and review folder are removed.
       // Cleanup cannot replace the refusal; a leftover record stays harmless
       // because every decision rechecks the engine's current hashes.
-      const refuseChanged = async (code, binding) => {
+      const refuseChanged = async (code, binding, reason) => {
         try {
           const stale = binding ?? (await readReviewPresentations(capability, lineage)).bindings.find(item => reviewCode(item.proposalHash) === code);
           if (stale) await settleReviewFiles(capability, { selection: source.selection, chatLineage: lineage, revision: stale });
         } catch (error) { if (signal?.aborted) throw error; }
         const drafts = await draftListing(capability, coded.filter(entry => entry.code !== code));
-        return { response: reviewView('changed', { draft: await named(code), ...(drafts.length ? { drafts } : {}) }) };
+        return { response: reviewView('changed', { draft: await named(code), reason, ...(drafts.length ? { drafts } : {}) }) };
       };
       const request = { source, capability, status, proposals, coded, asked, verified, elicit, signal, commitResponse, reviewView, refuseChanged, named };
       const outcome = asked.decision === undefined ? await showReview(request) : await decideReview(request);

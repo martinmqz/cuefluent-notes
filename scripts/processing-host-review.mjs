@@ -116,9 +116,11 @@ export async function reviewProcessingProposal(capability, { selection, operatio
   }
   keys(response, ['action', 'content', 'preview']); keys(response.content, ['decision']);
   const decision = choice(response.content.decision, ['save', 'skip', 'cancel', 'later']);
-  // A collapsed, truncated or edited echo cannot show what the person read.
-  // Keep every decision pending, including Later, and say why.
-  if (choice(response.preview, ['intact', 'altered']) === 'altered') return pending('display-altered');
+  const display = choice(response.preview, ['intact', 'altered']);
+  // Later applies nothing, so it needs no proof of what was displayed (a host
+  // can render the preview empty). A collapsed, truncated, missing or edited
+  // echo cannot show what the person read: every other choice stays pending.
   if (decision === 'later') return pending('deferred');
+  if (display === 'altered') return pending('display-altered');
   return decide(capability, { selection, operationId }, preview, decision, { signal, commitResponse });
 }

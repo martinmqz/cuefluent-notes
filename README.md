@@ -98,9 +98,11 @@ for this user. Clone the repository and run its install:codex npm script
    Prompted (approve Save / Skip), or Automatic within your chosen scope.
 
 **Processing starts with an explicit request.** For the reusable processing chat,
-type `/cuefluent-notes process` in Claude or `$cuefluent-notes process` in Codex.
-Invoke the same skill with `review` to write an exact proposal to a private review
-folder (Codex also opens its native form), then decide by typing `save <code>` or
+type `/cuefluent-notes process` in Claude or `$cuefluent-notes process` in Codex;
+in Codex, type `$` and pick cuefluent-notes from the list rather than typing the
+mention out by hand. Invoke the same skill with `review` to write an exact
+proposal to a private review folder, linked in the reply (Codex also opens its
+native form), then decide by typing `save <code>` or
 `skip <code>`, or type nothing to keep the draft pending. Without a code, `save`
 applies only to the draft your last typed `review` showed. A draft or destination
 that changed after your review is refused and nothing is saved. `help` lists

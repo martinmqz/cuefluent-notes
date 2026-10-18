@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, hash, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
@@ -42,7 +43,7 @@ const STATUS_DETAILS = Object.freeze({
   continuation: { states: ['idle'], text: cmd => `Selected evidence remains. Use ${cmd('process resume')} to continue.` },
   cancelled: { states: ['idle', 'completed', 'missing'], text: () => 'Processing cancelled; unhandled captures remain pending.' },
   // No verified source binding (for example before setup); only the command list.
-  unbound: { states: ['missing'], text: cmd => `Nothing was applied: this chat has no verified Cuefluent Notes source yet. To set up Cuefluent Notes, type ${cmd('setup')}.` },
+  unbound: { states: ['missing'], text: cmd => `This chat has no verified Cuefluent Notes source yet. To set up Cuefluent Notes, type ${cmd('setup')}.` },
 });
 // A review result is separate from draft state: a pending draft does not show
 // that a form opened. Pending outcomes describe only what the host returned.
@@ -53,7 +54,7 @@ const REVIEW_OUTCOMES = Object.freeze({
   cancelled: { pending: false, text: name => `Review completed: the operation${name ? ` for ${name}` : ''} was cancelled; its captures remain pending.` },
   deferred: { pending: true, text: name => `Review deferred with Later. ${capital(name ?? 'the draft')} remains pending; nothing was saved.` },
   declined: { pending: true, text: name => `Review not completed: the client declined or closed the review form, which may not have been displayed. ${capital(name ?? 'the draft')} remains pending; nothing was saved.` },
-  'display-altered': { pending: true, text: name => `Review not completed: the client changed the preview text, so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; ${name ?? 'the draft'} remains pending.` },
+  'display-altered': { pending: true, text: name => `Review not completed: the form did not return its preview unchanged (it may have been empty, shortened or edited), so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; ${name ?? 'the draft'} remains pending.` },
   unavailable: { pending: true, text: () => 'Review unavailable: this client did not report review form support. The draft remains pending; nothing was saved.' },
   // Review folder and typed decisions. Their text is built from bounded fields.
   presented: { pending: true, text: null },
@@ -102,10 +103,13 @@ function reviewDraft(value) {
   list(value.files, REVIEW_FILES_SHOWN, { empty: false });
   if (value.files.length !== Math.min(value.fileCount, REVIEW_FILES_SHOWN)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
   return { ...result, folder: value.folder, fileCount: value.fileCount, files: value.files.map(file => {
-    keys(file, ['path', 'bytes', 'change']); integer(file.bytes);
-    return { path: notePath(file.path), bytes: file.bytes, change: choice(file.change, ['create', 'update']) };
+    keys(file, ['path', 'bytes', 'change'], ['review']); integer(file.bytes);
+    // `review` names the file's proposed copy inside the review folder.
+    if (file.review !== undefined && (typeof file.review !== 'string' || !REVIEW_FILE.test(file.review))) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+    return { path: notePath(file.path), bytes: file.bytes, change: choice(file.change, ['create', 'update']), ...(file.review === undefined ? {} : { review: file.review }) };
   }) };
 }
+const REVIEW_FILE = /^(?:\d{1,3}-)?proposed\.md$/;
 // A listing of pending drafts; with `status --verbose` each also names its exact revision.
 const REVISION = ['operationId', 'proposalHash', 'claimHash'];
 function reviewDrafts(value, { revisions = false } = {}) {
@@ -126,72 +130,114 @@ const draftName = draft => {
 };
 // One pending draft per line: its code, two spaces and its first note path.
 const listingLine = item => `${item.code}  ${displayPath(item.path)}${item.fileCount > 1 ? ` (+${item.fileCount - 1} more)` : ''}`;
-const listingLines = (title, drafts) => [title, ...drafts.map(listingLine)];
-// One short paragraph for the person: where to read the draft and what to
-// type. Hashes, operation IDs and diagnostics stay in the private files.
-function reviewText(review, { draft, drafts, commandPrefix: command }) {
+// Replies are Markdown in both clients: a single newline joins lines into one
+// paragraph and continues a list item, so every list line is a list item and
+// blocks are separated by a blank line.
+const listing = (title, drafts) => [title, ...drafts.map(item => `- ${listingLine(item)}`)].join('\n');
+const replyText = blocks => `Cuefluent: ${blocks.join('\n\n')}`;
+// A local file the person opens with one click: a percent-encoded file URL as
+// a Markdown autolink. Display only; opening it grants and changes nothing.
+const fileLink = file => `<${pathToFileURL(file).href}>`;
+const folderLink = folder => `<${pathToFileURL(folder).href.replace(/\/?$/, '/')}>`;
+// Links make a reply longer; they are left out before it could exceed its bound.
+const REVIEW_TEXT_BYTES = 3840;
+// Why a decision found its revision no longer decidable, each with its next step.
+const CHANGED_REASONS = Object.freeze(['changed', 'destination', 'not-pending', 'stale']);
+function changedText(reason, name, code, cmd, others) {
+  const draft = name ?? 'that draft', next = `Review the current draft with ${cmd('review')} before deciding.`;
+  if (reason === 'changed') return `Nothing was applied: ${draft} changed after this chat was shown it. ${next}`;
+  if (reason === 'destination') return `Nothing was applied: a note at the destination of ${draft} changed after the draft was prepared. Restore that note, or process again for a new draft, then review it with ${cmd('review')}.`;
+  if (reason === 'not-pending') return `Nothing was applied: ${draft} is not pending.${others ? ` ${next}` : ''}`;
+  if (reason === 'stale') return `Nothing was applied: ${draft} needs a fresh review in this chat. Read it again with ${cmd(`review ${code ?? REVIEW_CODE_PLACEHOLDER}`)}.`;
+  return `Nothing was applied: ${draft} changed, its destination changed, or it is no longer pending. ${next} If a note changed, restore it or process again.`;
+}
+// One short reply for the person: where to read the draft and what to type.
+// Hashes, operation IDs and diagnostics stay in the private files.
+function reviewText(review, { draft, drafts, reason, commandPrefix: command }) {
   const code = draft?.code, name = draftName(draft), cmd = words => `${command} ${words}`;
   const choices = `To decide, type ${cmd(`save ${code}`)} or ${cmd(`skip ${code}`)}.`;
-  const lines = [];
-  if (review === 'presented') {
-    lines.push(`${capital(name)} is ready for review; nothing has been saved.`, `Review folder: ${displayFolder(draft.folder)}`,
-      ...draft.files.map(file => `- ${displayPath(file.path)} (${file.change === 'create' ? 'new note' : 'update'}, ${file.bytes} bytes)`));
-    if (draft.fileCount > draft.files.length) lines.push(`- and ${draft.fileCount - draft.files.length} more files listed in summary.txt`);
-    lines.push(choices);
-    if (drafts?.length) lines.push(...listingLines('Other drafts:', drafts));
-  } else if (review === 'not-shown') {
-    lines.push(`Nothing was applied: ${name} has not been shown in this chat by a typed review. Read it first with ${cmd(`review ${code}`)}.`);
-  } else if (review === 'unverified') {
-    lines.push(`Nothing was applied${name ? ` to ${name}` : ''}: a review decision counts only when you type the exact command yourself, for example ${cmd(`save ${code ?? REVIEW_CODE_PLACEHOLDER}`)}.`);
-  } else if (review === 'changed') {
-    lines.push(`Nothing was applied: ${name ?? 'that draft'} changed, its destination changed, or it is no longer pending. Review the current draft with ${cmd('review')} before deciding; if a note changed, restore it or process again.`);
-    if (drafts?.length) lines.push(...listingLines('Pending drafts:', drafts));
-  } else if (review === 'unresolved') {
-    lines.push(`Nothing was applied: name the draft to decide on, as in ${cmd(`save ${REVIEW_CODE_PLACEHOLDER}`)}, after reading it with ${cmd(`review ${REVIEW_CODE_PLACEHOLDER}`)}.`,
-      ...(drafts.length ? listingLines('Pending drafts:', drafts) : ['No drafts are pending.']));
-  } else {
-    lines.push(REVIEW_OUTCOMES[review].text(name));
-    if (draft?.folder) lines.push(`Review folder: ${displayFolder(draft.folder)}`, choices);
-  }
-  return `Cuefluent: ${lines.join('\n')}`;
+  const folder = links => `Review folder: ${links === 'none' ? displayFolder(draft.folder) : folderLink(draft.folder)}`;
+  const variants = links => {
+    const blocks = [];
+    if (review === 'presented') {
+      blocks.push(`${capital(name)} is ready for review; nothing has been saved.`, folder(links),
+        [...draft.files.map(file => `- ${displayPath(file.path)} (${file.change === 'create' ? 'new note' : 'update'}, ${file.bytes} bytes)${
+          links === 'all' && file.review !== undefined ? `: ${fileLink(path.join(draft.folder, file.review))}` : ''}`),
+        ...(draft.fileCount > draft.files.length ? [`- and ${draft.fileCount - draft.files.length} more files listed in summary.txt`] : [])].join('\n'),
+        choices);
+      if (drafts?.length) blocks.push(listing('Other drafts:', drafts));
+    } else if (review === 'not-shown') {
+      blocks.push(`Nothing was applied: ${name} has not been shown in this chat by a typed review. Read it first with ${cmd(`review ${code}`)}.`);
+    } else if (review === 'unverified') {
+      blocks.push(`Nothing was applied${name ? ` to ${name}` : ''}: a review decision counts only when you type the exact command yourself, for example ${cmd(`save ${code ?? REVIEW_CODE_PLACEHOLDER}`)}.${
+        command === REVIEW_COMMANDS.codex ? ' In Codex, type $ and choose cuefluent-notes from the list, then the action; the mention typed out by hand is not a command.' : ''}`);
+    } else if (review === 'changed') {
+      blocks.push(changedText(reason, name, code, cmd, Boolean(drafts?.length)));
+      if (drafts?.length) blocks.push(listing('Pending drafts:', drafts));
+    } else if (review === 'unresolved') {
+      blocks.push(`Nothing was applied: name the draft to decide on, as in ${cmd(`save ${REVIEW_CODE_PLACEHOLDER}`)}, after reading it with ${cmd(`review ${REVIEW_CODE_PLACEHOLDER}`)}.`,
+        drafts.length ? listing('Pending drafts:', drafts) : 'No drafts are pending.');
+    } else {
+      blocks.push(REVIEW_OUTCOMES[review].text(name));
+      if (draft?.folder) blocks.push(folder(links), choices);
+    }
+    return replyText(blocks);
+  };
+  const text = ['all', 'folder'].map(variants).find(value => Buffer.byteLength(value) <= REVIEW_TEXT_BYTES);
+  return text ?? variants('none');
 }
 // A typed skill invocation that was not one exact action: nothing was applied.
 // The suggestions come from the grammar; any code in them is a valid draft code.
-function notACommandText({ suggestions, commandPrefix: command }) {
+// A Codex mention typed out by hand is answered the same way, with how to
+// attach the skill instead.
+function notACommandText({ command: kind, suggestions, commandPrefix: command }) {
   const typed = suggestions.map(text => `${command} ${text}`);
   const choices = typed.length === 1 ? typed[0] : `${typed.slice(0, -1).join(', ')} or ${typed.at(-1)}`;
-  const lines = [`Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${choices}.`];
+  const blocks = [kind === 'skill-not-attached'
+    ? `Nothing was applied: Codex did not attach the Cuefluent Notes skill to that message, so it was not a command. Type $, choose cuefluent-notes from the list, then the action, for example ${choices}.`
+    : `Nothing was applied: that was not an exact command. Type the command yourself, exactly as written, for example ${choices}.`];
   if (suggestions.some(text => text.includes(REVIEW_CODE_PLACEHOLDER))) {
-    lines.push(`A draft code has six characters and never contains ${REVIEW_CODE_EXCLUDED.join(', ')}; ${command} review shows the current draft and its code.`);
+    blocks.push(`A draft code has six characters and never contains ${REVIEW_CODE_EXCLUDED.join(', ')}; ${command} review shows the current draft and its code.`);
   }
-  return `Cuefluent: ${lines.join('\n')}`;
+  return replyText(blocks);
 }
-// The command list, from the grammar: each first word on its own line with
-// what it does and its other forms. It applies nothing.
+// The command list, from the grammar: each first word as its own list item
+// with what it does and its other forms. It applies nothing. Codex attaches
+// the skill only when it is picked from its `$` list.
 function helpText({ commandPrefix: command, statusDetail }) {
-  const intro = statusDetail === 'unbound' ? `${STATUS_DETAILS.unbound.text(words => `${command} ${words}`)} The commands, typed exactly as written:`
-    : 'Nothing was applied. Type one of these yourself, exactly as written:';
+  const how = command === REVIEW_COMMANDS.codex
+    ? 'Type one of these yourself, exactly as written; for the first word, type $ and choose cuefluent-notes from the list:'
+    : 'Type one of these yourself, exactly as written:';
+  const intro = statusDetail === 'unbound' ? `${STATUS_DETAILS.unbound.text(words => `${command} ${words}`)} ${how}` : how;
   return [`Cuefluent: ${intro}`,
-    ...PROCESSING_HELP.map(item => `${command} ${item.word}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
+    ...PROCESSING_HELP.map(item => `- ${command} ${item.word}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
 }
+const counted = (value, one, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
 // Every detail the plain reply leaves out, for `status --verbose`.
 function verboseText(result) {
-  const counts = (label, value, names) => `${label}${value.incomplete ? ' (partial)' : ''}: ${names.map(([key, text]) => `${value[key]} ${text}`).join(', ')}.`;
-  const lines = [result.statusText, `Status: ${result.status}; next action: ${result.nextAction}.`,
+  const counts = (label, value, names) => `${label}${value.incomplete ? ' (partial)' : ''}: ${names.map(([key, one, many = one]) => counted(value[key], one, many)).join(', ')}.`;
+  const lines = [`Status: ${result.status}; next action: ${result.nextAction}.`,
     `Diagnostics: ${result.diagnostics.length ? result.diagnostics.join(', ') : 'none'}.`];
   if (result.requestId !== null) lines.push(`Request: ${result.requestId}.`);
   if (result.chat) lines.push(`Processing chat: ${result.chat.client} session ${result.chat.sessionId}.`);
   if (result.scope) lines.push(`Scope: ${result.scope}.`);
   if (result.inventory) lines.push(counts('Inventory', result.inventory, [['pending', 'pending'], ['claimed', 'claimed'], ['blockedByClaim', 'blocked by a claim'],
-    ['inspected', 'inspected'], ['handled', 'handled'], ['unfinishedOperations', 'unfinished operations'], ['awaitingReview', 'awaiting review']]));
+    ['inspected', 'inspected'], ['handled', 'handled'], ['unfinishedOperations', 'unfinished operation', 'unfinished operations'], ['awaitingReview', 'awaiting review']]));
   if (result.progress) lines.push(counts('Progress', result.progress, [['selected', 'selected'], ['unattempted', 'unattempted'], ['handled', 'handled'],
-    ['unavailable', 'unavailable'], ['cancelled', 'cancelled'], ['unfinishedOperations', 'unfinished operations'], ['awaitingReview', 'awaiting review']]));
-  if (result.drafts?.length) {
-    lines.push('Drafts awaiting review:');
-    for (const item of result.drafts) lines.push(listingLine(item), `  operation ${item.operationId}; proposal ${item.proposalHash}; claim ${item.claimHash}`);
-  }
-  return lines.join('\n');
+    ['unavailable', 'unavailable'], ['cancelled', 'cancelled'], ['unfinishedOperations', 'unfinished operation', 'unfinished operations'], ['awaitingReview', 'awaiting review']]));
+  if (result.collection) lines.push(`Collection: stopped for this chat (${result.collection.code}).`);
+  const blocks = [result.statusText, lines.map(line => `- ${line}`).join('\n')];
+  if (result.drafts?.length) blocks.push(['Drafts awaiting review:', ...result.drafts.map(item =>
+    `- ${listingLine(item)}: operation ${item.operationId}; proposal ${item.proposalHash}; claim ${item.claimHash}`)].join('\n'));
+  return blocks.join('\n\n');
 }
+// Why automatic collection stopped for the invoking chat, in plain words. The
+// status callback reports only these codes.
+const COLLECTION_STOPS = Object.freeze({
+  CLAUDE_HISTORY_REQUIRES_REVIEW: 'its transcript has a record Cuefluent Notes does not read past, for example a Remote Control connection in Claude Desktop or a session moved elsewhere',
+  UNSUPPORTED_SESSION_OWNERSHIP: 'its transcript belongs to a background, agent or forked session that is not linked to a collected chat',
+});
+export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 // Which review fields each outcome carries: a draft with its folder, a draft
 // code with or without its note path, or either ('?' marks an optional
 // draft); a listing of drafts.
@@ -233,6 +279,52 @@ const ERRORS = new Set([...DIAGNOSTICS, 'PROCESSING_CONTROL_PROTOCOL', 'PROCESSI
   'UNSAFE_INTAKE_PATH', 'UNSAFE_PRIVATE_STORAGE', 'STORAGE_NOT_PRIVATE', 'INTAKE_ROOT_CHANGED', 'PRIVATE_STORAGE_CHANGED',
   'UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
 const codexSourceErrors = new Set(['UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
+// A refused tool call answers with plain text the chat can relay; its code
+// stays machine-readable in `error.data.code`. Before the requested action
+// started nothing can have been applied; after it, the outcome is unknown.
+const STORAGE_REFUSALS = ['UNSAFE_INTAKE_PATH', 'UNSAFE_PRIVATE_STORAGE', 'STORAGE_NOT_PRIVATE', 'INTAKE_ROOT_CHANGED', 'PRIVATE_STORAGE_CHANGED'];
+const REFUSALS = Object.freeze({
+  PROCESSING_CONTROL_REGISTRATION_UNVERIFIED: () => 'Cuefluent Notes has registered this chat but cannot confirm commands in it yet. Type the command again.',
+  REGISTRATION_REQUIRES_REVIEW: () => 'this chat\'s collection registration no longer matches the current collection settings; it needs review in the setup workflow before commands work here.',
+  PROCESSING_CONTROL_SELECTION_MISMATCH: () => 'the tool call did not match the command that was typed.',
+  PROCESSING_CONTROL_INVALID_REQUEST: () => 'the tool call was not valid.',
+  PROCESSING_CONTROL_METHOD_UNSUPPORTED: () => 'this tool is not part of Cuefluent Notes.',
+  PROCESSING_SOURCE_DISCOVERY_LIMIT: () => 'this chat\'s own record was not found within the search limits. Reconnect Cuefluent Notes in this session, or restart it, and type the command again.',
+  PROCESSING_CONTROL_SOURCE_DISCOVERY_INCOMPLETE: () => 'this chat\'s own record was not found within the search limits. Reconnect Cuefluent Notes in this session, or restart it, and type the command again.',
+  UNSUPPORTED_SESSION_OWNERSHIP: () => 'this chat is not a session Cuefluent Notes can verify, for example a forked or agent session.',
+  UNSUPPORTED_CODEX_HISTORY: () => 'this chat\'s history format is not one Cuefluent Notes can verify.',
+  SOURCE_IDENTITY_MISMATCH: () => 'this chat\'s own record does not match what Cuefluent Notes registered for it.',
+  WORKFLOW_NOT_AUTHORIZED: () => 'the current Cuefluent Notes settings do not allow this here.',
+  WORKFLOW_POLICY_CHANGED: () => 'the Cuefluent Notes settings changed meanwhile. Type the command again.',
+  INTAKE_BLOCKED: () => 'Cuefluent Notes is busy with another operation. Type the command again in a moment.',
+  ...Object.fromEntries(STORAGE_REFUSALS.map(code => [code, () => 'Cuefluent Notes\' private storage failed a safety check; check it before trying again.'])),
+});
+const unconfirmed = command => command === REVIEW_COMMANDS.codex
+  ? `this command could not be confirmed in this chat's own record. Type $, choose cuefluent-notes from the list, then the action, as the whole message.`
+  : 'this command could not be confirmed in this chat\'s own record yet. Type it again as the whole message.';
+// Validation that runs before any requested action, even once it started.
+const PRE_ACTION = new Set(['PROCESSING_CONTROL_SELECTION_MISMATCH', 'PROCESSING_CONTROL_INVALID_REQUEST', 'PROCESSING_CONTROL_METHOD_UNSUPPORTED']);
+// Refusals of a started action that name their cause; they claim nothing
+// about what else changed.
+const CLIENT_REFUSAL = 'the native client\'s sign-in or launch settings for processing need attention (see the processing setup in the Cuefluent Notes guide)';
+const ACTION_REFUSALS = Object.freeze({
+  ...Object.fromEntries(['PROCESSING_CLIENT_AUTHENTICATION_INVALID', 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE', 'PROCESSING_CLIENT_SETTINGS_INVALID',
+    'PROCESSING_CLIENT_SETTINGS_UNAVAILABLE', 'PROCESSING_CLIENT_SETTINGS_LIMIT', 'PROCESSING_CLIENT_SETTINGS_UNSUPPORTED', 'PROCESSING_CLIENT_IDENTITY_CHANGED']
+    .map(code => [code, CLIENT_REFUSAL])),
+  PROCESSING_CANCEL_UNVERIFIED: 'the processing run could not be confirmed stopped, so its work was not released',
+});
+// A review call can carry a decision, so its refusal says outright that
+// nothing was saved.
+export function processingControlRefusalText(code, { client, stage, tool }) {
+  const command = REVIEW_COMMANDS[client];
+  if (stage === 'action' && Object.hasOwn(ACTION_REFUSALS, code)) {
+    return `Cuefluent: This command was refused: ${ACTION_REFUSALS[code]}. Type ${command} status to see where things stand.`;
+  }
+  if (stage === 'action' && !PRE_ACTION.has(code)) {
+    return `Cuefluent: This command stopped before it finished, so it is not certain whether anything changed. Type ${command} status to see where things stand before trying again.`;
+  }
+  return `Cuefluent: Nothing was applied${tool === 'processing_review' ? ' and nothing was saved' : ''}: ${Object.hasOwn(REFUSALS, code) ? REFUSALS[code]() : unconfirmed(command)}`;
+}
 const uuidSchema = { type: 'string', pattern: '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' };
 const retrySchema = { ...uuidSchema, description: 'Opaque token returned for native verification. End the current exec, then repeat the same tool and arguments with this token. Never invent one.' };
 const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
@@ -383,6 +475,11 @@ export function processingControlStatusView(value, args) {
       const draft = value.draft === undefined ? undefined : reviewDraft(value.draft);
       const drafts = value.drafts === undefined ? undefined : reviewDrafts(value.drafts);
       checkReviewFields(fields, draft, drafts);
+      // A refused decision can name its cause; older receipts have none.
+      if (value.reason !== undefined) {
+        if (value.review !== 'changed') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+        result.reason = choice(value.reason, CHANGED_REASONS);
+      }
       // Every reply built from these fields names its command spelling.
       reviewReply = outcome.text === null || draft !== undefined;
       if (reviewReply && result.commandPrefix === undefined) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
@@ -395,10 +492,10 @@ export function processingControlStatusView(value, args) {
       } else result.statusText = `Cuefluent: ${outcome.text()}${after}`;
     }
     if (value.command !== undefined) {
-      if (value.command !== 'not-a-command') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (!['not-a-command', 'skill-not-attached'].includes(value.command)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
       list(value.suggestions, 3, { empty: false }); unique(value.suggestions);
       if (value.suggestions.some(text => typeof text !== 'string' || !isProcessingControlSuggestion(text))) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
-      if (result.commandPrefix === undefined) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (result.commandPrefix === undefined || (value.command === 'skill-not-attached' && result.commandPrefix !== REVIEW_COMMANDS.codex)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
       result.command = value.command; result.suggestions = [...value.suggestions];
       result.statusText = notACommandText(result); ownReply = true;
     }
@@ -407,6 +504,13 @@ export function processingControlStatusView(value, args) {
       result.help = true; result.statusText = helpText(result); ownReply = true;
     }
     if (value.verbose !== undefined) result.verbose = true;
+    // A status reply can say that automatic collection stopped for this chat.
+    if (value.collection !== undefined) {
+      keys(value.collection, ['state', 'code']);
+      if (value.collection.state !== 'stopped' || !Object.hasOwn(COLLECTION_STOPS, value.collection.code) ||
+          ['review', 'command', 'help'].some(key => value[key] !== undefined)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      result.collection = { state: 'stopped', code: value.collection.code };
+    }
     // A listing of drafts awaiting review belongs to a status reply.
     if (value.review === undefined && value.drafts !== undefined && !ownReply) result.drafts = reviewDrafts(value.drafts, { revisions: result.verbose === true });
     if (value.scope !== undefined) result.scope = choice(value.scope, PROCESSING_SCOPES);
@@ -430,15 +534,21 @@ export function processingControlStatusView(value, args) {
       if (result.scope) result.statusText += ` Scope: ${result.scope}.`;
       if (result.inventory) {
         const { incomplete, pending, claimed, awaitingReview } = result.inventory;
-        result.statusText += ` Inventory${incomplete ? ' (partial)' : ''}: ${pending} pending, ${claimed} claimed, ${awaitingReview} drafts awaiting review.`;
+        result.statusText += ` Inventory${incomplete ? ' (partial)' : ''}: ${pending} pending, ${claimed} claimed, ${counted(awaitingReview, 'draft')} awaiting review.`;
       }
-      if (result.drafts?.length && !reviewReply) result.statusText += `\n${[...listingLines('Drafts awaiting review:', result.drafts), `Read one with ${cmd(`review ${REVIEW_CODE_PLACEHOLDER}`)}.`].join('\n')}`;
+      if (result.collection) {
+        result.statusText += `\n\nCollection has stopped for this chat: ${COLLECTION_STOPS[result.collection.code]}. Captures made before that point are kept; later turns of this chat are not collected.`;
+      }
+      if (result.drafts?.length && !reviewReply) result.statusText += `\n\n${listing('Drafts awaiting review:', result.drafts)}\n\nRead one with ${cmd(`review ${REVIEW_CODE_PLACEHOLDER}`)}.`;
       // Codes stay in the fields; the plain reply says where to see them. A
       // completed decision keeps its outcome and still says when something
       // else needs attention.
+      // A decision typed through Codex code mode always carries the notice
+      // that its control turn stays collectible; it alone needs no attention.
       const completed = value.review !== undefined && REVIEW_OUTCOMES[value.review].pending === false;
-      if (result.diagnostics.length && (completed || !reviewReply)) {
-        result.statusText += `\n${completed ? 'Something needs attention; for details' : 'For details'}, type ${cmd('status --verbose')}.`;
+      const notable = result.diagnostics.filter(code => !(completed && code === 'PROCESSING_EXCLUSION_UNVERIFIED'));
+      if (notable.length && (completed || !reviewReply)) {
+        result.statusText += `\n\n${completed ? 'Something needs attention; for details' : 'For details'}, type ${cmd('status --verbose')}.`;
       }
     }
     if (Buffer.byteLength(result.statusText) > 4096) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
@@ -510,6 +620,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
     const rpcId = row.id;
     const signal = request.controller.signal;
     const commitResponse = () => { signal.throwIfAborted(); request.complete = true; };
+    // A tool call is checked and bound to its native source first; only then
+    // does its action start. Other methods are protocol traffic.
+    let stage = null;
     try {
       if (request.cancelled) fail('PROCESSING_REVIEW_INTERRUPTED');
       let result, afterCommit = null;
@@ -527,6 +640,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
         if (row.method === 'ping') result = {};
         else if (row.method === 'tools/list') result = { tools: toolsFor(client) };
         else if (row.method === 'tools/call') {
+          stage = 'binding';
           keys(row.params, ['name'], ['arguments', '_meta']);
           const args = argumentsFor(row.params.name, row.params.arguments ?? {}, client);
           const context = nativeContext(client, row.params._meta, launchEnv);
@@ -576,6 +690,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
           try { id(collectionId); } catch { fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); }
           if (source.collectionId !== undefined && source.collectionId !== collectionId) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
           const resolvedArgs = Object.freeze({ ...args, collectionId });
+          stage = 'action';
           let elicited = 0, selectedForm = false;
           const elicit = async proposal => {
             const selecting = proposal.choices !== undefined;
@@ -603,14 +718,17 @@ export async function runProcessingControlServer({ client, input = process.stdin
               message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.' +
                 (proposal.folder === undefined ? '' : ` The same proposal is in the private review folder ${displayFolder(proposal.folder)}`),
               requestedSchema: { type: 'object', properties: {
+                // Optional: a client that cannot show the preview still lets
+                // the person choose Later. Save, Skip and Cancel apply only
+                // when the host returns this preview unchanged.
                 changes: { type: 'string', title: 'Proposed changes',
-                  description: 'Read the full preview, then go to the next field. For corrections, choose Later and provide them in your work chat; do not edit this preview. If the preview looks collapsed or incomplete, close this form and leave the draft pending.',
+                  description: 'Read the full preview, then go to the next field. If this field is empty, collapsed or incomplete, read the proposal in the review folder instead and choose Later or close this form; Save, Skip and Cancel need the complete preview here. For corrections, choose Later and provide them in your work chat; do not edit this preview.',
                   default: proposal.message },
                 decision: { type: 'string', title: 'Proposal action',
                   description: 'Save writes the exact proposal. Skip handles these captures without saving. Cancel releases the operation and keeps captures pending. Later keeps the proposal pending.',
                   enum: ['save', 'skip', 'cancel', 'later'],
                   enumNames: ['Save exact proposal', 'Skip these captures without saving', 'Cancel operation; keep captures pending', 'Later; keep proposal pending'] }
-              }, required: ['changes', 'decision'] } } };
+              }, required: ['decision'] } } };
             if (Buffer.byteLength(canonicalJSON(message)) + 1 > FORM_BYTES) fail('PROCESSING_REVIEW_TOO_LARGE');
             let resolve, reject;
             const response = new Promise((a, b) => { resolve = a; reject = b; });
@@ -661,11 +779,13 @@ export async function runProcessingControlServer({ client, input = process.stdin
       request.complete = true;
       if (request.cancelled) return;
       // Claude may have rejected an unrelated registered source during /clear
-      // fallback. Preserve its existing generic refusal instead of attributing
-      // that ownership failure to the invoking chat. Codex binds the exact ID.
-      const code = ERRORS.has(error?.code) && !(client === 'claude' && codexSourceErrors.has(error.code))
-        ? error.code : 'PROCESSING_CONTROL_FAILED';
-      await reply({ jsonrpc: '2.0', id: rpcId, error: { code: code === 'PROCESSING_CONTROL_METHOD_UNSUPPORTED' ? -32601 : -32600, message: code } });
+      // fallback, so an ownership or identity failure there is not attributed
+      // to the invoking chat. Before its action any other unknown failure is
+      // an unconfirmed source: nothing was applied. Codex binds the exact ID.
+      const known = ERRORS.has(error?.code) && !(client === 'claude' && codexSourceErrors.has(error.code));
+      const code = known ? error.code : stage === 'binding' ? 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' : 'PROCESSING_CONTROL_FAILED';
+      const message = stage === null ? code : processingControlRefusalText(code, { client, stage, tool: row.params?.name });
+      await reply({ jsonrpc: '2.0', id: rpcId, error: { code: code === 'PROCESSING_CONTROL_METHOD_UNSUPPORTED' ? -32601 : -32600, message, data: { code } } });
     } finally { requests.delete(rpcId); rejectForms('PROCESSING_REVIEW_INTERRUPTED', rpcId); }
   };
   const processLine = async line => {
@@ -696,7 +816,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     }
     if (!validRpcId(row.id)) fail('PROCESSING_CONTROL_PROTOCOL');
     if (requests.has(row.id) || queued >= QUEUED_REQUESTS) {
-      await reply({ jsonrpc: '2.0', id: row.id, error: { code: -32600, message: 'PROCESSING_CONTROL_PROTOCOL' } }); return;
+      await reply({ jsonrpc: '2.0', id: row.id, error: { code: -32600, message: 'PROCESSING_CONTROL_PROTOCOL', data: { code: 'PROCESSING_CONTROL_PROTOCOL' } } }); return;
     }
     const request = { cancelled: false, method: row.method, controller: new AbortController() }; requests.set(row.id, request); queued++;
     // Read the transport while a review awaits its native host response. Keep
@@ -715,7 +835,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
           try { await processLine(line); }
           catch (error) {
             if (error.code !== 'PROCESSING_CONTROL_PROTOCOL' && error.code !== 'INVALID_WORKFLOW') throw error;
-            await reply({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'PROCESSING_CONTROL_PROTOCOL' } });
+            await reply({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'PROCESSING_CONTROL_PROTOCOL', data: { code: 'PROCESSING_CONTROL_PROTOCOL' } } });
           }
         }
       }

@@ -29,10 +29,16 @@ contracts for supported commands, formats, permissions and recovery procedures.
   and [setup](setup.md).
 - Typed controls and decisions are verified against the client's native
   transcript: Claude's skill command with its skill expansion, or Codex's skill
-  block with the typed text. Input recorded in another shape is treated as
-  unverified and decides nothing. These channels resist the chat model, not a
-  local process: any process running as the user can drive the client or the
-  helper commands. See [review controls](processing-chat.md#review-controls).
+  block or `$`-list skill selection with the typed text. Input recorded in another
+  shape, including a Codex mention typed out by hand, is treated as unverified
+  and decides nothing. These channels resist the chat model, not a local
+  process: any process running as the user can drive the client or the helper
+  commands. See [review controls](processing-chat.md#review-controls).
+- A Codex control run through code mode, which Codex CLI 0.163 uses for tool
+  calls, gets no capture-exclusion receipt: that control turn, its typed mention
+  and its code-mode cells can enter a later capture. A Claude Desktop session
+  connected for Remote Control stops collection at its first `bridge-session`
+  record. See [capture prevention](processing-chat.md#capture-prevention-and-limits).
 - Routing text typed after the skill command, such as a plain-language request
   that starts with `save`, depends on the model following
   [the skill](../SKILL.md#formal-processing-controls). Verified inexact text

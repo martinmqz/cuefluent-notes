@@ -236,7 +236,14 @@ within the bounded recent range. Without a selection, a Claude source may also b
 read from its start (after a verified continuation's re-homed prefix) within the
 same 2 MiB bound when everything before the hook boundary holds at most the one
 prompt that registered it, so a typed control in a
-fresh session's first prompt binds. This creates no selection, moves no floor and
+fresh session's first prompt binds. When neither the registration nor that
+prompt's wake could snapshot the transcript (Claude can create it only after the
+prompt's hooks ran), the collection worker freezes the floor itself from a
+metadata-only snapshot taken when it handles that prompt wake (the worker that
+prompt's hook launched waits at most one second for the file to appear); a later
+floor is never wider, and the
+binding waits for a floor within its existing settle window. Only the worker
+freezes a floor. This creates no selection, moves no floor and
 captures nothing earlier: the first full prompt after the floor is still the
 excluded boundary, so collection starts with the prompt after that. With
 collection on, a typed control that is itself that first prompt after the floor
@@ -253,6 +260,16 @@ the model repeats its optional `requestId` hint. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
 
+A refused or failed tool call is a JSON-RPC error whose `message` is a plain
+sentence for the person (no codes, paths or identifiers) and whose `data.code`
+is the bounded diagnostic code below. A failure before the requested action
+started says that nothing was applied; any other unknown failure binding the call
+reports `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. A failure after the action started
+reports `PROCESSING_CONTROL_FAILED` unless it is a known code, and its message
+says the outcome is not certain and to check `status`; a refusal for the native
+client's sign-in or launch settings, or an unconfirmed cancel, names that cause
+instead.
+
 Source-binding failures use bounded MCP error codes. An exact Codex ingress
 registration with current collection authority but without a selection or
 processing-only binding reports `PROCESSING_CONTROL_REGISTRATION_UNVERIFIED`;
@@ -265,9 +282,9 @@ Use a processing-only binding under existing processing policy or the standalone
 explicit workflow without enabling collection. Actual
 ownership, history or identity rejection for the invoking Codex source reports
 `UNSUPPORTED_SESSION_OWNERSHIP`, `UNSUPPORTED_CODEX_HISTORY` or
-`SOURCE_IDENTITY_MISMATCH`; Claude retains its generic refusal when discovery
-could have rejected a different registered candidate. An absent or otherwise
-unproven binding remains
+`SOURCE_IDENTITY_MISMATCH`; in Claude, where discovery could have rejected a
+different registered candidate, these report `PROCESSING_CONTROL_SOURCE_UNVERIFIED`
+instead. An absent or otherwise unproven binding remains
 `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These errors contain no source paths or
 evidence and do not change the command schemas. See the
 [processing entry guidance](processing-chat.md#entry-and-reuse) for precedence,
@@ -356,7 +373,15 @@ and `decision` (`save`, `skip` or `cancel`) mirror the typed action `review`,
 so changed or model-chosen fields are refused. Later exists only as a choice in
 the Codex form. Codex refuses these fields with
 `PROCESSING_CONTROL_INVALID_REQUEST`; its verified typed text alone names the
-draft and decision. A decision applies only through a verified typed action, to a
+draft and decision. Codex verifies typed text in either native form: a user
+message whose parts are this skill and the text, or (Codex CLI 0.163) one text
+part that starts with the skill's mention, optionally recorded as the `$` list's
+single placeholder element, plus exactly one `skills.selected_skill_instructions`
+item of the same turn naming this skill at its installed `SKILL.md` path; the
+typed text is what follows the mention and one space. A mention typed out without
+that item is no command. A code-mode call verifies the same typed text through
+its native MCP item and the completed handshake; it gets no exclusion receipt.
+A decision applies only through a verified typed action, to a
 revision that a delivered typed review presented to the invoking chat lineage (a
 model-initiated or natural-language display records `verified: false` and does
 not count, even with the code), whose claim and proposal hashes still
@@ -379,13 +404,15 @@ When multiple proposals are pending, Codex's form review first sends a selector 
 There is no default. Acceptance selects a preview only; decline/cancel leaves all
 proposals unchanged. The subsequent form remains bound to the selected exact
 proposal. This uses the [supported single-select schema](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation#requested-schema).
-The proposal form uses a short header, a required `changes` string containing
+The proposal form uses a short header, an optional `changes` string containing
 the complete readable preview as its default, and a required `decision` enum (`save`, `skip`,
-`cancel`, `later`) without a default. A decision applies only when the accepted
-host response echoes the unchanged preview, allowing LF/CRLF/CR line-ending
-conversion only. Changed, trimmed, collapsed, oversized or missing text applies no
-decision and leaves the exact proposal pending; it cannot revise or authorize
-different note bytes.
+`cancel`, `later`) without a default. Save, Skip and Cancel apply only when the
+accepted host response echoes the unchanged preview, allowing LF/CRLF/CR
+line-ending conversion only. Changed, trimmed, collapsed, oversized or missing text
+applies no decision and leaves the exact proposal pending; it cannot revise or
+authorize different note bytes. Later applies nothing and is reported as
+`deferred` whatever the echo, so a host that renders the preview empty still lets
+the person defer.
 Review responses add `review`, separate from `statusDetail`: `presented` for a
 written review folder; `saved`, `skipped` or `cancelled` for a completed decision;
 `deferred` for Later; `declined` for a host decline or close, including a declined
@@ -394,14 +421,28 @@ presented to this session; `unverified` for a decision that was not a verified
 typed action; `changed` for a revision, destination or pending state that no
 longer matches; `unresolved` for a decision without a code and no verified latest
 presentation; and `unavailable` for a pending draft without a review callback.
-`presented`, `deferred`, `declined`, `display-altered` and `unavailable` always
+`changed` can add `reason`: `changed` (the revision differs from the one shown),
+`destination` (a note at its destination changed), `not-pending` (not
+pending) or `stale` (its review here is no longer current); its `statusText` then
+names that cause. `presented`, `deferred`, `declined`, `display-altered` and `unavailable` always
 have status `awaiting-review`. Review responses built from review fields also return
 `commandPrefix`, optional `draft` (`{code}`, `{code, path, fileCount}` naming its
 first note path while it is pending, or `{code, folder, files, fileCount}`, with at
-most five `{path, bytes, change}` files) and optional `drafts` (at most four
-`{code, path, fileCount}`, one per line as code, two spaces and note path), and
-their `statusText` omits diagnostic codes. `saved`, `skipped` and `cancelled` may
-carry `{code, path, fileCount}` for the decided draft.
+most five `{path, bytes, change, review?}` files, `review` naming the file's
+proposed copy in the folder) and optional `drafts` (at most four
+`{code, path, fileCount}`, one Markdown list item each as code, two spaces and
+note path), and their `statusText` omits diagnostic codes. Its Markdown blocks are
+separated by blank lines; the folder and each file's proposed copy appear as
+percent-encoded `file://` autolinks, dropped in favour of the plain folder path
+when they would not fit the reply bound. `saved`, `skipped` and `cancelled` may
+carry `{code, path, fileCount}` for the decided draft. A completed decision whose
+only diagnostic is `PROCESSING_EXCLUSION_UNVERIFIED` does not add the
+`status --verbose` hint.
+A status reply may add `collection: {state: "stopped", code}` when the latest
+collection pass reported `CLAUDE_HISTORY_REQUIRES_REVIEW` or
+`UNSUPPORTED_SESSION_OWNERSHIP` for exactly the invoking session; its
+`statusText` says in plain words that collection has stopped for this chat, and
+`status --verbose` names the code. It is display only and changes nothing.
 Note paths in these fields are truncated to 512 bytes for display; `summary.txt`
 keeps every full path.
 When the verified typed input that started the call selected this skill but is
@@ -416,7 +457,12 @@ message) is such input too, and so is a plain-language request that starts with
 an action word. Suggestions are exact actions, `setup`, or a form with
 `<draft code>` in place of an unusable code, computed deterministically from the
 command grammar and the typed text (text near no command gets `help`, `review`
-and `status`); they carry no authority.
+and `status`); they carry no authority. In Codex, a turn whose one message is a
+single text part starting with this skill's mention but without any
+selected-skill item (the mention typed out by hand) is answered the same way,
+with `command: "skill-not-attached"` and a `statusText` that says to choose
+cuefluent-notes from the `$` list; the suggestions come from the words after the
+mention.
 Quoted note-content lines, escaped controls and per-file line-ending
 summaries distinguish source text from review structure without changing saved bytes.
 The outgoing form is bounded to 256 KiB. Incoming frames allow up to six times

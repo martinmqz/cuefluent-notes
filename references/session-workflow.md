@@ -486,7 +486,10 @@ header's client version, not the emitting version of later rows.
 Malformed metadata or unsupported record types block at that row while preserving
 the supported prefix. Unsupported history relocation,
 rewinds or native ownership produce diagnostics; a verified continuation is
-described below. Compaction summaries, injected
+described below. A Claude Desktop session connected for Remote Control records
+`bridge-session` rows; the reader treats the first as a history discontinuity, so
+collection of that session stops there with `CLAUDE_HISTORY_REQUIRES_REVIEW`
+(captures before it stay valid). Compaction summaries, injected
 context, sidechain/child records, reasoning and queued attachment records are
 excluded. API request snapshot records (`api-request-shape`, `api-request-blob`
 and `api-request`, written by Claude CLI 2.1.299) are excluded transport metadata;
@@ -515,13 +518,22 @@ earlier records under that ID. Claude CLI's background sessions also mark every
 record `sessionKind: "bg"`. The worker links the two sessions only when both are
 registered through their own hooks for the same route, project and collection;
 the new transcript is the old one's sibling `<new session ID>.jsonl` and was never
-collected on its own; the marker is the old transcript's final record; and, within
+collected on its own; the marker is followed only by session bookkeeping of the
+old session (Claude CLI 2.1.302 writes cost, file-history and last-prompt rows
+after it): known metadata types other than queued prompts and API request
+snapshots, with no or the old session's `sessionId`, no rewind, within 64 KiB and
+64 records, and no root row or other discontinuity; and, within
 the new transcript's first 16 MiB, its first root record and the old session's
 last human input (found within 4 MiB before the marker) are re-homed copies with
 the same UUID, type, timestamp and message. The link is recorded once in private
 state, never inferred from timing, titles or the marker alone. The old session is
 then terminal at the marker: captures made before it stay valid, nothing after it
-is read, and bytes appended after it report `CLAUDE_HISTORY_REQUIRES_REVIEW`. The
+is evidence, and on each pass the bytes after it are checked again under the same
+bookkeeping rule (never past a paused ceiling); anything else there reports
+`CLAUDE_HISTORY_REQUIRES_REVIEW`, and a record still being written waits. The
+successor's file can hold only metadata until its first prompt, which writes the
+re-homed history; when one worker pass visits the successor before the old
+session links it, the pass visits the successor once more. The
 new session accepts the `bg` kind, treats its re-homed prefix as structural (never
 captured again, including records from before the old session's floor) and
 otherwise registers its own floor and excluded boundary prompt normally. The
@@ -760,8 +772,13 @@ proven boundary is still excluded. A reader update does not import pre-floor
 history or replace that saved floor with the upgrade time. If the source was
 missing at registration and its header has never verified, there is no saved
 floor yet: the first successful verification uses the available authorized wake's
-EOF. Earlier work is not automatically retained. Stale grants, changed sources
-and paused selections keep their existing refusal and recovery rules.
+EOF. A Claude prompt wake whose file was still missing too (Claude can create a
+new transcript only after that prompt's hooks ran) lets the worker take the same
+metadata-only snapshot itself when it handles that wake (the worker launched by
+that prompt's hook first waits at most one second for the file); it is never
+earlier than the hook would have seen, so the
+floor is never wider. Earlier work is not automatically retained. Stale grants,
+changed sources and paused selections keep their existing refusal and recovery rules.
 
 The configure helper assigns collection generations. Collection consent, source
 routing, raw/state locations, session selectors and overlapping route changes

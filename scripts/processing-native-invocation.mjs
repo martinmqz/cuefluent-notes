@@ -26,6 +26,8 @@ class UnavailableNativeSource extends Error {
   constructor() { super('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); this.code = this.message; }
 }
 class MissingNativeInvocation extends UnavailableNativeSource {}
+// A registered fresh session whose floor the worker has not frozen yet.
+class MissingRegistrationFloor extends MissingNativeInvocation {}
 const bindings = new WeakSet(), pendingBindings = new WeakSet();
 export const isPendingProcessingInvocation = value => object(value) && pendingBindings.has(value);
 export const isProcessingInvocation = value => object(value) && bindings.has(value);
@@ -85,7 +87,7 @@ async function registeredSource(capability, store, identity, sessionKinds) {
     // Only the worker freezes a floor; until then there is nothing to pin.
     const floorName = registrationFloorPath(identity), saved = await intakeSnapshot(store, 'state', floorName, { maxBytes: 16384 });
     const value = intakeJSON(saved);
-    if (!value) throw new MissingNativeInvocation();
+    if (!value) throw new MissingRegistrationFloor();
     keys(value, ['registrationId', 'snapshot']);
     if (value.registrationId !== registration.id) throw new UnavailableNativeSource();
     frozen = value.snapshot; records.push({ name: floorName, hash: saved.hash });
@@ -106,6 +108,14 @@ async function registeredSource(capability, store, identity, sessionKinds) {
  */
 async function resolveBoundInvocation(capability, context, invocation, { skillPath, skillCommand, signal, readBudget, configHash, settleMs, requireCompleted }) {
   signal?.throwIfAborted();
+  // One settle window for the whole binding: a floor the worker is about to
+  // freeze, then the native records themselves.
+  const deadline = performance.now() + settleMs;
+  const settle = async (attempt, error, retry) => {
+    const remaining = deadline - performance.now();
+    if (!(error instanceof retry) || remaining <= 0 || attempt === SETTLE_ATTEMPTS - 1) throw error;
+    await delay(Math.min(50 * 2 ** attempt, remaining), undefined, { signal });
+  };
   const store = await openWorkflowIntake(capability);
   const identity = { client: context.client, sessionId: context.sessionId };
   const selected = await readSelection(store, identity);
@@ -146,7 +156,11 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     } else if (context.client === 'claude' && selected.state === null) {
       // Only a session with no selection state at all; an exclusion-only or
       // retired selection keeps its existing refusal, also as a fallback candidate.
-      const found = await registeredSource(capability, store, identity, sessionKinds);
+      let found;
+      for (let attempt = 0; !found; attempt++) {
+        try { found = await registeredSource(capability, store, identity, sessionKinds); }
+        catch (error) { await settle(attempt, error, MissingRegistrationFloor); }
+      }
       source = found.source; floor = found.floor; pinned.push(...found.records);
       // Collection is on but not armed: a later typed control needs the armed
       // selection, whose exclusion receipt keeps it out of captured evidence.
@@ -177,7 +191,6 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     if (target) await verifiedTarget();
     signal?.throwIfAborted();
   };
-  const deadline = performance.now() + settleMs;
   let found;
   for (let attempt = 0; ; attempt++) {
     await guard();
@@ -185,27 +198,28 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
       found = await readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget, sessionKinds, base: target?.prefix.endByte ?? 0, registered });
       if (requireCompleted && found.call.pending) throw new MissingNativeInvocation();
       break;
-    } catch (error) {
-      const remaining = deadline - performance.now();
-      if (!(error instanceof MissingNativeInvocation) || remaining <= 0 || attempt === SETTLE_ATTEMPTS - 1) throw error;
-      await delay(Math.min(50 * 2 ** attempt, remaining), undefined, { signal });
-    }
+    } catch (error) { await settle(attempt, error, MissingNativeInvocation); }
   }
   await guard();
-  const { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions, typedHelp } = found;
+  const { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached } = found;
   // typedControl is the exact verified typed action. Only a verified binding
-  // carries it; a model-chosen call or a code-mode call never does.
+  // carries it; a model-chosen call never does. A Codex code-mode call carries
+  // it too: the typed text and skill selection are the same native turn's, the
+  // inner native MCP item has the exact arguments and the single-use handshake
+  // completed; the model's code is never read. Its turn gets no exclusion
+  // receipt (controlExclusionUnsupported), so it stays collectible.
   // typedSuggestions marks a typed skill invocation that is not an exact action:
   // nothing may be applied for it, whichever tool the model called; it names
   // the nearest exact commands and is never authority. typedHelp marks the
   // skill typed with nothing after it: nothing applies either, and the reply
   // is the command list.
   const result = Object.freeze({ source: Object.freeze(structuredClone(source)), selection: Object.freeze(selection),
-    configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill: nested ? false : nativeSkill,
+    configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill,
     controlExclusionUnsupported: Boolean(nested && nativeSkill), unitId, argsHash, ...call,
-    ...(nativeSkill && !nested ? { typedControl } : {}),
+    ...(nativeSkill ? { typedControl } : {}),
     ...(typedSuggestions ? { typedSuggestions } : {}),
     ...(typedHelp ? { typedHelp: true } : {}),
+    ...(typedUnattached ? { typedUnattached } : {}),
     ...(continued ? { chatLineage: Object.freeze({ client: 'claude', sessionId: continued.link.lineage }) } : {}),
     ...(controlInput ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand'].map(key => [key, controlInput[key]])) : {}) });
   if (call.pending) pendingBindings.add(result);
@@ -249,14 +263,23 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
     if (resumed.historyMode !== read.metadata.historyMode) fail('UNSUPPORTED_CODEX_HISTORY');
   }
   const argsHash = digest(canonicalJSON(invocation.arguments));
-  let call = null, unitId = context.unitId ?? null, nativeSkill = false, typedControl = null, typedSuggestions = null, typedHelp = false;
+  let call = null, unitId = context.unitId ?? null, nativeSkill = false, typedControl = null, typedSuggestions = null, typedHelp = false, typedUnattached = null;
   const nested = context.client === 'codex' ? codexNestedCall(records, context, invocation, argsHash) : null;
-  const users = [];
+  const users = [], selections = new Map();
   for (const record of records) {
     const row = record.value;
     if (context.client === 'codex') {
       const p = row.payload;
       if (row.type === 'event_msg' && p?.type === 'item_completed' && p.turn_id === unitId && p.item?.type === 'UserMessage') users.push(p.item);
+      // Codex 0.163 sends a skill picked from the `$` menu as its own user
+      // context item of this turn; the model cannot write one.
+      if (row.type === 'response_item' && p?.type === 'message' && p.role === 'user' && p.internal_chat_message_metadata_passthrough?.turn_id === unitId &&
+          Array.isArray(p.internal_chat_message_metadata_passthrough.content_item_kinds) &&
+          p.internal_chat_message_metadata_passthrough.content_item_kinds.includes('skills.selected_skill_instructions')) {
+        const key = typeof p.id === 'string' ? p.id : Symbol('unidentified'), value = canonicalJSON(p.content ?? null);
+        if (selections.has(key) && selections.get(key).value !== value) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+        selections.set(key, { value, item: p });
+      }
       if (row.type !== 'response_item' || p?.type !== 'function_call' || p.call_id !== context.toolCallId) continue;
       if (call || p.internal_chat_message_metadata_passthrough?.turn_id !== unitId ||
           !/^mcp__[a-zA-Z0-9_-]*cuefluent_control$/.test(p.namespace ?? '') || p.name !== invocation.tool) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
@@ -301,16 +324,38 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
       messages.set(key, { value, content: item.content });
     }
     const contents = [...messages.values()].map(message => message.content);
-    const exact = contents.length === 1 ? processingControlText(typedText(contents[0])) : null;
+    const texts = () => contents.flatMap(content => Array.isArray(content)
+      ? content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text) : []).join('\n');
+    // Codex 0.163 sends a skill picked from the `$` menu as one selected-skill
+    // item of the turn (this skill at its installed path) and the message as
+    // one text part that starts with the mention the menu inserted; the words
+    // after it are the typed text. A mention typed as plain text has no such
+    // item and is no command. The older form carries a skill part instead.
+    // Without the turn's own message in the window (its hook boundary can fall
+    // between the message and the selection), there is no typed input at all.
+    const picked = [...selections.values()].map(entry => entry.item);
+    const legacy = contents.some(content => Array.isArray(content) && content.some(trusted));
+    const selected = !legacy && contents.length > 0 && picked.some(item => trustedSelection(item, skillPath));
+    const after = selected && picked.length === 1 && contents.length === 1 ? mentionedText(contents[0]) : null;
+    const exact = selected ? (after?.startsWith(' ') ? processingControlText(after.slice(1)) : null)
+      : contents.length === 1 ? processingControlText(typedText(contents[0])) : null;
     if (exact !== null) {
       nativeSkill = processingControlMatches(exact, invocation.tool, invocation.arguments, 'codex');
       if (!nativeSkill) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
       typedControl = exact;
-    } else if (contents.length === 1 && skillAlone(contents[0])) {
+    } else if (selected ? after === '' : contents.length === 1 && skillAlone(contents[0])) {
       typedHelp = true;
-    } else if (contents.some(content => Array.isArray(content) && content.some(trusted))) {
-      typedSuggestions = processingControlSuggestions(contents.flatMap(content => Array.isArray(content)
-        ? content.filter(part => part?.type === 'text' && typeof part.text === 'string').map(part => part.text) : []).join('\n'));
+    } else if (selected) {
+      // This skill with anything else (other words, another selected skill or
+      // a second message) is a typed non-command.
+      typedSuggestions = processingControlSuggestions(after === null ? texts() : after.replace(/^ /, ''));
+    } else if (legacy) {
+      typedSuggestions = processingControlSuggestions(texts());
+    } else if (!picked.length && contents.length === 1 && mentionedText(contents[0]) !== null) {
+      // The mention typed out by hand: Codex attached no skill, so this is no
+      // command and gains nothing. Every control applies nothing and says how
+      // to type it, naming the nearest exact commands.
+      typedUnattached = processingControlSuggestions(mentionedText(contents[0]).replace(/^ /, ''));
     }
   }
   let controlInput = null;
@@ -345,7 +390,42 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
       else if (typed) typedSuggestions = processingControlSuggestions(typed.arguments);
     }
   }
-  return { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions, typedHelp };
+  return { call, unitId, nativeSkill, nested, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached };
+}
+
+// The two mentions Codex shows for this skill: the plugin-qualified one its
+// `$` menu inserts, and the bare skill name.
+const CODEX_MENTIONS = Object.freeze([`$${SKILL_NAME}:${SKILL_NAME}`, `$${SKILL_NAME}`]);
+/** A Codex 0.163 selected-skill item for exactly this installed skill: one
+ * text block opening with its name and SKILL.md path. */
+function trustedSelection(item, skillPath) {
+  const kinds = item.internal_chat_message_metadata_passthrough.content_item_kinds;
+  if (kinds.length !== 1 || !Array.isArray(item.content) || item.content.length !== 1) return false;
+  const [block] = item.content;
+  if (block?.type !== 'input_text' || typeof block.text !== 'string' || Object.keys(block).some(key => !['type', 'text'].includes(key))) return false;
+  const header = /^<skill>\n<name>([^<\n]{1,128})<\/name>\n<path>([^<\n]{1,4096})<\/path>\n/.exec(block.text);
+  return Boolean(header) && [`${SKILL_NAME}:${SKILL_NAME}`, SKILL_NAME].includes(header[1]) && path.isAbsolute(header[2]) &&
+    path.normalize(header[2]) === path.normalize(skillPath);
+}
+/** The text after this skill's leading mention in a one-part Codex message:
+ * '' for the mention alone, else what follows it, starting with its
+ * separator. The mention may be recorded as the menu's one placeholder
+ * element covering exactly it, or not at all. Anything else is null. */
+function mentionedText(content) {
+  if (!Array.isArray(content) || content.length !== 1) return null;
+  const [part] = content;
+  if (part?.type !== 'text' || typeof part.text !== 'string' || Object.keys(part).some(key => !['type', 'text', 'text_elements'].includes(key))) return null;
+  const mention = CODEX_MENTIONS.find(value => part.text === value || part.text.startsWith(`${value} `) || (part.text.startsWith(value) && !/^[a-z0-9:_-]/i.test(part.text.slice(value.length))));
+  if (mention === undefined) return null;
+  const elements = part.text_elements ?? [];
+  if (!Array.isArray(elements) || elements.length > 1) return null;
+  if (elements.length) {
+    const [element] = elements;
+    if (!object(element) || Object.keys(element).some(key => !['byte_range', 'placeholder'].includes(key)) || element.placeholder !== mention ||
+        !object(element.byte_range) || Object.keys(element.byte_range).some(key => !['start', 'end'].includes(key)) ||
+        element.byte_range.start !== 0 || element.byte_range.end !== Buffer.byteLength(mention)) return null;
+  }
+  return part.text.slice(mention.length);
 }
 
 /** Claude may keep its MCP process across /clear. The launch UUID is a hint;

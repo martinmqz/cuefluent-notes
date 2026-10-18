@@ -491,6 +491,37 @@ test('Claude 2.1.299 API request snapshots are skipped transport metadata, never
   await publish(f, result);
 });
 
+// Claude CLI 2.1.302 writes session bookkeeping after `continued-in`; a verified
+// link makes the marker terminal and only such bookkeeping may follow it.
+test('a linked continuation marker is terminal past later session bookkeeping, never past anything else', async t => {
+  const successor = randomUUID(), marker = { type: 'continued-in', sessionId: S, timestamp: stamp, continuedInSessionId: successor };
+  const bookkeeping = [{ type: 'cost-state', sessionId: S, totalCostUSD: 0 }, { type: 'file-history-snapshot', messageId: randomUUID(), snapshot: {}, isSnapshotUpdate: false },
+    { type: 'last-prompt', sessionId: S, lastPrompt: 'Synthetic last prompt', leafUuid: randomUUID() }];
+  const read = async (tail, extra = '') => {
+    const f = await fixture(t, [human(), assistant(), marker, ...tail]);
+    if (extra) await fs.appendFile(f.source.path, extra);
+    const at = f.anchors.find(anchor => anchor.id === undefined && f.bytes.subarray(anchor.startByte, anchor.endByte).includes('"continued-in"'));
+    return readClaudeSelection({ ...f.args, continuation: { from: null, into: { sessionId: successor, record: { startByte: at.startByte, endByte: at.endByte, hash: at.hash } } } });
+  };
+  for (const tail of [[], bookkeeping]) {
+    const result = await read(tail);
+    assert.equal(result.blocked, null); assert.equal(result.terminal, true); assert.equal(result.diagnostics.pendingTail, false);
+    assert.deepEqual(result.candidates[0].capture.evidence.map(item => item.text), ['Meeting: selected source.']);
+    assert(!JSON.stringify(result).includes('Synthetic last prompt'));
+  }
+  // A record still being written waits; it is not a review.
+  const partial = await read(bookkeeping, '{"type":"cost-state","sessionId"');
+  assert.equal(partial.blocked, null); assert.equal(partial.diagnostics.pendingTail, true);
+  for (const tail of [[human(B, 'Typed after the move.')], [{ type: 'last-prompt', sessionId: S, leafUuid: randomUUID(), rewound: true }],
+    [{ type: 'queue-operation', sessionId: S, operation: 'enqueue', content: 'Queued after the move.' }], [{ type: 'api-request', sessionId: S, id: randomUUID() }],
+    [{ type: 'bridge-session', sessionId: S, bridgeSessionId: 'cse_synthetic', lastSequenceNum: 0 }], [{ type: 'cost-state', sessionId: randomUUID() }],
+    Array.from({ length: 65 }, () => ({ type: 'cost-state', sessionId: S }))]) {
+    const result = await read(tail);
+    assert.equal(result.blocked?.code, 'CLAUDE_HISTORY_REQUIRES_REVIEW', JSON.stringify(tail[0]));
+    assert.equal(result.terminal, true);
+  }
+});
+
 const skillCommand = 'cuefluent-notes:cuefluent-notes';
 const envelope = (args, name = skillCommand) => `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>\n<command-args>${args}</command-args>`;
 test('a skill envelope that is not a verified control keeps exactly the typed arguments, without markup', async t => {

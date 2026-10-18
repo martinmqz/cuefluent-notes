@@ -69,8 +69,9 @@ paths to bypass a refusal; follow
 
 ## Processing
 
-Prefer the reusable processing chat: type `$cuefluent-notes process` in Codex or
-`/cuefluent-notes process` in Claude. Invoke the same skill with `review` to
+Prefer the reusable processing chat: type `$cuefluent-notes process` in Codex
+(type `$` and pick cuefluent-notes from the list) or `/cuefluent-notes process`
+in Claude. Invoke the same skill with `review` to
 write the exact proposal to a private review folder, then type `save <code>` or
 `skip <code>` to decide; `help` lists every action.
 This remains an explicit request in every mode, including Automatic.

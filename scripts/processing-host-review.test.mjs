@@ -151,11 +151,14 @@ test('host Skip and Cancel use distinct authoritative dispositions; model-shaped
 
 test('an altered host display applies no decision and leaves the exact proposal saveable', async t => {
   const f = await processingFixture(t), p = await proposedClaim(f);
+  // Later applies nothing, so it needs no intact display (a host may render
+  // the preview empty); every other choice does.
   for (const decision of ['save', 'skip', 'cancel', 'later']) {
     let commits = 0;
     const result = await reviewProcessingProposal(f.capability, f.args, { commitResponse: () => { commits++; },
       elicit: async () => ({ action: 'accept', content: { decision }, preview: 'altered' }) });
-    assert.deepEqual(result, { operationId: f.operationId, status: 'awaiting-review', proposalHash: p.proposalHash, review: 'display-altered' });
+    assert.deepEqual(result, { operationId: f.operationId, status: 'awaiting-review', proposalHash: p.proposalHash,
+      review: decision === 'later' ? 'deferred' : 'display-altered' });
     assert.equal(commits, 0);
     const current = await inspectProcessing(f.capability, f.operationId);
     assert.equal(current.state, 'awaiting-review'); assert.equal(current.outcome, null);

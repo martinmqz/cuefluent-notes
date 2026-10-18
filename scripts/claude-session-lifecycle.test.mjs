@@ -1,13 +1,15 @@
 import test from './test-support/storage-test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { appendFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { collectionIngress, registrationFloorPath } from './collection-ingress.mjs';
-import { inspectIntakeStore } from './intake-io.mjs';
-import { readSelection, readCaptureHead } from './intake-store.mjs';
+import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock } from './intake-io.mjs';
+import { schedulerPath } from './collection-scheduler.mjs';
+import { readSelection, readCaptureHead, controlSelection } from './intake-store.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
@@ -435,4 +437,209 @@ test('a successor collected on its own before any link is never joined afterward
   assert.equal(await readContinuedLink(f.store, A.sessionId), null);
   assert.equal(await readContinuesLink(f.store, B.sessionId), null);
   assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['CLAUDE_HISTORY_REQUIRES_REVIEW']);
+});
+
+// Claude CLI 2.1.302 creates a fresh session's transcript only after the hooks
+// of its first prompt ran: neither the registration nor that prompt's wake
+// holds a floor, and only the worker can freeze one.
+const floorOf = async (f, s) => JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir,
+  registrationFloorPath({ client: 'claude', sessionId: s.sessionId })), 'utf8'));
+test('a fresh session whose transcript is born after its prompt hook binds its first typed control', async t => {
+  for (const control of ['review', 'save k2mn9p']) await t.test(control, async t => {
+    const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+    assert.equal((await A.hook('SessionStart')).status, 'pending-source');
+    assert.equal((await A.hook('UserPromptSubmit', P1)).status, 'pending-source');
+    await A.append([A.meta('mode', { mode: 'normal' }), ...A.control(control, P1), A.snapshot()]);
+    assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['NATIVE_BOUNDARY_PENDING']);
+    // The worker froze the floor itself, past the persisted first prompt.
+    assert.equal((await floorOf(f, A)).snapshot.eofByte, (await fs.stat(A.file)).size);
+    const call = A.call(control); await A.append([call]);
+    const bound = await A.resolve(call);
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1); assert.equal(bound.typedControl, control);
+    assert.equal(bound.captureActive, false); assert.equal((await A.selection()).state, null);
+    // Later is never wider: the next prompt is the excluded boundary and only
+    // the one after it is collected.
+    await A.append([A.reply('Shown.'), A.prompt('Boundary after the first control', P2)]); await A.hook('UserPromptSubmit', P2);
+    assert.deepEqual((await f.run()).boundaryExcluded, [{ client: 'claude', sessionId: A.sessionId, unitId: P2 }]);
+    await A.append([A.reply('Noted.'), A.prompt('Synthetic decision: ship the cedar cache change', P3)]); await A.hook('UserPromptSubmit', P3);
+    assert.equal((await f.run()).saved, 1);
+    assert.equal((await A.head(P1)).head, null); assert.equal((await A.head(P2)).head, null);
+    assert.deepEqual((await A.head(P3)).capture.evidence.map(item => item.text), ['Synthetic decision: ship the cedar cache change']);
+  });
+});
+
+test('only a prompt wake lets the worker freeze a floor; it waits briefly for a transcript still missing', async t => {
+  await t.test('a SessionStart wake alone freezes nothing', async t => {
+    const f = await claudeFixture(t), A = f.session();
+    await A.hook('SessionStart'); await A.append([A.meta('mode', { mode: 'normal' })]);
+    assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['SOURCE_BOUNDARY_PENDING']);
+    await assert.rejects(floorOf(f, A), { code: 'ENOENT' });
+  });
+  await t.test('a worker woken before the file exists', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
+    // The transcript appears, complete, while the worker is already waiting
+    // (past its storage checks, within its bounded wait).
+    const rows = [A.meta('mode', { mode: 'normal' }), ...A.control('review', P1)], staged = `${A.file}.staged`;
+    await fs.writeFile(staged, rows.map(line).join(''));
+    const timer = setTimeout(() => { void fs.rename(staged, A.file); }, 600);
+    t.after(() => clearTimeout(timer));
+    assert.deepEqual(sessionCodes(await f.run({ trigger: { client: 'claude', sessionId: A.sessionId } }), A.sessionId), ['NATIVE_BOUNDARY_PENDING']);
+    assert.equal((await floorOf(f, A)).snapshot.eofByte, (await fs.stat(A.file)).size);
+    const call = A.call('review'); await A.append([call]);
+    assert.equal((await A.resolve(call)).unitId, P1);
+  });
+  await t.test('a transcript that holds only bookkeeping when the worker first looks', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
+    // Claude creates the file with bookkeeping first; the rows that identify
+    // the session, with the prompt, follow while the worker is still waiting.
+    await A.append([A.meta('mode', { mode: 'normal' })]);
+    const rows = A.control('review', P1), timer = setTimeout(() => { void fs.appendFile(A.file, rows.map(line).join('')); }, 300);
+    t.after(() => clearTimeout(timer));
+    assert.deepEqual(sessionCodes(await f.run({ trigger: { client: 'claude', sessionId: A.sessionId } }), A.sessionId), ['NATIVE_BOUNDARY_PENDING']);
+    assert.equal((await floorOf(f, A)).snapshot.eofByte, (await fs.stat(A.file)).size);
+    const call = A.call('review'); await A.append([call]);
+    assert.equal((await A.resolve(call)).unitId, P1);
+  });
+  await t.test('only the session whose hook launched the worker waits for its file', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
+    const timed = async extra => { const started = performance.now(); const result = await f.run(extra); return { result, ms: performance.now() - started }; };
+    const background = await timed(), triggered = await timed({ trigger: { client: 'claude', sessionId: A.sessionId } });
+    for (const { result } of [background, triggered]) assert.deepEqual(sessionCodes(result, A.sessionId), ['SOURCE_BOUNDARY_PENDING']);
+    // The transcript never appears: the triggered visit waited its bounded second.
+    assert(triggered.ms - background.ms >= 600, `${triggered.ms} ms vs ${background.ms} ms`);
+    await assert.rejects(floorOf(f, A), { code: 'ENOENT' });
+  });
+  await t.test('a binding settles while the worker freezes the floor', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
+    await A.append([A.meta('mode', { mode: 'normal' }), ...A.control('review', P1)]);
+    const call = A.call('review'); await A.append([call]);
+    await assert.rejects(A.resolve(call), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+    const block = call.message.content[0];
+    let worker; const timer = setTimeout(() => { worker = f.run(); }, 100);
+    t.after(() => clearTimeout(timer));
+    const bound = await resolveProcessingInvocation(f.capability, { client: 'claude', sessionId: A.sessionId, toolCallId: block.id },
+      { tool: 'processing_review', arguments: {} }, { skillPath: f.skillPath, settleMs: 1000 });
+    await worker;
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1);
+  });
+});
+
+// Claude CLI 2.1.302 `/bg`: the origin's marker is followed by session
+// bookkeeping, and the successor's file holds only metadata until its first
+// prompt, which writes the re-homed history (rows also naming the origin in an
+// extra `session_id`) and that prompt together.
+async function moved(t, { tail = (A, B) => [A.meta('cost-state', { totalCostUSD: 0 }), { type: 'file-history-snapshot', messageId: randomUUID(), snapshot: {}, isSnapshotUpdate: false },
+  A.meta('last-prompt', { lastPrompt: 'Synthetic last prompt', leafUuid: randomUUID() }), A.meta('cost-state', { totalCostUSD: 0 })] } = {}) {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision before the move', P3), A.reply('Recorded.')]);
+  await A.hook('UserPromptSubmit', P3); assert.equal((await f.run()).saved, 1);
+  const B = f.session(randomUUID(), { kind: 'bg' });
+  await B.append([B.meta('ai-title', { aiTitle: 'Synthetic title' }), B.meta('agent-name', { agentName: 'synthetic' })]);
+  await B.hook('SessionStart', null, { source: 'startup' });
+  await A.append([{ type: 'continued-in', timestamp: new Date(Date.UTC(2026, 9, 16, 13)).toISOString(), sessionId: A.sessionId, continuedInSessionId: B.sessionId },
+    ...tail(A, B)]);
+  return { f, A, B, P: [P1, P2, P3] };
+}
+const firstPromptAfterMove = async ({ f, A, B }, control) => {
+  const Q1 = randomUUID();
+  await B.append([B.meta('mode', { mode: 'normal' }), ...A.rows.filter(row => ['user', 'assistant', 'system', 'attachment'].includes(row.type))
+    .map((row, i) => ({ ...row, sessionId: B.sessionId, sessionKind: 'bg', ...(i % 2 ? { session_id: A.sessionId } : {}) })), ...B.control(control, Q1)]);
+  await B.hook('UserPromptSubmit', Q1);
+  return Q1;
+};
+const triggerFirst = async f => intakeJSON(await intakeSnapshot(f.store, 'state', schedulerPath))?.triggerFirst ?? true;
+
+test('a 2.1.302 continuation links past the bookkeeping after its marker and a first typed save in the background session binds', async t => {
+  const m = await moved(t), { f, A, B } = m;
+  // Make this pass visit the successor first: it must still link and arm.
+  if (!await triggerFirst(f)) await f.run();
+  const Q1 = await firstPromptAfterMove(m, 'save k2mn9p');
+  const pass = await f.run({ trigger: { client: 'claude', sessionId: B.sessionId } });
+  assert.deepEqual(sessionCodes(pass, A.sessionId), []); assert.deepEqual(sessionCodes(pass, B.sessionId), []);
+  assert.deepEqual(pass.boundaryExcluded.filter(item => item.sessionId === B.sessionId), [{ client: 'claude', sessionId: B.sessionId, unitId: Q1 }]);
+  assert.equal((await readContinuesLink(f.store, B.sessionId)).link.lineage, A.sessionId);
+  const call = B.call('save k2mn9p'); await B.append([call]);
+  const bound = await B.resolve(call);
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, 'save k2mn9p'); assert.equal(bound.unitId, Q1);
+  assert.deepEqual(bound.chatLineage, { client: 'claude', sessionId: A.sessionId });
+  // The origin stays terminal and clean under more bookkeeping; a root row after
+  // the marker still keeps it in review.
+  await A.append([A.meta('cost-state', { totalCostUSD: 0 })]);
+  assert.deepEqual(sessionCodes(await f.run(), A.sessionId), []);
+  await A.append([A.prompt('Late origin prompt', randomUUID())]);
+  assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['CLAUDE_HISTORY_REQUIRES_REVIEW']);
+});
+
+test('only bookkeeping of the origin may follow its marker; anything else never links', async t => {
+  const cases = {
+    'a root row': (A, B) => [A.meta('cost-state', {}), A.prompt('Typed after the move', randomUUID())],
+    'a rewound last prompt': A => [A.meta('last-prompt', { leafUuid: randomUUID(), rewound: true })],
+    'a queued prompt': A => [A.meta('queue-operation', { operation: 'enqueue', content: 'Queued after the move' })],
+    'an API request snapshot': A => [A.snapshot()],
+    'another discontinuity': A => [A.meta('bridge-session', { bridgeSessionId: 'cse_synthetic', lastSequenceNum: 0 })],
+    'another session\'s row': (A, B) => [B.meta('cost-state', {})],
+    'an unknown record type': A => [A.meta('future-bookkeeping', {})],
+  };
+  for (const [name, tail] of Object.entries(cases)) await t.test(name, async t => {
+    const m = await moved(t, { tail }), { f, A, B } = m;
+    await firstPromptAfterMove(m, 'status');
+    await f.run(); const settled = await f.run();
+    assert.equal(await readContinuesLink(f.store, B.sessionId), null);
+    assert.deepEqual(sessionCodes(settled, A.sessionId), ['CLAUDE_HISTORY_REQUIRES_REVIEW']);
+  });
+  await t.test('a record still being written waits', async t => {
+    const m = await moved(t, { tail: () => [] }), { f, A, B } = m;
+    await fs.appendFile(A.file, '{"type":"cost-state","sessionId"');
+    await firstPromptAfterMove(m, 'status');
+    await f.run(); await f.run();
+    assert.equal(await readContinuesLink(f.store, B.sessionId), null);
+    await fs.appendFile(A.file, `:"${A.sessionId}"}\n`);
+    await f.run(); const settled = await f.run();
+    assert(await readContinuesLink(f.store, B.sessionId));
+    assert.deepEqual(sessionCodes(settled, A.sessionId), []);
+  });
+});
+
+test('a paused origin links only when nothing lies past its saved EOF', async t => {
+  for (const later of [false, true]) await t.test(later ? 'bookkeeping after the pause' : 'nothing after the pause', async t => {
+    const m = await moved(t), { f, A, B, P: [, , P3] } = m;
+    const selected = await A.selection(), eofByte = (await fs.stat(A.file)).size;
+    await withIntakeLock(f.store, tx => controlSelection(tx, { source: selected.state.source, expectedHash: selected.hash, authorize: async () => true,
+      request: { id: randomUUID(), client: 'claude', sessionId: A.sessionId, operation: 'pause', unitId: P3, expectedRevision: selected.state.revision },
+      boundary: { sourceIdentity: selected.state.source.fileIdentity, eofByte, startsMidRecord: false, unitId: P3, record: null } }));
+    if (later) await A.append([A.meta('cost-state', { totalCostUSD: 0 })]);
+    await firstPromptAfterMove(m, 'status');
+    await f.run(); await f.run();
+    // Bytes past the saved EOF are never read, so they cannot show that the
+    // marker ends the origin.
+    assert.equal(Boolean(await readContinuesLink(f.store, B.sessionId)), !later);
+  });
+  await t.test('growth between the marker read and its tail read', async t => {
+    const m = await moved(t), { f, A, B, P: [, , P3] } = m;
+    const selected = await A.selection(), eofByte = (await fs.stat(A.file)).size;
+    await withIntakeLock(f.store, tx => controlSelection(tx, { source: selected.state.source, expectedHash: selected.hash, authorize: async () => true,
+      request: { id: randomUUID(), client: 'claude', sessionId: A.sessionId, operation: 'pause', unitId: P3, expectedRevision: selected.state.revision },
+      boundary: { sourceIdentity: selected.state.source.fileIdentity, eofByte, startsMidRecord: false, unitId: P3, record: null } }));
+    await firstPromptAfterMove(m, 'status');
+    // Claude appends a record right after the worker has read the marker.
+    const bytes = await fs.readFile(A.file), at = bytes.indexOf('{"type":"continued-in"'), end = bytes.indexOf(10, at) + 1;
+    let appended = false; const tailEnds = [];
+    const observeRead = ({ offset, bytes: length, purpose }) => {
+      if (purpose !== 'range') return;
+      if (!appended && offset === at && length === end - at) { appended = true; appendFileSync(A.file, line(A.meta('cost-state', { totalCostUSD: 0 }))); }
+      else if (offset === end) tailEnds.push(offset + length);
+    };
+    await f.run({ observeRead }); await f.run();
+    assert.equal(appended, true); assert(tailEnds.length > 0);
+    // No read reached past the saved EOF, and the marker stays unproven.
+    assert(tailEnds.every(value => value <= eofByte), `tail reads ended at ${tailEnds}, past the saved EOF ${eofByte}`);
+    assert.equal(await readContinuesLink(f.store, B.sessionId), null);
+  });
 });

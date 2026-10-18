@@ -299,9 +299,11 @@ export async function presentReviewFiles(capability, { selection, preview, chatL
       recent: [...value.recent.filter(item => !sameLineage(item.chatLineage, chatLineage)), record].slice(-MAX_RECENT) };
     await authorize();
     await replaceIntakeJSON(tx, STATE, validState(next), state.hash);
+    // `review` is each file's proposed copy in the folder, for a direct link.
+    const names = fileNames(preview.files);
     return Object.freeze({ code, folder: directory, ...revision, presentedAt,
-      files: Object.freeze(preview.files.map(file => Object.freeze({ path: file.path, bytes: Buffer.byteLength(file.proposed),
-        change: file.original === null ? 'create' : 'update' }))) });
+      files: Object.freeze(preview.files.map((file, index) => Object.freeze({ path: file.path, bytes: Buffer.byteLength(file.proposed),
+        change: file.original === null ? 'create' : 'update', review: names[index].proposed }))) });
   });
 }
 

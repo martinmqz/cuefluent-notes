@@ -39,7 +39,9 @@ to make a requested operation succeed.
 ### Formal processing controls
 
 Type `/cuefluent-notes` in Claude or `$cuefluent-notes` in Codex, then one exact
-action:
+action. In Codex, type `$` and choose cuefluent-notes from the list (Codex then
+shows `$cuefluent-notes:cuefluent-notes`) before the action; the mention typed out
+by hand does not attach the skill and is no command:
 
 | Action | Scope and behavior | Tool call |
 | --- | --- | --- |
@@ -92,9 +94,10 @@ exec/tool call, repeat the same tool and arguments with its returned `retryToken
 once. This handshake does not start processing or approve a proposal. Do not
 retry inside the same exec or invent a token. Never repeat an action to poll;
 use `status` when requested. After a successful control call, return only the
-tool's `statusText`. If the tool or verified source binding is unavailable, report
-that limitation and stop; do not silently fall back to inline processing or
-invent selection metadata.
+tool's `statusText`. A refused or failed control call returns a plain-text error
+message for the user: return that message and stop. If the tool itself is
+unavailable, report that limitation and stop; do not silently fall back to inline
+processing or invent selection metadata.
 
 Natural-language processing requests typed without this skill's command can use
 the same handoff; after the command, only an exact action calls a control.

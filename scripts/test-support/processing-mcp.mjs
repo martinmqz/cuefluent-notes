@@ -13,7 +13,8 @@ import { inspectProcessing } from '../processing.mjs';
 // Shared native MCP harness for the processing front door. Source binding is
 // stubbed: h.nativeSkill marks a verified typed action and h.typedControl its
 // exact typed text (Codex has no review fields in its call); h.typedSuggestions
-// marks a typed skill invocation that is not an exact action, and h.typedHelp
+// marks a typed skill invocation that is not an exact action, h.typedUnattached
+// a Codex mention typed out by hand (its nearest commands), and h.typedHelp
 // the skill typed with nothing after it.
 export const deferred = () => {
   let resolve, reject;
@@ -31,7 +32,7 @@ export async function harness(t, f, overrides = {}) {
     for (const line of chunk.toString().trim().split('\n')) {
       const row = JSON.parse(line); h.responses.push(row); h.waiters.get(row.id)?.resolve(row); h.waiters.delete(row.id);
       if (row.method === 'elicitation/create') { h.forms.push(row); h.formWaiters.shift()?.resolve(row); }
-      if (row.error) h.formWaiters.shift()?.reject(new Error(row.error.message));
+      if (row.error) h.formWaiters.shift()?.reject(new Error(row.error.data.code));
     }
     done();
   } });
@@ -63,6 +64,7 @@ export async function harness(t, f, overrides = {}) {
         ...(h.nativeSkill && h.typedControl !== undefined ? { typedControl: h.typedControl } : {}),
         ...(h.typedSuggestions !== undefined ? { typedSuggestions: Object.freeze([...h.typedSuggestions]) } : {}),
         ...(h.typedHelp === true ? { typedHelp: true } : {}),
+        ...(h.typedUnattached !== undefined ? { typedUnattached: Object.freeze([...h.typedUnattached]) } : {}),
         tool: `mcp__cuefluent_control.${invocation.tool}`, callId: context.toolCallId });
     },
     async openController(context, options) {

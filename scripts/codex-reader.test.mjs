@@ -600,6 +600,27 @@ test('Codex control exchanges stay evidence without this skill selection or exac
   });
 });
 
+// Codex CLI 0.163 attaches a skill picked from the `$` list as a separate user
+// context item and records the mention as text; every tool call runs in code mode.
+test('Codex 0.163: the selected skill\'s instructions are never evidence; the mention and code-mode cells are kept (known limit)', async t => {
+  const mention = '$cuefluent-notes:cuefluent-notes', typed = `${mention} sav t7xb88`;
+  const selection = { type: 'response_item', payload: { type: 'message', id: randomUUID(), role: 'user',
+    content: [{ type: 'input_text', text: `<skill>\n<name>cuefluent-notes:cuefluent-notes</name>\n<path>/synthetic/SKILL.md</path>\nSYNTHETIC SKILL INSTRUCTIONS\n</skill>` }],
+    internal_chat_message_metadata_passthrough: { turn_id: A, content_item_kinds: ['skills.selected_skill_instructions'] } } };
+  const f = await fixture(t, [start(A),
+    item(A, 'UserMessage', [{ type: 'text', text: typed, text_elements: [{ byte_range: { start: 0, end: Buffer.byteLength(mention) }, placeholder: mention }] }]),
+    selection,
+    response(A, 'custom_tool_call', { call_id: 'outer', name: 'exec', input: 'await tools.mcp__cuefluent_control__processing_status({})' }),
+    evt('item_completed', { thread_id: S, turn_id: A, item: { type: 'McpToolCall', id: `exec-${randomUUID()}`, server: 'cuefluent_control', tool: 'processing_status',
+      arguments: {}, status: 'completed', result: { content: [{ type: 'text', text: 'Cuefluent: Nothing was applied.' }], isError: false } } }),
+    response(A, 'custom_tool_call_output', { call_id: 'outer', output: 'Cuefluent: Nothing was applied.' }),
+    assistant(A, 'Nothing was applied.'), end(A)]);
+  const capture = (await readCodexSelection(f.args)).candidates[0].capture;
+  assert.deepEqual(capture.evidence.map(entry => [entry.kind, entry.text]), [['user', typed],
+    ['tool-call', 'await tools.mcp__cuefluent_control__processing_status({})'], ['tool-result', 'Cuefluent: Nothing was applied.'], ['assistant', 'Nothing was applied.']]);
+  assert.doesNotMatch(serializeCapture(capture).toString(), /SYNTHETIC SKILL INSTRUCTIONS/);
+});
+
 test('the version 3 skill rule ignores the install path, so a published unit replays unchanged after an upgrade', async t => {
   // Each plugin version installs at its own path and a transcript keeps the
   // path of the version that ran; neither is this reader's location.

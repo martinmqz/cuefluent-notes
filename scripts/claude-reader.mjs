@@ -27,7 +27,7 @@ const MARKUP_SKILL_COMMAND = 'cuefluent-notes:cuefluent-notes';
 const CLAUDE_CHECKPOINT_READER = 'claude-transcript/1';
 // Bump when compatibility or classification rules change. This expires only
 // disposable suspensions, independently of immutable captures/checkpoints.
-export const CLAUDE_READER_RULES_REVISION = 5;
+export const CLAUDE_READER_RULES_REVISION = 6;
 // Claude CLI background sessions (CLAUDE_CODE_SESSION_KIND=bg) stamp every
 // record with this kind, including the history a session moved there carries.
 // Accepted only for a session verified as the continuation of a registered root
@@ -47,6 +47,29 @@ const metadataTypes = new Set(['summary', 'custom-title', 'ended-by-model', 'ai-
 const discontinuities = new Set(['relocated', 'continued-in', 'bridge-session', 'history-suppression',
   'content-replacement', 'fork-context-ref', 'observer-ref']);
 const rootTypes = new Set(['user', 'assistant', 'system', 'attachment']);
+// Claude CLI 2.1.302 writes session bookkeeping after `continued-in` (cost,
+// file-history and last-prompt rows). Only such rows may follow the marker:
+// known metadata of this session, never a root row, another discontinuity, a
+// rewind, a queued prompt or an API request snapshot, which would carry
+// conversation written after the move. One bounded window; nothing is kept.
+const MARKER_TAIL_TYPES = new Set([...metadataTypes].filter(type => !['queue-operation', 'api-request-shape', 'api-request-blob', 'api-request'].includes(type)));
+const MARKER_TAIL_BYTES = 64 * 1024, MARKER_TAIL_RECORDS = 64;
+const markerTailRow = (row, source) => row !== null && typeof row === 'object' && MARKER_TAIL_TYPES.has(row.type) &&
+  !(row.type === 'last-prompt' && row.rewound === true) && (row.sessionId === undefined || row.sessionId === source.sessionId);
+/** Classify the bytes after an exact `continued-in` marker, up to the
+ * authorized `endByte`: `metadata` when every complete record there is session
+ * bookkeeping (or there is none), `pending` while a record is still being
+ * written, and `other` for anything else or more than the bounded window. Reads
+ * nothing past `endByte`; `snapshotEnd` is the file size this read observed, so
+ * a caller can tell that the file has grown beyond what it may read. */
+export async function readClaudeMarkerTail({ source, from, endByte, readHeader, verifyHeader, observeRead = () => {}, deadline = Infinity, now = Date.now }) {
+  integer(endByte);
+  const tail = await readSessionRange({ source, from, endByte, readHeader, verifyHeader, observeRead, deadline, now,
+    maxBytes: MARKER_TAIL_BYTES, maxRecords: MARKER_TAIL_RECORDS });
+  const kind = tail.blocked || tail.limited || tail.discarded.length || !tail.records.every(record => markerTailRow(record.value, source)) ? 'other'
+    : tail.pendingTail ? 'pending' : 'metadata';
+  return { kind, snapshotEnd: tail.snapshotEnd };
+}
 const anchor = r => ({ id: r.id, startByte: r.startByte, endByte: r.endByte, hash: r.hash });
 const range = r => ({ startByte: r.startByte, endByte: r.endByte, recordIds: [r.id] });
 const captureRange = r => ({ ...range(r), hash: r.hash });
@@ -309,12 +332,20 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       blocked = { offset: record.startByte, code: error.code ?? 'UNSUPPORTED_CLAUDE_RECORD' }; break;
     }
   }
-  // Bytes after a terminal marker were not read; their presence alone keeps
-  // the session in review rather than silently dropping later evidence.
-  // A cursor already at the marker reads nothing and is terminal as well.
+  // Nothing after a terminal marker is evidence. Only session bookkeeping may
+  // follow it (one bounded look, never kept); anything else keeps the session
+  // in review rather than silently dropping later evidence. A record still
+  // being written there waits. A cursor already at the marker is terminal too.
+  let markerTailPending = false;
   if (continuedInto && !blocked && scan.readEnd === continuedInto.record.endByte) {
     terminal = true;
-    if (scan.snapshotEnd > continuedInto.record.endByte) blocked = { offset: continuedInto.record.endByte, code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' };
+    const stop = Math.min(scan.snapshotEnd, ...[ceiling, limits.endByte].filter(value => value !== undefined));
+    if (stop > continuedInto.record.endByte) {
+      const after = await readClaudeMarkerTail({ source, from: continuedInto.record.endByte, endByte: stop, observeRead: limits.observeRead, deadline, now,
+        readHeader: readClaudeHeader, verifyHeader: (row, source) => verifyClaudeIdentity(row, source, { header: true, sessionKinds }) });
+      if (after.kind === 'pending') markerTailPending = true;
+      else if (after.kind !== 'metadata') blocked = { offset: continuedInto.record.endByte, code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' };
+    }
   }
   carry.offset = to.offset;
   validateReaderCheckpoint(carry);
@@ -446,7 +477,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   return { candidates, covered, pending, noEvidence, processingControls, unanchoredUnits: [], blocked, anchorUpdates, selection, from, to, frames, eligibility, checkpoint: carry,
     continuedIn: blocked?.code === 'CLAUDE_HISTORY_REQUIRES_REVIEW' && continuedIn?.record.startByte === blocked.offset ? continuedIn : null, terminal,
     nativeAnchors: carry.units.map(unit => ({ unitId: unit.id, record: anchor(rows.get(unit.recordId)) })), recordAnchors: scan.records.filter(record => record.id && record.endByte <= to.offset).map(anchor),
-    diagnostics: { pendingTail: scan.pendingTail, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd,
+    diagnostics: { pendingTail: scan.pendingTail || markerTailPending, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd,
       automaticCeilingReached: Boolean(scope.upper && scan.snapshotEnd >= ceiling && !scan.limited && !scan.blocked),
       unownedRecords: carry.records.filter(row => row.kind === 'unowned').length, coverage: 'proven-human-input-only' } };
 }

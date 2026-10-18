@@ -17,7 +17,7 @@ import { createProcessingWorkset } from './processing-workset.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
-import { collectionIngress, registrationPath } from './collection-ingress.mjs';
+import { collectionIngress, registrationPath, publishIngressMetadata, collectionStatusPath } from './collection-ingress.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { processScope } from './collection-worker.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
@@ -231,7 +231,7 @@ test('formal replay rejects a changed stored response without changing its recei
   receipt.dispatch.response.statusDetail = 'completed';
   const bytes = canonicalJSON(receipt) + '\n'; await fs.writeFile(receiptFile, bytes);
   h.callId = 'call_1';
-  assert.equal((await h.call('process_selected_captures', args)).error.message, 'PROCESSING_CONTROL_FAILED');
+  assert.equal((await h.call('process_selected_captures', args)).error.data.code, 'PROCESSING_CONTROL_FAILED');
   assert.equal(h.dispatches, 1); assert.equal(await fs.readFile(receiptFile, 'utf8'), bytes);
 });
 
@@ -250,7 +250,7 @@ test('formal processing cannot replace its verified source selection with model 
     const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = !nested; h.controlExclusionUnsupported = nested;
     const row = await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID(),
       selection: { ...selectedInput(f), sessionId: randomUUID() } });
-    assert.equal(row.error.message, 'PROCESSING_CONTROL_SELECTION_MISMATCH');
+    assert.equal(row.error.data.code, 'PROCESSING_CONTROL_SELECTION_MISMATCH');
     assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
   });
 });
@@ -275,12 +275,44 @@ test('formal processing existing evidence remains available with collection disa
   });
 });
 
+test('a status reply says when automatic collection stopped for this exact chat', async t => {
+  const f = await processingFixture(t), h = await harness(t, f), store = await openWorkflowIntake(f.capability);
+  const own = code => ({ client: f.identity.client, sessionId: f.identity.sessionId, code });
+  const notice = diagnostics => publishIngressMetadata(store, collectionStatusPath, { status: 'pending', saved: 0,
+    pending: diagnostics.map(item => item.code), diagnostics, boundaryExcluded: [], updatedAt: new Date().toISOString() });
+  await notice([own('CLAUDE_HISTORY_REQUIRES_REVIEW'), { client: 'claude', sessionId: randomUUID(), code: 'UNSUPPORTED_SESSION_OWNERSHIP' }]);
+  const stopped = body(await h.call('processing_status', {}));
+  assert.deepEqual(stopped.collection, { state: 'stopped', code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' });
+  assert(stopped.statusText.includes('\n\nCollection has stopped for this chat: its transcript has a record Cuefluent Notes does not read past, ' +
+    'for example a Remote Control connection in Claude Desktop or a session moved elsewhere. Captures made before that point are kept; later turns of this chat are not collected.'));
+  assert(!/[A-Z]{3,}_[A-Z_]+/.test(stopped.statusText));
+  h.nativeSkill = true; h.typedControl = 'status --verbose';
+  assert(body(await h.call('processing_status', {})).statusText.includes('\n- Collection: stopped for this chat (CLAUDE_HISTORY_REQUIRES_REVIEW).'));
+  h.nativeSkill = false; delete h.typedControl;
+  // Another chat's stop, a boundary still pending or no record says nothing.
+  for (const diagnostics of [[{ client: 'claude', sessionId: randomUUID(), code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' }], [own('SOURCE_BOUNDARY_PENDING')]]) {
+    await notice(diagnostics);
+    const quiet = body(await h.call('processing_status', {}));
+    assert.equal(quiet.collection, undefined); assert(!quiet.statusText.includes('Collection has stopped'));
+  }
+  // The help list and a review reply never carry it.
+  await notice([own('UNSUPPORTED_SESSION_OWNERSHIP')]);
+  h.typedHelp = true;
+  assert.equal(body(await h.call('processing_status', {})).collection, undefined);
+  delete h.typedHelp;
+  assert.equal(body(await h.call('processing_status', {})).collection.code, 'UNSUPPORTED_SESSION_OWNERSHIP');
+  // With collection off for the chat, an old record says nothing.
+  const config = JSON.parse(await fs.readFile(f.options.configPath, 'utf8'));
+  config.routes[0].collection.enabled = false; await fs.writeFile(f.options.configPath, JSON.stringify(config));
+  assert.equal(body(await h.call('processing_status', {})).collection, undefined);
+});
+
 test('read-only status and unconfigured collection lookup dispatch no model and write no configuration', async t => {
   const f = await processingFixture(t), config = await fs.readFile(f.options.configPath), before = await fs.readdir(f.collection.intakeStateDir);
   const h = await harness(t, f);
   assert.equal(body(await h.call('processing_status', { collectionId: f.collection.id })).status, 'missing');
   const missing = await h.call('process_selected_captures', { collectionId: 'not-configured', requestId: randomUUID() });
-  assert.equal(missing.error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal(missing.error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   assert.equal(h.creates, 0); assert.equal(h.dispatches, 0); assert.equal(h.opens, 1); assert.equal(h.closes, 1);
   assert.deepEqual(await fs.readFile(f.options.configPath), config);
   assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
@@ -294,7 +326,7 @@ test('request admission closes its controller if initial status fails before a j
       async close() { closed++; } };
   } });
   const result = await h.call('process_selected_captures', { collectionId: f.collection.id, requestId: randomUUID() });
-  assert.equal(result.error.message, 'WORKFLOW_POLICY_CHANGED'); assert.equal(opened, 1); assert.equal(closed, 1);
+  assert.equal(result.error.data.code, 'WORKFLOW_POLICY_CHANGED'); assert.equal(opened, 1); assert.equal(closed, 1);
   assert(!JSON.stringify(result).includes('private detail'));
 });
 
@@ -346,7 +378,7 @@ test('policy revocation at admission still refuses native dispatch without leavi
   });
   h.nativeSkill = true;
   const closed = h.whenClosed();
-  assert.equal((await h.call('process_selected_captures', {})).error.message, 'WORKFLOW_POLICY_CHANGED');
+  assert.equal((await h.call('process_selected_captures', {})).error.data.code, 'WORKFLOW_POLICY_CHANGED');
   await closed;
   assert.equal(h.dispatches, 0); assert.equal(h.opens, h.closes);
 });
@@ -401,7 +433,7 @@ async function proposeInChat(f, h, content = draft, expectedHash = null) {
 test('source review requires a correlated host action and saves the exact engine proposal without exposing the draft to the source model', async t => {
   const f = await processingFixture(t), h = await harness(t, f), first = await proposeInChat(f, h);
   const forged = await h.call('processing_review', { collectionId: f.collection.id, decision: 'save' });
-  assert.equal(forged.error.message, 'PROCESSING_CONTROL_INVALID_REQUEST');
+  assert.equal(forged.error.data.code, 'PROCESSING_CONTROL_INVALID_REQUEST');
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   const nextForm = h.nextForm(), review = h.call('processing_review', { collectionId: f.collection.id });
   const form = await nextForm;
@@ -460,7 +492,8 @@ test('observed Claude review responses keep the exact draft pending with truthfu
     // Claude Desktop 2.42304.0 advertises elicitation without a host handler;
     // its SDK returns this decline without displaying any form.
     ['Desktop decline', () => ({ action: 'decline' }), 'declined'],
-    ['CLI Later', form => ({ action: 'accept', content: { changes: sanitized(form), decision: 'later' } }), 'display-altered'],
+    // Later applies nothing, so it needs no intact display.
+    ['CLI Later', form => ({ action: 'accept', content: { changes: sanitized(form), decision: 'later' } }), 'deferred'],
     ['CLI Save', form => ({ action: 'accept', content: { changes: sanitized(form), decision: 'save' } }), 'display-altered'],
     ['CLI Skip', form => ({ action: 'accept', content: { changes: sanitized(form), decision: 'skip' } }), 'display-altered'],
   ]) {
@@ -472,7 +505,7 @@ test('observed Claude review responses keep the exact draft pending with truthfu
     // Neither result claims a displayed form, a changed draft, or bare readiness.
     assert(!reported.statusText.includes('Draft ready'), name);
     assert(!JSON.stringify(row).includes('PREVIEW_CHANGED'), name);
-    assert.match(reported.statusText, outcome === 'declined' ? /may not have been displayed/ : /may not have been readable/, name);
+    assert.match(reported.statusText, { declined: /may not have been displayed/, deferred: /deferred with Later/ }[outcome] ?? /may not have been readable/, name);
     const current = await inspectProcessing(f.capability, f.operationId);
     assert.equal(current.state, 'awaiting-review', name); assert.equal(current.outcome, null, name);
     assert.equal(current.claimHash, before.claimHash, name); assert.equal(current.proposalHash, before.proposalHash, name);
@@ -937,7 +970,7 @@ test('exact unverified registration is diagnostic only for every native control'
   });
   for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) for (const explicit of [false, true]) {
     const result = await h.call(tool, explicit ? { collectionId: f.collection.id } : {});
-    assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED' });
+    assert.equal(result.error.code, -32600); assert.equal(result.error.data.code, 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
     assert(!JSON.stringify(result).includes(f.root));
   }
   assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
@@ -966,8 +999,8 @@ test('missing exact registration never borrows an unrelated registration or a co
   // explicit collection still refuses. Neither reads the other session.
   const unbound = body(await h.call('processing_status', {}));
   assert.equal(unbound.statusDetail, 'unbound'); assert.equal(unbound.help, true);
-  assert.equal((await h.call('processing_status', { collectionId: f.collection.id })).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
-  assert.equal((await h.call('processing_review', {})).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal((await h.call('processing_status', { collectionId: f.collection.id })).error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal((await h.call('processing_review', {})).error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
 });
 
@@ -988,7 +1021,7 @@ test('refused ownership remains unverified while a stale registration grant expl
     const files = await fs.readdir(f.collection.intakeStateDir, { recursive: true });
     for (const args of [{}, { collectionId: f.collection.id }]) {
       const result = await h.call('process_selected_captures', args);
-      assert.equal(result.error.message, variant === 'grant' ? 'REGISTRATION_REQUIRES_REVIEW' : 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
+      assert.equal(result.error.data.code, variant === 'grant' ? 'REGISTRATION_REQUIRES_REVIEW' : 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
       assert(!JSON.stringify(result).includes(f.root));
     }
     assert.deepEqual(await fs.readdir(f.collection.intakeStateDir, { recursive: true }), files);
@@ -1019,7 +1052,7 @@ test('old registrations without current collection consent do not request grant 
       // plain status gets the command list. A retired registration still refuses.
       if (variant === 'unconfigured' && tool === 'processing_status' && args.collectionId === undefined) {
         assert.equal(body(result).statusDetail, 'unbound'); assert.equal(body(result).help, true);
-      } else assert.deepEqual(result.error, { code: -32600, message: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+      } else { assert.equal(result.error.code, -32600); assert.equal(result.error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED'); }
     }
     assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
     assert.equal((await readSelection(parent.store, f.identity)).state, null);
@@ -1050,8 +1083,9 @@ test('damaged or mismatched pending registration metadata cannot become a bindin
     } else if (variant === 'linked') await fs.link(file, path.join(f.root, 'second-link.json'));
     else await fs.writeFile(file, variant === 'malformed' ? '{' : variant === 'null' ? 'null' : ' '.repeat(16385));
     const before = await fs.readFile(file), result = await h.call('process_selected_captures', {});
-    assert.equal(result.error.message, variant === 'identity' ? 'PROCESSING_CONTROL_SOURCE_UNVERIFIED'
-      : variant === 'linked' ? 'UNSAFE_PRIVATE_STORAGE' : 'PROCESSING_CONTROL_FAILED');
+    // Damaged metadata fails the binding before any action: nothing applies.
+    assert.equal(result.error.data.code, variant === 'linked' ? 'UNSAFE_PRIVATE_STORAGE' : 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+    assert.match(result.error.message, /^Cuefluent: Nothing was applied: /);
     assert.deepEqual(await fs.readFile(file), before); assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
   });
 });
@@ -1082,7 +1116,7 @@ test('a pending-only candidate cannot block a verified native source in another 
       return lstat.call(this, file, ...args);
     });
     assert.equal(body(await h.call('processing_status', {})).status, 'missing');
-    assert.equal((await h.call('processing_status', { collectionId: 'waiting' })).error.message, 'PROCESSING_CONTROL_FAILED');
+    assert.equal((await h.call('processing_status', { collectionId: 'waiting' })).error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
     mocked.mock.restore();
   }
   assert.equal(h.opens, 5); assert.equal(h.dispatches, 0);
@@ -1091,7 +1125,7 @@ test('a pending-only candidate cannot block a verified native source in another 
   selected.state.safetyStop = { reason: 'capacity', unitId: f.identity.unitId };
   await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${f.identity.sessionId}.json`, selected.state, selected.hash));
   // A failed real binding must remain visible, even beside damaged registration-only metadata.
-  assert.equal((await h.call('processing_status', {})).error.message, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
+  assert.equal((await h.call('processing_status', {})).error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   assert.equal(h.opens, 5); assert.equal(h.dispatches, 0);
 });
 
@@ -1101,7 +1135,7 @@ test('explicit collection requests use guarded intake paths before source classi
     await fs.mkdir(path.dirname(parent), { recursive: true, mode: 0o700 });
     await fs.writeFile(parent, 'Synthetic invalid directory', { mode: 0o600 });
     const before = await fs.readFile(parent);
-    assert.equal((await h.call('processing_status', { collectionId: f.collection.id })).error.message, 'UNSAFE_INTAKE_PATH');
+    assert.equal((await h.call('processing_status', { collectionId: f.collection.id })).error.data.code, 'UNSAFE_INTAKE_PATH');
     assert.deepEqual(await fs.readFile(parent), before);
     assert.equal(h.opens, 0); assert.equal(h.dispatches, 0); assert.equal(h.forms.length, 0);
   });
@@ -1120,7 +1154,7 @@ test('old-policy processing-only bindings do not hide a pending Codex collection
   await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
   assert.equal((await hook()).status, 'queued');
   for (const args of [{}, { collectionId: f.collection.id }]) {
-    assert.equal((await h.call('process_selected_captures', args)).error.message, 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
+    assert.equal((await h.call('process_selected_captures', args)).error.data.code, 'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED');
   }
   assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
 });
@@ -1129,7 +1163,8 @@ test('actual unsupported native ownership remains a path-free public refusal', a
   const f = await processingFixture(t), h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
   await nativeParent(t, f, h, { headerChanges: { thread_source: 'agent_created_thread', parent_thread_id: randomUUID() } });
   for (const args of [{}, { collectionId: f.collection.id }]) {
-    assert.deepEqual((await h.call('processing_review', args)).error, { code: -32600, message: 'UNSUPPORTED_SESSION_OWNERSHIP' });
+    assert.deepEqual((await h.call('processing_review', args)).error, { code: -32600, data: { code: 'UNSUPPORTED_SESSION_OWNERSHIP' },
+      message: 'Cuefluent: Nothing was applied and nothing was saved: this chat is not a session Cuefluent Notes can verify, for example a forked or agent session.' });
   }
   assert.equal(h.forms.length, 0); assert.equal(h.opens, 0); assert.equal(h.dispatches, 0);
 });
@@ -1143,7 +1178,7 @@ test('resumed history and project mismatches remain actionable through the publi
     const selected = await readSelection(parent.store, f.identity);
     for (const args of [{}, { collectionId: f.collection.id }]) {
       const response = await h.call('processing_review', args);
-      assert.equal(response.error.message, kind === 'history' ? 'UNSUPPORTED_CODEX_HISTORY' : 'SOURCE_IDENTITY_MISMATCH');
+      assert.equal(response.error.data.code, kind === 'history' ? 'UNSUPPORTED_CODEX_HISTORY' : 'SOURCE_IDENTITY_MISMATCH');
       assert(!JSON.stringify(response).includes(f.root));
     }
     assert.equal((await readSelection(parent.store, f.identity)).hash, selected.hash);
@@ -1302,7 +1337,7 @@ test('cancel from another controller refuses an unverified active owner and pres
   const before = await inspectProcessing(f.capability, f.operationId), outsider = await harness(t, f);
   outsider.callId = 'cancel_from_other';
   const result = await outsider.call('processing_cancel', {});
-  assert.equal(result.error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.equal(result.error.data.code, 'PROCESSING_CANCEL_UNVERIFIED');
   assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, before.claimHash);
   assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, null);
   assert.equal(outsider.dispatches, 0); gate.resolve();
@@ -1332,7 +1367,7 @@ test('shortcut process and cancel preserve standalone claims and drafts without 
     assert.equal(process.nextAction, proposed ? 'review' : 'inspect');
     if (!proposed) assert.deepEqual(process.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
     const cancelled = await h.call('processing_cancel', { collectionId: f.collection.id });
-    assert.equal(cancelled.error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+    assert.equal(cancelled.error.data.code, 'PROCESSING_CANCEL_UNVERIFIED');
     assert.equal((await inspectProcessing(f.capability, f.operationId)).claimHash, claim.claimHash);
     assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
   });
@@ -1350,7 +1385,7 @@ test('MCP resume and cancel preserve a standalone claim in the shortcut workset'
   assert.deepEqual(resumed.diagnostics, ['PROCESSING_OPERATION_OWNER_UNVERIFIED']);
   assert.equal(resumed.nextAction, 'inspect');
   const cancelled = await h.call('processing_cancel', { collectionId: f.collection.id });
-  assert.equal(cancelled.error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.equal(cancelled.error.data.code, 'PROCESSING_CANCEL_UNVERIFIED');
   assert.equal((await inspectProcessing(f.capability, claim.operationId)).claimHash, claim.claimHash);
   assert.equal((await inspectProcessingShortcut(f.capability, { selection: f.selection })).checkpointHash, chosen.checkpointHash);
   assert.equal(h.dispatches, 0); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
@@ -1365,7 +1400,7 @@ test('routine intake contention does not block read-only inventory or review dis
     assert.deepEqual(status.diagnostics, []);
     const review = body(await h.call('processing_review', { collectionId: f.collection.id }));
     assert.equal(review.statusDetail, 'pending'); assert.equal(h.forms.length, 0);
-    assert.equal((await h.call('process_selected_captures', {})).error.message, 'INTAKE_BLOCKED');
+    assert.equal((await h.call('process_selected_captures', {})).error.data.code, 'INTAKE_BLOCKED');
   } finally { await fs.rmdir(lock); }
 });
 
@@ -1438,7 +1473,7 @@ test('committed capture admission still dispatches if secondary control publicat
   const closed = h.whenClosed();
   try {
     const response = await h.call('process_selected_captures', { collectionId: f.collection.id });
-    assert.equal(response.error.message, 'PROCESSING_CONTROL_FAILED'); await closed;
+    assert.equal(response.error.data.code, 'PROCESSING_CONTROL_FAILED'); await closed;
     assert.equal(injected, true); assert.equal(h.dispatches, 1);
     mock.mock.restore(); h.callId = 'call_1';
     assert.equal(body(await h.call('process_selected_captures', { collectionId: f.collection.id })).statusDetail, 'accepted');
@@ -1757,7 +1792,7 @@ for (const beforePin of [false, true]) test(`MCP retired execution exposes the $
     assert.equal((await controller.status()).chatHash, retired.chatHash);
     assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
   }
-  assert.equal((await h.call('processing_cancel', {})).error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.equal((await h.call('processing_cancel', {})).error.data.code, 'PROCESSING_CANCEL_UNVERIFIED');
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), claim);
   assert.equal((await controller.status()).chatHash, retired.chatHash);
   assert.equal(h.forms.length, 0); assert.equal(h.dispatches, 1);
@@ -1799,7 +1834,7 @@ for (const damage of ['missing', 'corrupt']) test(`MCP reports a blocked retired
     assert.equal(result.status, 'blocked'); assert.equal(result.nextAction, 'inspect');
     assert.deepEqual(result.diagnostics, ['PROCESSING_COLLECTION_BUSY']);
   }
-  assert.equal((await peer.call('processing_cancel', {})).error.message, 'PROCESSING_CANCEL_UNVERIFIED');
+  assert.equal((await peer.call('processing_cancel', {})).error.data.code, 'PROCESSING_CANCEL_UNVERIFIED');
   assert.equal(peer.creates, 0); assert.equal(peer.dispatches, 0); assert.equal(peer.forms.length, 0);
   assert.deepEqual(await fs.readFile(registry), stored);
   if (damage === 'missing') await assert.rejects(fs.readFile(workset), { code: 'ENOENT' });

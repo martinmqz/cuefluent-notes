@@ -440,8 +440,101 @@ test('Codex outer exec can request a handshake but only a completed exact inner 
   const pending = await f.resolve(); assert.equal(pending.pending, true); assert.equal(isProcessingInvocation(pending), false);
   await f.append([rows.call, rows.output]);
   const bound = await f.resolve(); assert.equal(isProcessingInvocation(bound), true);
-  assert.equal(bound.handshakeResultHash, digest(canonicalJSON(result))); assert.equal(bound.nativeSkill, false);
-  assert.equal(bound.controlExclusionUnsupported, true);
+  // The typed text verifies through code mode as well; only its exclusion
+  // receipt is unavailable.
+  assert.equal(bound.handshakeResultHash, digest(canonicalJSON(result))); assert.equal(bound.nativeSkill, true);
+  assert.equal(bound.typedControl, 'process'); assert.equal(bound.controlExclusionUnsupported, true);
+  // Without the typed skill input, a code-mode call carries no typed authority.
+  const g = await fixture(t), other = nestedRows(g, result);
+  await g.append([g.spacer(), other.outer, other.call, other.output]);
+  const plain = await g.resolve();
+  assert.equal(plain.nativeSkill, false); assert.equal(Object.hasOwn(plain, 'typedControl'), false); assert.equal(plain.controlExclusionUnsupported, false);
+});
+
+// Codex 0.163: a skill picked from the `$` menu arrives as its own user context
+// item of the turn, and the message is one text part opening with the mention.
+function menuInput(f, text, { mention = '$cuefluent-notes:cuefluent-notes', placeholder = true, name = 'cuefluent-notes:cuefluent-notes',
+  skillPath = f.skillPath, turn = f.context.unitId, selections = 1 } = {}) {
+  const user = { timestamp: stamp, ordinal: 3, type: 'event_msg', payload: { type: 'item_completed', thread_id: f.context.sessionId, turn_id: f.context.unitId,
+    item: { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text, text_elements: placeholder
+      ? [{ byte_range: { start: 0, end: Buffer.byteLength(mention) }, placeholder: mention }] : [] }] } } };
+  const selection = (skillName, file) => ({ timestamp: stamp, ordinal: 3, type: 'response_item', payload: { type: 'message', id: randomUUID(), role: 'user',
+    content: [{ type: 'input_text', text: `<skill>\n<name>${skillName}</name>\n<path>${file}</path>\n---\nname: cuefluent-notes\n---\nSynthetic instructions\n</skill>` }],
+    internal_chat_message_metadata_passthrough: { turn_id: turn, content_item_kinds: ['skills.selected_skill_instructions'] } } });
+  return [user, ...Array.from({ length: selections }, (_, i) => i ? selection('other-plugin:other-skill', '/synthetic/other/SKILL.md') : selection(name, skillPath))];
+}
+test('Codex 0.163 typed controls verify from the menu mention and its selected-skill item, directly and through code mode', async t => {
+  for (const [text, tool, typed, options] of [
+    ['$cuefluent-notes:cuefluent-notes process', 'process', 'process'],
+    ['$cuefluent-notes:cuefluent-notes save t7xb88', 'processing_review', 'save t7xb88'],
+    ['$cuefluent-notes:cuefluent-notes review', 'processing_review', 'review'],
+    ['$cuefluent-notes:cuefluent-notes status --verbose', 'processing_status', 'status --verbose'],
+    ['$cuefluent-notes:cuefluent-notes help', 'processing_status', 'help'],
+    // The mention without its placeholder element, or the bare skill name.
+    ['$cuefluent-notes:cuefluent-notes save', 'processing_review', 'save', { placeholder: false }],
+    ['$cuefluent-notes skip', 'processing_review', 'skip', { mention: '$cuefluent-notes', name: 'cuefluent-notes' }],
+  ]) for (const nested of [false, true]) await t.test(`${text}${nested ? ' (code mode)' : ''}`, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = tool; f.invocation.arguments = tool === 'process' ? f.invocation.arguments : { collectionId: f.collection.id };
+    const input = menuInput(f, text, options);
+    if (nested) {
+      const result = { content: [{ type: 'text', text: 'Synthetic challenge' }], isError: false }, rows = nestedRows(f, result);
+      await f.append([f.spacer(), ...input, rows.outer, rows.call, rows.output]);
+    } else await f.append([f.spacer(), ...input, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, typed);
+    assert.equal(bound.controlExclusionUnsupported, nested);
+  });
+  await t.test('a typed control that names another tool is refused', async t => {
+    const f = await fixture(t); f.invocation.tool = 'processing_status'; f.invocation.arguments = { collectionId: f.collection.id };
+    await f.append([f.spacer(), ...menuInput(f, '$cuefluent-notes:cuefluent-notes save t7xb88'), f.nativeCall()]);
+    await assert.rejects(f.resolve(), { code: 'PROCESSING_CONTROL_SELECTION_MISMATCH' });
+  });
+});
+
+test('Codex 0.163 menu input that is not one exact action is a typed non-command; a plain-text mention gains nothing', async t => {
+  const review = f => { f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id }; };
+  for (const [name, text, options, expected] of [
+    ['the skill alone', '$cuefluent-notes:cuefluent-notes', {}, { typedHelp: true }],
+    ['a mixed message', '$cuefluent-notes:cuefluent-notes save please, and note that the launch moved to Friday', {}, { typedSuggestions: ['save <draft code>'] }],
+    ['a near miss', '$cuefluent-notes:cuefluent-notes sav', {}, { typedSuggestions: ['save'] }],
+    ['two spaces', '$cuefluent-notes:cuefluent-notes  save', {}, { typedSuggestions: ['save'] }],
+    ['a second line', '$cuefluent-notes:cuefluent-notes save\nThe rollout moved.', {}, { typedSuggestions: ['save'] }],
+    ['a placeholder not covering the mention', '$cuefluent-notes:cuefluent-notes save', { placeholder: true, mention: '$cuefluent-notes:cuefluent-note' }, { typedSuggestions: ['save'] }],
+    ['the mention after other words', 'please $cuefluent-notes:cuefluent-notes save', { placeholder: false }, { typedSuggestions: ['save'] }],
+    ['another skill selected too', '$cuefluent-notes:cuefluent-notes save', { selections: 2 }, { typedSuggestions: ['save'] }],
+    // The mention typed out by hand, with no selected-skill item of this turn:
+    // no command and no authority; it only names the commands to type.
+    ['a plain-text mention', '$cuefluent-notes save', { placeholder: false, mention: '$cuefluent-notes', selections: 0 }, { typedUnattached: ['save'] }],
+    ['a plain-text full mention', '$cuefluent-notes:cuefluent-notes save k2mn9p', { placeholder: false, selections: 0 }, { typedUnattached: ['save k2mn9p'] }],
+    ['a plain-text mention alone', '$cuefluent-notes', { placeholder: false, mention: '$cuefluent-notes', selections: 0 }, { typedUnattached: ['help', 'review', 'status'] }],
+    ['a selection of another turn', '$cuefluent-notes:cuefluent-notes save', { turn: randomUUID() }, { typedUnattached: ['save'] }],
+    // A selected skill that is not this installed one: the call binds as model-chosen.
+    ['another installed copy', '$cuefluent-notes:cuefluent-notes save', { skillPath: '/synthetic/other-copy/SKILL.md' }, {}],
+    ['another skill', '$cuefluent-notes:cuefluent-notes save', { name: 'other-plugin:cuefluent-notes' }, {}],
+    ['other text', 'Please save the cuefluent-notes draft', { placeholder: false, selections: 0 }, {}],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t); review(f);
+    await f.append([f.spacer(), ...menuInput(f, text, options), f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.equal(bound.typedHelp, expected.typedHelp); assert.deepEqual(bound.typedSuggestions, expected.typedSuggestions);
+    assert.deepEqual(bound.typedUnattached, expected.typedUnattached);
+  });
+  await t.test('a selection whose message lies before the binding window', async t => {
+    const f = await fixture(t); review(f);
+    const [, selection] = menuInput(f, '$cuefluent-notes:cuefluent-notes save');
+    await f.append([f.spacer(), selection, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(bound.typedHelp, undefined); assert.equal(bound.typedSuggestions, undefined);
+  });
+  await t.test('a changed mirror of the selected-skill item', async t => {
+    const f = await fixture(t); review(f);
+    const [user, selection] = menuInput(f, '$cuefluent-notes:cuefluent-notes save');
+    const mirror = structuredClone(selection); mirror.payload.content[0].text += ' altered';
+    await f.append([f.spacer(), user, selection, mirror, f.nativeCall()]);
+    await assert.rejects(f.resolve(), unavailable);
+  });
 });
 test('Codex nested binding rejects forged metadata, arguments, duplicate calls and incomplete native results', async t => {
   for (const [name, change] of Object.entries({

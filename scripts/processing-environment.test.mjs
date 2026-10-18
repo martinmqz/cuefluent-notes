@@ -288,7 +288,7 @@ for (const profileState of ['available', 'missing', 'inaccessible']) test(`inval
   for (const name of ['processing_status', 'processing_review', 'processing_cancel', 'process_selected_captures', 'processing_resume']) {
     const response = await rpc.send({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: {
       name, arguments: { collectionId: f.collection.id }, _meta: { 'claudecode/toolUseId': `synthetic-environment-${id}` } } });
-    assert.equal(response.error?.message, 'PROCESSING_CLIENT_AUTHENTICATION_INVALID');
+    assert.equal(response.error?.data?.code, 'PROCESSING_CLIENT_AUTHENTICATION_INVALID');
     for (const secret of ['synthetic-invalid-private-selection', profile, 'synthetic private failure']) assert(!JSON.stringify(response).includes(secret));
   }
   assert.equal(profileReads, 0); assert.equal(f.nativeCalls.length, 0);
@@ -328,7 +328,7 @@ test('MCP cached Claude controls refuse a changed mode before cancelling or muta
     for (const name of ['processing_cancel', 'processing_status', 'processing_review', 'processing_resume', 'process_selected_captures']) {
       const response = await rpc.send({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: {
         name, arguments: { collectionId: f.collection.id }, _meta: { 'claudecode/toolUseId': `synthetic-mode-${id}` } } });
-      assert.equal(response.error?.message, 'PROCESSING_CLIENT_IDENTITY_CHANGED');
+      assert.equal(response.error?.data?.code, 'PROCESSING_CLIENT_IDENTITY_CHANGED');
       assert.equal(worker.killed, undefined, 'wrong-mode cancellation cannot signal the original worker');
       assert.deepEqual(await writerSnapshot(f), before);
       assert.equal(f.nativeCalls.length, 1);
@@ -356,7 +356,7 @@ for (const locator of [undefined, 'ANTHROPIC_AUTH_TOKEN']) test(`MCP rejects inc
   const response = await rpc.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
     name: 'process_selected_captures', arguments: { collectionId: f.collection.id },
     _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
-  assert.equal(response.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+  assert.equal(response.error?.data?.code, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
   assert.equal(response.result, undefined);
   for (const relative of ['processed/shortcut-controls', 'processed/shortcuts', 'processed/worksets']) {
     assert.equal(existsSync(path.join(f.collection.notes.writerStateDir, relative)), false);
@@ -414,10 +414,10 @@ for (const tool of ['process_selected_captures', 'processing_resume']) for (cons
     assert.deepEqual((await reconnected.send(request)).result, first.result);
     const changed = await reconnected.send({ ...request, id: 2, params: {
       ...request.params, arguments: {} } });
-    assert.equal(changed.error?.message, 'PROCESSING_CONTROL_RECEIPT_CONFLICT');
+    assert.equal(changed.error?.data?.code, 'PROCESSING_CONTROL_RECEIPT_CONFLICT');
     const fresh = await reconnected.send({ ...request, id: 3, params: {
       ...request.params, _meta: { 'claudecode/toolUseId': 'synthetic-new-call' } } });
-    assert.equal(fresh.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+    assert.equal(fresh.error?.data?.code, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
     await reconnected.close();
     assert.equal(f.nativeCalls.length, launches);
     assert.deepEqual(await writerSnapshot(f), before);
@@ -583,7 +583,7 @@ test('missing native profile returns safe CLI and MCP diagnostics without replac
     capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } });
   const refused = await rpc.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'processing_status',
     arguments: { collectionId: f.collection.id }, _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
-  assert.equal(refused.error.message, 'PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
+  assert.equal(refused.error.data.code, 'PROCESSING_CLIENT_SETTINGS_UNAVAILABLE');
   assert((await fs.readFile(path.join(directory, filenames[0]))).equals(before));
   assert.equal(f.nativeCalls.length, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 }));
@@ -596,7 +596,7 @@ test('MCP exposes a safe profile-settings refusal without dispatch or lost state
   const refused = await rpc.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
     name: 'process_selected_captures', arguments: { collectionId: f.collection.id },
     _meta: { 'claudecode/toolUseId': 'synthetic-environment-call' } } });
-  assert.equal(refused.error.message, 'PROCESSING_CLIENT_SETTINGS_UNSUPPORTED');
+  assert.equal(refused.error.data.code, 'PROCESSING_CLIENT_SETTINGS_UNSUPPORTED');
   assert(!JSON.stringify(refused).includes('synthetic-private-command'));
   await rpc.close(); assert.equal(f.nativeCalls.length, 0);
   const status = await executeWorkflow('processing-chat-status', { collectionId: f.collection.id,
@@ -666,7 +666,7 @@ for (const tool of ['processing_resume', 'process_selected_captures']) test(`Cla
       name: tool, arguments: { collectionId: f.collection.id },
       _meta: { 'claudecode/toolUseId': 'synthetic-retired-retry' } } };
     const denied = await rpc.send(request);
-    assert.equal(denied.error?.message, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
+    assert.equal(denied.error?.data?.code, 'PROCESSING_CLIENT_HOST_AUTH_UNAVAILABLE');
     assert.equal(f.nativeCalls.length, 1);
     assert.deepEqual(await writerSnapshot(f), before);
     assert.deepEqual(await owner.status(), retired);
