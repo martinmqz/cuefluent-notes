@@ -6,6 +6,7 @@ import { PassThrough, Writable } from 'node:stream';
 import { withReviewPreview } from './processing-review.mjs';
 import { openProcessingController } from '../processing-controller.mjs';
 import { runProcessingMcp } from '../processing-mcp.mjs';
+import { confirmReviewPresentation } from '../processing-review-files.mjs';
 import { readSelection } from '../intake-store.mjs';
 import { canonicalJSON, digest } from '../workflow-values.mjs';
 import { inspectProcessing } from '../processing.mjs';
@@ -57,6 +58,8 @@ export async function harness(t, f, overrides = {}) {
   });
   const dependencies = {
     execution: { async beforeExecution() {}, async guardExecution() {}, async afterExecution() {} },
+    // The real confirmation; a test may first act as another MCP process.
+    async confirmPresentation(capability, args) { await h.beforeConfirm?.(); return confirmReviewPresentation(capability, args); },
     async resolveInvocation(capability, context, invocation) {
       const selected = await readSelection(f.store, { client: f.identity.client, sessionId: f.identity.sessionId });
       return Object.freeze({ source: f.source, selection: f.selection, selectionHash: selected.hash,

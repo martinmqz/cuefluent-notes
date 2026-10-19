@@ -191,6 +191,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   const pendingPresentations = new WeakMap();
   const openController = dependencies.openController ?? openProcessingController;
   const resolveInvocation = dependencies.resolveInvocation ?? resolveProcessingInvocation;
+  const confirmPresentation = dependencies.confirmPresentation ?? confirmReviewPresentation;
   // Nothing is set up for this chat: no configuration, no route for this client,
   // or no registration, selection or processing source for this session in any
   // routed collection. Still a refusal; only a status request may answer it with
@@ -773,13 +774,15 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // The reply naming a presented draft is committed: only now does that
   // attempt count for decisions. A cancelled or failed request leaves it
   // unconfirmed, and a failed confirmation fails the reply, so the chat never
-  // hears "presented" about a draft it cannot decide on.
+  // hears "presented" about a draft it cannot decide on. That includes an
+  // attempt another request settled or superseded meanwhile: nothing is left
+  // to confirm, so the reply becomes that refusal.
   async function afterResponse({ source }) {
     const pending = pendingPresentations.get(source);
     if (!pending) return;
     pendingPresentations.delete(source);
     const { capability } = selected(source);
-    await confirmReviewPresentation(capability, { selection: source.selection, ...pending });
+    if (!await confirmPresentation(capability, { selection: source.selection, ...pending })) fail('PROCESSING_REVIEW_SUPERSEDED');
   }
   try {
     // With nothing set up for the chat, a status request still gets the command

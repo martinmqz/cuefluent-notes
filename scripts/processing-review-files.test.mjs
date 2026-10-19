@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { processingFixture, proposedClaim, inspectedClaim } from './test-support/processing-fixture.mjs';
 import { body, harness } from './test-support/processing-mcp.mjs';
 import { inspectProcessing, completeProcessing, proposeProcessing } from './processing.mjs';
-import { reviewCode, presentReviewFiles, readReviewPresentations } from './processing-review-files.mjs';
+import { reviewCode, presentReviewFiles, readReviewPresentations, settleReviewFiles } from './processing-review-files.mjs';
 import { readReviewPreview } from './processing-host-review.mjs';
 import { REVIEW_CODE, REVIEW_COMMANDS, processingControlCall } from './processing-control-proof.mjs';
 import { reviewPathLink } from './processing-control-server.mjs';
@@ -397,6 +397,37 @@ test('a presentation counts only once its reply is committed; an unconfirmed one
   // Once B is shown by a reply that commits, it is decidable.
   assert.equal((await review(h, { draft: codeB })).review, 'presented');
   assert.equal((await review(h, { decision: 'skip', draft: codeB })).review, 'skipped');
+});
+
+test('a presentation another request supersedes or settles before its reply commits fails that reply', async t => {
+  for (const [name, compete] of [
+    // Another MCP process shows the same revision to this chat again.
+    ['superseded', async (f, lineage) => {
+      const preview = await readReviewPreview(f.capability, { selection: f.selection, operationId: f.operationId });
+      await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage: lineage, verified: false,
+        presentedAt: new Date(Date.now() + 60_000).toISOString() });
+    }],
+    // Another MCP process settles this chat's record of the revision.
+    ['settled', async (f, lineage, p) => settleReviewFiles(f.capability, { selection: f.selection, chatLineage: lineage,
+      revision: { operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash } })],
+  ]) await t.test(name, async t => {
+    const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
+    const h = await claudeReview(t, f); h.nativeSkill = true;
+    const lineage = { client: 'claude', sessionId: f.identity.sessionId }, code = reviewCode(p.proposalHash);
+    // After this request wrote its record and before its reply commits.
+    h.beforeConfirm = async () => { h.beforeConfirm = null; await compete(f, lineage, p); };
+    const row = await h.call('processing_review', {});
+    assert.equal(row.result, undefined); assert.equal(row.error.data.code, 'PROCESSING_REVIEW_SUPERSEDED');
+    assert.match(row.error.message, /^Cuefluent: This command was refused: the draft was decided, replaced or shown again before this review was confirmed/);
+    // The chat never received a usable review: no decision form applies it.
+    assert.equal((await review(h, { decision: 'save', draft: code })).review, 'not-shown');
+    assert.equal((await review(h, { decision: 'save' })).review, 'unresolved');
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+    // A typed review whose reply commits makes it decidable.
+    assert.equal((await review(h, { draft: code })).review, 'presented');
+    assert.equal((await review(h, { decision: 'save', draft: code })).review, 'saved');
+    assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
+  });
 });
 
 test('a redisplay keeps the earlier typed review of the same revision', async t => {

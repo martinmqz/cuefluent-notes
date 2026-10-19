@@ -358,8 +358,9 @@ that revision (typed, and its reply committed), and `typedDelivered` records tha
 some typed review of it was delivered to that session. A coded decision needs
 `typedDelivered`; a bare decision needs the session's latest attempt to be a
 delivered typed review. Delivery is confirmed after the reply commits and
-before it is written; if that confirmation fails, the reply is the error and the
-draft must be reviewed again. A cancelled, failed or model-started attempt
+before it is written; if that confirmation fails, including when another request
+settled or superseded that attempt meanwhile (`PROCESSING_REVIEW_SUPERSEDED`),
+the reply is the error and the draft must be reviewed again. A cancelled, failed or model-started attempt
 therefore never makes a draft decidable, and never lets a bare decision fall
 back to an older draft. A folder is removed when its draft is
 decided through review, or by a later review or refused decision once its revision
