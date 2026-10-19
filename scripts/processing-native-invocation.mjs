@@ -11,7 +11,7 @@ import { processingSourceDirectory, processingSourcePath, validateProcessingSour
 import { readSessionRange } from './session-jsonl.mjs';
 import { verifyCodexHeader, codexRegistrationHeader, codexSkillSelection, codexMentionText } from './codex-reader.mjs';
 import { claudeRegistrationHeader, isClaudeHumanRow } from './claude-reader.mjs';
-import { readContinuesLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
+import { readContinuesLink, readContinuedLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
 import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, findClaudeSkillArguments, claudeProcessingCommandKind, processingControlAction,
   processingControlText, processingControlMatches, processingControlSuggestions, SKILL_NAME } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, fail, object, isNativeId, keys, hash, integer } from './workflow-values.mjs';
@@ -145,6 +145,17 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   const sessionKinds = continued?.link.to.sessionKinds ?? [];
   const pinned = context.client === 'claude' ? [{ name: continuesPath(identity.sessionId), hash: continued?.pointerHash ?? null },
     ...(continued ? [{ name: continuedPath(continued.link.from.sessionId), hash: continued.linkHash }] : [])] : [];
+  // A chat continued elsewhere (`/bg`) handed its lineage on. A command typed
+  // in it again, for example after resuming it, is refused once its own call is
+  // found, so it cannot decide a draft only the continuation was shown.
+  let continuedElsewhere = false;
+  if (context.client === 'claude') {
+    let outbound;
+    try { outbound = await settle(() => readContinuedLink(store, identity.sessionId)); }
+    catch (error) { if (error.code === 'INVALID_SESSION_CONTINUATION') throw new UnavailableNativeSource(); throw error; }
+    pinned.push({ name: continuedPath(identity.sessionId), hash: outbound?.hash ?? null });
+    continuedElsewhere = outbound !== null;
+  }
   let registered = null;
   const intervals = selected.state ? currentIntervals(selected.state) : [];
   const interval = selected.state?.paused ? intervals.at(-1) : intervals.find(value => value.upper === null);
@@ -208,6 +219,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     return value;
   }, MissingNativeInvocation);
   await settle(guard);
+  if (continuedElsewhere) fail('PROCESSING_CHAT_CONTINUED');
   const { call, unitId, nativeSkill, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached } = found;
   // typedControl is the exact verified typed action. Only a verified binding
   // carries it; a model-chosen call never does. A Codex code-mode call carries

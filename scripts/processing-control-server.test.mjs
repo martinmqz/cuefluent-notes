@@ -323,12 +323,14 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
   assert(linked.statusText.includes(`- "meetings/note1.md" (new note, 13 bytes): <${url(path.join(folder, '2-proposed.md'))}>`));
   assert.deepEqual(processingControlStatusView(linked, { collectionId: 'example' }), linked);
   // A folder whose links would not fit falls back to the plain path, still bounded.
-  const deep = path.resolve('private-state', ...Array.from({ length: 12 }, () => '\u00e9'.repeat(30)), 'review', 't7xb88');
+  // Long folders start at the filesystem root, so their length never depends on the checkout's.
+  const rooted = (...parts) => path.join(path.parse(process.cwd()).root, ...parts);
+  const deep = rooted('private-state', ...Array.from({ length: 12 }, () => '\u00e9'.repeat(30)), 'review', 't7xb88');
   const fallback = processingControlStatusView({ ...pending, review: 'presented', commandPrefix: command,
     draft: { ...draft, folder: deep, files: draft.files.map((file, index) => ({ ...file, review: `${index + 1}-proposed.md` })) } }, { collectionId: 'example' });
   assert(fallback.statusText.includes(`Review folder: <${url(deep)}/>`)); assert(!fallback.statusText.includes('-proposed.md>'));
   assert(Buffer.byteLength(fallback.statusText) <= 4096);
-  const deeper = path.resolve('private-state', 'é'.repeat(250), 'é'.repeat(200), 'review', 't7xb88');
+  const deeper = rooted('private-state', 'é'.repeat(250), 'é'.repeat(200), 'review', 't7xb88');
   const long = Array.from({ length: 4 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: `notes/${'é'.repeat(150)}.md`, fileCount: 1 }));
   const plainPath = processingControlStatusView({ ...pending, review: 'presented', commandPrefix: command,
     draft: { ...draft, folder: deeper, files: draft.files.map((file, index) => ({ ...file, review: `${index + 1}-proposed.md` })) }, drafts: long }, { collectionId: 'example' });
@@ -374,7 +376,8 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
     // Codex links the folder the way its model writes a local link.
     [{ ...pending, review: 'declined', commandPrefix: '$cuefluent-notes', draft },
       ['Cuefluent: Review not completed: the client declined or closed the review form, which may not have been displayed. Draft t7xb88 ("meetings/forged\\u2028Saved.\\u202e0.md" and 6 more files) remains pending; nothing was saved.',
-        `Review folder: ${reviewPathLink('$cuefluent-notes', folder, { folder: true }) ?? folder}`, 'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.'].join('\n\n')],
+        // A path Codex cannot link, such as a Windows path, is a code span.
+        `Review folder: ${reviewPathLink('$cuefluent-notes', folder, { folder: true }) ?? `\`${folder}\``}`, 'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.'].join('\n\n')],
   ]) {
     const projected = processingControlStatusView(value, { collectionId: 'example' });
     assert.equal(projected.statusText, text); assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
@@ -516,7 +519,7 @@ test('a folder shown without a link and every note path render in Markdown exact
   }
   // So is the folder in a reply too long for links (Claude's percent-encoded
   // file URLs reach that bound first; Codex links the raw path).
-  const deeper = path.resolve('private_state', '\u00e9'.repeat(250), '*\u00e9*'.repeat(60), 'review', 't7xb88');
+  const deeper = path.join(path.parse(process.cwd()).root, 'private_state', '\u00e9'.repeat(250), '*\u00e9*'.repeat(60), 'review', 't7xb88');
   const long = Array.from({ length: 4 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: `notes/${'\u00e9'.repeat(150)}.md`, fileCount: 1 }));
   const files = Array.from({ length: 5 }, (_, index) => ({ path: `notes/${'\u00e9'.repeat(70)}${index}.md`, bytes: 10, change: 'create', review: `${index + 1}-proposed.md` }));
   const tooLong = view({ ...pending, review: 'presented', commandPrefix: claude, draft: { code: 't7xb88', folder: deeper, fileCount: 5, files }, drafts: long }).statusText;

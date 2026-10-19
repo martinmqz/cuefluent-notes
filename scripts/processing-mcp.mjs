@@ -70,6 +70,8 @@ const authorizedReviews = inventory => inventory.operations.filter(item => item.
 const REVIEW_REVISION_CHANGED = new Set(['PROCESSING_REVIEW_REQUIRED', 'PROCESSING_OPERATION_COMPLETE', 'PROCESSING_CLAIM_MISSING',
   'PROCESSING_CLAIM_CHANGED', 'PROCESSING_PROPOSAL_CHANGED', 'PROCESSING_OUTPUT_CHANGED', 'PROCESSING_NOTES_ROOT_CHANGED',
   'PROCESSING_HEAD_CHANGED', 'PROCESSING_INPUT_CHANGED']);
+// Review outcomes that leave a presented draft pending.
+const REVIEW_PENDING = new Set(['presented', 'deferred', 'declined', 'display-altered', 'unavailable']);
 const reviewChanged = error => REVIEW_REVISION_CHANGED.has(error?.code) || (error?.code === 'SAFE_UPDATE_REJECTED' &&
   /changed since inspection|Reviewed processing (?:directories|manifest) changed/.test(error.safeMessage ?? ''));
 // The cause a refused decision names: its destination, a revision no longer
@@ -301,6 +303,15 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     });
     if (!receipt?.response) return null;
     if (receipt.response.collectionId !== source.collectionId) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT');
+    // A review reply is recorded before its presentation is confirmed. When
+    // that confirmation failed, the reply the chat received was the refusal,
+    // so a redelivered call gets the refusal again, never "presented".
+    const shown = receipt.response.draft?.folder !== undefined && REVIEW_PENDING.has(receipt.response.review);
+    if (shown) {
+      const { bindings, recent } = await readReviewPresentations(capability, reviewChatLineage(source));
+      const code = receipt.response.draft.code;
+      if (![...bindings, ...(recent ? [recent] : [])].some(item => item.delivered && reviewCode(item.proposalHash) === code)) fail('PROCESSING_REVIEW_SUPERSEDED');
+    }
     replayed.set(source, receipt);
     return receipt.response;
   }
@@ -552,14 +563,15 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (reviewCode(preview.proposalHash) !== target.code) return refuseChanged(target.code, null, 'changed');
     signal?.throwIfAborted();
     const presentation = await presentReviewFiles(capability, { selection: source.selection, preview,
-      chatLineage: reviewChatLineage(source), verified });
-    pendingPresentations.set(source, { chatLineage: reviewChatLineage(source), presentedAt: presentation.presentedAt,
+      chatLineage: reviewChatLineage(source), verified, signal });
+    pendingPresentations.set(source, { chatLineage: reviewChatLineage(source), attempt: presentation.attempt,
       revision: { operationId: presentation.operationId, proposalHash: presentation.proposalHash, claimHash: presentation.claimHash } });
     signal?.throwIfAborted();
-    const draft = draftView(presentation);
+    // A display the person did not type says to type the review first.
+    const draft = draftView(presentation), untyped = verified ? {} : { untyped: true };
     const presented = async () => {
-      const others = await draftListing(capability, coded.filter(entry => entry !== target));
-      return { response: reviewView('presented', { draft, ...(others.length ? { drafts: others } : {}) }) };
+      const others = await shownDrafts(capability, coded.filter(entry => entry !== target), signal);
+      return { response: reviewView('presented', { draft, ...untyped, ...(others.length ? { drafts: others } : {}) }) };
     };
     if (!elicit) return presented();
     let result;
@@ -570,7 +582,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (signal?.aborted || !['PROCESSING_REVIEW_LIMIT', 'PROCESSING_REVIEW_TOO_LARGE'].includes(error?.code)) throw error;
       return presented();
     }
-    if (result.status === 'awaiting-review') return { response: reviewView(result.review, { draft }) };
+    if (result.status === 'awaiting-review') return { response: reviewView(result.review, { draft, ...untyped }) };
     return { result, proposal: target.item, revision: presentation,
       draft: { code: draft.code, path: draft.files[0].path, fileCount: draft.fileCount } };
   }
@@ -586,15 +598,20 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       for (const extra of matches.slice(1)) await refuseChanged(asked.draft, extra, 'stale');
       if (matches.length > 1) return refuseChanged(asked.draft, matches[0], 'stale');
       // Even with its code, a draft counts as shown only when a typed review
-      // presented it here; a natural-language or model-initiated display does not.
-      if (!matches.length) return { response: reviewView('not-shown', { draft: await named(asked.draft) }) };
+      // presented it here; a natural-language or model-initiated display does
+      // not. A code no pending draft has is simply not pending, for example
+      // one already decided.
+      if (!matches.length) {
+        if (!coded.some(entry => entry.code === asked.draft)) return refuseChanged(asked.draft, null, 'not-pending');
+        return { response: reviewView('not-shown', { draft: await named(asked.draft) }) };
+      }
       binding = matches[0];
     } else {
       // Only the revision this chat was most recently shown by a verified
       // typed review; never "the only draft" or "the only review folder".
       // The latest attempt must itself be a delivered typed review; an attempt
       // whose reply failed, or one the model started, blocks the bare form.
-      if (!recent?.verified || !recent.delivered) return { response: reviewView('unresolved', { drafts: await draftListing(capability, coded) }) };
+      if (!recent?.verified || !recent.delivered) return { response: reviewView('unresolved', { drafts: await shownDrafts(capability, coded, signal) }) };
       binding = bindings.find(item => sameReviewRevision(item, recent));
       if (!binding) return refuseChanged(reviewCode(recent.proposalHash), null, revisionReason(proposals, recent, 'stale'));
     }
@@ -629,7 +646,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     signal?.throwIfAborted();
     if (replay) return replay;
     const existing = await activeJob(key, source, signal);
-    if (existing) return existing;
+    if (existing) return { ...existing, review: 'busy' };
     // Only a verified typed action is an approval channel. Its exact text names
     // the draft and decision (Claude also mirrors them in checked arguments);
     // model-chosen fields can only display a draft or be refused.
@@ -661,9 +678,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       const refuseChanged = async (code, binding, reason) => {
         try {
           const stale = binding ?? (await readReviewPresentations(capability, lineage)).bindings.find(item => reviewCode(item.proposalHash) === code);
-          if (stale) await settleReviewFiles(capability, { selection: source.selection, chatLineage: lineage, revision: stale });
+          if (stale) await settleReviewFiles(capability, { selection: source.selection, chatLineage: lineage, revision: stale, signal });
         } catch (error) { if (signal?.aborted) throw error; }
-        const drafts = await draftListing(capability, coded.filter(entry => entry.code !== code));
+        const drafts = await shownDrafts(capability, coded.filter(entry => entry.code !== code), signal);
         return { response: reviewView('changed', { draft: await named(code), reason, ...(drafts.length ? { drafts } : {}) }) };
       };
       const request = { source, capability, status, proposals, coded, asked, verified, elicit, signal, commitResponse, reviewView, refuseChanged, named };

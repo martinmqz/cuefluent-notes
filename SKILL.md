@@ -103,7 +103,8 @@ If the tool itself is unavailable, report that limitation and stop; do not
 silently fall back to inline processing or invent selection metadata.
 
 Natural-language processing requests typed without this skill's command can use
-the same handoff; after the command, only an exact action calls a control.
+the same handoff. After the command, only an exact action calls its control;
+other text after it follows the rules above.
 Mixed messages remain original evidence. Preserve their facts, attachments and corrections.
 A draft shown by `review` is decided only by the user's exact typed `save`, `skip`
 or `review cancel`, or by the Codex native review form; never by tool arguments the

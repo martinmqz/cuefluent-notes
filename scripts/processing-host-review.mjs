@@ -53,6 +53,9 @@ const OUTCOMES = Object.freeze({ save: 'saved', skip: 'skipped', cancel: 'cancel
 
 async function inspectReview(capability, operationId) {
   const inspected = await withStorageProbes(() => inspectProcessing(capability, operationId));
+  // A collection blocker, such as a publication still finishing, leaves the
+  // revision pending: it is not a change, so nothing about its review settles.
+  if (inspected.state === 'blocked' && !inspected.recoveryRequired) fail('PROCESSING_REVIEW_BLOCKED');
   if (inspected.state !== 'awaiting-review' || inspected.recoveryRequired) fail('PROCESSING_REVIEW_REQUIRED');
   return inspected;
 }

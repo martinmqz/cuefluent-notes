@@ -348,23 +348,33 @@ files 0600 on POSIX, no links followed): `proposed.md` and, for an update,
 `summary.txt` with paths, sizes, sources (each with the numbers of the files it
 supports and at most five omission details plus a count), inspection limits, the
 decision commands and the operation, claim and proposal hashes, bounded to 1 MiB.
-A durable presentation record in the
+Entries an editor or Finder adds inside a review folder are neither checked nor
+followed by the storage privacy check; Finder's `.DS_Store` is removed with the
+folder's own files, and anything else keeps the folder. At most 32 folders are
+kept, the oldest removed first, and a reused copy whose permissions changed is
+written again. A durable presentation record in the
 same private state stores `{chatLineage, operationId, proposalHash, claimHash,
-presentedAt, verified, delivered, typedDelivered}` for the invoking chat lineage:
+attempt, presentedAt, verified, delivered, typedDelivered}` for the invoking chat lineage:
 the native session, or the root session of a verified Claude continuation (see
 the [Claude reader contract](session-workflow.md#claude-reader-contract)), so the
-records outlive a continuation. `verified` and `delivered` describe the latest presentation attempt of
-that revision (typed, and its reply committed), and `typedDelivered` records that
+records outlive a continuation. `attempt` is a random ID naming the latest presentation attempt of
+that revision, and `verified` and `delivered` describe it (typed, and its reply committed), and `typedDelivered` records that
 some typed review of it was delivered to that session. A coded decision needs
 `typedDelivered`; a bare decision needs the session's latest attempt to be a
 delivered typed review. Delivery is confirmed after the reply commits and
 before it is written; if that confirmation fails, including when another request
 settled or superseded that attempt meanwhile (`PROCESSING_REVIEW_SUPERSEDED`),
-the reply is the error and the draft must be reviewed again. A cancelled, failed or model-started attempt
+the reply is the error and the draft must be reviewed again; a redelivery of that
+same call is refused the same way. A cancelled, failed or model-started attempt
 therefore never makes a draft decidable, and never lets a bare decision fall
 back to an older draft. A folder is removed when its draft is
 decided through review, or by a later review or refused decision once its revision
-is no longer pending; records are bounded per collection.
+is no longer pending; records are bounded per collection (64 revision records and
+64 chats' latest attempts). A collection step that has not finished, such as a
+capture still being published, refuses a review or decision with
+`PROCESSING_REVIEW_BLOCKED` and leaves the draft and this chat's record as they
+are; a review step waits up to two seconds for the collection lock before
+refusing with `INTAKE_BLOCKED`.
 
 The draft code is six characters from `a-h j k m n p-t v-z 2-9`, derived from a
 domain-separated hash of the proposal hash. Claude's optional `draft` (that code)
@@ -423,7 +433,12 @@ draft selector; `display-altered` for a changed echo; `not-shown` for a draft no
 presented to this session; `unverified` for a decision that was not a verified
 typed action; `changed` for a revision, destination or pending state that no
 longer matches; `unresolved` for a decision without a code and no verified latest
-presentation; and `unavailable` for a pending draft without a review callback.
+presentation; `unavailable` for a pending draft without a review callback; and
+`busy` for a review typed while this chat's own processing run is still going,
+which applies nothing. A coded decision naming a draft that is no longer pending
+is `changed` with reason `not-pending`, whether or not this chat was shown it.
+A pending display the person did not type (`verified: false`) adds
+`untyped: true`, and its `statusText` says to type `review <code>` first.
 `changed` can add `reason`: `changed` (the revision differs from the one shown),
 `destination` (a note at its destination changed), `not-pending` (not
 pending) or `stale` (its review here is no longer current); its `statusText` then
@@ -442,7 +457,7 @@ are separated by blank lines, and every list follows one. For Claude the folder
 and each file's proposed copy appear as percent-encoded `file://` autolinks; for
 Codex as `[name](/absolute/path)` links named by the path's last segment, with
 `[name](</absolute/path>)` for a path with spaces or parentheses and no link for
-a path Markdown cannot carry, such as a Windows path. Links are dropped in
+a path Markdown cannot carry, such as a Windows path or one with `#` or `?`. Links are dropped in
 favour of the folder path as a code span when they would not fit the reply
 bound, and that code span, with its controls escaped and its fences counted,
 stays within 1024 bytes; the `draft.folder` field always holds the native path. `saved`, `skipped` and

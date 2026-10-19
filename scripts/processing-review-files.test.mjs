@@ -5,12 +5,13 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { processingFixture, proposedClaim, inspectedClaim } from './test-support/processing-fixture.mjs';
-import { body, harness } from './test-support/processing-mcp.mjs';
+import { body, harness, deferred } from './test-support/processing-mcp.mjs';
 import { inspectProcessing, completeProcessing, proposeProcessing } from './processing.mjs';
-import { reviewCode, presentReviewFiles, readReviewPresentations, settleReviewFiles } from './processing-review-files.mjs';
+import { reviewCode, presentReviewFiles, confirmReviewPresentation, readReviewPresentations, settleReviewFiles } from './processing-review-files.mjs';
+import { auditWorkflowStorage } from './workflow-storage.mjs';
 import { readReviewPreview } from './processing-host-review.mjs';
 import { REVIEW_CODE, REVIEW_COMMANDS, processingControlCall } from './processing-control-proof.mjs';
-import { reviewPathLink } from './processing-control-server.mjs';
+import { reviewPathLink, processingControlRefusalText } from './processing-control-server.mjs';
 import { fingerprint } from './safe-update.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { readSelection } from './intake-store.mjs';
@@ -80,7 +81,7 @@ test('Claude review writes the exact proposal to a private review folder and rep
   assertPlainReply(shown, f);
   // The durable presentation binding names this chat and the exact revision.
   const state = await reviewState(f);
-  assert.deepEqual(state.bindings.map(({ presentedAt, ...item }) => item), [{ chatLineage: { client: 'claude', sessionId: f.identity.sessionId },
+  assert.deepEqual(state.bindings.map(({ attempt, presentedAt, ...item }) => item), [{ chatLineage: { client: 'claude', sessionId: f.identity.sessionId },
     operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash, verified: true, delivered: true, typedDelivered: true }]);
   assert.deepEqual(state.recent, state.bindings);
   assert.deepEqual(state.folders, [{ code, operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash }]);
@@ -130,7 +131,7 @@ test('a large proposal stays within the reply and receipt bounds while summary.t
   const row = await h.call('processing_review', {}), shown = body(row);
   assert.equal(shown.review, 'presented'); assert.equal(shown.draft.fileCount, 6); assert.equal(shown.draft.files.length, 5);
   for (const file of shown.draft.files) { assert(Buffer.byteLength(file.path) <= 512); assert(file.path.endsWith('…')); }
-  assert(shown.statusText.includes('- and 1 more files listed in summary.txt'));
+  assert(shown.statusText.includes('- and 1 more file listed in summary.txt'));
   assert(Buffer.byteLength(shown.statusText) <= 4096); assert(Buffer.byteLength(JSON.stringify(row)) < 16 * 1024);
   const summary = await fs.readFile(path.join(shown.draft.folder, 'summary.txt'), 'utf8');
   for (const [index, file] of files.entries()) {
@@ -154,7 +155,9 @@ test('typed decisions need a verified command and a presentation to this chat; S
   const model = await review(h, { decision: 'save', draft: code });
   assert.equal(model.review, 'unverified'); assertPlainReply(model, f);
   h.nativeSkill = true;
-  assert.equal((await review(h, { decision: 'save', draft: 'k2mn9p' })).review, 'not-shown');
+  // A code no pending draft has is not pending, shown here or not.
+  const unknown = await review(h, { decision: 'save', draft: 'k2mn9p' });
+  assert.equal(unknown.review, 'changed'); assert.equal(unknown.reason, 'not-pending');
   // A typed Later waits for Phase 2: a model cannot pass it either.
   assert.equal((await h.call('processing_review', { decision: 'later', draft: code })).error.data.code, 'PROCESSING_CONTROL_INVALID_REQUEST');
   assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []); assert(await exists(folder));
@@ -170,8 +173,9 @@ test('typed decisions need a verified command and a presentation to this chat; S
   await fs.rm(folder, { recursive: true });
   const state = await reviewState(f);
   assert.deepEqual(state.bindings, []); assert.deepEqual(state.folders, []);
-  // The decided revision is no longer bound; a bare decision still points at it.
-  assert.equal((await review(h, { decision: 'save', draft: code })).review, 'not-shown');
+  // The decided revision is no longer pending or bound; a bare decision still points at it.
+  const again = await review(h, { decision: 'save', draft: code });
+  assert.equal(again.review, 'changed'); assert.equal(again.reason, 'not-pending');
   const bare = await review(h, { decision: 'save' });
   assert.equal(bare.review, 'changed'); assert.notEqual(bare.status, 'awaiting-review');
   assert.equal(h.dispatches, 0);
@@ -570,8 +574,9 @@ test('Codex keeps its native form, names the review folder, and accepts the same
     h.answer(await next, { action: 'accept', content: { decision: 'later' } });
     const later = body(await call), code = later.draft.code;
     assert.equal(later.review, 'deferred');
-    // Codex links the folder the way its model writes a local link.
-    assert.equal(later.statusText, `Cuefluent: Review deferred with Later. Draft ${code} ("meetings/rollout.md") remains pending; nothing was saved.\n\nReview folder: ${reviewPathLink(codex, later.draft.folder, { folder: true }) ?? later.draft.folder}\n\n` +
+    // Codex links the folder the way its model writes a local link; a path it
+    // cannot link, such as a Windows path, is a code span.
+    assert.equal(later.statusText, `Cuefluent: Review deferred with Later. Draft ${code} ("meetings/rollout.md") remains pending; nothing was saved.\n\nReview folder: ${reviewPathLink(codex, later.draft.folder, { folder: true }) ?? `\`${later.draft.folder}\``}\n\n` +
       `To decide, type ${codex} save ${code} or ${codex} skip ${code}.`);
     // The typed text alone carries the decision; the call has no review fields.
     h.typedControl = `save ${code}`;
@@ -764,4 +769,175 @@ test('a plain-language request that starts with save is never a decision, in eit
     assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
     assert.equal(p.proposalHash.length, 64);
   });
+});
+
+test('files an editor or Finder adds to a review folder never fail the storage check, and Finder\'s goes with the folder', async t => {
+  const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
+  const h = await claudeReview(t, f); h.nativeSkill = true;
+  const view = await review(h), folder = view.draft.folder;
+  for (const file of [path.join(folder, '.DS_Store'), path.join(path.dirname(folder), '.DS_Store'), path.join(folder, 'proposed.md~')]) {
+    await fs.writeFile(file, 'synthetic', { mode: 0o644 }); await fs.chmod(file, 0o644);
+  }
+  // An editor's lock file is a dangling link (Emacs).
+  if (posix) await fs.symlink('user@host.4242:1700000000', path.join(folder, '.#proposed.md'));
+  assert.deepEqual(await auditWorkflowStorage(f.capability), { complete: true });
+  // The folder's own files are still checked.
+  if (posix) {
+    await fs.chmod(path.join(folder, 'proposed.md'), 0o644);
+    assert.deepEqual(await auditWorkflowStorage(f.capability), { complete: false, reason: 'STORAGE_NOT_PRIVATE' });
+    await fs.chmod(path.join(folder, 'proposed.md'), 0o600);
+  }
+  assert.equal((await review(h, { decision: 'save', draft: view.draft.code })).review, 'saved');
+  // Finder's file went with the folder's own files; the editor's keep the folder.
+  assert.deepEqual((await fs.readdir(folder)).sort(), [...(posix ? ['.#proposed.md'] : []), 'proposed.md~']);
+  await fs.rm(path.join(folder, 'proposed.md~')); if (posix) await fs.unlink(path.join(folder, '.#proposed.md'));
+  assert.deepEqual(await auditWorkflowStorage(f.capability), { complete: true });
+});
+
+test('a reused review copy whose permissions changed is written again', async t => {
+  if (!posix) { t.skip('POSIX file modes'); return; }
+  const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
+  const h = await claudeReview(t, f); h.nativeSkill = true;
+  const view = await review(h), proposed = path.join(view.draft.folder, 'proposed.md');
+  // An editor saved it back unchanged with its own permissions.
+  await fs.chmod(proposed, 0o644);
+  assert.equal((await review(h, { draft: view.draft.code })).review, 'presented');
+  assert.equal((await fs.stat(proposed)).mode & 0o777, 0o600);
+  assert.equal(await fs.readFile(proposed, 'utf8'), content);
+});
+
+test('two presentation attempts in one millisecond are told apart', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
+  const chatLineage = { client: 'claude', sessionId: f.identity.sessionId }, presentedAt = new Date().toISOString();
+  const revision = { operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash };
+  const preview = await readReviewPreview(f.capability, { selection: f.selection, operationId: f.operationId });
+  // A model-started display, then a typed review from another process, both stamped alike.
+  const shown = await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage, verified: false, presentedAt });
+  const typed = await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage, verified: true, presentedAt });
+  assert.notEqual(shown.attempt, typed.attempt);
+  // The first reply confirms nothing: its attempt was superseded.
+  assert.equal(await confirmReviewPresentation(f.capability, { selection: f.selection, chatLineage, revision, attempt: shown.attempt }), false);
+  let { bindings, recent } = await readReviewPresentations(f.capability, chatLineage);
+  assert.deepEqual(bindings, []); assert.equal(recent.delivered, false);
+  assert.equal(await confirmReviewPresentation(f.capability, { selection: f.selection, chatLineage, revision, attempt: typed.attempt }), true);
+  ({ bindings, recent } = await readReviewPresentations(f.capability, chatLineage));
+  assert.equal(bindings.length, 1); assert.equal(recent.attempt, typed.attempt); assert.equal(recent.delivered, true);
+});
+
+test('a review the model started says to type the review before deciding, and so does its summary', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
+  const h = await claudeReview(t, f), code = reviewCode(p.proposalHash);
+  const shown = await review(h);
+  assert.equal(shown.review, 'presented'); assert.equal(shown.untyped, true);
+  assert(shown.statusText.includes(`To decide, first type ${claude} review ${code} yourself, then ${claude} save ${code} or ${claude} skip ${code}.`));
+  const summary = await fs.readFile(path.join(shown.draft.folder, 'summary.txt'), 'utf8');
+  assert(summary.includes(`- Show it in that chat, if you have not typed this there yet: ${claude} review ${code} (Codex: ${codex} review ${code})`));
+  // A typed review then makes it decidable, and its reply has no such step.
+  h.nativeSkill = true;
+  const typed = await review(h, { draft: code });
+  assert.equal(typed.untyped, undefined); assert(typed.statusText.includes(`To decide, type ${claude} save ${code} or ${claude} skip ${code}.`));
+  assert.equal((await review(h, { decision: 'save', draft: code })).review, 'saved');
+});
+
+test('a coded decision typed again after the draft was decided says it is not pending', async t => {
+  const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
+  const h = await claudeReview(t, f); h.nativeSkill = true;
+  const code = (await review(h)).draft.code;
+  assert.equal((await review(h, { decision: 'save', draft: code })).review, 'saved');
+  const again = await review(h, { decision: 'save', draft: code });
+  assert.equal(again.review, 'changed'); assert.equal(again.reason, 'not-pending');
+  assert.equal(again.statusText, `Cuefluent: Nothing was applied: draft ${code} is not pending.`);
+});
+
+test('a collection step finishing during a decision leaves the draft and this chat\'s review in place', async t => {
+  const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
+  const h = await claudeReview(t, f); h.nativeSkill = true;
+  const code = (await review(h)).draft.code, pending = path.join(f.collection.intakeStateDir, 'pending.json');
+  // A capture publication starts after the inventory and before the decision's inspection.
+  const open = fs.open.bind(fs); let injected = false;
+  const mock = t.mock.method(fs, 'open', async (file, ...args) => {
+    if (!injected && file === stateFile(f)) { injected = true; await fs.writeFile(pending, '{}', { mode: 0o600 }); }
+    return open(file, ...args);
+  });
+  let row;
+  try { row = await h.call('processing_review', { decision: 'save', draft: code }); }
+  finally { mock.mock.restore(); }
+  assert(injected);
+  assert.equal(row.error.data.code, 'PROCESSING_REVIEW_BLOCKED');
+  assert.equal(row.error.message, `Cuefluent: This command was refused: another Cuefluent Notes step had not finished, or needs recovery, so nothing was shown or decided; type the command again in a moment. Type ${claude} status to see where things stand.`);
+  assert.equal((await readReviewPresentations(f.capability, { client: 'claude', sessionId: f.identity.sessionId })).bindings.length, 1);
+  await fs.rm(pending);
+  assert.equal((await review(h, { decision: 'save', draft: code })).review, 'saved');
+});
+
+test('a review step waits a bounded moment for the collection lock', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
+  const chatLineage = { client: 'claude', sessionId: f.identity.sessionId };
+  const preview = await readReviewPreview(f.capability, { selection: f.selection, operationId: f.operationId });
+  // Collection holds the intake lock; it releases it after a short pass.
+  const lock = path.join(f.collection.intakeStateDir, '.intake-lock');
+  await fs.mkdir(lock, { mode: 0o700 });
+  const released = new Promise(resolve => setTimeout(() => fs.rmdir(lock).then(resolve), 300));
+  const shown = await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage, verified: true });
+  await released;
+  assert.equal(shown.code, reviewCode(p.proposalHash));
+  // A lock held past the wait refuses as busy, and the reply says so.
+  await fs.mkdir(lock, { mode: 0o700 }); t.after(() => fs.rm(lock, { recursive: true, force: true }));
+  const started = performance.now();
+  await assert.rejects(confirmReviewPresentation(f.capability, { selection: f.selection, chatLineage, attempt: shown.attempt,
+    revision: { operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash } }), { code: 'INTAKE_BLOCKED' });
+  assert(performance.now() - started >= 1900);
+  assert.equal(processingControlRefusalText('INTAKE_BLOCKED', { client: 'claude', stage: 'action', tool: 'processing_review' }),
+    `Cuefluent: This command was refused: Cuefluent Notes was busy with another operation; type the command again in a moment. Type ${claude} status to see where things stand.`);
+});
+
+test('an unlocked read of the presentation record survives another chat replacing it', async t => {
+  const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
+  const h = await claudeReview(t, f); h.nativeSkill = true;
+  const code = (await review(h)).draft.code, state = stateFile(f), open = fs.open.bind(fs);
+  let replaced = 0;
+  const mock = t.mock.method(fs, 'open', async (file, ...args) => {
+    const handle = await open(file, ...args);
+    // Replaced with the same bytes just after this read opened it.
+    if (file === state && replaced++ === 0) { const copy = `${state}.copy`; await fs.copyFile(state, copy); await fs.rename(copy, state); }
+    return handle;
+  });
+  try { assert.equal((await readReviewPresentations(f.capability, { client: 'claude', sessionId: f.identity.sessionId })).bindings.length, 1); }
+  finally { mock.mock.restore(); }
+  assert(replaced >= 2);
+  assert.equal((await review(h, { decision: 'skip', draft: code })).review, 'skipped');
+});
+
+test('a redelivered review call whose presentation was superseded is refused again, never replayed as presented', async t => {
+  const f = await processingFixture(t), p = await proposedClaim(f), h = await harness(t, f, { capabilities: {} });
+  h.nativeSkill = true; h.typedControl = 'review'; h.callId = 'call_redelivered';
+  const chatLineage = { client: 'codex', sessionId: f.identity.sessionId };
+  h.beforeConfirm = async () => {
+    h.beforeConfirm = null;
+    const preview = await readReviewPreview(f.capability, { selection: f.selection, operationId: f.operationId });
+    await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage, verified: false });
+  };
+  for (const attempt of ['first', 'redelivered']) {
+    const row = await h.call('processing_review', {});
+    assert.equal(row.result, undefined, attempt); assert.equal(row.error.data.code, 'PROCESSING_REVIEW_SUPERSEDED', attempt);
+  }
+  // A new typed review is a new call and shows the draft.
+  delete h.callId;
+  assert.equal(body(await h.call('processing_review', {})).review, 'presented');
+  assert.equal(p.proposalHash.length, 64);
+});
+
+test('a review typed while this chat\'s own processing run is still going applies nothing and says so', async t => {
+  const f = await processingFixture(t), h = await harness(t, f, { capabilities: {} }), gate = deferred();
+  h.script = async call => { await gate.promise; await call('processing_pending', {}); };
+  assert.equal(body(await h.call('process_selected_captures', { collectionId: f.collection.id })).statusDetail, 'accepted');
+  h.nativeSkill = true;
+  for (const typed of ['review', 'save t7xb88']) {
+    h.typedControl = typed;
+    const busy = body(await h.call('processing_review', {}));
+    assert.equal(busy.review, 'busy', typed); assert.equal(busy.status, 'busy', typed);
+    assert.match(busy.statusText, /^Cuefluent: Nothing was applied: this chat is still processing\. Type the command again once it finishes\./, typed);
+  }
+  assert.equal(h.dispatches, 1);
+  gate.resolve(); await Promise.all(h.jobs);
 });

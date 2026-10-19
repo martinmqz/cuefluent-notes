@@ -45,7 +45,9 @@ contracts for supported commands, formats, permissions and recovery procedures.
   shows model-written code cannot set; other Codex versions and the installed
   binaries themselves are not checked. A nested tool that leaves no native record
   is not visible to the check. A Claude Desktop session connected for Remote
-  Control stops collection at its first `bridge-session` record. See
+  Control stops collection at its first `bridge-session` record; one connected
+  before collection started for it confirms only a command typed as its first
+  prompt. See
   [capture prevention](processing-chat.md#capture-prevention-and-limits).
 - In every Codex turn, including a plain-language request without the skill,
   this plugin's control calls, their results, code-mode cells that only made such

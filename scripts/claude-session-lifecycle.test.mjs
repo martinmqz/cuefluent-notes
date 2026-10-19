@@ -312,6 +312,16 @@ test('a verified continuation ends the origin at its marker, never recollects re
   assert.equal((await readContinuedLink(f.store, A.sessionId)).value.linkedAt, link.linkedAt);
 });
 
+test('the origin of a verified continuation refuses a command typed in it again', async t => {
+  const { f, A } = await continued(t);
+  await f.run(); await f.run();
+  assert(await readContinuedLink(f.store, A.sessionId));
+  // The origin resumed after the move: its own typed command binds nothing.
+  const R = randomUUID(), call = A.call('save k2mn9p');
+  await A.append([...A.control('save k2mn9p', R), call]);
+  await assert.rejects(A.resolve(call), { code: 'PROCESSING_CHAT_CONTINUED' });
+});
+
 test('the successor reader refuses a re-homed prefix rewritten in place after the link', async t => {
   const { f, A, B } = await continued(t);
   await f.run(); await f.run();
@@ -667,7 +677,10 @@ test('a real storage change during the binding window fails closed at once, even
   // `during`: after the attempt's walk pinned the root; otherwise just before it.
   const changes = {
     'an intake root replaced between attempts': { change: replace, undo: restore, code: 'PRIVATE_STORAGE_CHANGED' },
-    'an intake root replaced during an attempt': { during: true, change: replace, undo: restore, code: 'PRIVATE_STORAGE_CHANGED' },
+    // On Windows the replacement lacks the private ACL, which that attempt's
+    // permission check refuses before it compares identities.
+    'an intake root replaced during an attempt': { during: true, change: replace, undo: restore,
+      code: process.platform === 'win32' ? 'STORAGE_NOT_PRIVATE' : 'PRIVATE_STORAGE_CHANGED' },
     'a symlinked intake root': { during: true, code: 'UNSAFE_PRIVATE_STORAGE',
       change: async ({ root }) => { await fs.rename(root, `${root}-moved`); await link(`${root}-moved`, root); },
       undo: async ({ root }) => { await fs.unlink(root); await fs.rename(`${root}-moved`, root); } },

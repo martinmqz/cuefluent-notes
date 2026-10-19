@@ -44,8 +44,20 @@ async function checkCurrentPlacement(value) {
   return selected;
 }
 
+// Review folders (processing-review-files.mjs) are private copies people open
+// in an editor or Finder, which add files of their own. A full walk checks each
+// folder and its own files and skips, unfollowed, anything else in it, and
+// Finder's metadata file beside the folders.
+export const REVIEW_OWN_FILE = /^(?:\d{1,3}-)?(?:proposed|current)\.md$|^summary\.txt$/;
+export const FINDER_FILE = '.DS_Store';
+const reviewForeign = (reviewRoot, file) => {
+  const parent = path.dirname(file), name = path.basename(file);
+  return reviewRoot !== null && (parent === reviewRoot ? name === FINDER_FILE : path.dirname(parent) === reviewRoot && !REVIEW_OWN_FILE.test(name));
+};
+const reviewRootOf = collection => path.join(collection.intakeStateDir, 'review');
+
 /** Bounded metadata walk, never follows links or reads evidence. */
-export async function privateStorageEntries(roots, { limit = 20000, paths = null } = {}) {
+export async function privateStorageEntries(roots, { limit = 20000, paths = null, reviewRoot = null } = {}) {
   const entries = [], seen = new Set();
   async function visit(file, root, descend = paths === null) {
     if (seen.has(file)) return;
@@ -57,7 +69,10 @@ export async function privateStorageEntries(roots, { limit = 20000, paths = null
     entries.push({ path: file, stat, root }); seen.add(file);
     if (stat.isDirectory() && descend) {
       const stream = await fs.opendir(file);
-      for await (const child of stream) await visit(path.join(file, child.name), false);
+      for await (const child of stream) {
+        const entry = path.join(file, child.name);
+        if (!reviewForeign(reviewRoot, entry)) await visit(entry, false);
+      }
     }
   }
   for (const root of roots) await visit(root, true);
@@ -209,7 +224,7 @@ async function prepareStorage({ configPath, expectedConfigHash, collectionId }, 
     // can retain a directory alias while exposing relocation only on a child file.
     // Remove only exact owned probes; existing roots receive no permission edits.
     for (const root of rootsOf(selected.collection)) {
-      await verifyRoots([root], identity, { paths: null });
+      await verifyRoots([root], identity, { paths: null, reviewRoot: reviewRootOf(selected.collection) });
       const probe = path.join(root, `.privacy-probe-${randomUUID()}`);
       await fs.mkdir(probe, { mode: 0o700 });
       const stat = await fs.lstat(probe, { bigint: true });
@@ -388,7 +403,7 @@ export async function assertPrivatePaths(capability, paths) {
 export async function auditWorkflowStorage(capability, { limit = 20000 } = {}) {
   await assertWorkflowStorage(capability);
   const value = capabilities.get(capability);
-  try { await verifyRoots(rootsOf(value.collection), value.identity, { paths: null, limit }); return { complete: true }; }
+  try { await verifyRoots(rootsOf(value.collection), value.identity, { paths: null, limit, reviewRoot: reviewRootOf(value.collection) }); return { complete: true }; }
   catch (error) { return { complete: false, reason: error.code ?? 'PRIVACY_INSPECTION_FAILED' }; }
 }
 

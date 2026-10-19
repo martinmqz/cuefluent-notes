@@ -56,6 +56,8 @@ const REVIEW_OUTCOMES = Object.freeze({
   declined: { pending: true, text: name => `Review not completed: the client declined or closed the review form, which may not have been displayed. ${capital(name ?? 'the draft')} remains pending; nothing was saved.` },
   'display-altered': { pending: true, text: name => `Review not completed: the form did not return its preview unchanged (it may have been empty, shortened or edited), so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; ${name ?? 'the draft'} remains pending.` },
   unavailable: { pending: true, text: () => 'Review unavailable: this client did not report review form support. The draft remains pending; nothing was saved.' },
+  // A review typed while this chat's own processing run is still going.
+  busy: { pending: null, text: () => 'Nothing was applied: this chat is still processing. Type the command again once it finishes.' },
   // Review folder and typed decisions. Their text is built from bounded fields.
   presented: { pending: true, text: null },
   'not-shown': { pending: null, text: null },
@@ -157,8 +159,9 @@ const replyText = blocks => `Cuefluent: ${blocks.join('\n\n')}`;
 // Characters a link destination cannot carry as written: controls, other
 // whitespace than a space, characters CommonMark reads as markup in a
 // destination (`<`, `>`, a backslash escape, an `&` entity), `%`, which Codex
-// decodes in a path, and a backtick, which its model is told to keep out of links.
-const UNLINKABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069<>\\&%`]|[^\S ]/u;
+// decodes in a path, `#` and `?`, which a link reads as a fragment or query,
+// and a backtick, which its model is told to keep out of links.
+const UNLINKABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069<>\\&%`#?]|[^\S ]/u;
 /** A local file or folder in a reply, as a link the person opens. Claude: a
  * percent-encoded file URL as a Markdown autolink, which opens with one click
  * in Claude Desktop. Codex: the local link its model writes, so a relayed reply
@@ -193,9 +196,11 @@ function changedText(reason, name, code, cmd, others) {
 }
 // One short reply for the person: where to read the draft and what to type.
 // Hashes, operation IDs and diagnostics stay in the private files.
-function reviewText(review, { draft, drafts, reason, commandPrefix: command }) {
+function reviewText(review, { draft, drafts, reason, untyped, commandPrefix: command }) {
   const code = draft?.code, name = draftName(draft), cmd = words => `${command} ${words}`;
-  const choices = `To decide, type ${cmd(`save ${code}`)} or ${cmd(`skip ${code}`)}.`;
+  // A draft counts as shown only through a review the person typed.
+  const choices = untyped ? `To decide, first type ${cmd(`review ${code}`)} yourself, then ${cmd(`save ${code}`)} or ${cmd(`skip ${code}`)}.`
+    : `To decide, type ${cmd(`save ${code}`)} or ${cmd(`skip ${code}`)}.`;
   const folder = links => `Review folder: ${(links !== 'none' && reviewPathLink(command, draft.folder, { folder: true })) || displayFolder(draft.folder)}`;
   // A file's proposed copy is linked only with every link shown, and only when it can be.
   const fileLink = (links, file) => {
@@ -208,7 +213,7 @@ function reviewText(review, { draft, drafts, reason, commandPrefix: command }) {
       blocks.push(`${capital(name)} is ready for review; nothing has been saved.`, folder(links),
         [...draft.files.map(file => `- ${displayPath(file.path)} (${file.change === 'create' ? 'new note' : 'update'}, ${file.bytes} bytes)${
           fileLink(links, file)}`),
-        ...(draft.fileCount > draft.files.length ? [`- and ${draft.fileCount - draft.files.length} more files listed in summary.txt`] : [])].join('\n'),
+        ...(draft.fileCount > draft.files.length ? [`- and ${draft.fileCount - draft.files.length} more ${draft.fileCount - draft.files.length === 1 ? 'file' : 'files'} listed in summary.txt`] : [])].join('\n'),
         choices);
       if (drafts?.length) blocks.push(listing('Other drafts:', drafts));
     } else if (review === 'not-shown') {
@@ -312,7 +317,7 @@ const DIAGNOSTICS = Object.freeze(['PROCESSING_CONTROL_SOURCE_UNVERIFIED', 'PROC
   'PROCESSING_CLIENT_SETTINGS_LIMIT', 'PROCESSING_CLIENT_SETTINGS_UNSUPPORTED', 'INTAKE_BLOCKED']);
 const ERRORS = new Set([...DIAGNOSTICS, 'PROCESSING_CONTROL_PROTOCOL', 'PROCESSING_CONTROL_INPUT_LIMIT',
   'PROCESSING_CONTROL_OUTPUT_INVALID', 'PROCESSING_CONTROL_METHOD_UNSUPPORTED', 'PROCESSING_CONTROL_INVALID_REQUEST',
-  'PROCESSING_CONTROL_SELECTION_MISMATCH', 'PROCESSING_REVIEW_REQUIRED', 'PROCESSING_OUTPUT_CHANGED',
+  'PROCESSING_CONTROL_SELECTION_MISMATCH', 'PROCESSING_REVIEW_REQUIRED', 'PROCESSING_REVIEW_BLOCKED', 'PROCESSING_CHAT_CONTINUED', 'PROCESSING_OUTPUT_CHANGED',
   'PROCESSING_REVIEW_STATE_INVALID', 'PROCESSING_REVIEW_CODE_CONFLICT', 'PROCESSING_REVIEW_FILES_CHANGED',
   'PROCESSING_PROPOSAL_CHANGED', 'PROCESSING_CLAIM_CHANGED', 'STALE_SELECTION', 'PROCESSING_CHAT_REQUEST_CONFLICT',
   'PROCESSING_SOURCE_DISCOVERY_LIMIT', 'PROCESSING_SOURCE_CHANGED', 'PROCESSING_SOURCE_UNAVAILABLE',
@@ -342,6 +347,7 @@ const REFUSALS = Object.freeze({
   WORKFLOW_NOT_AUTHORIZED: () => 'the current Cuefluent Notes settings do not allow this here.',
   WORKFLOW_POLICY_CHANGED: () => 'the Cuefluent Notes settings changed meanwhile. Type the command again.',
   INTAKE_BLOCKED: () => 'Cuefluent Notes is busy with another operation. Type the command again in a moment.',
+  PROCESSING_CHAT_CONTINUED: () => 'this chat was continued in another session. Type the command there.',
   ...Object.fromEntries(STORAGE_REFUSALS.map(code => [code, () => 'Cuefluent Notes\' private storage failed a safety check; check it before trying again.'])),
 });
 const unconfirmed = command => command === REVIEW_COMMANDS.codex
@@ -358,6 +364,8 @@ const ACTION_REFUSALS = Object.freeze({
     .map(code => [code, CLIENT_REFUSAL])),
   PROCESSING_CANCEL_UNVERIFIED: 'the processing run could not be confirmed stopped, so its work was not released',
   PROCESSING_REVIEW_SUPERSEDED: 'the draft was decided, replaced or shown again before this review was confirmed, so this chat cannot decide on it yet',
+  PROCESSING_REVIEW_BLOCKED: 'another Cuefluent Notes step had not finished, or needs recovery, so nothing was shown or decided; type the command again in a moment',
+  INTAKE_BLOCKED: 'Cuefluent Notes was busy with another operation; type the command again in a moment',
 });
 // A review call can carry a decision, so its refusal says outright that
 // nothing was saved.
@@ -521,6 +529,11 @@ export function processingControlStatusView(value, args) {
       const draft = value.draft === undefined ? undefined : reviewDraft(value.draft);
       const drafts = value.drafts === undefined ? undefined : reviewDrafts(value.drafts);
       checkReviewFields(fields, draft, drafts);
+      // A display the person did not type: deciding needs their own review first.
+      if (value.untyped !== undefined) {
+        if (value.untyped !== true || draft?.folder === undefined || outcome.pending !== true) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+        result.untyped = true;
+      }
       // A refused decision can name its cause; older receipts have none.
       if (value.reason !== undefined) {
         if (value.review !== 'changed') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
@@ -589,8 +602,8 @@ export function processingControlStatusView(value, args) {
       // Codes stay in the fields; the plain reply says where to see them. A
       // completed decision keeps its outcome and still says when something
       // else needs attention.
-      // A decision typed through Codex code mode always carries the notice
-      // that its control turn stays collectible; it alone needs no attention.
+      // A decision whose control turn could not be proven for exclusion stays
+      // collectible; that notice alone needs no attention.
       const completed = value.review !== undefined && REVIEW_OUTCOMES[value.review].pending === false;
       const notable = result.diagnostics.filter(code => !(completed && code === 'PROCESSING_EXCLUSION_UNVERIFIED'));
       if (notable.length && (completed || !reviewReply)) {

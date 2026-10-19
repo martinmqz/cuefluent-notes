@@ -33,20 +33,22 @@ command: whichever control the assistant calls for it applies nothing, and the
 reply says how to type it and names the nearest commands. The actions are the
 [formal processing controls](../SKILL.md#formal-processing-controls), typed
 exactly as written. `help`, or the skill typed with nothing after it, lists them
-and applies nothing. `help` also works before setup: the reply then says how to
-start `setup`, which follows the [setup workflow](setup.md) and is not itself a
-processing control.
+and applies nothing. Before setup, while nothing is registered for the chat, a
+command answered by the status tool (`help`, `status` or the skill alone)
+returns the command list and how to start `setup`, which follows the
+[setup workflow](setup.md) and is not itself a processing control; other actions
+are refused there.
 
 Replies are short, plain Markdown. They name a draft by its code and first note
 path, list commands and other drafts as one list item each after a blank line
 (a draft as its code, one space and its note path), and contain no hashes,
 identifiers or diagnostic codes. A review reply links the review folder and each
-listed file's proposed copy: in Claude as `file://` links that open with one
-click, in Codex as the local links Codex's model writes itself,
+listed file's proposed copy: in Claude as `file://` links, which open with one
+click in Claude Desktop, in Codex as the local links Codex's model writes itself,
 `[name](/absolute/path)` with the folder's or file's name (angle brackets around
 a path with spaces or parentheses), so a relayed reply keeps its form. A very
 long folder path, or in Codex a path Markdown cannot carry as such a link (for
-example a Windows path), is shown as a code span instead, so it reads exactly
+example a Windows path, or one with `#` or `?`), is shown as a code span instead, so it reads exactly
 as written; note paths are quoted with Markdown's inline characters escaped. A status reply or
 completed decision that has diagnostics says to type `status --verbose`; that
 reply adds the status, next action, diagnostics, request and chat identifiers,
@@ -60,8 +62,11 @@ A refused or failed control answers with a plain sentence the assistant returns
 as its reply. A refusal before the requested action started says that nothing was
 applied (for `review`, `save`, `skip` and `review cancel`, also that nothing was
 saved) and what to do next; a failure after it started says the outcome is not
-certain and to check `status` first, unless it is a refusal for the native
-client's sign-in or launch settings, which says so. The diagnostic code stays in the error's data
+certain and to check `status` first, unless it is a refusal that names its cause:
+the native client's sign-in or launch settings, a run that could not be confirmed
+stopped, a review shown again or decided before its reply was confirmed, another
+Cuefluent Notes step still finishing, or the collection being busy. Those say
+what happened and to check `status`. The diagnostic code stays in the error's data
 for tools, as described in the [workflow CLI](workflow-cli.md#processing-chat-controls).
 
 Text after the skill that is not one exact action, such as a near miss or an
@@ -519,18 +524,23 @@ Invoke the same skill with `review` (or `review <code>` for one draft). Its
 to a private review folder in the collection's private state, never in the notes
 folder or the project, and replies with links to the folder and each listed
 file's proposed copy (see [commands and replies](#commands-and-replies)), each
-note path with its size, and the decision commands. Open the folder in any editor:
+note path with its size, and the decision commands. A review the model started
+without your typed command shows the draft too, but you still type `review
+<code>` yourself before deciding; its reply says so. Open the folder in any editor:
 
 - `proposed.md` holds the exact Markdown that Save would write, and `current.md`
   the note as it is now when the draft updates an existing note. A draft with
-  several files numbers them (`1-proposed.md`, `1-current.md`, `2-proposed.md`).
+  several files numbers them (`1-proposed.md`, `1-current.md`, `2-proposed.md`;
+  from ten files on, with leading zeros, as in `01-proposed.md`).
 - `summary.txt` lists the note paths and sizes, new folders, source sessions and
   turns with their known limits, inspection coverage, the draft code, the exact
   decision commands and the revision's operation, claim and proposal hashes.
 
 The folder is a read-only copy; editing it changes nothing. It is removed when the
 draft is decided through review, or by a later review once the draft is replaced
-or no longer pending. Drafts whose sources are no longer authorized remain
+or no longer pending, together with Finder's `.DS_Store`; other files an editor
+added keep it until you delete them, and never affect a decision. At most 32
+review folders are kept, the oldest removed first. Drafts whose sources are no longer authorized remain
 preserved and are not offered. When several drafts are pending, `review` shows one
 and lists the others by code and note path.
 
@@ -642,7 +652,10 @@ the move. Claude CLI writes the new session's transcript only at its first promp
 so the link is recorded when that prompt's hooks run; a typed `save` as that first
 prompt then binds. Until the link is recorded, drafts reviewed before the move are
 not decidable there, and controls in a Claude CLI background session are refused,
-with nothing applied. Continuations on processing-only routes are not joined.
+with nothing applied. Once the link is recorded, the original session has handed
+its lineage on: a command typed there again, for example after resuming it, is
+refused with `PROCESSING_CHAT_CONTINUED` and applies nothing. Continuations on
+processing-only routes are not joined.
 
 For a factual correction, leave the draft undecided (or choose Later in the Codex
 form) and provide the correction in the ordinary work chat. Capture it through
@@ -687,10 +700,15 @@ because collection progressed during admission, reports
 Claude Desktop records a `bridge-session` row in a session connected for Remote
 Control. The Claude reader does not read past such a record, so automatic
 collection of that session stops there with `CLAUDE_HISTORY_REQUIRES_REVIEW`:
-captures made before it stay valid, nothing after it is collected, and typed
-controls in the session still work. A `status` reply in that chat says that
-collection has stopped. Collecting such sessions needs a reader decision first,
-not a reset of the selection or floor.
+captures made before it stay valid and nothing after it is collected. When
+collection had already started for the session, typed commands there still work,
+and a `status` reply says that collection has stopped. When the session was
+connected before collection started, as when Desktop connects every new session,
+collection never starts for it: only a command typed as its first prompt is
+confirmed, and later commands are refused as unconfirmed, however often they are
+typed. Type commands in a session that is not connected, or turn off connecting
+new sessions to Remote Control first. Resetting the selection or floor does not
+resume collection of such a session.
 
 In the source chat, only a verified formal skill control, actual controller call and
 receipt can exclude processing control input. Claude also checks the exact

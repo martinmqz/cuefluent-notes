@@ -1,8 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { openWorkflowIntake, withIntakeLock, assertIntakeTransaction, guardStore, intakePath, intakeSnapshot, intakeJSON, replaceIntakeJSON, replaceIntakeBytes } from './intake-io.mjs';
-import { assertWorkflowStorage, assertPrivatePaths } from './workflow-storage.mjs';
+import { assertWorkflowStorage, assertPrivatePaths, isPrivateStorageChurn, REVIEW_OWN_FILE as OWN_FILE, FINDER_FILE } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { lstatOrNull, readBoundedBytes, sameFileIdentity, syncDirectory, displayScalar } from './file-io.mjs';
 import { unitKey } from './capture-retention.mjs';
@@ -18,7 +19,6 @@ const STATE = 'review-state/presentations.json', FORMAT = 'cuefluent-review-pres
 const STATE_BYTES = 128 * 1024, FILE_BYTES = 2 * 1024 * 1024, SUMMARY_BYTES = 1024 * 1024;
 const MAX_FOLDERS = 32, MAX_BINDINGS = 64, MAX_RECENT = 64, MAX_ENTRIES = 256, OMISSIONS_SHOWN = 5;
 const CODE_ALPHABET = 'abcdefghjkmnpqrstvwxyz23456789';
-const OWN_FILE = /^(?:\d{1,3}-)?(?:proposed|current)\.md$|^summary\.txt$/;
 
 /** Short, unambiguous label for one exact proposal revision. A replaced
  * proposal has a new hash and therefore a new code. It grants nothing. */
@@ -43,13 +43,14 @@ export const sameReviewRevision = (a, b) => a.operationId === b.operationId &&
 const revisionOf = value => ({ operationId: value.operationId, proposalHash: value.proposalHash, claimHash: value.claimHash });
 
 function validRevision(value) { nativeId(value.operationId); hash(value.proposalHash); hash(value.claimHash); }
-// `verified` and `delivered` describe the latest presentation attempt of this
-// revision in this chat; `typedDelivered` records that some typed review of it
-// was delivered here, which is what a coded decision requires.
+// `attempt` names the latest presentation attempt of this revision in this
+// chat; `verified` and `delivered` describe that attempt; `typedDelivered`
+// records that some typed review of it was delivered here, which is what a
+// coded decision requires.
 function validRecord(value) {
-  keys(value, ['chatLineage', 'operationId', 'proposalHash', 'claimHash', 'presentedAt', 'verified', 'delivered', 'typedDelivered']);
+  keys(value, ['chatLineage', 'operationId', 'proposalHash', 'claimHash', 'attempt', 'presentedAt', 'verified', 'delivered', 'typedDelivered']);
   keys(value.chatLineage, ['client', 'sessionId']); choice(value.chatLineage.client, CLIENTS); nativeId(value.chatLineage.sessionId);
-  validRevision(value); timestamp(value.presentedAt);
+  validRevision(value); nativeId(value.attempt); timestamp(value.presentedAt);
   for (const flag of ['verified', 'delivered', 'typedDelivered']) if (typeof value[flag] !== 'boolean') fail('INVALID_WORKFLOW');
 }
 function validState(value) {
@@ -78,29 +79,55 @@ async function readState(store) {
   return { value, hash: snapshot.hash };
 }
 
+// Collection holds the intake lock for most of each short pass, so a review
+// step waits a bounded moment for it rather than failing as busy. A step runs
+// entirely under the lock or not at all, so trying again repeats nothing.
+const LOCK_WAIT_MS = 2000;
 // Processing consent for the invoking chat covers this private copy, like the
 // proposal read it came from. No lock is held while the person reads or types.
-function withReviewState(capability, selection, run) {
-  return withStorageProbes(async () => {
-    const store = await openWorkflowIntake(capability);
-    return withIntakeLock(store, async tx => {
-      const authorize = () => assertWorkflowStorage(capability, selection, 'explicitProcess');
-      await authorize();
-      return run({ store, tx, state: await readState(store), authorize });
-    });
-  });
+async function withReviewState(capability, selection, run, signal) {
+  const deadline = performance.now() + LOCK_WAIT_MS;
+  for (let attempt = 0; ; attempt++) {
+    let started = false;
+    try {
+      return await withStorageProbes(async () => {
+        const store = await openWorkflowIntake(capability);
+        return withIntakeLock(store, async tx => {
+          started = true;
+          const authorize = () => assertWorkflowStorage(capability, selection, 'explicitProcess');
+          await authorize();
+          return run({ store, tx, state: await readState(store), authorize });
+        });
+      });
+    } catch (error) {
+      const remaining = deadline - performance.now();
+      if (started || error?.code !== 'INTAKE_BLOCKED' || remaining <= 0 || signal?.aborted) throw error;
+      await delay(Math.min(25 * 2 ** attempt, 200, remaining));
+      signal?.throwIfAborted();
+    }
+  }
 }
 
 /** Presentation records for one chat lineage, read without the intake lock:
  * `bindings` are revisions a typed review delivered to this chat; `recent` is
  * the chat's latest presentation attempt, delivered or not. They identify a
- * revision; the engine's current hashes still decide. */
+ * revision; the engine's current hashes still decide. Another chat may replace
+ * the record during the read; a few fresh reads then see one whole version. */
+// A file replaced while open: its identity changed, or the opened one is unlinked.
+const REPLACED = new Set(['INTAKE_FILE_CHANGED', 'FILE_LINK_COUNT_INVALID']);
 export async function readReviewPresentations(capability, chatLineage) {
-  return withStorageProbes(async () => {
-    const { value } = await readState(await openWorkflowIntake(capability));
-    return { bindings: value.bindings.filter(item => item.typedDelivered && sameLineage(item.chatLineage, chatLineage)),
-      recent: value.recent.find(item => sameLineage(item.chatLineage, chatLineage)) ?? null };
-  });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await withStorageProbes(async () => {
+        const { value } = await readState(await openWorkflowIntake(capability));
+        return { bindings: value.bindings.filter(item => item.typedDelivered && sameLineage(item.chatLineage, chatLineage)),
+          recent: value.recent.find(item => sameLineage(item.chatLineage, chatLineage)) ?? null };
+      });
+    } catch (error) {
+      if (attempt >= 4 || (!REPLACED.has(error?.code) && !isPrivateStorageChurn(error))) throw error;
+      await delay(10 * (attempt + 1));
+    }
+  }
 }
 
 function fileNames(files) {
@@ -154,7 +181,8 @@ function summaryText(preview, code, names) {
     }
   }
   lines.push('', 'Inspection', `${preview.inspection.acknowledgedPages} of ${preview.inspection.totalPages} retained evidence pages inspected. This does not establish completeness of the original sources.`,
-    '', 'Decide by typing one of these commands yourself in the chat that showed this draft:',
+    '', 'Decide by typing these commands yourself. A decision counts only in a chat where you typed the review command for this draft:',
+    `- Show it in that chat, if you have not typed this there yet: ${commandLine(`review ${code}`)}`,
     `- Save this exact proposal: ${commandLine(`save ${code}`)}`,
     `- Skip these captures without saving: ${commandLine(`skip ${code}`)}`,
     `- Cancel the draft; its captures stay pending: ${commandLine(`review cancel ${code}`)}`,
@@ -208,9 +236,10 @@ async function folderEntries(directory) {
   }
   return names;
 }
-/** Remove a review folder's own files, then the folder if nothing else is in
- * it (an editor's swap file, for example, keeps it). Best effort by design:
- * the folder is a copy, and leftovers never authorize anything. */
+/** Remove a review folder's own files and Finder's metadata file, then the
+ * folder if nothing else is in it (an editor's swap file, for example, keeps
+ * it). Best effort by design: the folder is a copy, and leftovers never
+ * authorize anything. */
 async function removeFolder(tx, store, code, { keepDirectory = false } = {}) {
   const directory = path.dirname(await intakePath(store, 'state', `review/${code}/summary.txt`));
   const stat = await lstatOrNull(directory);
@@ -220,7 +249,7 @@ async function removeFolder(tx, store, code, { keepDirectory = false } = {}) {
   if (!entries) return;
   let others = false;
   for (const entry of entries) {
-    if (entry.file && OWN_FILE.test(entry.name)) { if (!await removeOwnFile(tx, store, `review/${code}/${entry.name}`)) others = true; }
+    if (entry.file && (OWN_FILE.test(entry.name) || entry.name === FINDER_FILE)) { if (!await removeOwnFile(tx, store, `review/${code}/${entry.name}`)) others = true; }
     else others = true;
   }
   if (others || keepDirectory) return;
@@ -240,12 +269,16 @@ async function isCurrentRevision(capability, revision) {
  * `verified` is true only for a verified typed review action. Folders of
  * revisions that are no longer pending are removed; their presentation records
  * stay until a decision refers to them, so it can report the change. */
-export async function presentReviewFiles(capability, { selection, preview, chatLineage, verified, presentedAt = new Date().toISOString() }) {
+export async function presentReviewFiles(capability, { selection, preview, chatLineage, verified, presentedAt = new Date().toISOString(), signal }) {
   keys(chatLineage, ['client', 'sessionId']); choice(chatLineage.client, CLIENTS); nativeId(chatLineage.sessionId);
   if (typeof verified !== 'boolean') fail('INVALID_WORKFLOW');
   timestamp(presentedAt);
   const revision = revisionOf(preview); validRevision(revision);
-  const code = reviewCode(revision.proposalHash), files = reviewFiles(preview, code);
+  const code = reviewCode(revision.proposalHash), files = reviewFiles(preview, code), attempt = randomUUID();
+  // A reused copy must still be private: an editor can save it back unchanged
+  // with other permissions, and then it is written again.
+  const privateFile = target => assertPrivatePaths(capability, [target]).then(() => true,
+    error => { if (error?.code === 'STORAGE_NOT_PRIVATE') return false; throw error; });
   return withReviewState(capability, selection, async ({ store, tx, state, authorize }) => {
     const value = state.value, kept = [];
     for (const folder of value.folders) {
@@ -272,7 +305,7 @@ export async function presentReviewFiles(capability, { selection, preview, chatL
       const existing = await lstatOrNull(target, { bigint: true });
       if (existing?.isFile() && existing.nlink === 1n) {
         const bytes = await readBoundedBytes(target, { maxBytes: FILE_BYTES, utf8: false, noFollow: true }).catch(() => null);
-        if (bytes?.equals(file.bytes)) { written.push(target); continue; }
+        if (bytes?.equals(file.bytes) && await privateFile(target)) { written.push(target); continue; }
       }
       if (existing && !await removeOwnFile(tx, store, name)) fail('PROCESSING_REVIEW_FILES_CHANGED');
       await authorize();
@@ -290,7 +323,7 @@ export async function presentReviewFiles(capability, { selection, preview, chatL
     // in doubt. A typed review this chat already received stays usable for a
     // coded decision; a redisplay never upgrades or downgrades that record.
     const previous = value.bindings.find(item => sameLineage(item.chatLineage, chatLineage) && sameReviewRevision(item, revision));
-    const record = { chatLineage: { ...chatLineage }, ...revision, presentedAt, verified, delivered: false,
+    const record = { chatLineage: { ...chatLineage }, ...revision, attempt, presentedAt, verified, delivered: false,
       typedDelivered: previous?.typedDelivered === true };
     const folders = [...kept.filter(folder => folder.code !== code), { code, ...revision }];
     while (folders.length > MAX_FOLDERS) await removeFolder(tx, store, folders.shift().code);
@@ -301,36 +334,36 @@ export async function presentReviewFiles(capability, { selection, preview, chatL
     await replaceIntakeJSON(tx, STATE, validState(next), state.hash);
     // `review` is each file's proposed copy in the folder, for a direct link.
     const names = fileNames(preview.files);
-    return Object.freeze({ code, folder: directory, ...revision, presentedAt,
+    return Object.freeze({ code, folder: directory, ...revision, attempt, presentedAt,
       files: Object.freeze(preview.files.map((file, index) => Object.freeze({ path: file.path, bytes: Buffer.byteLength(file.proposed),
         change: file.original === null ? 'create' : 'update', review: names[index].proposed }))) });
-  });
+  }, signal);
 }
 
 /** The reply naming exactly this presentation attempt was committed to the
  * chat: the attempt is delivered, and if it was a typed review the revision
  * becomes decidable by code. An attempt settled or superseded meanwhile leaves
  * nothing to confirm, and a later attempt is never confirmed by an earlier reply. */
-export async function confirmReviewPresentation(capability, { selection, chatLineage, revision, presentedAt }) {
-  validRevision(revision); timestamp(presentedAt);
+export async function confirmReviewPresentation(capability, { selection, chatLineage, revision, attempt, signal }) {
+  validRevision(revision); nativeId(attempt);
   return withReviewState(capability, selection, async ({ tx, state, authorize }) => {
     const value = state.value;
-    const attempt = item => sameLineage(item.chatLineage, chatLineage) && sameReviewRevision(item, revision) && item.presentedAt === presentedAt;
-    const binding = value.bindings.find(attempt);
+    const named = item => sameLineage(item.chatLineage, chatLineage) && sameReviewRevision(item, revision) && item.attempt === attempt;
+    const binding = value.bindings.find(named);
     if (!binding) return false;
     const delivered = { ...binding, delivered: true, typedDelivered: binding.typedDelivered || binding.verified };
     const next = { ...value, bindings: value.bindings.map(item => item === binding ? delivered : item),
-      recent: value.recent.map(item => attempt(item) ? delivered : item) };
+      recent: value.recent.map(item => named(item) ? delivered : item) };
     await authorize();
     await replaceIntakeJSON(tx, STATE, validState(next), state.hash);
     return true;
-  });
+  }, signal);
 }
 
 /** After a decision or a refused change: this chat's record of that revision
  * and its folder are removed. The chat's latest-presentation pointer remains,
  * so a later bare decision cannot fall through to an older revision. */
-export async function settleReviewFiles(capability, { selection, chatLineage, revision }) {
+export async function settleReviewFiles(capability, { selection, chatLineage, revision, signal }) {
   validRevision(revision);
   const code = reviewCode(revision.proposalHash);
   return withReviewState(capability, selection, async ({ store, tx, state, authorize }) => {
@@ -342,5 +375,5 @@ export async function settleReviewFiles(capability, { selection, chatLineage, re
     if (bindings.length === value.bindings.length && folders.length === value.folders.length) return;
     await authorize();
     await replaceIntakeJSON(tx, STATE, validState({ ...value, folders, bindings }), state.hash);
-  });
+  }, signal);
 }
