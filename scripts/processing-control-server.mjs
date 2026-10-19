@@ -65,6 +65,21 @@ const REVIEW_OUTCOMES = Object.freeze({
   changed: { pending: null, text: null },
   unresolved: { pending: null, text: null },
 });
+// A typed capture command's outcome. `turns` counts the turns captured now;
+// `more` says earlier finished turns are still waiting for another capture.
+const CAPTURE_OUTCOMES = Object.freeze({
+  captured: (cmd, turns, more) => `Captured ${counted(turns, 'turn')} of this chat.${more
+    ? ` More finished turns are waiting; type ${cmd('capture')} again to capture them.` : ''} Type ${cmd('process')} to draft notes from captured turns.`,
+  'nothing-new': (cmd, turns, more) => more
+    ? `Nothing was captured this time; type ${cmd('capture')} again to continue with this chat's later turns.`
+    : 'Nothing new to capture: every finished turn of this chat is already captured or left out.',
+  automatic: cmd => `Automatic capture already covers this chat, so there is nothing to capture by hand. To stop it for this chat, type ${cmd('pause chat')}.`,
+  paused: cmd => `Automatic capture is paused for this chat from this turn on; turns captured before it are kept. To restart it, type ${cmd('resume chat')}.`,
+  'already-paused': cmd => `Automatic capture is already paused for this chat. To restart it, type ${cmd('resume chat')}.`,
+  resumed: () => 'Automatic capture is on again for this chat; turns after this one are captured.',
+  'already-active': () => 'Automatic capture is already on for this chat.',
+  'not-automatic': cmd => `Automatic capture does not cover this chat, so there is nothing to pause or resume. To capture its finished turns, type ${cmd('capture')}.`,
+});
 const REVIEW_FILES_SHOWN = 5, REVIEW_DRAFTS_SHOWN = 4, REVIEW_PATH_BYTES = 160, REVIEW_FOLDER_BYTES = 1024, REVIEW_NOTE_PATH_BYTES = 512;
 /** A note path bounded for a review reply, which must fit the transport and its
  * receipt. Display only: summary.txt in the review folder keeps every full path. */
@@ -260,7 +275,7 @@ function helpText({ commandPrefix: command, statusDetail }) {
     : 'Type one of these yourself, exactly as written:';
   const intro = statusDetail === 'unbound' ? `${STATUS_DETAILS.unbound.text(words => `${command} ${words}`)} ${how}` : how;
   return [`Cuefluent: ${intro}`, '',
-    ...PROCESSING_HELP.map(item => `- ${command} ${item.word}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
+    ...PROCESSING_HELP.map(item => `- ${command} ${item.text}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
 }
 const counted = (value, one, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
 // Every detail the plain reply leaves out, for `status --verbose`.
@@ -383,6 +398,8 @@ export function processingControlRefusalText(code, { client, stage, tool }) {
   }
   return `Cuefluent: Nothing was applied${tool === 'processing_review' ? ' and nothing was saved' : ''}: ${Object.hasOwn(REFUSALS, code) ? REFUSALS[code]() : unconfirmed(command)}`;
 }
+// Typed chat capture commands; each carries no fields of its own.
+export const CAPTURE_TOOLS = Object.freeze(['capture_turns', 'pause_capture', 'resume_capture']);
 const uuidSchema = { type: 'string', pattern: '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' };
 const retrySchema = { ...uuidSchema, description: 'Opaque token returned for native verification. End the current exec, then repeat the same tool and arguments with this token. Never invent one.' };
 const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
@@ -407,6 +424,13 @@ const toolsFor = client => [
   ...[
     ['processing_resume', 'Resume the saved unfinished evidence selection without adding new captures. Never saves notes.'],
     ['processing_cancel', 'Stop the owned processing run and release unapplied operations after verified termination. Keeps captures pending and settings unchanged.']
+  ].map(([name, description]) => ({ name, description,
+    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } })),
+  ...[
+    ['capture_turns', 'Capture this chat\'s finished turns since its last capture, only when the user typed capture. The command turn itself is never captured. Never processes or saves notes.'],
+    ['pause_capture', 'Stop Automatic capture of this chat from this turn on, only when the user typed pause chat. Keeps turns already captured.'],
+    ['resume_capture', 'Restart Automatic capture of this chat after the user paused it, only when the user typed resume chat.']
   ].map(([name, description]) => ({ name, description,
     inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } })),
@@ -452,7 +476,7 @@ function argumentsFor(name, args, client) {
     // verified typed text alone names the draft, decision, verbosity or help.
     if (name === 'processing_review' && client === 'claude') keys(args, [], ['collectionId', 'retryToken', 'draft', 'decision']);
     else if (name === 'processing_status' && client === 'claude') keys(args, [], ['collectionId', 'retryToken', 'verbose', 'help']);
-    else if (['processing_status', 'processing_review', 'processing_resume', 'processing_cancel'].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
+    else if (['processing_status', 'processing_review', 'processing_resume', 'processing_cancel', ...CAPTURE_TOOLS].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
     else if (name === 'process_selected_captures') keys(args, [], ['requestId', 'collectionId', 'selection', 'retryToken', 'scope']);
     else fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
     if (args.collectionId !== undefined) id(args.collectionId);
@@ -522,7 +546,7 @@ export function processingControlStatusView(value, args) {
     }
     // A reply of its own: a review outcome, a typed non-command, the command
     // list, or every detail; at most one of them.
-    const kinds = ['review', 'command', 'help', 'verbose'].filter(key => value[key] !== undefined);
+    const kinds = ['review', 'command', 'help', 'verbose', 'capture'].filter(key => value[key] !== undefined);
     if (kinds.length > 1 || (value.help !== undefined && value.help !== true) || (value.verbose !== undefined && value.verbose !== true)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
     let reviewReply = false, ownReply = false;
     if (value.review !== undefined) {
@@ -567,11 +591,21 @@ export function processingControlStatusView(value, args) {
       result.help = true; result.statusText = helpText(result); ownReply = true;
     }
     if (value.verbose !== undefined) result.verbose = true;
+    if (value.capture !== undefined) {
+      choice(value.capture, Object.keys(CAPTURE_OUTCOMES));
+      const counts = value.capture === 'captured' || value.capture === 'nothing-new';
+      if (result.commandPrefix === undefined || (value.capture === 'captured') !== (value.turns !== undefined) ||
+          (!counts && value.more !== undefined) || (value.more !== undefined && typeof value.more !== 'boolean')) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (value.turns !== undefined) { integer(value.turns); if (value.turns < 1 || value.turns > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); result.turns = value.turns; }
+      if (value.more !== undefined) result.more = value.more;
+      result.capture = value.capture;
+      result.statusText = `Cuefluent: ${CAPTURE_OUTCOMES[value.capture](cmd, value.turns, value.more === true)}`; ownReply = true;
+    }
     // A status reply can say that automatic collection stopped for this chat.
     if (value.collection !== undefined) {
       keys(value.collection, ['state', 'code']);
       if (value.collection.state !== 'stopped' || !Object.hasOwn(COLLECTION_STOPS, value.collection.code) ||
-          ['review', 'command', 'help'].some(key => value[key] !== undefined)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+          ['review', 'command', 'help', 'capture'].some(key => value[key] !== undefined)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
       result.collection = { state: 'stopped', code: value.collection.code };
     }
     // A listing of drafts awaiting review belongs to a status reply.
@@ -625,7 +659,7 @@ export function processingControlStatusView(value, args) {
  * skill/control provenance for a dispatch. Its opaque result is never accepted
  * from JSON or returned to the model. No transcript discovery exists here. */
 export async function runProcessingControlServer({ client, input = process.stdin, output = process.stdout,
-  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse, afterResponse, afterDelivery,
+  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, requestCapture, beforeResponse, afterResponse, afterDelivery,
   unboundStatus } = {}) {
   choice(client, CLIENTS);
   if ([resolveSource, getStatus, requestProcessing].some(value => typeof value !== 'function')) fail('PROCESSING_CONTROL_INVALID_REQUEST');
@@ -817,6 +851,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
             // when the host supports one.
             else response = await requestReview({ source, context, ...resolvedArgs, clientCapabilities,
               elicit: client === 'codex' && formSupported ? elicit : undefined, signal, commitResponse });
+          } else if (CAPTURE_TOOLS.includes(row.params.name)) {
+            if (typeof requestCapture !== 'function') fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
+            response = await requestCapture({ source, context, ...resolvedArgs, tool: row.params.name, signal });
           } else {
             const action = { processing_status: getStatus, process_selected_captures: requestProcessing,
               processing_resume: requestResume, processing_cancel: requestCancel }[row.params.name];

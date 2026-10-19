@@ -27,8 +27,10 @@ Explain the choices in ordinary terms, using the
 [words people see](../SKILL.md#words-people-see):
 
 - **Capture mode: Manual or Automatic.** Manual, the default, captures nothing on
-  its own. Automatic lets the hooks capture every later turn of the sessions in the
-  project folder, or of listed sessions only. Capturing makes sensitive local JSON
+  its own: typing `capture` in a chat captures its finished turns since the last
+  capture. Automatic lets the hooks capture every later turn of the sessions in the
+  project folder, or of listed sessions only; `pause chat` stops it for one chat
+  and `resume chat` restarts it. Capturing makes sensitive local JSON
   copies using scripts, with no model calls, and starts from the moment it is
   enabled, never earlier history. Captured sessions can include secrets and private
   remarks; there is no automatic redaction. They are not finished Cuefluent notes.
@@ -263,6 +265,13 @@ mixed-version operation. Old settings are not permission to enable new collectio
 The following historical boundaries still matter when skipping releases. Keep
 all helpers sharing a collection on the same release, including both clients
 when used; a worker can process registrations from either client.
+
+The release after v0.15.1 publishes new Codex captures with reader version 5,
+which knows the `capture`, `pause chat` and `resume chat` actions. Helpers
+through v0.15.1 do not know version 5 and fail when they re-read a turn captured
+with it. Upgrade every helper sharing the collection together; downgrading after
+version 5 captures exist is unsupported.
+Version 1-4 captures keep their own rules and replay unchanged.
 
 v0.15.1 adds retained-draft transfer state and the shared writer's
 `reinspection.json` reservation. Helpers through v0.15.0 do not enforce that

@@ -51,7 +51,10 @@ test('source adapter exposes explicit versioned tools without save, approval or 
   const result = await server([initialize, { jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
   assert.equal(result.rows[0].result.serverInfo.name, 'cuefluent_control');
   const tools = result.rows[1].result.tools;
-  assert.deepEqual(tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_resume', 'processing_cancel', 'processing_review']);
+  assert.deepEqual(tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_resume', 'processing_cancel',
+    'capture_turns', 'pause_capture', 'resume_capture', 'processing_review']);
+  // The chat capture commands take no fields of their own.
+  for (const tool of tools.slice(4, 7)) assert.deepEqual(Object.keys(tool.inputSchema.properties), ['collectionId', 'retryToken']);
   for (const tool of tools) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(tools[0].annotations.readOnlyHint, true); assert.equal(tools[1].annotations.readOnlyHint, false);
   assert.equal(tools[1].inputSchema.properties.selection.additionalProperties, false);
@@ -623,6 +626,9 @@ test('the command list is built from the grammar in the client spelling and carr
       : 'Cuefluent: Type one of these yourself, exactly as written:', '',
       `- ${command} setup: choose the capture and processing modes.`,
       `- ${command} status: show processing, captured turns and drafts (also: status --verbose).`,
+      `- ${command} capture: capture this chat's finished turns since the last capture.`,
+      `- ${command} pause chat: stop Automatic capture of this chat from now on.`,
+      `- ${command} resume chat: restart Automatic capture of this chat.`,
       `- ${command} process: draft notes from captured turns (also: process repo, process chat, process resume, process cancel).`,
       `- ${command} review: write a pending draft to a private review folder (also: review <draft code>, review cancel, review cancel <draft code>).`,
       `- ${command} save: save the draft your last typed review showed, exactly as shown (also: save <draft code>).`,

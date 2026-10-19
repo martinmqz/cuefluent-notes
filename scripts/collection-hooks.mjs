@@ -12,7 +12,7 @@ async function input(stream) {
 }
 
 export function collectionHookOutput(result, event) {
-  if (!['UserPromptSubmit', 'SessionStart'].includes(event) || ['disabled', 'unconfigured', 'excluded'].includes(result.status)) return null;
+  if (!['UserPromptSubmit', 'SessionStart'].includes(event) || ['disabled', 'unconfigured', 'excluded', 'manual'].includes(result.status)) return null;
   const identity = result.selection ? { client: result.selection.client, sessionId: result.selection.sessionId, unitId: result.selection.unitId } : null;
   const blocked = result.intakeBlocked === true || result.status === 'intake-blocked';
   const diagnostics = Array.isArray(result.notice?.diagnostics) ? result.notice.diagnostics : [];

@@ -20,12 +20,14 @@ import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fa
 // mode, and leaves out this plugin's control exchanges and the assistant's
 // repetition of their replies in every unit, with or without this skill,
 // comparing a reply and its relay in the form `codexReplyForm` gives both.
-// Published v1-v3 captures remain immutable under their own rules.
-export const CODEX_READER_VERSION = '4';
+// v5 keeps the v4 rules with the chat capture commands (`capture`, `pause
+// chat`, `resume chat`) in the command grammar it decides command-only messages
+// with. Published v1-v4 captures remain immutable under their own rules.
+export const CODEX_READER_VERSION = '5';
 // Retain every supported historical reader independently of later reader bumps.
-export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2' });
-export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup', '4': 'mention' });
-const SKILL_MARKUP_RULES = Object.freeze(['markup', 'mention']);
+export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2', '5': '2' });
+export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup', '4': 'mention', '5': 'mention-5' });
+const SKILL_MARKUP_RULES = Object.freeze(['markup', 'mention', 'mention-5']);
 // Which mentioned-skill message is only a command is decided with the command
 // grammar and draft-code alphabet as version 4 shipped them, frozen here: a
 // later grammar changes what a new reader version accepts, never the evidence
@@ -34,7 +36,14 @@ export const CODEX_V4_CONTROL_FORMS = Object.freeze(['help', 'status', 'status -
   'process resume', 'process cancel', 'review', 'review #', 'review cancel', 'review cancel #', 'save', 'save #', 'skip', 'skip #']
   .map(form => Object.freeze(form.split(' '))));
 export const CODEX_V4_CODE = /^[a-hjkmnp-tv-z2-9]{6}$/;
-const v4Control = text => typeof text === 'string' && text.length <= 64 && CODEX_V4_CONTROL_FORMS.some(form => {
+// The grammar version 5 shipped with, frozen the same way.
+export const CODEX_V5_CONTROL_FORMS = Object.freeze(['help', 'status', 'status --verbose', 'capture', 'pause chat', 'resume chat',
+  'process', 'process repo', 'process chat', 'process resume', 'process cancel', 'review', 'review #', 'review cancel', 'review cancel #',
+  'save', 'save #', 'skip', 'skip #'].map(form => Object.freeze(form.split(' '))));
+// Each mention rule set and the command forms it decides command-only messages with.
+const MENTION_FORMS = Object.freeze({ mention: CODEX_V4_CONTROL_FORMS, 'mention-5': CODEX_V5_CONTROL_FORMS });
+const mentionRules = rules => Object.hasOwn(MENTION_FORMS, rules);
+const commandOnly = (rules, text) => typeof text === 'string' && text.length <= 64 && MENTION_FORMS[rules].some(form => {
   const words = text.split(' ');
   return form.length === words.length && form.every((word, index) => word === '#' ? CODEX_V4_CODE.test(words[index]) : word === words[index]);
 });
@@ -276,19 +285,19 @@ export const codexRegistrationHeader = selected => async io => verifyCodexHeader
 
 function blocks(collector, record, content, kind, syntax, skillRules = 'retain', selected = false, replies = null) {
   if (!Array.isArray(content)) fail('UNSUPPORTED_CODEX_RECORD');
-  if (skillRules === 'mention') {
+  if (mentionRules(skillRules)) {
     // On the message that selected this skill from the `$` list, the leading
     // mention the list inserted is markup; the words after it and one space
     // stay, unless they are exactly one action: then the message is only the
     // command. Other messages, and a mention typed by hand, stay as typed.
     const after = syntax === 'user' && selected ? codexMentionText(content) : null;
     if (after !== null) {
-      if (after.startsWith(' ') && v4Control(after.slice(1))) return;
+      if (after.startsWith(' ') && commandOnly(skillRules, after.slice(1))) return;
       collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
     }
     // The older skill part with exactly one action is only the command too.
     if (syntax === 'user' && content.length === 2 && pluginSkillBlock(content[0]) && content[1]?.type === 'text' &&
-        v4Control(content[1].text)) return;
+        commandOnly(skillRules, content[1].text)) return;
     // An assistant message that only repeats this plugin's reply in this turn,
     // compared in the form `codexReplyForm` gives both, is that reply, not the
     // assistant's own text.
@@ -350,7 +359,7 @@ function controlExchanges(unit, skillRules) {
     if (value.type === 'response_item' && p?.type === 'function_call' && typeof p.call_id === 'string' &&
         p.namespace === `mcp__${CONTROL_SERVER}` && native.get(p.call_id) === `${CONTROL_SERVER}\0${p.name}`) ids.add(p.call_id);
   }
-  if (skillRules === 'mention') for (const id of codeModeExchanges(unit, values)) ids.add(id);
+  if (mentionRules(skillRules)) for (const id of codeModeExchanges(unit, values)) ids.add(id);
   return ids;
 }
 
@@ -452,9 +461,9 @@ function codeModeExchanges(unit, values) {
 function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRules = 'retain') {
   const collector = evidenceCollector(undefined, { toolRulesVersion }), calls = new Map(), seen = new Map(), outcomes = new Map(), collabIds = new Set(unit.collaborationIds);
   const exchanges = controlExchanges(unit, skillRules);
-  const replies = skillRules === 'mention' ? controlReplies(unit, exchanges) : null;
+  const replies = mentionRules(skillRules) ? controlReplies(unit, exchanges) : null;
   // Markup belongs only to the message the `$` list selection was made for.
-  const selectedMessage = id => skillRules === 'mention' && unit.selectedMessages.has(id);
+  const selectedMessage = id => mentionRules(skillRules) && unit.selectedMessages.has(id);
   // Only structured native completion status can refine an observed tool outcome.
   for (const record of unit.records) {
     checkBudget();

@@ -30,6 +30,7 @@ const CODE = REVIEW_CODE_PLACEHOLDER;
 const GRAMMAR = Object.freeze([
   ['help', 'processing_status', { help: true }],
   ['status', 'processing_status', {}], ['status --verbose', 'processing_status', { verbose: true }],
+  ['capture', 'capture_turns', {}], ['pause chat', 'pause_capture', {}], ['resume chat', 'resume_capture', {}],
   ['process', 'process_selected_captures', {}], ['process repo', 'process_selected_captures', { scope: 'repo' }],
   ['process chat', 'process_selected_captures', { scope: 'chat' }],
   ['process resume', 'processing_resume', {}], ['process cancel', 'processing_cancel', {}],
@@ -86,14 +87,21 @@ const SUGGESTION_FORMS = Object.freeze([...PROCESSING_CONTROL_FORMS, ...PROCESSI
 const HELP_SUMMARIES = Object.freeze({
   setup: 'choose the capture and processing modes',
   status: 'show processing, captured turns and drafts',
+  capture: 'capture this chat\'s finished turns since the last capture',
+  pause: 'stop Automatic capture of this chat from now on',
+  resume: 'restart Automatic capture of this chat',
   process: 'draft notes from captured turns',
   review: 'write a pending draft to a private review folder',
   save: 'save the draft your last typed review showed, exactly as shown',
   skip: 'handle that draft\'s captured turns without saving',
   help: 'show this list',
 });
-export const PROCESSING_HELP = Object.freeze(Object.entries(HELP_SUMMARIES).map(([word, summary]) => Object.freeze({ word, summary,
-  also: Object.freeze(SUGGESTION_FORMS.filter(form => form[0] === word && form.length > 1).map(form => form.join(' '))) })));
+// A first word that is no command alone (`pause`) is listed as its one form.
+export const PROCESSING_HELP = Object.freeze(Object.entries(HELP_SUMMARIES).map(([word, summary]) => {
+  const forms = SUGGESTION_FORMS.filter(form => form[0] === word).map(form => form.join(' '));
+  const text = forms.includes(word) ? word : forms[0];
+  return Object.freeze({ word, text, summary, also: Object.freeze(forms.filter(form => form !== text)) });
+}));
 if (SUGGESTION_FORMS.some(form => !Object.hasOwn(HELP_SUMMARIES, form[0]))) throw new Error('INVALID_CONTROL_GRAMMAR');
 // Typed text is compared as letters and digits only (`--verbose` as `verbose`).
 const matchWord = word => word.replace(/[^a-z0-9]/g, '');
@@ -130,6 +138,8 @@ function codeCost(token) {
 // Only the first word of a longer form may be missing (`resume` is nearer
 // `process resume`, `cancel k2mn9p` nearer `review cancel k2mn9p`).
 const OMITTABLE_PREFIXES = Object.freeze(['status', 'process', 'review']);
+// The last word of a chat command may be missing too (`pause` is nearer `pause chat`).
+const OMITTABLE_SUFFIXES = Object.freeze(['chat']);
 // A match scores the typed words it consumes less its corrections; ties prefer
 // the match consuming more words. A missing prefix costs one, and so does each
 // filler word inside a command ("process my repo" is nearer `process repo` than
@@ -147,6 +157,7 @@ function alignForm(form, tokens) {
     }
     const expected = form[i];
     if (i === 0 && form.length > 1 && OMITTABLE_PREFIXES.includes(expected)) walk(i + 1, j, cost + 1, used, [expected]);
+    if (i > 0 && i === form.length - 1 && OMITTABLE_SUFFIXES.includes(expected)) walk(i + 1, j, cost + 1, used, [...words, expected]);
     if (j >= tokens.length) return;
     if (expected === CODE) {
       const code = codeCost(tokens[j]);
@@ -190,7 +201,8 @@ export function processingControlAction(tool, args = {}) {
     if (args.help !== undefined) return args.help === true && args.verbose === undefined ? 'help' : null;
     return args.verbose === undefined ? 'status' : args.verbose === true ? 'status --verbose' : null;
   }
-  return { processing_resume: 'process resume', processing_cancel: 'process cancel' }[name] ?? null;
+  return { processing_resume: 'process resume', processing_cancel: 'process cancel',
+    capture_turns: 'capture', pause_capture: 'pause chat', resume_capture: 'resume chat' }[name] ?? null;
 }
 // The table and the tool mapping must agree; a known word is never a control.
 for (const form of GRAMMAR) {

@@ -14,7 +14,8 @@ import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessin
 import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingShortcut, beginProcessingShortcutControl, readProcessingShortcutControl, finishProcessingShortcutControl } from './processing-shortcuts.mjs';
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
-import { runProcessingControlServer, processingControlStatusView, reviewNotePath, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView, reviewNotePath, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
+import { captureChatTurns, controlChatCapture, excludeCommandTurn } from './capture-controls.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -716,6 +717,37 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     }
     return response;
   }
+  // A typed chat capture command. Whether Automatic capture covers this chat
+  // is policy (its route and session list) plus the chat's own pause. Only the
+  // person's typed command acts; a model's own call is refused before acting.
+  async function requestCapture({ source, tool, signal }) {
+    signal?.throwIfAborted();
+    if (!source.nativeSkill || !source.unitId) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
+    const { capability } = selected(source);
+    const automatic = await automaticCapture(capability, source);
+    const store = await withStorageProbes(() => openWorkflowIntake(capability));
+    const paused = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state?.paused === true;
+    const chat = { selection: source.selection, source: source.source };
+    let outcome;
+    if (tool === 'capture_turns') {
+      if (automatic && !paused) outcome = { capture: 'automatic' };
+      else {
+        const captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }));
+        outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more } : { capture: 'nothing-new', more: captured.more };
+      }
+    } else if (!automatic) outcome = { capture: 'not-automatic' };
+    else if (tool === 'pause_capture') {
+      if (paused) outcome = { capture: 'already-paused' };
+      else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'pause' })); outcome = { capture: 'paused' }; }
+    } else if (!paused) outcome = { capture: 'already-active' };
+    else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' })); outcome = { capture: 'resumed' }; }
+    signal?.throwIfAborted();
+    return { ...await currentView(source), ...outcome };
+  }
+  async function automaticCapture(capability, source) {
+    try { await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect')); return true; }
+    catch (error) { if (error.code === 'WORKFLOW_NOT_AUTHORIZED') return false; throw error; }
+  }
   async function beforeResponse({ source, context, invocation, view, result, signal, commitResponse }) {
     const { capability, options } = selected(source);
     const job = ['process_selected_captures', 'processing_resume'].includes(invocation.tool) ? jobs.get(keyFor(options)) : null;
@@ -741,7 +773,19 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         // separate call; redelivery cannot rewrite immutable proof or dispatch.
         return;
       }
-      if (!source.nativeSkill || !source.unitId || source.captureActive === false) {
+      // A typed command with no receipt to exclude it (in a chat Automatic
+      // capture does not cover, or a chat capture command, which records none)
+      // leaves out its own turn by an exclusion, so a later capture skips it.
+      // An unarmed Automatic chat has no selection to add one to: its first
+      // prompt is the boundary the worker excludes. Housekeeping only: a failed
+      // exclusion cannot undo the command.
+      const typed = Boolean(source.nativeSkill && source.unitId);
+      const leaveOut = async () => {
+        try { await withStorageProbes(() => excludeCommandTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId })); }
+        catch { /* the turn stays capturable */ }
+      };
+      if (CAPTURE_TOOLS.includes(invocation.tool) || !typed || source.captureActive === false) {
+        if (typed && (source.selectionHash !== null || !await automaticCapture(capability, source))) await leaveOut();
         await release();
         return;
       }
@@ -752,7 +796,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       catch (error) {
         if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error;
         await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
-        await release(); return;
+        await leaveOut(); await release(); return;
       }
       // A code-mode control was bound through the handshake's first cell; this
       // retry's own native metadata names its cell and nested call.
@@ -822,7 +866,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix });
     await runProcessingControlServer({ client, input, output, env, resolveSource, unboundStatus, getStatus: exactOnly(getStatus),
       requestProcessing: exactOnly(requestProcessing), requestResume: exactOnly(requestResume), requestCancel: exactOnly(requestCancel),
-      requestReview: exactOnly(requestReview), beforeResponse, afterResponse, afterDelivery });
+      requestReview: exactOnly(requestReview), requestCapture: exactOnly(requestCapture), beforeResponse, afterResponse, afterDelivery });
   } finally {
     // No automatic dispatch retry, cancellation, claim cleanup or new source read.
     for (const job of jobs.values()) job.rejectDispatch(Object.assign(new Error('PROCESSING_CONTROL_FAILED'), { code: 'PROCESSING_CONTROL_FAILED' }));

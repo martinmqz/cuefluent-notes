@@ -242,7 +242,7 @@ Choose one variant for each client. Both variants have the identity
 well as through the plugin. Manual packages contain no hook registration. Hook
 packages register SessionStart, UserPromptSubmit, Stop, SessionEnd, and Codex
 Interrupt or Claude StopFailure. No startup-only matcher or SubagentStop is used.
-Hooks do nothing in unconfigured or entirely disabled projects. Trust is separate
+Hooks do nothing in unconfigured or excluded projects. Trust is separate
 from collection consent; processing requires explicit selection until the live
 transport gate passes. See [hooks](hooks.md).
 

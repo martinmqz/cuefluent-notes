@@ -113,7 +113,10 @@ every action, also before setup.
 Plain `process` covers every captured turn waiting for the notes folder's projects; use
 `process repo` or `process chat` to narrow it, `process resume` for saved
 unfinished work, `status` for progress, and `process cancel` to stop owned work
-while keeping captured turns pending. Processing prepares drafts; only your exact typed
+while keeping captured turns pending. With capture mode Manual, type `capture` in a
+chat to capture its finished turns since the last capture; with Automatic, type
+`pause chat` or `resume chat` to stop or restart capturing that chat. Processing
+prepares drafts; only your exact typed
 `save` (or Save in the Codex form) saves them.
 The controller uses the existing native client and processing engine; it does not
 require the Cuefluent app. See [processing chats](references/processing-chat.md)
@@ -288,7 +291,8 @@ Repository maintainers can use the
 Hook packages register SessionStart, UserPromptSubmit, Stop, SessionEnd, and
 Codex Interrupt or Claude StopFailure. Ingress stores bounded native metadata
 and launches a short-lived local worker only with fresh capture permission.
-Unconfigured and fully disabled projects cause zero filesystem writes.
+Unconfigured and excluded projects cause zero filesystem writes; with capture mode
+Manual, hooks record only where each session starts, so typed commands can verify it.
 Synchronous hooks never scan source text, call models, write Markdown, block a
 prompt, or request a recovery continuation. There is no old Stop completion check.
 

@@ -13,6 +13,7 @@ import { schedulerPath } from './collection-scheduler.mjs';
 import { readSelection, readCaptureHead, controlSelection } from './intake-store.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
+import { captureChatTurns, excludeCommandTurn } from './capture-controls.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { digest } from './workflow-values.mjs';
 
@@ -26,13 +27,14 @@ const CONTROLS = {
   help: { tool: 'processing_status', arguments: { help: true } },
   'status --verbose': { tool: 'processing_status', arguments: { verbose: true } },
   'save k2mn9p': { tool: 'processing_review', arguments: { decision: 'save', draft: 'k2mn9p' } },
+  capture: { tool: 'capture_turns', arguments: {} },
 };
 
-async function claudeFixture(t, { collect = true } = {}) {
+async function claudeFixture(t, { collect = true, processing = 'prompted' } = {}) {
   const f = await storageFixture(t, { privateConfig: true });
   if (!collect) {
-    // Processing-only: hooks register a processing source only for a non-manual mode.
-    f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'prompted';
+    // Collection off: hooks record only the session start, with any processing mode.
+    f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = processing;
     const bytes = JSON.stringify(f.config);
     await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
     f.options.expectedConfigHash = digest(bytes);
@@ -240,6 +242,29 @@ test('a processing-only route also verifies a first-prompt control before its ho
   const call = A.call('review'); await A.append([call]);
   const bound = await A.resolve(call);
   assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1); assert.equal(bound.captureActive, false);
+});
+
+test('typed capture in a Manual Claude chat captures its turns since the last capture, never a command turn', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, C1, P3, C2] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]);
+  assert.equal((await A.hook('SessionStart')).status, 'manual');
+  const typedCapture = async (rows, promptId) => {
+    const call = A.call('capture'); await A.append([...rows, ...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, promptId);
+    const chat = { selection: bound.selection, source: bound.source };
+    const captured = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId });
+    await excludeCommandTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return captured;
+  };
+  assert.deepEqual(await typedCapture([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'),
+    A.prompt('Owner: Dana.', P2), A.reply('Noted.')], C1), { turns: 2, more: false });
+  assert((await A.head(P1)).head); assert((await A.head(P2)).head); assert.equal((await A.head(C1)).head, null);
+  assert.deepEqual(await typedCapture([A.reply('Captured.'), A.prompt('Correction: ship on Monday.', P3), A.reply('Noted.')], C2), { turns: 1, more: false });
+  assert.match((await A.head(P3)).capture.evidence[0].text, /ship on Monday/);
+  for (const unitId of [C1, C2]) assert.equal((await A.head(unitId)).head, null);
+  assert.deepEqual((await A.selection()).state.exclusions, [C1, C2]);
 });
 
 // A session the CLI moved into a background session: the origin ends with

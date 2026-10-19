@@ -39,15 +39,33 @@ test('shared budget covers repeated reads and native probe deadlines', async () 
   });
 });
 
-test('unconfigured and fully disabled ingress do not touch source or create storage', async t => {
+test('unconfigured and excluded ingress do not touch source or create storage', async t => {
   const f = await fixture(t); await fs.rm(f.source); const before = await fs.readdir(f.collection.intakeStateDir);
   for (const config of [{ format: 'cuefluent-workflow', schemaVersion: 1, collections: [], routes: [] },
-    { ...f.config, routes: f.config.routes.map(r => ({ ...r, collection: { enabled: false } })) }]) {
+    { ...f.config, routes: f.config.routes.map(r => ({ ...r, excluded: true })) }]) {
     await fs.writeFile(f.options.configPath, JSON.stringify(config));
     const result = await collectionIngress('codex', f.payload, { ...f.options, launch: () => assert.fail('must not launch') });
-    assert(['unconfigured', 'disabled'].includes(result.status));
+    assert(['unconfigured', 'excluded'].includes(result.status));
     assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
   }
+});
+
+test('capture mode Manual records only the metadata-only session start, so typed commands can verify the chat', async t => {
+  const f = await fixture(t);
+  f.config.routes[0].collection = { enabled: false }; f.config.routes[0].processing = { mode: 'manual' };
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  const result = await collectionIngress('codex', f.payload, { ...f.options, launch: () => assert.fail('must not launch') });
+  assert.equal(result.status, 'manual');
+  // Nothing runs on its own, so the hook adds nothing to the chat.
+  assert.equal(collectionHookOutput(result, 'UserPromptSubmit'), null);
+  // A session start, not a selection: nothing is armed or captured.
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  const files = (await fs.readdir(f.collection.intakeStateDir, { recursive: true })).filter(name => name.endsWith('.json'));
+  assert.equal(files.length, 1);
+  const saved = JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir, files[0]), 'utf8'));
+  assert.equal(saved.format, 'cuefluent-processing-source');
+  assert.deepEqual(Object.keys(saved.snapshot).sort(), ['eofByte', 'fileIdentity', 'path']);
+  assert.deepEqual(await fs.readdir(f.collection.rawDir), []);
 });
 
 test('processing-only and paused notices expose a fresh blocked intake without a stored diagnostic', async t => {
@@ -774,7 +792,7 @@ test('adding a selected session preserves the existing tail and gives the new se
   await fs.appendFile(f.source, turn(C, 'Must retain uncollected tail through widening'));
   await fs.writeFile(sourcePath, row('session_meta', { id: other, session_id: other, cwd: f.project, cli_version: '0.156.1', source: 'cli', history_mode: 'legacy' }) + turn(A, 'Prior history'));
   const otherPayload = { ...f.payload, session_id: other, transcript_path: sourcePath };
-  assert.equal((await collectionIngress('codex', otherPayload, f.options)).status, 'disabled');
+  assert.equal((await collectionIngress('codex', otherPayload, f.options)).status, 'manual');
   const expectedFloor = (await fs.stat(sourcePath)).size;
   await update(c => { c.routes[0].clients.push('claude'); c.routes[0].collection.selection.sessionIds.push(other); });
   assert.equal((await collectionIngress('codex', f.payload, f.options)).status, 'queued');

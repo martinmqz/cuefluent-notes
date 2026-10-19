@@ -4,7 +4,7 @@ import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, with
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { canonicalWorkflowProject, validateWorkflowPlacement } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
-import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom } from './intake-store.mjs';
+import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom, readCaptureHead } from './intake-store.mjs';
 import { inspectSourceBoundary, newSelectionState, currentIntervals } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.mjs';
@@ -13,7 +13,7 @@ import { processScope } from './collection-worker.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { withWorkflowBudget } from './workflow-budget.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
-import { keys, nativeId, hash, integer, list, unique, choice, canonicalJSON, digest, fail, safeErrorCode } from './workflow-values.mjs';
+import { keys, nativeId, hash, integer, list, unique, choice, canonicalJSON, digest, digestId, fail, safeErrorCode } from './workflow-values.mjs';
 
 const identityOf = ({ client, sessionId }) => ({ client, sessionId });
 const oldHash = value => { if (value !== null) hash(value); };
@@ -234,4 +234,143 @@ export async function runSelectedCapture(capability, request, { observeRead = ()
       return { ...result, ...(await readSelection(store, identityOf(selection))) };
     });
   });
+}
+
+// Typed chat commands. A verified binding names the chat, its command turn and
+// the floor it may be read from; the model supplies no unit, range or source.
+// A window's turns are published within one bounded operation, so it stays small.
+const CHAT_WINDOW_BYTES = 8 * 1024 * 1024, CHAT_WINDOW_UNITS = 25, CHAT_ANCHOR_BYTES = 64 * 1024, CHAT_RUN_PASSES = 6;
+const deniedUnits = state => new Set(state ? [...state.exclusions, ...state.intervals.map(item => item.upper?.unitId).filter(Boolean)] : []);
+// Where the last typed or explicit capture of this chat ended, if any.
+const capturedThrough = state => state?.explicitScopes.length
+  ? Math.max(...state.explicitScopes.map(scope => (scope.end ?? scope.start).endByte)) : null;
+
+/** Keep a typed command's own turn out of captured turns. An exclusion is an
+ * opt-out: it needs no capture consent, applies to the latest state and is
+ * idempotent, so it never refreshes a hash to get past a conflict. */
+export async function excludeCommandTurn(capability, { selection, source, unitId }, { now } = {}) {
+  const chat = await selected(selection); nativeId(unitId); hash(source.fileIdentity);
+  return bounded(now, async () => {
+    await assertWorkflowStorage(capability);
+    const store = await openWorkflowIntake(capability);
+    return withIntakeLock(store, async tx => {
+      const current = await readSelection(store, identityOf(chat));
+      if (current.state?.safetyStop || deniedUnits(current.state).has(unitId)) return current;
+      const metadata = await snapshotSourceMetadata(source.path);
+      if (!metadata || metadata.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
+      const observed = { client: chat.client, sessionId: chat.sessionId, path: metadata.path, projectRoot: chat.cwd, fileIdentity: metadata.fileIdentity };
+      return controlSelection(tx, { source: observed, expectedHash: current.hash,
+        boundary: { sourceIdentity: metadata.fileIdentity, eofByte: metadata.eofByte, startsMidRecord: true, unitId, record: null },
+        request: { id: digestId('cuefluent-command-turn-v1', { client: chat.client, sessionId: chat.sessionId, unitId }),
+          client: chat.client, sessionId: chat.sessionId, unitId, expectedRevision: current.state?.revision ?? 0, operation: 'exclude' } });
+    });
+  });
+}
+
+// The next window of a chat's finished turns: from where its last capture
+// ended (or its floor), up to the command turn, at most 100 turns or 8 MiB,
+// leaving out excluded turns. Reads only that window of the verified source.
+async function chatWindow(capability, { chat, source, floor, commandUnitId, observeRead }) {
+  await assertWorkflowStorage(capability, chat, 'explicitCollect');
+  const store = await openWorkflowIntake(capability), current = await readSelection(store, identityOf(chat));
+  if (current.state?.safetyStop) fail('SELECTION_CAPACITY_EXCEEDED');
+  if (current.state && current.state.source.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
+  const through = capturedThrough(current.state), fromScope = through !== null && through >= floor.eofByte;
+  const from = fromScope ? through : floor.eofByte;
+  const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null), eof = observed.boundary.eofByte;
+  const limit = Math.min(eof, from + CHAT_WINDOW_BYTES);
+  if (limit <= from) return { current, unitIds: [], more: false };
+  const state = newSelectionState(observed.source), scopeId = randomUUID();
+  state.active = true; state.intervals = [{ id: scopeId, upper: null,
+    lower: { ...observed.boundary, eofByte: from, startsMidRecord: fromScope ? false : floor.startsMidRecord, unitId: null } }];
+  const inspected = await reader(chat.client)({ state, scopeId, endByte: limit, observeRead });
+  if (inspected.blocked) fail(inspected.blocked.code ?? 'INCOMPLETE_EXPLICIT_RANGE');
+  const anchors = [...new Map(inspected.nativeAnchors.map(item => [item.unitId, item])).values()]
+    .sort((a, b) => a.record.startByte - b.record.startByte);
+  // The command turn bounds the window; a window cut short by its size limit
+  // ends before its last turn, which may continue past it.
+  const command = anchors.find(item => item.unitId === commandUnitId);
+  let more = false, stop = command?.record.startByte;
+  if (stop === undefined) {
+    if (limit === eof || anchors.length < 2) fail('NATIVE_BOUNDARY_UNAVAILABLE');
+    stop = anchors.at(-1).record.startByte; more = true;
+  }
+  const denied = deniedUnits(current.state);
+  let units = anchors.filter(item => item.record.startByte >= from && item.record.startByte < stop &&
+    item.unitId !== commandUnitId && !denied.has(item.unitId));
+  if (units.length > CHAT_WINDOW_UNITS) { stop = units[CHAT_WINDOW_UNITS].record.startByte; units = units.slice(0, CHAT_WINDOW_UNITS); more = true; }
+  if (!units.length) return { current, unitIds: [], more };
+  // The scope ends with the last complete record before the stop.
+  const end = inspected.recordAnchors.filter(record => record.endByte <= stop).at(-1);
+  if (!end || end.endByte <= units[0].record.startByte || end.endByte - end.startByte > CHAT_ANCHOR_BYTES) fail('SOURCE_ANCHOR_LIMIT');
+  return { current, unitIds: units.map(item => item.unitId), readRange: { fromByte: units[0].record.startByte, endByte: end.endByte }, more };
+}
+
+// Bounded runs of a chat's capture scope, each publishing a few turns, while
+// they make progress. Publication keeps every turn it finished; when runs or a
+// budget run out, the rest of the scope waits for the next capture. Counted
+// from the stored captures, not the runs. A
+// privacy probe started near the deadline gets only the time left and fails
+// as a probe; after progress that is the budget too, while a real probe
+// failure makes no progress and is reported.
+const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET']);
+async function runChatScope(capability, chat, scope, { observeRead, now }) {
+  const captured = () => bounded(now, async () => {
+    const store = await openWorkflowIntake(capability);
+    let count = 0;
+    for (const unitId of scope.unitIds) if ((await readCaptureHead(store, { ...identityOf(chat), unitId }, { metadataOnly: true })).head) count++;
+    return { store, count };
+  });
+  const before = await captured();
+  let failure = null, finished = false;
+  for (let pass = 0; pass < CHAT_RUN_PASSES && !finished; pass++) {
+    let run;
+    try {
+      const current = await bounded(now, () => readSelection(before.store, identityOf(chat)));
+      run = await runSelectedCapture(capability, { selection: chat, scopeId: scope.id, expectedSelectionHash: current.hash, unitIds: scope.unitIds }, { observeRead, now });
+    } catch (error) { failure = error; break; }
+    // A turn held for another reason (no terminal record yet) does not hold
+    // up the chat's later turns; only the pass limit continues here.
+    finished = run.drained === true || (!run.incomplete && run.pending !== 'WORKER_PASS_LIMIT');
+    if (!finished && !run.saved) break;
+  }
+  const saved = (await captured()).count - before.count;
+  if (failure && !RUN_BUDGET_CODES.has(failure.code) && !(failure.code === 'PRIVACY_PROBE_FAILED' && saved > 0)) throw failure;
+  return { saved, finished };
+}
+
+/** `capture`: this chat's finished turns since its last capture, oldest first,
+ * as one explicit scope per window. A window a previous capture could not
+ * finish runs first; a new window is read only once it has. The command turn
+ * is never part of a window. */
+export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now } = {}) {
+  const chat = await selected(selection); nativeId(commandUnitId); hash(source.fileIdentity);
+  keys(floor, ['eofByte', 'startsMidRecord']); integer(floor.eofByte);
+  let turns = 0;
+  const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
+  const last = previous.state?.explicitScopes.filter(scope => scope.kind === 'historical').at(-1);
+  if (last) {
+    const rerun = await runChatScope(capability, chat, last, { observeRead, now });
+    turns += rerun.saved;
+    if (!rerun.finished) return { turns, more: true };
+  }
+  const window = await bounded(now, () => chatWindow(capability, { chat, source, floor, commandUnitId, observeRead }));
+  if (!window.unitIds.length) return { turns, more: window.more };
+  const operationId = digestId('cuefluent-chat-capture-v1', { client: chat.client, sessionId: chat.sessionId,
+    unitIds: window.unitIds, readRange: window.readRange });
+  await selectExplicitCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
+    expectedSelectionHash: window.current.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange }, { observeRead, now });
+  const run = await runChatScope(capability, chat, { id: operationId, unitIds: window.unitIds }, { observeRead, now });
+  return { turns: turns + run.saved, more: window.more || !run.finished };
+}
+
+/** `pause chat` and `resume chat`: the existing pause and resume controls at
+ * the command turn, which each leaves out of captured turns. */
+export async function controlChatCapture(capability, { selection, source, unitId, operation }, { now } = {}) {
+  choice(operation, ['pause', 'resume']);
+  const chat = await selected({ ...selection, unitId });
+  const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
+  return controlCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
+    expectedSelectionHash: current.hash, operation,
+    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now });
 }

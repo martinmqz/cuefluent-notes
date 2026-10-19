@@ -762,6 +762,15 @@ test('a settings change while native review is open cannot authorize the stale p
   assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
 });
 
+// A selection that changed only by the exclusions of typed command turns.
+function assertOnlyCommandTurnsLeftOut(after, before, controls) {
+  if (!controls.length) { assert.equal(after.hash, before.hash); return; }
+  const kept = state => state && { ...state, exclusions: [], revision: 0, lastRequest: null };
+  const expected = before.state ? kept(before.state) : kept({ ...after.state, intervals: [], explicitScopes: [], active: false, paused: false, currentGrantHash: null });
+  assert.deepEqual(kept(after.state), expected);
+  assert.deepEqual(after.state.exclusions.filter(unitId => !before.state?.exclusions.includes(unitId)).sort(), [...controls].sort());
+}
+
 async function nativeParent(t, f, h, { binding = 'active', headerChanges = {} } = {}) {
   const sessionId = binding === 'processing-only' ? randomUUID() : f.identity.sessionId, previous = randomUUID(), stamp = '2026-10-10T12:00:00.000Z';
   // The pending synthetic capture belongs to this same source session. Replace
@@ -878,7 +887,8 @@ test('collection-off native controls process and review manual backlog without e
     h.answer(await next, { action: 'accept', content: { decision: 'save' } }); body(await review);
     assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
     assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
-    assert.equal((await readSelection(store, identity)).hash, selected.hash);
+    // A typed command leaves only its own turn out; nothing is armed or captured.
+    assertOnlyCommandTurnsLeftOut(await readSelection(store, identity), selected, binding === 'manual' ? parent.controls : []);
     assert.deepEqual(await fs.readdir(f.collection.rawDir, { recursive: true }), raw);
     assert.equal(await fs.readFile(f.options.configPath, 'utf8'), config);
     await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
@@ -906,7 +916,7 @@ test('paused native source can inspect, process and save an existing proposal wi
     assert.equal((await review).error, undefined);
     assert.equal((await inspectProcessing(f.capability, f.operationId)).outcome, 'saved');
     assert.equal(await fs.readFile(path.join(f.collection.notes.notesDir, 'meetings/rollout.md'), 'utf8'), draft);
-    assert.equal((await readSelection(parent.store, f.identity)).hash, paused.hash);
+    assertOnlyCommandTurnsLeftOut(await readSelection(parent.store, f.identity), paused, parent.controls);
     assert.deepEqual(await fs.readFile(f.options.configPath), config);
     await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'control-dispatch')), { code: 'ENOENT' });
   });
@@ -923,6 +933,108 @@ async function nativeIngressFixture(t, { headerChanges = {} } = {}) {
   const parent = await nativeParent(t, f, h, { binding: 'ingress', headerChanges: { source: 'vscode', thread_source: 'agent_created_thread', ...headerChanges } });
   return { f, h, parent };
 }
+
+// A Codex chat in a project with capture mode and processing mode Manual: its
+// hook recorded only where the session starts.
+async function manualCaptureChat(t) {
+  const f = await storageFixture(t, { fullSetup: false }), sessionId = randomUUID();
+  await fs.mkdir(f.collection.notes.notesDir);
+  f.identity = { client: 'codex', sessionId, unitId: randomUUID() };
+  f.selection = { client: 'codex', sessionId, cwd: f.project, unitId: null };
+  f.source = { client: 'codex', sessionId, projectRoot: f.project, path: path.join(f.project, 'native.jsonl') };
+  const h = await harness(t, f, { resolveInvocation: resolveProcessingInvocation });
+  const parent = await nativeParent(t, f, h, { binding: 'typed' });
+  // Capture mode Manual and processing mode Manual: the hook records only where the session starts.
+  f.config.routes[0].collection = { enabled: false }; f.config.routes[0].processing = { mode: 'manual' };
+  const config = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, config);
+  f.options.expectedConfigHash = digest(config); f.capability = await verifyWorkflowStorage(f.options);
+  assert.equal((await collectionIngress('codex', { session_id: sessionId, turn_id: randomUUID(), cwd: f.project,
+    transcript_path: parent.source.path, hook_event_name: 'UserPromptSubmit' }, { configPath: f.options.configPath,
+    launch: () => assert.fail('no collection worker') })).status, 'manual');
+  const store = await openWorkflowIntake(f.capability), identity = { client: 'codex', sessionId };
+  const head = async unitId => (await readCaptureHead(store, { ...identity, unitId })).head;
+  const typed = async (tool, expected) => {
+    const rpc = await h.call(tool, {}), reply = body(rpc);
+    assert.equal(reply.capture, expected, reply.statusText); await parent.finish(rpc); return reply;
+  };
+  return { f, h, parent, store, identity, head, typed, config };
+}
+
+test('typed capture in a Manual chat captures every finished turn since the last capture, never a command turn', async t => {
+  const { f, h, parent, store, identity, head, typed, config } = await manualCaptureChat(t);
+  const first = await parent.work('Decision: ship on Friday.'), second = await parent.work('Owner: Dana.');
+  const captured = await typed('capture_turns', 'captured');
+  assert.equal(captured.turns, 2); assert.equal(captured.more, false);
+  assert.match(captured.statusText, /^Cuefluent: Captured 2 turns of this chat\. Type \$cuefluent-notes process/);
+  assert(await head(first)); assert(await head(second));
+  // Another typed command in between is left out as well.
+  body(await h.call('processing_status', {}).then(async rpc => { await parent.finish(rpc); return rpc; }));
+  const third = await parent.work('Correction: ship on Monday.');
+  assert.equal((await typed('capture_turns', 'captured')).turns, 1);
+  assert.equal((await readCaptureHead(store, { ...identity, unitId: third })).capture.evidence[0].text, 'Correction: ship on Monday.');
+  assert.equal((await typed('capture_turns', 'nothing-new')).more, false);
+  // Pausing or resuming applies only to Automatic capture.
+  await typed('pause_capture', 'not-automatic'); await typed('resume_capture', 'not-automatic');
+  for (const unitId of parent.controls) assert.equal(await head(unitId), null, unitId);
+  const selection = (await readSelection(store, identity)).state;
+  assert.equal(selection.active, false); assert.deepEqual(selection.intervals, []);
+  assert.deepEqual([...selection.exclusions].sort(), [...parent.controls].sort());
+  assert.equal(selection.explicitScopes.length, 2);
+  assert.equal(await fs.readFile(f.options.configPath, 'utf8'), config);
+});
+
+test('a long chat is captured in order across typed captures, in bounded windows', async t => {
+  const { h, parent, head, typed } = await manualCaptureChat(t), turns = [];
+  for (let index = 0; index < 26; index++) turns.push(await parent.work(`Synthetic note ${index}.`));
+  // One window holds at most 25 turns, and a run that outlasts its budget
+  // keeps what it published; typing capture again continues in order.
+  const first = await typed('capture_turns', 'captured');
+  assert.equal(first.more, true); assert(first.turns <= 25);
+  assert.match(first.statusText, /More finished turns are waiting; type \$cuefluent-notes capture again/);
+  assert.equal(await head(turns[25]), null);
+  let total = first.turns, reply = first;
+  for (let attempt = 0; reply.more && attempt < 12; attempt++) {
+    const rpc = await h.call('capture_turns', {}); reply = body(rpc); await parent.finish(rpc);
+    total += reply.turns ?? 0;
+  }
+  assert.equal(reply.more, false); assert.equal(total, 26);
+  for (const unitId of turns) assert(await head(unitId), unitId);
+});
+
+test('a capture command the person did not type applies nothing', async t => {
+  const f = await processingFixture(t), h = await harness(t, f);
+  for (const tool of ['capture_turns', 'pause_capture', 'resume_capture']) {
+    const rpc = await h.call(tool, {});
+    assert.equal(rpc.error.data.code, 'PROCESSING_CONTROL_SELECTION_MISMATCH', tool);
+    assert.match(rpc.error.message, /^Cuefluent: Nothing was applied: the tool call did not match the command that was typed\.$/);
+  }
+  assert.equal(h.dispatches, 0);
+});
+
+test('typed capture, pause chat and resume chat follow Automatic capture of the chat', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const head = async unitId => (await readCaptureHead(parent.store, { ...identity, unitId })).head;
+  const typed = async (tool, expected) => {
+    const rpc = await h.call(tool, {}), reply = body(rpc);
+    assert.equal(reply.capture, expected, reply.statusText); await parent.finish(rpc); return reply;
+  };
+  const before = await parent.work('Captured automatically.');
+  assert.equal((await run()).saved, 1); assert(await head(before));
+  await typed('capture_turns', 'automatic'); await typed('resume_capture', 'already-active');
+  await typed('pause_capture', 'paused');
+  assert.equal((await readSelection(parent.store, identity)).state.paused, true);
+  await typed('pause_capture', 'already-paused');
+  const paused = await parent.work('Kept out while paused.'); await run();
+  assert.equal(await head(paused), null);
+  // A paused chat counts as Manual: a typed capture takes its later turns.
+  assert.equal((await typed('capture_turns', 'captured')).turns, 1); assert(await head(paused));
+  await typed('resume_capture', 'resumed');
+  assert.equal((await readSelection(parent.store, identity)).state.active, true);
+  const resumed = await parent.work('Captured again.'); await run();
+  assert(await head(resumed));
+  for (const unitId of parent.controls) assert.equal(await head(unitId), null, unitId);
+});
 
 test('agent-created hook registration reaches real capture, native processing and exact proposal review', async t => {
   const { f, h, parent } = await nativeIngressFixture(t), sessionId = f.identity.sessionId;
@@ -1068,7 +1180,8 @@ test('old registrations without current collection consent do not request grant 
       assert.equal(ingress.status, 'processing-only');
       for (const args of [{}, { collectionId: f.collection.id }]) assert.equal(body(await h.call('processing_status', args)).status, 'missing');
       assert.deepEqual(await fs.readFile(file), before);
-      assert.equal((await readSelection(parent.store, f.identity)).state, null);
+      // Each typed status left its own turn out of later captures; nothing was armed.
+      assertOnlyCommandTurnsLeftOut(await readSelection(parent.store, f.identity), { state: null }, parent.controls.slice(-2));
       assert.equal(await fs.readFile(f.options.configPath, 'utf8'), config);
       assert.deepEqual(await fs.readdir(f.collection.rawDir), []);
     }

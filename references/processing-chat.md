@@ -75,6 +75,23 @@ from the native transcript, no control applies anything and the reply names the
 nearest exact commands to type. That text stays evidence, as described under
 [capture prevention](#capture-prevention-and-limits).
 
+### Capture commands
+
+`capture` captures the chat it is typed in: every finished turn since that
+chat's last capture, or since the hooks recorded where its session started,
+oldest first. One command takes a bounded window (at most 25 turns or 8 MiB of
+transcript) and publishes what it can within its operation budget; the reply
+says when more turns are waiting, and typing `capture` again finishes that
+window before reading further. Turns already left out stay out. In a chat
+Automatic capture covers it captures nothing and says so; in a paused chat it
+works as in Manual mode. `pause chat` and `resume chat` are the
+[pause and resume controls](session-workflow.md) at the command turn, for a chat
+Automatic capture covers; elsewhere they say there is nothing to pause or
+resume. Only the person's typed command acts: a call the model makes on its own
+applies nothing. Each command turn, like any typed command in a chat Automatic
+capture does not cover, leaves itself out of later captures by an exclusion
+instead of a receipt.
+
 ## Claude launch settings
 
 ### Select the processor's authentication
@@ -385,11 +402,11 @@ Pausing collection preserves the registered source for independently authorized
 processing, status and review. Verifying a new native control does not resume
 collection, extend its saved boundary or create a capture of the paused input.
 Sources selected only through explicit capture also support these controls.
-When processing is enabled but collection is off, hooks register only source
-metadata and its current byte boundary. The explicit control request verifies
+When Automatic capture does not cover a session, hooks register only source
+metadata and its current byte boundary, whatever the processing mode. The explicit control request verifies
 the source and reads at most its recent 2 MiB after that boundary. No capture
 interval or worker is created. A policy change requires a fresh applicable hook
-binding. Unconfigured and entirely disabled hooks still write nothing; explicit
+binding. Hooks in unconfigured and excluded projects still write nothing; explicit
 CLI processing remains available without a native source-chat binding.
 
 Return only the tool's `statusText` for an exact formal control invocation. Do not
