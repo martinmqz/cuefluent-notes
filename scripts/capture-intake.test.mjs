@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { newSelectionState, validateSelectionState, applySelectionControl, evaluateUnitSelection, resolveSelectionAnchor, inspectSourceBoundary, stableSourceIdentity } from './capture-selection.mjs';
+import { newSelectionState, validateSelectionState, applySelectionControl, evaluateUnitSelection, resolveSelectionAnchor, inspectSourceBoundary, stableSourceIdentity, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
 import { inspectIntakeStore, withIntakeLock, intakeSnapshot, intakeJSON, intakePath, writeIntakeStage, assertIntakeTransaction } from './intake-io.mjs';
 import { controlSelection, readSelection, publishCapture, recoverPendingPublication, verifySourceCursor, resolveStoredSelectionAnchor, readCaptureHead } from './intake-store.mjs';
 import { createCapture, captureRelativePath } from './capture-contract.mjs';
@@ -103,7 +103,7 @@ test('registration fixes EOF without reading a 50 MiB historical prefix', async 
   prototype.read = async function (...args) { const result = await originalRead.apply(this, args); actualReads.push({ offset: args[3], bytes: result.bytesRead }); return result; };
   try {
     inspected = await inspectSourceBoundary(selected, { currentUnitId: U[1], verifyHeader: async ({ readHeader }) => {
-      await assert.rejects(readHeader(0, 1024 * 1024), { code: 'SOURCE_HEADER_LIMIT' });
+      await assert.rejects(readHeader(0, SOURCE_HEADER_BYTES + 1), { code: 'SOURCE_HEADER_LIMIT' });
       const bytes = await readHeader(0, header.length);
       await fs.appendFile(file, '\nnew record\n');
       return JSON.parse(bytes);

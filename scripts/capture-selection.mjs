@@ -4,6 +4,10 @@ import { openGuarded, sameFileIdentity } from './file-io.mjs';
 import { canonicalWorkflowProject, absolutePath, canonicalWorkflowPath } from './workflow-paths.mjs';
 import { CLIENTS, keys, choice, nativeId, integer, hash, list, unique, string, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
+// Every source-header read is bounded by this. Claude CLI 2.1.303 writes about
+// 160 KiB of API request snapshots before a session's first identity row.
+export const SOURCE_HEADER_BYTES = 1024 * 1024;
+
 export const MAX_SELECTION_BYTES = 1024 * 1024;
 const ACTIVE_SELECTION_BYTES = MAX_SELECTION_BYTES - 16 * 1024;
 export const stableSourceIdentity = stat => digest(canonicalJSON([stat.dev, stat.ino, stat.birthtimeNs].map(String)));
@@ -39,7 +43,7 @@ export async function inspectSourceBoundary(selected, { verifyHeader, currentUni
     let headerBytes = 0;
     const readHeader = async (offset, length) => {
       integer(offset); integer(length);
-      if (offset + length > Math.min(Number(stat.size), 64 * 1024) || headerBytes + length > 64 * 1024) fail('SOURCE_HEADER_LIMIT');
+      if (offset + length > Math.min(Number(stat.size), SOURCE_HEADER_BYTES) || headerBytes + length > SOURCE_HEADER_BYTES) fail('SOURCE_HEADER_LIMIT');
       headerBytes += length;
       const bytes = Buffer.alloc(length);
       const result = await handle.read(bytes, 0, length, offset);

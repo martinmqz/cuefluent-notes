@@ -3,7 +3,7 @@ import path from 'node:path';
 import { absolutePath } from './workflow-paths.mjs';
 import { validateReaderCheckpoint, MAX_READER_CHECKPOINT_BYTES, checkpointPageBuilder } from './reader-checkpoint.mjs';
 import { readSessionRange, decodeSessionRecord } from './session-jsonl.mjs';
-import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
+import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
@@ -85,11 +85,13 @@ const markupOnly = (row, text) => row.promptSource === undefined && claudeSkillA
 const emptyHuman = row => row.message.content === '' || markupOnly(row, row.message.content) || (Array.isArray(row.message.content) &&
   row.message.content.every(block => (block.type === 'text' && (block.text === '' || markupOnly(row, block.text))) || ['thinking', 'redacted_thinking'].includes(block.type)));
 
-/** Claude can prepend metadata before its first native identity row. Never scan past 64 KiB. */
+/** Claude can prepend metadata before its first native identity row (about
+ * 160 KiB of API request snapshots from CLI 2.1.303). Never scan past
+ * SOURCE_HEADER_BYTES. */
 export async function readClaudeHeader({ readHeader, size }) {
   let offset = 0, pending = Buffer.alloc(0), prefixSessionId = null;
-  while (offset < Math.min(size, 64 * 1024)) {
-    const chunk = await readHeader(offset, Math.min(1024, size - offset, 64 * 1024 - offset));
+  while (offset < Math.min(size, SOURCE_HEADER_BYTES)) {
+    const chunk = await readHeader(offset, Math.min(16 * 1024, size - offset, SOURCE_HEADER_BYTES - offset));
     if (!chunk.length) fail('SOURCE_CHANGED');
     offset += chunk.length; pending = Buffer.concat([pending, chunk]);
     let end;

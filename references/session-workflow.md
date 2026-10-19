@@ -315,7 +315,7 @@ and immutable publication through the [workflow CLI](workflow-cli.md) and
 privacy; collection requires a verified private-storage capability.
 
 Registration fixes the source identity and current EOF, allowing at most a
-bounded 64 KiB source-header check and one byte before EOF. A missing source
+bounded 1 MiB source-header check and one byte before EOF. A missing source
 returns `pending-source`: this inspection result is not durable registration or
 acknowledgement that collection is enabled. Durable ingress retries preserve the
 registration boundary; later appearance cannot imply an authorized offset of zero.
@@ -492,7 +492,7 @@ call identity have omissions. Tool namespaces are preserved. Mirrored auxiliary
 items already represented by the same native call ID do not add false omissions.
 
 Reads stop at a frozen EOF and seek from the authorized floor/current cursor.
-Header reads are bounded to 64 KiB; records to 8 MiB; one pass to 64 MiB and
+Header reads are bounded to 1 MiB (a Codex header line to 64 KiB); records to 8 MiB; one pass to 64 MiB and
 16,384 records. Incomplete lines remain unconsumed, and a split registration record
 is discarded through its newline. Invalid UTF-8/JSON, changed source identities,
 non-increasing paginated ordinals and oversized lines do not advance past the
@@ -544,8 +544,9 @@ No assistant/tool payload is put into a capture or checkpoint on that basis.
 Claude captures therefore remain `terminal: unconfirmed` with partial coverage.
 They must not be described downstream as complete dialogue or completed work.
 
-The header may have known native metadata before its first identity row; the
-entire header read is still bounded to 64 KiB. The header fixes the registered project, tolerating its stored canonical path
+The header may have known native metadata before its first identity row
+(Claude CLI 2.1.303 writes about 160 KiB of API request snapshots there); the
+entire header read is still bounded to 1 MiB. The header fixes the registered project, tolerating its stored canonical path
 when the project later moves. Later root rows must match session and ownership;
 their working directory and client version may change. Version strings must be
 bounded and nonempty; `reader.headerClientVersion` explicitly records only the

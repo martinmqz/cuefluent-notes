@@ -219,6 +219,21 @@ test('header registration accepts bounded metadata prefixes and checks exact sou
   assert.equal(inspected.status, 'registered');
 });
 
+test('header registration reads past Claude CLI 2.1.303 request snapshots, within its bound', async t => {
+  const f = await fixture(t, [human()]), { fileIdentity: _identity, ...selected } = f.source;
+  // Claude CLI 2.1.303 writes bookkeeping and about 160 KiB of API request
+  // snapshots before a session's first identity row.
+  const snapshot = (type, bytes) => JSON.stringify({ type, sessionId: f.source.sessionId, body: 'x'.repeat(bytes) }) + '\n';
+  const prefix = [JSON.stringify({ type: 'mode', mode: 'normal' }) + '\n', snapshot('api-request-shape', 88000),
+    snapshot('api-request-blob', 32000), snapshot('api-request-blob', 36000), snapshot('api-request', 5700)].join('');
+  await fs.writeFile(f.source.path, prefix + f.bytes);
+  const inspected = await inspectSourceBoundary(selected, { currentUnitId: A, verifyHeader: claudeRegistrationHeader(f.source) });
+  assert.equal(inspected.status, 'registered');
+  // A prefix past the bound still finds no header.
+  await fs.writeFile(f.source.path, snapshot('api-request-shape', 1024 * 1024) + f.bytes);
+  await assert.rejects(inspectSourceBoundary(selected, { currentUnitId: A, verifyHeader: claudeRegistrationHeader(f.source) }), { code: 'SESSION_HEADER_UNAVAILABLE' });
+});
+
 test('large input has a bounded tail anchor and bounded normalized evidence', async t => {
   const f = await fixture(t, [human(A, 'é'.repeat(700000))]);
   const result = await readClaudeSelection(f.args), candidate = result.candidates[0];

@@ -577,6 +577,17 @@ test('only a prompt wake lets the worker freeze a floor; it waits briefly for a 
     const call = A.call('review'); await A.append([call]);
     assert.equal((await A.resolve(call)).unitId, P1);
   });
+  // Claude CLI 2.1.303 writes its API request snapshots before the first
+  // identity row: far more than a 64 KiB header window.
+  await t.test('a first-prompt control after a large request-snapshot prefix', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
+    await A.append([A.meta('mode', { mode: 'normal' }), ...Array.from({ length: 8 }, () => A.snapshot()), ...A.control('review', P1)]);
+    assert((await fs.stat(A.file)).size > 160 * 1024);
+    assert.deepEqual(sessionCodes(await f.run({ trigger: { client: 'claude', sessionId: A.sessionId } }), A.sessionId), ['NATIVE_BOUNDARY_PENDING']);
+    const call = A.call('review'); await A.append([call]);
+    assert.equal((await A.resolve(call)).unitId, P1);
+  });
   await t.test('only the session whose hook launched the worker waits for its file', async t => {
     const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
     await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
