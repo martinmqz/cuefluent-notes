@@ -359,8 +359,12 @@ runs once after that wait, or immediately if the launch session is unavailable.
 Stopped captures, over-limit tails and changed selections cannot supply a binding,
 but do not block another registered session from proving the exact call. A matching
 call with invalid arguments, tool identity or duplicate records is refused without
-retrying or substituting another session. Storage and source-identity failures
-still stop verification.
+retrying or substituting another session. Within the same wait the adapter also
+repeats a private-storage check that a concurrent collection worker kept busy
+(directories still gaining or losing entries on every attempt while no privacy
+check failed); if that outlasts the wait, the refusal is
+`PRIVATE_STORAGE_CHANGED`. Other storage and source-identity failures still stop
+verification at once.
 A Codex code-mode call needs a separate verification handshake:
 `verification-required` returns an opaque `retryToken` without delivering evidence,
 starting processing or opening a review. End the current exec, then repeat the

@@ -5,7 +5,7 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import path from 'node:path';
 import { openWorkflowIntake, intakePath, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readSelection } from './intake-store.mjs';
-import { assertWorkflowStorage, workflowProcessingContext, workflowCollectionGrant } from './workflow-storage.mjs';
+import { assertWorkflowStorage, workflowProcessingContext, workflowCollectionGrant, isPrivateStorageChurn } from './workflow-storage.mjs';
 import { currentIntervals, inspectSourceBoundary } from './capture-selection.mjs';
 import { processingSourceDirectory, processingSourcePath, validateProcessingSource, readRegistration, registrationPath, registrationFloorPath } from './collection-ingress.mjs';
 import { readSessionRange } from './session-jsonl.mjs';
@@ -21,7 +21,8 @@ const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
 const MAX_READS = SETTLE_ATTEMPTS + FALLBACK_SOURCES;
 // A candidate may be unavailable without disproving the requested call in a
 // different registered session. Exact-call mismatches remain fatal; only missing
-// records may settle, and privacy/identity failures are never candidate misses.
+// records (and exhausted storage churn, see settleWithin) may settle, and
+// privacy/identity failures are never candidate misses.
 class UnavailableNativeSource extends Error {
   constructor() { super('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); this.code = this.message; }
 }
@@ -29,6 +30,23 @@ class MissingNativeInvocation extends UnavailableNativeSource {}
 // A registered fresh session whose floor the worker has not frozen yet.
 class MissingRegistrationFloor extends MissingNativeInvocation {}
 const bindings = new WeakSet(), pendingBindings = new WeakSet();
+
+/** One settle window per binding: a floor the worker is about to freeze, then
+ * the native records. A concurrent worker's writes can also outlast a
+ * private-storage check's own attempts (exhausted directory churn); such a step
+ * is repeated from scratch too. Anything else, and anything still unsettled
+ * when the window or the step's attempts run out, is thrown as is: the same
+ * refusal as without a window. */
+const settleWithin = (deadline, signal) => async (step, retry = null) => {
+  for (let attempt = 0; ; attempt++) {
+    try { return await step(); }
+    catch (error) {
+      const remaining = deadline - performance.now();
+      if (!((retry && error instanceof retry) || isPrivateStorageChurn(error)) || remaining <= 0 || attempt === SETTLE_ATTEMPTS - 1) throw error;
+      await delay(Math.min(50 * 2 ** attempt, remaining), undefined, { signal });
+    }
+  }
+};
 export const isPendingProcessingInvocation = value => object(value) && pendingBindings.has(value);
 export const isProcessingInvocation = value => object(value) && bindings.has(value);
 
@@ -106,26 +124,22 @@ async function registeredSource(capability, store, identity, sessionKinds) {
  * Pausing collection preserves this binding for independently authorized
  * processing; it does not reopen or extend any collection interval.
  */
-async function resolveBoundInvocation(capability, context, invocation, { skillPath, skillCommand, signal, readBudget, configHash, settleMs, requireCompleted }) {
+async function resolveBoundInvocation(capability, context, invocation, { skillPath, skillCommand, signal, readBudget, configHash, deadline, requireCompleted }) {
   signal?.throwIfAborted();
-  // One settle window for the whole binding: a floor the worker is about to
-  // freeze, then the native records themselves.
-  const deadline = performance.now() + settleMs;
-  const settle = async (attempt, error, retry) => {
-    const remaining = deadline - performance.now();
-    if (!(error instanceof retry) || remaining <= 0 || attempt === SETTLE_ATTEMPTS - 1) throw error;
-    await delay(Math.min(50 * 2 ** attempt, remaining), undefined, { signal });
-  };
-  const store = await openWorkflowIntake(capability);
+  // Every private-storage step settles within the binding's one window. Each
+  // checks storage before reading the transcript, so repeating one for churn
+  // reads no more of it.
+  const settle = settleWithin(deadline, signal);
+  const store = await settle(() => openWorkflowIntake(capability));
   const identity = { client: context.client, sessionId: context.sessionId };
-  const selected = await readSelection(store, identity);
+  const selected = await settle(() => readSelection(store, identity));
   if (selected.state?.safetyStop) throw new UnavailableNativeSource();
   // A verified continuation of a registered root session: its background kind
   // is accepted, its re-homed prefix is never read, and it shares the
   // predecessor's chat lineage. Unverified or changed links bind nothing.
   let continued = null;
   if (context.client === 'claude') {
-    try { continued = await readContinuesLink(store, identity.sessionId); }
+    try { continued = await settle(() => readContinuesLink(store, identity.sessionId)); }
     catch (error) { if (error.code === 'INVALID_SESSION_CONTINUATION') throw new UnavailableNativeSource(); throw error; }
   }
   const sessionKinds = continued?.link.to.sessionKinds ?? [];
@@ -139,13 +153,13 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     floor = { eofByte: Math.min(...selected.state.explicitScopes.map(scope => scope.start.startByte)), startsMidRecord: false };
   }
   if (!floor) {
-    const name = processingSourcePath(identity, configHash), snapshot = await intakeSnapshot(store, 'state', name, { maxBytes: 16384 });
+    const name = processingSourcePath(identity, configHash), snapshot = await settle(() => intakeSnapshot(store, 'state', name, { maxBytes: 16384 }));
     if (snapshot.bytes) {
       const value = validateProcessingSource(intakeJSON(snapshot), identity, configHash, snapshot.bytes);
       source = { ...identity, path: value.snapshot.path, fileIdentity: value.snapshot.fileIdentity, projectRoot: value.cwd };
       // Collection stays off. Only the explicit MCP request may inspect this
       // source, starting at the immutable metadata-only hook boundary.
-      await assertWorkflowStorage(capability, { ...identity, cwd: source.projectRoot }, 'explicitProcess');
+      await settle(() => assertWorkflowStorage(capability, { ...identity, cwd: source.projectRoot }, 'explicitProcess'));
       const inspected = await inspectSourceBoundary({ ...identity, path: source.path, projectRoot: source.projectRoot }, {
         frozen: value.snapshot, verifyHeader: context.client === 'codex' ? codexRegistrationHeader(source) : claudeRegistrationHeader(source, { sessionKinds }) });
       if (inspected.status !== 'registered') throw new UnavailableNativeSource();
@@ -156,11 +170,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     } else if (context.client === 'claude' && selected.state === null) {
       // Only a session with no selection state at all; an exclusion-only or
       // retired selection keeps its existing refusal, also as a fallback candidate.
-      let found;
-      for (let attempt = 0; !found; attempt++) {
-        try { found = await registeredSource(capability, store, identity, sessionKinds); }
-        catch (error) { await settle(attempt, error, MissingRegistrationFloor); }
-      }
+      const found = await settle(() => registeredSource(capability, store, identity, sessionKinds), MissingRegistrationFloor);
       source = found.source; floor = found.floor; pinned.push(...found.records);
       // Collection is on but not armed: a later typed control needs the armed
       // selection, whose exclusion receipt keeps it out of captured evidence.
@@ -170,7 +180,7 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   const selection = { client: context.client, sessionId: context.sessionId, cwd: source.projectRoot, unitId: null };
   // Authorization precedes every transcript read, including the link's pinned
   // prefix record just below: an excluded route reads nothing.
-  await assertWorkflowStorage(capability, selection, 'explicitProcess');
+  await settle(() => assertWorkflowStorage(capability, selection, 'explicitProcess'));
   // The link's pinned prefix record is re-read on every guard: the binding
   // window starts past it, so only this check notices a prefix rewritten in
   // place, which otherwise would lend the predecessor's lineage to a decision.
@@ -191,16 +201,13 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
     if (target) await verifiedTarget();
     signal?.throwIfAborted();
   };
-  let found;
-  for (let attempt = 0; ; attempt++) {
+  const found = await settle(async () => {
     await guard();
-    try {
-      found = await readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget, sessionKinds, base: target?.prefix.endByte ?? 0, registered });
-      if (requireCompleted && found.call.pending) throw new MissingNativeInvocation();
-      break;
-    } catch (error) { await settle(attempt, error, MissingNativeInvocation); }
-  }
-  await guard();
+    const value = await readBoundCall(source, floor, context, invocation, { skillPath, skillCommand, readBudget, sessionKinds, base: target?.prefix.endByte ?? 0, registered });
+    if (requireCompleted && value.call.pending) throw new MissingNativeInvocation();
+    return value;
+  }, MissingNativeInvocation);
+  await settle(guard);
   const { call, unitId, nativeSkill, controlInput, argsHash, typedControl, typedSuggestions, typedHelp, typedUnattached } = found;
   // typedControl is the exact verified typed action. Only a verified binding
   // carries it; a model-chosen call never does. A Codex code-mode call carries
@@ -430,16 +437,20 @@ async function resolveClaudeFallback(capability, context, invocation, options) {
   return matches[0];
 }
 
-/** Native logging can lag an MCP request. Retry only a missing call, with an
- * unchanged source/selection, a shared finite read budget and cancellation.
+/** Native logging can lag an MCP request. Retry only a missing call or floor,
+ * or exhausted storage churn, within one window, with an unchanged
+ * source/selection, a shared finite read budget and cancellation.
  * No sleep, source scan or write is performed by hook ingress.
  */
 export async function resolveProcessingInvocation(capability, context, invocation, { settleMs = 1000, signal, requireCompleted = false, ...options } = {}) {
   if (!Number.isSafeInteger(settleMs) || settleMs < 0 || settleMs > 1000 || typeof requireCompleted !== 'boolean') fail('PROCESSING_CONTROL_INVALID_REQUEST');
   signal?.throwIfAborted();
-  const { configHash } = await workflowProcessingContext(capability);
+  // The primary binding's one settle window, from its first storage check.
+  const deadline = performance.now() + settleMs;
+  const { configHash } = await settleWithin(deadline, signal)(() => workflowProcessingContext(capability));
   const boundOptions = { ...options, signal, requireCompleted, configHash, readBudget: { reads: 0, bytes: 0 } };
-  try { return await resolveBoundInvocation(capability, context, invocation, { ...boundOptions, settleMs }); }
+  try { return await resolveBoundInvocation(capability, context, invocation, { ...boundOptions, deadline }); }
   catch (error) { if (context.client !== 'claude' || !(error instanceof UnavailableNativeSource)) throw error; }
-  return resolveClaudeFallback(capability, context, invocation, { ...boundOptions, settleMs: 0 });
+  // The fallback pass does not settle.
+  return resolveClaudeFallback(capability, context, invocation, { ...boundOptions, deadline: performance.now() });
 }

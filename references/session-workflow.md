@@ -745,7 +745,12 @@ operations verify roots and touched paths; unrelated archive size does not gate
 collection. A concurrent child write may change a directory's timestamps, size or
 link count; verification makes at most three attempts, re-reading ACLs on each retry while preserving
 the original identity, mode and owner. Files, replaced roots, permission changes
-and persistent churn fail closed. Policy checks retain their exact configuration
+and persistent churn fail closed; persistent churn reports `PRIVATE_STORAGE_CHANGED`.
+Only a command binding repeats a check whose every attempt saw nothing but
+directory churn on the very roots its storage capability pinned, from scratch
+with ACLs re-read, within its existing settle window
+([entry and reuse](processing-chat.md#entry-and-reuse)); a check that found a
+real change, including a replaced root that keeps churning, is never repeated. Policy checks retain their exact configuration
 hash and a final fresh placement check. Explicit setup audits existing roots. `auditWorkflowStorage` reports
 incompleteness at its 20,000-entry default limit. Setup/probes stay outside
 synchronous prompt hooks; production worker probe latency remains unverified.

@@ -6,11 +6,12 @@ import path from 'node:path';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { storageFixture } from './test-support/storage-fixture.mjs';
-import { assertWorkflowStorage, assertPrivatePaths } from './workflow-storage.mjs';
+import { assertWorkflowStorage, assertPrivatePaths, isPrivateStorageChurn, verifyPrivateDirectories } from './workflow-storage.mjs';
 import { withStorageProbes, systemCommand } from './storage-platform.mjs';
 import { inspectIntakeStore, intakePath, guardStore, writeIntakeStage, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
 import { collectionGrantHash } from './collection-grant.mjs';
 import { validateWorkflowConfig } from './workflow-config.mjs';
+import { storageChurn } from './test-support/storage-churn.mjs';
 
 test('directory child churn retries privacy verification but repeated churn stays bounded', async t => withStorageProbes(async () => {
   const f = await storageFixture(t), root = f.collection.intakeStateDir, lstat = fs.lstat;
@@ -31,11 +32,25 @@ test('directory child churn retries privacy verification but repeated churn stay
       return lstat(file, ...args);
     };
     try {
-      if (continuous) await assert.rejects(assertWorkflowStorage(f.capability), /PRIVATE_STORAGE_CHANGED/);
+      // Persistent churn keeps the storage code; only its owner marks it as churn.
+      if (continuous) await assert.rejects(assertWorkflowStorage(f.capability), error => error.code === 'PRIVATE_STORAGE_CHANGED' && isPrivateStorageChurn(error));
       else await assertWorkflowStorage(f.capability);
       assert(count < 25, 'retry count is bounded');
     } finally { fs.lstat = lstat; }
   }
+}));
+
+// Churn is retryable only where a capability pinned the roots: an unpinned
+// check cannot tell its roots are the expected ones, so it fails closed.
+test('persistent churn in a check without pinned roots is never reported as churn', async t => withStorageProbes(async () => {
+  const f = await storageFixture(t), root = f.collection.intakeStateDir;
+  const churn = storageChurn(t, root);
+  await assert.rejects(verifyPrivateDirectories([root]), error => error.code === 'PRIVATE_STORAGE_CHANGED' && !isPrivateStorageChurn(error));
+  assert.equal(churn.attempts, 3);
+  t.mock.restoreAll();
+  // The same churn under a capability is reported as churn.
+  storageChurn(t, root);
+  await assert.rejects(assertWorkflowStorage(f.capability), isPrivateStorageChurn);
 }));
 
 test('privacy retries do not adopt permission changes or replaced roots', async t => withStorageProbes(async () => {
@@ -47,7 +62,9 @@ test('privacy retries do not adopt permission changes or replaced roots', async 
     }
     return lstat(file, ...args);
   };
-  try { await assert.rejects(assertWorkflowStorage(f.capability), /PRIVATE_STORAGE_CHANGED/); }
+  // A real change is never reported as churn a caller may wait out.
+  const real = code => error => code.test(error.code) && !isPrivateStorageChurn(error);
+  try { await assert.rejects(assertWorkflowStorage(f.capability), real(/^PRIVATE_STORAGE_CHANGED$/)); }
   finally { fs.lstat = lstat; }
   await fs.rmdir(root); await fs.rename(root + '-original', root);
   if (process.platform !== 'win32') {
@@ -56,7 +73,7 @@ test('privacy retries do not adopt permission changes or replaced roots', async 
       if (file === root && ++count === 2) await fs.chmod(root, 0o750);
       return lstat(file, ...args);
     };
-    try { await assert.rejects(assertWorkflowStorage(f.capability), /PRIVATE_STORAGE_CHANGED|STORAGE_NOT_PRIVATE/); }
+    try { await assert.rejects(assertWorkflowStorage(f.capability), real(/^(?:PRIVATE_STORAGE_CHANGED|STORAGE_NOT_PRIVATE)$/)); }
     finally { fs.lstat = lstat; await fs.chmod(root, 0o700); }
   }
 }));
@@ -96,6 +113,32 @@ test('macOS scopes reuse unchanged ACLs while locality, changed ACLs and later s
     await withStorageProbes(() => assertPrivatePaths(f.capability, [file]));
     assert.equal(acl, 4); assert.equal(mount, 7);
   } finally { childProcess.spawn = spawn; syncBuiltinESMExports(); }
+});
+
+test('macOS exhausted churn leaves no cached ACL result behind for the caller\'s retry', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await storageFixture(t), file = path.join(f.collection.rawDir, 'capture.json');
+  await fs.writeFile(file, '{}', { mode: 0o600 });
+  const spawn = childProcess.spawn, probed = [];
+  childProcess.spawn = function (executable, args, ...rest) {
+    if (executable === '/bin/ls') probed.push(...args.slice(1));
+    return spawn.call(this, executable, args, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    await withStorageProbes(async () => {
+      await assertPrivatePaths(f.capability, [file]);
+      probed.length = 0;
+      await assertPrivatePaths(f.capability, [file]);
+      assert.deepEqual(probed, [], 'unchanged entries reuse their cached ACL results');
+      const churn = storageChurn(t, f.collection.intakeStateDir, { attempts: 3 });
+      await assert.rejects(assertPrivatePaths(f.capability, [file]), isPrivateStorageChurn);
+      assert.equal(churn.attempts, 3);
+      probed.length = 0;
+      await assertPrivatePaths(f.capability, [file]);
+      // Unchanged entries too: the retry re-reads ACLs like the owner's own retries.
+      for (const entry of [f.collection.rawDir, file, f.collection.notes.writerStateDir]) assert(probed.includes(entry), entry);
+    });
+  } finally { t.mock.restoreAll(); childProcess.spawn = spawn; syncBuiltinESMExports(); }
 });
 
 test('same-config note alias retargets are rejected by the final fresh placement check', async t => withStorageProbes(async () => {

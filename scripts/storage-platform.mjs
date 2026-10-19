@@ -135,6 +135,13 @@ export async function withStorageProbes(operation) {
   finally { child.stdin.end(); failed(); }
 }
 
+/** Drop cached macOS ACL results for these paths, so the next verification
+ * re-reads them. Windows ACL queries and Linux modes are never cached. */
+export function forgetStorageProbes(paths) {
+  const cache = probeSessions.getStore()?.aclCache;
+  if (cache) for (const file of paths) cache.delete(file);
+}
+
 /** Cache policy only for the live top-level operation, never across commands or
  * in a serialized capability. ACL queries remain fresh on every boundary. */
 export async function privateProfilePaths(files, identity) {

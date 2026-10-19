@@ -5,6 +5,7 @@ import { appendFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
+import { storageChurn, onVerificationAttempt, directoryChurn } from './test-support/storage-churn.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { collectionIngress, registrationFloorPath } from './collection-ingress.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock } from './intake-io.mjs';
@@ -519,12 +520,161 @@ test('only a prompt wake lets the worker freeze a floor; it waits briefly for a 
     const call = A.call('review'); await A.append([call]);
     await assert.rejects(A.resolve(call), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
     const block = call.message.content[0];
-    let worker; const timer = setTimeout(() => { worker = f.run(); }, 100);
-    t.after(() => clearTimeout(timer));
-    const bound = await resolveProcessingInvocation(f.capability, { client: 'claude', sessionId: A.sessionId, toolCallId: block.id },
-      { tool: 'processing_review', arguments: {} }, { skillPath: f.skillPath, settleMs: 1000 });
-    await worker;
-    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1);
+    // Order, not timing: the worker runs up to saving the floor and saves it
+    // once the binding has looked for it and missed; the binding's retries then
+    // overlap the rest of the worker's pass and its writes.
+    const floor = path.join(f.collection.intakeStateDir, registrationFloorPath({ client: 'claude', sessionId: A.sessionId }));
+    let reached, release, binding = false, misses = 0;
+    const atFloor = new Promise(resolve => { reached = resolve; }), released = new Promise(resolve => { release = resolve; });
+    const { rename, lstat } = fs;
+    t.mock.method(fs, 'rename', async (from, to, ...args) => {
+      if (to === floor) { reached(); await released; }
+      return rename(from, to, ...args);
+    });
+    t.mock.method(fs, 'lstat', async (file, ...args) => {
+      try { return await lstat(file, ...args); }
+      catch (error) { if (binding && file === floor && error.code === 'ENOENT' && ++misses === 2) release(); throw error; }
+    });
+    const worker = f.run();
+    try {
+      await Promise.race([atFloor, worker.then(() => assert.fail('the worker finished without saving the floor'))]);
+      binding = true;
+      const bound = await resolveProcessingInvocation(f.capability, { client: 'claude', sessionId: A.sessionId, toolCallId: block.id },
+        { tool: 'processing_review', arguments: {} }, { skillPath: f.skillPath, settleMs: 1000 });
+      assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1);
+      assert(misses >= 2, 'the binding looked for the floor before the worker saved it');
+    } finally { release(); await worker; }
+    assert.equal((await floorOf(f, A)).snapshot.eofByte, (await fs.stat(A.file)).size);
+  });
+});
+
+// A worker's writes can keep a private directory changing for longer than one
+// storage check's own attempts. The churn source stands in for that writer
+// deterministically: one directory change per verification attempt, so a
+// check exhausts its attempts exactly when three in a row are churned.
+const bindable = {
+  'a fresh registered session': async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
+    await A.append([A.meta('mode', { mode: 'normal' }), ...A.control('review', P1)]);
+    assert.deepEqual(sessionCodes(await f.run(), A.sessionId), ['NATIVE_BOUNDARY_PENDING']);
+    return { f, A, P1 };
+  },
+  'a processing-only session': async t => {
+    const f = await claudeFixture(t, { collect: false }), A = f.session(), P1 = randomUUID();
+    await A.append([...A.control('review', P1), A.snapshot()]);
+    assert.equal((await A.hook('UserPromptSubmit', P1)).status, 'processing-only');
+    return { f, A, P1 };
+  },
+};
+async function churnBinding(t, kind = 'a fresh registered session') {
+  const { f, A, P1 } = await bindable[kind](t);
+  const call = A.call('review'); await A.append([call]);
+  const block = call.message.content[0];
+  const bind = (settleMs = 1000) => resolveProcessingInvocation(f.capability, { client: 'claude', sessionId: A.sessionId, toolCallId: block.id },
+    { tool: 'processing_review', arguments: {} }, { skillPath: f.skillPath, settleMs });
+  return { f, A, P1, bind, root: f.collection.intakeStateDir };
+}
+// Every transcript open, to show a settled storage check reads no more of it.
+function transcriptOpens(t, file) {
+  const open = fs.open; let count = 0;
+  t.mock.method(fs, 'open', async (target, ...args) => { if (target === file) count++; return open(target, ...args); });
+  return { get count() { return count; } };
+}
+test('storage churn from a concurrent writer settles within the binding window', async t => {
+  for (const kind of Object.keys(bindable)) await t.test(`at every storage check of ${kind}`, async t => {
+    const { A, P1, bind, root } = await churnBinding(t, kind);
+    // Every check walks the intake root once per attempt.
+    const clean = storageChurn(t, root, { attempts: 0 }), reads = transcriptOpens(t, A.file);
+    assert.equal((await bind()).unitId, P1);
+    const checks = clean.attempts, opened = reads.count;
+    assert(checks > 10, `${checks} storage checks`);
+    t.diagnostic(`${checks} storage checks, ${opened} transcript opens per binding`);
+    t.mock.restoreAll();
+    for (let from = 1; from <= checks; from++) {
+      // Check `from` exhausts its three attempts; its repeat is churned once more.
+      const churn = storageChurn(t, root, { from, attempts: 4 }), during = transcriptOpens(t, A.file);
+      const bound = await bind();
+      assert.equal(bound.unitId, P1, `check ${from}`); assert.equal(bound.nativeSkill, true);
+      assert.equal(churn.churned, 4, `check ${from}`); assert.equal(during.count, opened, `check ${from}`);
+      t.mock.restoreAll();
+    }
+  });
+  await t.test('churn the window cannot absorb refuses with the storage code', async t => {
+    const { P1, bind, root } = await churnBinding(t);
+    // No window: the first check's exhausted churn is the refusal, unrepeated.
+    let churn = storageChurn(t, root, { attempts: 4 });
+    await assert.rejects(bind(0), { code: 'PRIVATE_STORAGE_CHANGED' });
+    assert.equal(churn.attempts, 3);
+    t.mock.restoreAll();
+    // Endless churn: each repeat exhausts as well, within the step's attempts.
+    churn = storageChurn(t, root);
+    await assert.rejects(bind(), { code: 'PRIVATE_STORAGE_CHANGED' });
+    assert(churn.attempts > 3 && churn.attempts <= 15, `${churn.attempts} attempts`);
+    t.mock.restoreAll();
+    assert.equal((await bind()).unitId, P1);
+  });
+});
+
+test('a real storage change during the binding window fails closed at once, even when undone at once', async t => {
+  const link = (target, file) => fs.symlink(target, file, process.platform === 'win32' ? 'junction' : 'dir');
+  const replace = async ({ root }) => { await fs.rename(root, `${root}-original`); await fs.mkdir(root, { mode: 0o700 }); };
+  const restore = async ({ root }) => { await fs.rmdir(root); await fs.rename(`${root}-original`, root); };
+  // `during`: after the attempt's walk pinned the root; otherwise just before it.
+  const changes = {
+    'an intake root replaced between attempts': { change: replace, undo: restore, code: 'PRIVATE_STORAGE_CHANGED' },
+    'an intake root replaced during an attempt': { during: true, change: replace, undo: restore, code: 'PRIVATE_STORAGE_CHANGED' },
+    'a symlinked intake root': { during: true, code: 'UNSAFE_PRIVATE_STORAGE',
+      change: async ({ root }) => { await fs.rename(root, `${root}-moved`); await link(`${root}-moved`, root); },
+      undo: async ({ root }) => { await fs.unlink(root); await fs.rename(`${root}-moved`, root); } },
+    'a relocated storage folder': { during: true, code: 'UNSAFE_PRIVATE_STORAGE',
+      change: async ({ f }) => { await fs.rename(f.root, `${f.root}-moved`); await link(`${f.root}-moved`, f.root); },
+      undo: async ({ f }) => { await fs.unlink(f.root); await fs.rename(`${f.root}-moved`, f.root); } },
+    // POSIX modes; Windows ACLs are queried afresh on every attempt.
+    ...(process.platform === 'win32' ? {} : { 'a mode change on the intake root': { during: true, code: 'PRIVATE_STORAGE_CHANGED',
+      change: ({ root }) => fs.chmod(root, 0o750), undo: ({ root }) => fs.chmod(root, 0o700) } }),
+  };
+  for (const [name, { during = false, change, undo, code }] of Object.entries(changes)) await t.test(name, async t => {
+    const context = await churnBinding(t), { P1, bind, root } = context;
+    // The first check exhausts its churn, so the change lands in its repeat.
+    // Only a further attempt undoes it first, and that attempt would bind.
+    const churn = directoryChurn(root);
+    let changed = false, undone = false;
+    const seen = onVerificationAttempt(t, root, {
+      before: async n => {
+        if (n === 4 && !during) { await change(context); changed = true; }
+        if (n === 5) { await undo(context); undone = true; }
+      },
+      after: async n => {
+        if (n <= 3) await churn();
+        if (n === 4 && during) { await change(context); changed = true; }
+      },
+    });
+    try { await assert.rejects(bind(), { code }); }
+    finally { if (changed && !undone) await undo(context); }
+    assert.equal(seen.attempts, 4);
+    t.mock.restoreAll();
+    assert.equal((await bind()).unitId, P1);
+  });
+  // A replacement that keeps churning is still a replacement: the capability's
+  // pinned root is compared on every attempt, so the repeat that meets it fails
+  // closed and never reaches the next repeat, after the original is restored.
+  await t.test('an intake root replaced while churning, restored before the next repeat', async t => {
+    const context = await churnBinding(t), { P1, bind, root } = context;
+    const churn = directoryChurn(root);
+    let replaced = false, restored = false;
+    const seen = onVerificationAttempt(t, root, {
+      before: async n => {
+        if (n === 4) { await replace(context); replaced = true; }
+        if (n === 7) { await restore(context); restored = true; }
+      },
+      after: async n => { if (n <= 6) await churn(); },
+    });
+    try { await assert.rejects(bind(), { code: 'PRIVATE_STORAGE_CHANGED' }); }
+    finally { if (replaced && !restored) await restore(context); }
+    assert.equal(seen.attempts, 4); assert.equal(restored, false);
+    t.mock.restoreAll();
+    assert.equal((await bind()).unitId, P1);
   });
 });
 
