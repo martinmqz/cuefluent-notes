@@ -93,27 +93,42 @@ function withReviewState(capability, selection, run, signal) {
   });
 }
 
-/** Presentation records for one chat lineage, read without the intake lock:
- * `bindings` are revisions a typed review delivered to this chat; `recent` is
- * the chat's latest presentation attempt, delivered or not. They identify a
- * revision; the engine's current hashes still decide. Another chat may replace
- * the record during the read; a few fresh reads then see one whole version. */
 // A file replaced while it was opened or read: its identity changed, or the
 // opened one is unlinked.
 const REPLACED = new Set(['FILE_IDENTITY_CHANGED', 'INTAKE_FILE_CHANGED', 'FILE_LINK_COUNT_INVALID']);
-export async function readReviewPresentations(capability, chatLineage) {
+// Read without the intake lock. Another chat may replace the record during
+// the read; a few fresh reads then see one whole version.
+async function readStateUnlocked(capability) {
   for (let attempt = 0; ; attempt++) {
-    try {
-      return await withStorageProbes(async () => {
-        const { value } = await readState(await openWorkflowIntake(capability));
-        return { bindings: value.bindings.filter(item => item.typedDelivered && sameLineage(item.chatLineage, chatLineage)),
-          recent: value.recent.find(item => sameLineage(item.chatLineage, chatLineage)) ?? null };
-      });
-    } catch (error) {
+    try { return await withStorageProbes(async () => (await readState(await openWorkflowIntake(capability))).value); }
+    catch (error) {
       if (attempt >= 4 || (!REPLACED.has(error?.code) && !isPrivateStorageChurn(error))) throw error;
       await delay(10 * (attempt + 1));
     }
   }
+}
+
+/** Presentation records for one chat lineage, read without the intake lock:
+ * `bindings` are revisions a typed review delivered to this chat; `recent` is
+ * the chat's latest presentation attempt, delivered or not. They identify a
+ * revision; the engine's current hashes still decide. */
+export async function readReviewPresentations(capability, chatLineage) {
+  const value = await readStateUnlocked(capability);
+  return { bindings: value.bindings.filter(item => item.typedDelivered && sameLineage(item.chatLineage, chatLineage)),
+    recent: value.recent.find(item => sameLineage(item.chatLineage, chatLineage)) ?? null };
+}
+
+/** Whether a reply presenting exactly this revision may be given again: this
+ * chat's record of it is live (not settled) and was delivered, and the engine
+ * still has that revision awaiting review. The chat's latest-presentation
+ * pointer outlives a decision, so it never counts on its own. */
+export async function presentationStillShown(capability, chatLineage, revision) {
+  validRevision(revision);
+  const value = await readStateUnlocked(capability);
+  const record = value.bindings.find(item => sameLineage(item.chatLineage, chatLineage) && sameReviewRevision(item, revision));
+  if (!record || !(record.delivered || record.typedDelivered)) return false;
+  const current = await withStorageProbes(() => inspectProcessing(capability, revision.operationId));
+  return current.state === 'awaiting-review' && !current.recoveryRequired && sameReviewRevision(current, revision);
 }
 
 function fileNames(files) {

@@ -18,7 +18,7 @@ import { runProcessingControlServer, processingControlStatusView, reviewNotePath
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
-import { presentReviewFiles, confirmReviewPresentation, settleReviewFiles, readReviewPresentations, reviewChatLineage, reviewCode, sameReviewRevision } from './processing-review-files.mjs';
+import { presentReviewFiles, confirmReviewPresentation, settleReviewFiles, readReviewPresentations, presentationStillShown, reviewChatLineage, reviewCode, sameReviewRevision } from './processing-review-files.mjs';
 import { REVIEW_COMMANDS, SKILL_NAME, reviewControlFields } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
@@ -304,14 +304,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (!receipt?.response) return null;
     if (receipt.response.collectionId !== source.collectionId) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT');
     // A review reply is recorded before its presentation is confirmed. When
-    // that confirmation failed, the reply the chat received was the refusal,
-    // so a redelivered call gets the refusal again, never "presented". The
+    // that confirmation failed, the reply the chat received was the refusal;
+    // once the draft is decided or replaced, its folder is gone. Either way a
+    // redelivered call is refused rather than told "presented" again. The
     // exact revision decides: another revision can share its draft code.
     const shown = receipt.response.draft?.folder !== undefined && REVIEW_PENDING.has(receipt.response.review);
-    if (shown) {
-      const { bindings, recent } = await readReviewPresentations(capability, reviewChatLineage(source));
-      if (!receipt.presentation || ![...bindings, ...(recent ? [recent] : [])].some(item => item.delivered &&
-          sameReviewRevision(item, receipt.presentation))) fail('PROCESSING_REVIEW_SUPERSEDED');
+    if (shown && !(receipt.presentation && await presentationStillShown(capability, reviewChatLineage(source), receipt.presentation))) {
+      fail('PROCESSING_REVIEW_SUPERSEDED');
     }
     replayed.set(source, receipt);
     return receipt.response;

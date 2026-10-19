@@ -976,6 +976,29 @@ test('a redelivered review call replays only when its exact revision was deliver
   assert.equal(row.result, undefined); assert.equal(row.error.data.code, 'PROCESSING_REVIEW_SUPERSEDED');
 });
 
+test('a redelivered review call is refused once its draft was decided or stopped being pending', async t => {
+  for (const variant of ['decided here', 'no longer pending']) await t.test(variant, async t => {
+    const f = await processingFixture(t), p = await proposedClaim(f), h = await harness(t, f, { capabilities: {} });
+    h.nativeSkill = true; h.typedControl = 'review'; h.callId = 'call_settled_review';
+    const shown = body(await h.call('processing_review', {}));
+    assert.equal(shown.review, 'presented');
+    if (variant === 'decided here') {
+      // The decision settles this chat's record and folder; only the chat's
+      // latest-presentation pointer remains.
+      h.typedControl = `save ${shown.draft.code}`; h.callId = 'call_settling_save';
+      assert.equal(body(await h.call('processing_review', {})).review, 'saved');
+      assert.equal((await readReviewPresentations(f.capability, { client: 'codex', sessionId: f.identity.sessionId })).recent.delivered, true);
+    } else {
+      // Cancelled elsewhere: this chat's record stays until a decision refers to it.
+      await completeProcessing(f.capability, { ...f.args, expectedClaimHash: p.claimHash, outcome: 'cancelled' });
+      assert.equal((await readReviewPresentations(f.capability, { client: 'codex', sessionId: f.identity.sessionId })).bindings.length, 1);
+    }
+    h.typedControl = 'review'; h.callId = 'call_settled_review';
+    const row = await h.call('processing_review', {});
+    assert.equal(row.result, undefined); assert.equal(row.error.data.code, 'PROCESSING_REVIEW_SUPERSEDED');
+  });
+});
+
 test('a review typed while this chat\'s own processing run is still going applies nothing and says so', async t => {
   const f = await processingFixture(t), h = await harness(t, f, { capabilities: {} }), gate = deferred();
   h.script = async call => { await gate.promise; await call('processing_pending', {}); };
