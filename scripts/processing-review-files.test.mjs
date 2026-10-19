@@ -959,6 +959,23 @@ test('a redelivered review call whose presentation was superseded is refused aga
   assert.equal(p.proposalHash.length, 64);
 });
 
+test('a redelivered review call replays only when its exact revision was delivered, not another with its code', async t => {
+  const f = await processingFixture(t), p = await proposedClaim(f), h = await harness(t, f, { capabilities: {} });
+  h.nativeSkill = true; h.typedControl = 'review'; h.callId = 'call_exact_revision';
+  const shown = body(await h.call('processing_review', {}));
+  assert.equal(shown.review, 'presented'); assert.equal(shown.draft.code, reviewCode(p.proposalHash));
+  // Redelivered while that exact revision is the one delivered here: the same reply.
+  assert.deepEqual(body(await h.call('processing_review', {})), shown);
+  // A draft code comes from the proposal alone, so a later revision with the
+  // same proposal under another claim has the same code. Delivered here, it
+  // does not stand in for the revision this call presented.
+  const state = await reviewState(f);
+  for (const item of [...state.bindings, ...state.recent]) item.claimHash = 'c'.repeat(64);
+  await fs.writeFile(stateFile(f), canonicalJSON(state) + '\n');
+  const row = await h.call('processing_review', {});
+  assert.equal(row.result, undefined); assert.equal(row.error.data.code, 'PROCESSING_REVIEW_SUPERSEDED');
+});
+
 test('a review typed while this chat\'s own processing run is still going applies nothing and says so', async t => {
   const f = await processingFixture(t), h = await harness(t, f, { capabilities: {} }), gate = deferred();
   h.script = async call => { await gate.promise; await call('processing_pending', {}); };

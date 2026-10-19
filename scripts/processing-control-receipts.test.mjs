@@ -318,6 +318,20 @@ test('a receipt keeps validating against its own recorded reply after replies ar
   });
 });
 
+test('only a review reply names its exact presented revision, in full', async t => {
+  const f = await fixture(t), response = { collectionId: 'fixture', statusText };
+  const resultHash = digest(canonicalJSON({ content: [{ type: 'text', text: canonicalJSON(response) }], isError: false }));
+  const presentation = { operationId: randomUUID(), proposalHash: 'a'.repeat(64), claimHash: 'b'.repeat(64) };
+  const review = { ...f.dispatch, tool: 'mcp__cuefluent.processing_review', resultHash, response, presentation };
+  await withIntakeLock(f.store, async tx => {
+    for (const changed of [{ ...review, tool: 'mcp__cuefluent.process' }, { ...review, response: undefined, resultHash: f.dispatch.resultHash },
+      { ...review, presentation: { ...presentation, claimHash: 'short' } }, { ...review, presentation: { ...presentation, code: 't7xb88' } }]) {
+      await assert.rejects(f.record(tx, changed), { code: /^(INVALID_PROCESSING_CONTROL_RECEIPT|INVALID_WORKFLOW)$/ });
+    }
+    assert.equal((await f.record(tx, review)).status, 'recorded');
+  });
+});
+
 test('a one-time capture resolves its control receipts under its own scope', async t => {
   const f = await fixture(t, { turn: { control: 'save t7xb88' } });
   await withIntakeLock(f.store, tx => f.record(tx));

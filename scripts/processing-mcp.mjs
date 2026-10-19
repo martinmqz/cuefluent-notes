@@ -305,12 +305,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (receipt.response.collectionId !== source.collectionId) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT');
     // A review reply is recorded before its presentation is confirmed. When
     // that confirmation failed, the reply the chat received was the refusal,
-    // so a redelivered call gets the refusal again, never "presented".
+    // so a redelivered call gets the refusal again, never "presented". The
+    // exact revision decides: another revision can share its draft code.
     const shown = receipt.response.draft?.folder !== undefined && REVIEW_PENDING.has(receipt.response.review);
     if (shown) {
       const { bindings, recent } = await readReviewPresentations(capability, reviewChatLineage(source));
-      const code = receipt.response.draft.code;
-      if (![...bindings, ...(recent ? [recent] : [])].some(item => item.delivered && reviewCode(item.proposalHash) === code)) fail('PROCESSING_REVIEW_SUPERSEDED');
+      if (!receipt.presentation || ![...bindings, ...(recent ? [recent] : [])].some(item => item.delivered &&
+          sameReviewRevision(item, receipt.presentation))) fail('PROCESSING_REVIEW_SUPERSEDED');
     }
     replayed.set(source, receipt);
     return receipt.response;
@@ -757,6 +758,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       // retry's own native metadata names its cell and nested call.
       const codeMode = source.handshakeResultHash === undefined ? {} : { outerItemId: source.outerItemId,
         retryItemId: context.itemId, retryCallId: context.toolCallId, handshakeResultHash: source.handshakeResultHash };
+      // A reply that leaves a draft presented names its exact revision.
+      const presented = invocation.tool === 'processing_review' ? pendingPresentations.get(source) : undefined;
+      const presentation = presented ? { presentation: { ...presented.revision } } : {};
       const store = await withStorageProbes(() => openWorkflowIntake(capability, source.selection, 'collect'));
       const authorize = async () => { signal?.throwIfAborted(); await assertWorkflowStorage(capability, source.selection, 'collect'); signal?.throwIfAborted(); return true; };
       await withStorageProbes(() => withIntakeLockWaiting(store, tx => recordProcessingControlDispatch(tx, {
@@ -764,7 +768,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         dispatch: { client, sessionId: source.selection.sessionId, unitId: source.unitId, callId: source.callId,
           tool: source.tool, argsHash: source.argsHash, sourceIdentity: source.source.fileIdentity, sourcePath: source.source.path,
           requestHash: digest(canonicalJSON(invocation.arguments)), skillName: SKILL_NAME, skillPath,
-          statusText: view.statusText, resultHash: digest(canonicalJSON(client === 'claude' ? result.content : result)), response: view, ...codeMode,
+          statusText: view.statusText, resultHash: digest(canonicalJSON(client === 'claude' ? result.content : result)), response: view, ...presentation, ...codeMode,
           ...(client === 'claude' ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand']
             .map(key => [key, source[key]])) : {}) },
       }, { authorize, beforePublish: commitAdmission }), { signal }));

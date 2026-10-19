@@ -16,7 +16,7 @@ const CODEX_CODE_MODE_FIELDS = ['outerItemId', 'retryItemId', 'retryCallId', 'ha
 const nativeToken = value => { string(value, 128); if (!/^[a-zA-Z0-9_-]+$/.test(value)) fail('INVALID_PROCESSING_CONTROL_RECEIPT'); };
 
 function dispatchDescriptor(value) {
-  keys(value, value?.client === 'claude' ? [...FIELDS, ...CLAUDE_FIELDS] : FIELDS, ['response', ...(value?.client === 'codex' ? CODEX_CODE_MODE_FIELDS : [])]);
+  keys(value, value?.client === 'claude' ? [...FIELDS, ...CLAUDE_FIELDS] : FIELDS, ['response', 'presentation', ...(value?.client === 'codex' ? CODEX_CODE_MODE_FIELDS : [])]);
   if (!['codex', 'claude'].includes(value.client) || value.skillName !== 'cuefluent-notes') fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   nativeId(value.sessionId); nativeId(value.unitId); string(value.callId, 512);
   if (value.client === 'codex' && CODEX_CODE_MODE_FIELDS.some(field => value[field] !== undefined)) {
@@ -34,6 +34,13 @@ function dispatchDescriptor(value) {
   for (const field of ['argsHash', 'sourceIdentity', 'requestHash', 'resultHash']) hash(value[field]);
   absolutePath(value.sourcePath); absolutePath(value.skillPath); string(value.statusText, 4096);
   if (Buffer.byteLength(value.statusText) > 4096) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+  // A review reply that left a draft presented names that exact revision, so
+  // a redelivery can check it was delivered; a draft code alone can repeat.
+  if (value.presentation !== undefined) {
+    keys(value.presentation, ['operationId', 'proposalHash', 'claimHash']);
+    nativeId(value.presentation.operationId); hash(value.presentation.proposalHash); hash(value.presentation.claimHash);
+    if (value.response === undefined || !/processing_review$/.test(value.tool)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+  }
   // The stored reply is checked against the text and result hash recorded with
   // it, never re-rendered: a receipt stays valid when a later release words
   // its replies differently.

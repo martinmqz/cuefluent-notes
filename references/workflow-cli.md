@@ -365,7 +365,8 @@ delivered typed review. Delivery is confirmed after the reply commits and
 before it is written; if that confirmation fails, including when another request
 settled or superseded that attempt meanwhile (`PROCESSING_REVIEW_SUPERSEDED`),
 the reply is the error and the draft must be reviewed again; a redelivery of that
-same call is refused the same way. A cancelled, failed or model-started attempt
+same call is refused the same way unless the exact revision its receipt names
+was delivered to the chat since. A cancelled, failed or model-started attempt
 therefore never makes a draft decidable, and never lets a bare decision fall
 back to an older draft. A folder is removed when its draft is
 decided through review, or by a later review or refused decision once its revision
