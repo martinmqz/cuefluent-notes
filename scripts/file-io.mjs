@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -69,6 +70,29 @@ export async function isMain(url) {
   if (!process.argv[1]) return false;
   try { return await fs.realpath(fileURLToPath(url)) === await fs.realpath(process.argv[1]); }
   catch { return false; }
+}
+
+// Windows refuses to replace a file another process holds open, as an
+// unlocked reader briefly does: Node renames with MoveFileExW, without POSIX
+// semantics. A refused rename changes neither name.
+const WINDOWS_RENAME_REFUSALS = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_WAITS_MS = [0, 10, 20, 40, 80, 160, 320];
+/** Rename a staged file over its target. On Windows a refusal is retried for
+ * up to `maxWaitMs` (about 0.6 s by default), running the caller's
+ * pre-publication `check` before every attempt, so a retry is as strict as the
+ * first; any other error, or running out of time, rethrows the rename's own
+ * error. Elsewhere this is one checked rename. */
+export async function renameReplacing(from, to, { check = async () => {}, maxWaitMs = 630, platform = process.platform } = {}) {
+  let waited = 0;
+  for (let attempt = 0; ; attempt++) {
+    await check();
+    try { return await fs.rename(from, to); }
+    catch (error) {
+      const wait = RENAME_WAITS_MS[attempt];
+      if (platform !== 'win32' || !WINDOWS_RENAME_REFUSALS.has(error?.code) || wait === undefined || waited + wait > maxWaitMs) throw error;
+      waited += wait; await delay(wait);
+    }
+  }
 }
 
 /** Open an ordinary file without trusting a path that changed during open. */

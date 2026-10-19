@@ -86,6 +86,10 @@ contracts for supported commands, formats, permissions and recovery procedures.
   collection, processing and a duplicate-safe retry, remains unverified.
 - Recovery does not guarantee survival of every OS termination or sudden power
   loss. Windows lacks Node directory fsync, so its power-loss durability is weaker.
+- Windows refuses to replace a file another process has open. A private-state or
+  settings write then retries for up to about 0.6 s (a hook's for 70 ms) and
+  otherwise fails, changing nothing. Note saves do not wait this way, so a note
+  an editor, indexer or sync client holds open can refuse a save.
 - Plugin filesystem and Markdown checks do not establish Cuefluent recursive file
   admission, rendering, image loading or search ranking. See the
   [authoring contract](authoring.md).

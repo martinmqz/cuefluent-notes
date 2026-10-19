@@ -13,6 +13,7 @@ import { readReviewPreview } from './processing-host-review.mjs';
 import { REVIEW_CODE, REVIEW_COMMANDS, processingControlCall } from './processing-control-proof.mjs';
 import { reviewPathLink, processingControlRefusalText } from './processing-control-server.mjs';
 import { fingerprint } from './safe-update.mjs';
+import { openGuarded } from './file-io.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { readSelection } from './intake-store.mjs';
 
@@ -892,6 +893,22 @@ test('a review step waits a bounded moment for the collection lock', async t => 
   // Another action, such as a cancel, may have taken effect before its receipt found the lock busy.
   assert.match(processingControlRefusalText('INTAKE_BLOCKED', { client: 'claude', stage: 'action', tool: 'processing_cancel' }),
     /^Cuefluent: This command stopped before it finished, so it is not certain whether anything changed./);
+});
+
+test('a confirmation waits out another chat\'s brief read of the presentation record', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
+  const chatLineage = { client: 'claude', sessionId: f.identity.sessionId };
+  const preview = await readReviewPreview(f.capability, { selection: f.selection, operationId: f.operationId });
+  const shown = await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage, verified: true });
+  // Another chat's unlocked read holds the record open, as Windows then
+  // refuses to replace it, and closes it a moment later.
+  const { handle } = await openGuarded(stateFile(f), { singleLink: true });
+  const closed = new Promise(resolve => setTimeout(() => handle.close().then(resolve), 100));
+  try {
+    assert.equal(await confirmReviewPresentation(f.capability, { selection: f.selection, chatLineage, attempt: shown.attempt,
+      revision: { operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash } }), true);
+  } finally { await closed; }
+  assert.equal((await readReviewPresentations(f.capability, chatLineage)).recent.delivered, true);
 });
 
 test('an unlocked read of the presentation record survives another chat replacing it', async t => {

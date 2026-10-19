@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { openGuarded, lstatOrNull, sameFileIdentity, readBoundedBytes, syncDirectory, isOwnedStage, removeOwnedStage } from './file-io.mjs';
+import { openGuarded, lstatOrNull, sameFileIdentity, readBoundedBytes, syncDirectory, isOwnedStage, removeOwnedStage, renameReplacing } from './file-io.mjs';
 import { canonicalWorkflowProject, canonicalWorkflowPath, overlaps, inside } from './workflow-paths.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { canonicalJSON, digest, fail, keys, nativeId, list, unique } from './workflow-values.mjs';
@@ -271,9 +271,13 @@ export async function replaceIntakeBytes(transaction, name, bytes, expectedHash,
   const stage = await writeIntakeStage(store, 'state', stageName, bytes, guard);
   try {
     const target = await intakePath(store, 'state', name, { createParents: true });
-    if ((await intakeSnapshot(store, 'state', name, { maxBytes })).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
-    if (!await isOwnedStage(stage.file, stage.identity, bytes, { guard })) fail('INTAKE_STAGE_CHANGED');
-    await guard(); await guardStore(store, [stage.file, target]); await fs.rename(stage.file, target); await syncDirectory(path.dirname(target));
+    await renameReplacing(stage.file, target, { check: async () => {
+      checkWorkflowBudget();
+      if ((await intakeSnapshot(store, 'state', name, { maxBytes })).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
+      if (!await isOwnedStage(stage.file, stage.identity, bytes, { guard })) fail('INTAKE_STAGE_CHANGED');
+      await guard(); await guardStore(store, [stage.file, target]);
+    } });
+    await syncDirectory(path.dirname(target));
     return digest(bytes);
   } finally { await removeOwnedStage(stage.file, stage.identity, bytes, { guard }); }
 }
