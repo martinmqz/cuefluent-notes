@@ -1,6 +1,6 @@
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { once } from 'node:events';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, hash, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
 import { DISPLAY_CONTROLS, displayEscape, displayScalar } from './file-io.mjs';
@@ -625,7 +625,7 @@ export function processingControlStatusView(value, args) {
  * skill/control provenance for a dispatch. Its opaque result is never accepted
  * from JSON or returned to the model. No transcript discovery exists here. */
 export async function runProcessingControlServer({ client, input = process.stdin, output = process.stdout,
-  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse, afterResponse,
+  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse, afterResponse, afterDelivery,
   unboundStatus } = {}) {
   choice(client, CLIENTS);
   if ([resolveSource, getStatus, requestProcessing].some(value => typeof value !== 'function')) fail('PROCESSING_CONTROL_INVALID_REQUEST');
@@ -633,10 +633,13 @@ export async function runProcessingControlServer({ client, input = process.stdin
   let initialized = false, pending = Buffer.alloc(0), queue = Promise.resolve(), queued = 0, closed = false;
   let formSupported = false, clientCapabilities = Object.freeze({});
   const requests = new Map(), forms = new Map(), handshakes = new Map();
-  const reply = async (value, limit = OUTPUT_BYTES) => {
+  // With `written`, resolves only once the bytes were handed to the output,
+  // so bookkeeping that must follow delivery never runs after a failed write.
+  const reply = async (value, limit = OUTPUT_BYTES, { written = false } = {}) => {
     const bytes = Buffer.from(`${canonicalJSON(value)}\n`);
     if (bytes.length > limit) fail(limit === FORM_BYTES ? 'PROCESSING_REVIEW_TOO_LARGE' : 'PROCESSING_CONTROL_OUTPUT_INVALID');
-    if (!output.write(bytes)) await once(output, 'drain');
+    if (written) await new Promise((resolve, reject) => output.write(bytes, error => error ? reject(error) : resolve()));
+    else if (!output.write(bytes)) await once(output, 'drain');
   };
   const rejectForms = (code, requestId) => {
     for (const [formId, form] of forms) if (requestId === undefined || form.requestId === requestId) {
@@ -688,7 +691,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     let stage = null;
     try {
       if (request.cancelled) fail('PROCESSING_REVIEW_INTERRUPTED');
-      let result, afterCommit = null;
+      let result, afterCommit = null, delivered = null;
       if (row.method === 'initialize') {
         if (initialized || !object(row.params) || (row.params.capabilities !== undefined && !object(row.params.capabilities))) fail('PROCESSING_CONTROL_PROTOCOL');
         const caps = row.params.capabilities ?? {};
@@ -829,15 +832,20 @@ export async function runProcessingControlServer({ client, input = process.stdin
           // another receipt; the attempted receipt cannot prove this new result.
           if (replacement !== undefined) result = { content: [{ type: 'text', text: canonicalJSON(processingControlStatusView(replacement, resolvedArgs)) }], isError: false };
           if (typeof afterResponse === 'function') afterCommit = () => afterResponse({ source, context, invocation, signal });
+          if (typeof afterDelivery === 'function') delivered = () => afterDelivery({ source, context, invocation });
         } else fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
       }
       commitResponse();
-      // Bookkeeping that must follow the commit: a review presentation counts
-      // only once its reply is committed. Cancellation can no longer affect the
-      // request, but a failure here turns the reply into that error, so the
-      // chat is never told a draft was presented when it cannot be decided on.
+      // Checks that must follow the commit: cancellation can no longer affect
+      // the request, but a failure here turns the reply into that error, so the
+      // chat is not told a draft was presented when it already cannot be
+      // decided on.
       if (afterCommit) await afterCommit();
-      await reply({ jsonrpc: '2.0', id: rpcId, result });
+      await reply({ jsonrpc: '2.0', id: rpcId, result }, OUTPUT_BYTES, { written: delivered !== null });
+      // Bookkeeping that needs the written reply, such as a presentation
+      // counting as delivered. The reply stands; if this fails or never runs,
+      // the draft is simply not decidable until it is shown again.
+      if (delivered) { try { await delivered(); } catch { /* reply already written */ } }
     } catch (error) {
       request.complete = true;
       if (request.cancelled) return;

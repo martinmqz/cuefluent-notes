@@ -18,7 +18,7 @@ import { runProcessingControlServer, processingControlStatusView, reviewNotePath
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
-import { presentReviewFiles, confirmReviewPresentation, settleReviewFiles, readReviewPresentations, presentationStillShown, reviewChatLineage, reviewCode, sameReviewRevision } from './processing-review-files.mjs';
+import { presentReviewFiles, confirmReviewPresentation, settleReviewFiles, readReviewPresentations, presentationStillShown, presentationAttemptCurrent, reviewChatLineage, reviewCode, sameReviewRevision } from './processing-review-files.mjs';
 import { REVIEW_COMMANDS, SKILL_NAME, reviewControlFields } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, digestId, choice, CLIENTS, fail, safeErrorCode } from './workflow-values.mjs';
 import { isMain } from './file-io.mjs';
@@ -194,6 +194,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   const openController = dependencies.openController ?? openProcessingController;
   const resolveInvocation = dependencies.resolveInvocation ?? resolveProcessingInvocation;
   const confirmPresentation = dependencies.confirmPresentation ?? confirmReviewPresentation;
+  const presentationCurrent = dependencies.presentationCurrent ?? presentationAttemptCurrent;
   // Nothing is set up for this chat: no configuration, no route for this client,
   // or no registration, selection or processing source for this session in any
   // routed collection. Still a refusal; only a status request may answer it with
@@ -792,17 +793,27 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     }
   }
   // The reply naming a presented draft is committed: only now does that
-  // attempt count for decisions. A cancelled or failed request leaves it
-  // unconfirmed, and a failed confirmation fails the reply, so the chat never
-  // hears "presented" about a draft it cannot decide on. That includes an
-  // attempt another request settled or superseded meanwhile: nothing is left
-  // to confirm, so the reply becomes that refusal.
+  // attempt count for decisions. Before the reply is written, an attempt
+  // another request settled or showed again meanwhile turns the reply into
+  // that refusal, so the chat is not told "presented" about a draft it already
+  // cannot decide on. Only once the reply was written is the attempt confirmed
+  // as delivered: a failed write, a killed process or a failed confirmation
+  // leaves the draft undecidable here until it is shown again, never decidable
+  // without having been shown.
   async function afterResponse({ source }) {
+    const pending = pendingPresentations.get(source);
+    if (!pending) return;
+    const { capability } = selected(source);
+    if (await presentationCurrent(capability, pending)) return;
+    pendingPresentations.delete(source);
+    fail('PROCESSING_REVIEW_SUPERSEDED');
+  }
+  async function afterDelivery({ source }) {
     const pending = pendingPresentations.get(source);
     if (!pending) return;
     pendingPresentations.delete(source);
     const { capability } = selected(source);
-    if (!await confirmPresentation(capability, { selection: source.selection, ...pending })) fail('PROCESSING_REVIEW_SUPERSEDED');
+    await confirmPresentation(capability, { selection: source.selection, ...pending });
   }
   try {
     // With nothing set up for the chat, a status request still gets the command
@@ -811,7 +822,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix });
     await runProcessingControlServer({ client, input, output, env, resolveSource, unboundStatus, getStatus: exactOnly(getStatus),
       requestProcessing: exactOnly(requestProcessing), requestResume: exactOnly(requestResume), requestCancel: exactOnly(requestCancel),
-      requestReview: exactOnly(requestReview), beforeResponse, afterResponse });
+      requestReview: exactOnly(requestReview), beforeResponse, afterResponse, afterDelivery });
   } finally {
     // No automatic dispatch retry, cancellation, claim cleanup or new source read.
     for (const job of jobs.values()) job.rejectDispatch(Object.assign(new Error('PROCESSING_CONTROL_FAILED'), { code: 'PROCESSING_CONTROL_FAILED' }));

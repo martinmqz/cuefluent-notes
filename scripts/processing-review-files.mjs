@@ -118,6 +118,15 @@ export async function readReviewPresentations(capability, chatLineage) {
     recent: value.recent.find(item => sameLineage(item.chatLineage, chatLineage)) ?? null };
 }
 
+/** Whether this exact presentation attempt is still this chat's record of its
+ * revision: nothing settled it or showed it again since. A check before the
+ * reply is written; delivery is confirmed only after it was. */
+export async function presentationAttemptCurrent(capability, { chatLineage, revision, attempt }) {
+  validRevision(revision); nativeId(attempt);
+  const value = await readStateUnlocked(capability);
+  return value.bindings.some(item => sameLineage(item.chatLineage, chatLineage) && sameReviewRevision(item, revision) && item.attempt === attempt);
+}
+
 /** Whether a reply presenting exactly this revision may be given again: this
  * chat's record of it is live (not settled) and was delivered, and the engine
  * still has that revision awaiting review. The chat's latest-presentation

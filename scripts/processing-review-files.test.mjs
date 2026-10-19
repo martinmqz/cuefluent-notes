@@ -404,7 +404,7 @@ test('a presentation counts only once its reply is committed; an unconfirmed one
   assert.equal((await review(h, { decision: 'skip', draft: codeB })).review, 'skipped');
 });
 
-test('a presentation another request supersedes or settles before its reply commits fails that reply', async t => {
+test('a presentation another request supersedes or settles before its reply is written fails that reply', async t => {
   for (const [name, compete] of [
     // Another MCP process shows the same revision to this chat again.
     ['superseded', async (f, lineage) => {
@@ -419,8 +419,8 @@ test('a presentation another request supersedes or settles before its reply comm
     const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
     const h = await claudeReview(t, f); h.nativeSkill = true;
     const lineage = { client: 'claude', sessionId: f.identity.sessionId }, code = reviewCode(p.proposalHash);
-    // After this request wrote its record and before its reply commits.
-    h.beforeConfirm = async () => { h.beforeConfirm = null; await compete(f, lineage, p); };
+    // After this request wrote its record and before its reply is written.
+    h.beforeCheck = async () => { h.beforeCheck = null; await compete(f, lineage, p); };
     const row = await h.call('processing_review', {});
     assert.equal(row.result, undefined); assert.equal(row.error.data.code, 'PROCESSING_REVIEW_SUPERSEDED');
     assert.match(row.error.message, /^Cuefluent: This command was refused: the draft was decided, replaced or shown again before this review was confirmed/);
@@ -433,6 +433,27 @@ test('a presentation another request supersedes or settles before its reply comm
     assert.equal((await review(h, { decision: 'save', draft: code })).review, 'saved');
     assert.deepEqual(await fs.readFile(p.target), Buffer.from(content));
   });
+});
+
+test('a presentation counts as delivered only after its reply was written', async t => {
+  const f = await processingFixture(t, { client: 'claude' }), p = await proposedClaim(f);
+  const h = await claudeReview(t, f); h.nativeSkill = true;
+  const lineage = { client: 'claude', sessionId: f.identity.sessionId }, code = reviewCode(p.proposalHash);
+  // Another MCP process shows the same revision again once this reply is
+  // already written: the reply stands, but its confirmation finds nothing.
+  h.beforeConfirm = async () => {
+    h.beforeConfirm = null;
+    const preview = await readReviewPreview(f.capability, { selection: f.selection, operationId: f.operationId });
+    await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage: lineage, verified: false });
+  };
+  assert.equal((await review(h)).review, 'presented');
+  assert.equal(h.confirmed, false);
+  // Never decidable without a delivered typed review: not decided unseen.
+  assert.equal((await review(h, { decision: 'save', draft: code })).review, 'not-shown');
+  assert.equal((await review(h, { decision: 'save' })).review, 'unresolved');
+  assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
+  assert.equal((await review(h, { draft: code })).review, 'presented'); assert.equal(h.confirmed, true);
+  assert.equal((await review(h, { decision: 'save', draft: code })).review, 'saved');
 });
 
 test('a redisplay keeps the earlier typed review of the same revision', async t => {
@@ -944,8 +965,8 @@ test('a redelivered review call whose presentation was superseded is refused aga
   const f = await processingFixture(t), p = await proposedClaim(f), h = await harness(t, f, { capabilities: {} });
   h.nativeSkill = true; h.typedControl = 'review'; h.callId = 'call_redelivered';
   const chatLineage = { client: 'codex', sessionId: f.identity.sessionId };
-  h.beforeConfirm = async () => {
-    h.beforeConfirm = null;
+  h.beforeCheck = async () => {
+    h.beforeCheck = null;
     const preview = await readReviewPreview(f.capability, { selection: f.selection, operationId: f.operationId });
     await presentReviewFiles(f.capability, { selection: f.selection, preview, chatLineage, verified: false });
   };

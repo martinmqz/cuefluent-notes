@@ -361,13 +361,14 @@ records outlive a continuation. `attempt` is a random ID naming the latest prese
 that revision, and `verified` and `delivered` describe it (typed, and its reply committed), and `typedDelivered` records that
 some typed review of it was delivered to that session. A coded decision needs
 `typedDelivered`; a bare decision needs the session's latest attempt to be a
-delivered typed review. Delivery is confirmed after the reply commits and
-before it is written; if that confirmation fails, including when another request
-settled or superseded that attempt meanwhile (`PROCESSING_REVIEW_SUPERSEDED`),
-the reply is the error and the draft must be reviewed again; a redelivery of that
-same call is refused the same way unless this chat's record of the exact
-revision its receipt names is live and delivered and that revision is still
-awaiting review. A cancelled, failed or model-started attempt
+delivered typed review. Before the reply is written, the attempt must still be
+this chat's current one; if another request settled or superseded it meanwhile
+(`PROCESSING_REVIEW_SUPERSEDED`), the reply is the error and the draft must be
+reviewed again. The attempt counts as delivered only once the reply was written;
+a failed write, a stopped process or a failed confirmation leaves the draft
+undecidable until it is shown again. A redelivery of that same call is refused
+the same way unless this chat's record of the exact revision its receipt names
+is live and delivered and that revision is still awaiting review. A cancelled, failed or model-started attempt
 therefore never makes a draft decidable, and never lets a bare decision fall
 back to an older draft. A folder is removed when its draft is
 decided through review, or by a later review or refused decision once its revision

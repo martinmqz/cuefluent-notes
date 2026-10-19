@@ -6,7 +6,7 @@ import { PassThrough, Writable } from 'node:stream';
 import { withReviewPreview } from './processing-review.mjs';
 import { openProcessingController } from '../processing-controller.mjs';
 import { runProcessingMcp } from '../processing-mcp.mjs';
-import { confirmReviewPresentation } from '../processing-review-files.mjs';
+import { confirmReviewPresentation, presentationAttemptCurrent } from '../processing-review-files.mjs';
 import { readSelection } from '../intake-store.mjs';
 import { canonicalJSON, digest } from '../workflow-values.mjs';
 import { inspectProcessing } from '../processing.mjs';
@@ -58,8 +58,13 @@ export async function harness(t, f, overrides = {}) {
   });
   const dependencies = {
     execution: { async beforeExecution() {}, async guardExecution() {}, async afterExecution() {} },
-    // The real confirmation; a test may first act as another MCP process.
-    async confirmPresentation(capability, args) { await h.beforeConfirm?.(); return confirmReviewPresentation(capability, args); },
+    // The real check before the reply and confirmation after it; a test may
+    // first act as another MCP process.
+    async presentationCurrent(capability, args) { await h.beforeCheck?.(); return presentationAttemptCurrent(capability, args); },
+    confirmPresentation(capability, args) {
+      h.confirming = (async () => { await h.beforeConfirm?.(); h.confirmed = await confirmReviewPresentation(capability, args); return h.confirmed; })();
+      return h.confirming;
+    },
     async resolveInvocation(capability, context, invocation) {
       const selected = await readSelection(f.store, { client: f.identity.client, sessionId: f.identity.sessionId });
       return Object.freeze({ source: f.source, selection: f.selection, selectionHash: selected.hash,
@@ -112,10 +117,13 @@ export async function harness(t, f, overrides = {}) {
     const id = nextId++;
     await h.beforeCall?.(name, argumentsValue, id);
     const identity = h.nativeIdentity ?? f.identity;
+    // A presentation is confirmed just after its reply is written; a person
+    // reads it first, so a test's next call waits for that confirmation.
+    const settled = async row => { await new Promise(resolve => setImmediate(resolve)); await h.confirming?.catch(() => {}); h.confirming = null; return row; };
     return h.send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: argumentsValue,
       _meta: client === 'claude' ? { 'claudecode/toolUseId': h.callId ?? `toolu_${id}` }
         : { callId: h.callId ?? `call_${id}`, itemId: `item_${id}`, 'x-codex-turn-metadata': {
-          session_id: identity.sessionId, thread_id: identity.sessionId, turn_id: identity.unitId } } } });
+          session_id: identity.sessionId, thread_id: identity.sessionId, turn_id: identity.unitId } } } }).then(settled);
   };
   h.nextForm = () => {
     const ready = deferred(), timer = setTimeout(() => ready.reject(new Error('Expected native review form was not emitted')), 10000);

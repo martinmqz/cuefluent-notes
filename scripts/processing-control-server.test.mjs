@@ -31,6 +31,22 @@ async function server(messages, overrides = {}) {
 }
 const view = row => JSON.parse(row.result.content[0].text);
 
+test('bookkeeping that needs the written reply runs only after the write succeeded', async () => {
+  for (const fails of [false, true]) {
+    const order = [];
+    let failed = false;
+    // Only the server's write(bytes, done) is used; this one can fail the tool reply once.
+    const output = { write(bytes, done) {
+      const row = JSON.parse(bytes);
+      if (fails && !failed && row.id === 1 && row.result) { failed = true; done?.(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); return false; }
+      order.push(row.error ? 'error reply' : `reply ${row.id}`); done?.(); return true;
+    } };
+    await server([initialize, tool('processing_status', { collectionId: 'example' })], { output,
+      afterResponse: async () => { order.push('checked'); }, afterDelivery: async () => { order.push('delivered'); } });
+    assert.deepEqual(order, fails ? ['reply 0', 'checked', 'error reply'] : ['reply 0', 'checked', 'reply 1', 'delivered']);
+  }
+});
+
 test('source adapter exposes explicit versioned tools without save, approval or arbitrary execution', async () => {
   const result = await server([initialize, { jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
   assert.equal(result.rows[0].result.serverInfo.name, 'cuefluent_control');
