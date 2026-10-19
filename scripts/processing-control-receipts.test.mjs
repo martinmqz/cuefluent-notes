@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { privateIntakeFixture } from './test-support/intake-fixture.mjs';
+import { privateIntakeFixture, explicitIntakeFixture } from './test-support/intake-fixture.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { withIntakeLock, intakeSnapshot } from './intake-io.mjs';
 import { controlSelection, readSelection, readCaptureHead, readReaderProgress, commitReaderProgress, publishCapture } from './intake-store.mjs';
@@ -299,6 +299,35 @@ test('unfamiliar duplicate-key receipt bytes are preserved and cannot authorize 
     assert.equal(read.pending[0].reason, 'INVALID_PROCESSING_CONTROL_RECEIPT');
     assert.equal(codexProgressPlan(read).scan.to.offset, read.from.offset);
     assert.deepEqual((await intakeSnapshot(f.store, 'state', f.name)).bytes, altered);
+  });
+});
+
+test('a receipt keeps validating against its own recorded reply after replies are reworded', async t => {
+  // The exact reply v0.15.1 recorded for this status; this release words it differently.
+  const response = { chat: null, collectionId: 'fixture', diagnostics: ['PROCESSING_RECOVERY_REQUIRED'], interfaceVersion: 1,
+    nextAction: 'inspect', requestId: null, status: 'blocked', statusText: 'Cuefluent processing: blocked. PROCESSING_RECOVERY_REQUIRED. Next action: inspect.' };
+  const f = await fixture(t), resultHash = digest(canonicalJSON({ content: [{ type: 'text', text: canonicalJSON(response) }], isError: false }));
+  const dispatch = { ...f.dispatch, statusText: response.statusText, resultHash, response };
+  await withIntakeLock(f.store, async tx => {
+    for (const changed of [{ ...dispatch, statusText: 'Cuefluent processing: blocked.' }, { ...dispatch, resultHash: 'b'.repeat(64) },
+      { ...dispatch, response: { ...response, statusText: 'Cuefluent processing: blocked.' } }, { ...dispatch, response: [response] }]) {
+      await assert.rejects(f.record(tx, changed), { code: 'INVALID_PROCESSING_CONTROL_RECEIPT' });
+    }
+    assert.equal((await f.record(tx, dispatch)).status, 'recorded');
+    assert.deepEqual(await f.resolve(tx)(f.query), dispatch);
+  });
+});
+
+test('a one-time capture resolves its control receipts under its own scope', async t => {
+  const f = await fixture(t, { turn: { control: 'save t7xb88' } });
+  await withIntakeLock(f.store, tx => f.record(tx));
+  const store = await explicitIntakeFixture(f.store, f.source, { scopeId: f.scopeId, unitIds: [unitId] });
+  await withIntakeLock(store, async tx => {
+    assert.deepEqual(await processScope(tx, store, f.selection, f.scopeId, authorize), { saved: 0, pending: null, incomplete: false, drained: true });
+    assert.equal((await readCaptureHead(store, { client: 'codex', sessionId, unitId })).head, null);
+    // Another scope's read is still refused on this store.
+    await assert.rejects(createProcessingControlResolver(tx, { state: f.selection.state, selectionHash: f.selection.hash, authorize,
+      scopeId: randomUUID() })(f.query), { code: 'WORKFLOW_NOT_AUTHORIZED' });
   });
 });
 

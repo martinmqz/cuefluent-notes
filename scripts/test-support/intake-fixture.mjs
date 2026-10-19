@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { coreStorageFixture } from './core-storage.mjs';
-import { openWorkflowIntake } from '../intake-io.mjs';
+import { openWorkflowIntake, openExplicitCaptureIntake } from '../intake-io.mjs';
 import { digest } from '../workflow-values.mjs';
 const fixtureCapabilities = new WeakMap();
 
@@ -23,4 +23,9 @@ export async function privateIntakeFixture(t, source) {
 
 export function rebindIntakeFixture(store, source) {
   return openWorkflowIntake(fixtureCapabilities.get(store), { client: source.client, sessionId: source.sessionId, cwd: source.projectRoot }, 'collect');
+}
+
+/** The same fixture storage opened as one explicitly selected one-time capture. */
+export function explicitIntakeFixture(store, source, scope) {
+  return openExplicitCaptureIntake(fixtureCapabilities.get(store), { client: source.client, sessionId: source.sessionId, cwd: source.projectRoot }, scope);
 }

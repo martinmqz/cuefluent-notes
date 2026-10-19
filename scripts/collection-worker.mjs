@@ -12,7 +12,8 @@ import { inspectIntakeStore, openWorkflowIntake, intakePath, intakeSnapshot, int
 import { readSelection, controlSelection, resolveStoredSelectionAnchor, readCaptureHead, publishCapture, commitReaderProgress, recoverPendingPublication, inspectPendingPublication, readReaderProgress } from './intake-store.mjs';
 import { newSelectionState, inspectSourceBoundary, currentIntervals, stableSourceIdentity } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexProgressPlan, codexCheckpoint } from './codex-reader.mjs';
-import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan, CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
+import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan, isClaudeHumanRow, CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
+import { readSessionRange } from './session-jsonl.mjs';
 import { createProcessingExecutionResolver } from './processing-execution-receipts.mjs';
 import { hydrateReaderCheckpoint } from './reader-pages.mjs';
 import { readTombstone } from './capture-retention.mjs';
@@ -110,6 +111,13 @@ async function armRegistration(transaction, store, registration, wake, authorize
     readHeader: (offset, length) => offset + length > frozen.eofByte ? fail('SESSION_HEADER_UNAVAILABLE') : io.readHeader(offset, length) });
   const observed = await inspectSourceBoundary(selected, { verifyHeader, frozen, currentUnitId: registration.unitId });
   if (observed.status !== 'registered') return { pending: 'SOURCE_BOUNDARY_PENDING' };
+  // An attachment or system row can identify the session before its first
+  // prompt is written, so that floor must hold a complete human prompt too.
+  if (freezing) {
+    const { records } = await readSessionRange({ source: observed.source, from: 0, endByte: frozen.eofByte,
+      readHeader: verifyHeader, verifyHeader: identity => identity, observeRead, maxBytes: 8 * 1024 * 1024 });
+    if (!records.some(record => isClaudeHumanRow(record.value))) fail('SESSION_HEADER_UNAVAILABLE');
+  }
   const continuation = registration.client === 'claude' ? await claudeContinuation(transaction, store, observed.source, link, authorize, observeRead) : null;
   const target = continuation?.from ?? null;
   if (registration.snapshot === null && floor === null) await replaceIntakeJSON(transaction, floorName,
@@ -224,7 +232,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
         authorize: () => authorize({ operation: 'capture', identity, projectRoot: selection.state.source.projectRoot,
           sourcePath: selection.state.source.path }) }),
       resolveProcessingDispatch: createProcessingControlResolver(transaction,
-        { state: selection.state, selectionHash: selection.hash, authorize }),
+        { state: selection.state, selectionHash: selection.hash, authorize, scopeId }),
       loadHead: unitId => readCaptureHead(store, { ...identity, unitId }), ...(identity.client === 'claude' ? { continuation } : {}) });
     // A later event for an already published/pruned Codex unit is not harmless
     // structural content. Do not advance through it as an excluded prefix.

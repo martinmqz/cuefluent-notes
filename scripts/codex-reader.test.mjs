@@ -5,7 +5,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm } from './codex-reader.mjs';
+import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm, CODEX_V4_CONTROL_FORMS, CODEX_V4_CODE } from './codex-reader.mjs';
+import { PROCESSING_CONTROL_FORMS, REVIEW_CODE, REVIEW_CODE_PLACEHOLDER } from './processing-control-proof.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { newSelectionState, applySelectionControl, stableSourceIdentity, inspectSourceBoundary } from './capture-selection.mjs';
 import { digest } from './workflow-values.mjs';
@@ -1091,4 +1092,12 @@ test('published version 2 Codex captures keep their skill-block omission and con
     const again = (await readCodexSelection({ ...args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
     assert.equal(again.evidenceHash, replayed.evidenceHash);
   }
+});
+
+test('reader version 4 decides command-only messages with the grammar it shipped with', () => {
+  // Today the live grammar matches. When it changes, v4 keeps these forms and
+  // the new grammar goes into a new reader version, so v4 captures replay unchanged.
+  assert.deepEqual(CODEX_V4_CONTROL_FORMS.map(form => form.map(word => word === '#' ? REVIEW_CODE_PLACEHOLDER : word)),
+    PROCESSING_CONTROL_FORMS.map(form => [...form]), 'the command grammar changed: add a Codex reader version');
+  assert.equal(CODEX_V4_CODE.source, REVIEW_CODE.source, 'the draft-code alphabet changed: add a Codex reader version');
 });

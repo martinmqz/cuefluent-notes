@@ -3,7 +3,6 @@ import { readSelection, verifySourceCursor } from './intake-store.mjs';
 import { newSelectionState, validateSelectionState } from './capture-selection.mjs';
 import { absolutePath } from './workflow-paths.mjs';
 import { canonicalJSON, digest, fail, keys, nativeId, hash, string, id } from './workflow-values.mjs';
-import { processingControlStatusView } from './processing-control-server.mjs';
 
 const FORMAT = 'cuefluent-processing-control-dispatch';
 const MAX_RECEIPT_BYTES = 32 * 1024;
@@ -35,11 +34,14 @@ function dispatchDescriptor(value) {
   for (const field of ['argsHash', 'sourceIdentity', 'requestHash', 'resultHash']) hash(value[field]);
   absolutePath(value.sourcePath); absolutePath(value.skillPath); string(value.statusText, 4096);
   if (Buffer.byteLength(value.statusText) > 4096) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+  // The stored reply is checked against the text and result hash recorded with
+  // it, never re-rendered: a receipt stays valid when a later release words
+  // its replies differently.
   if (value.response !== undefined) {
-    id(value.response?.collectionId);
-    const response = processingControlStatusView(value.response, { collectionId: value.response.collectionId });
-    const result = { content: [{ type: 'text', text: canonicalJSON(response) }], isError: false };
-    if (canonicalJSON(value.response) !== canonicalJSON(response) || response.statusText !== value.statusText ||
+    if (value.response === null || typeof value.response !== 'object' || Array.isArray(value.response)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+    id(value.response.collectionId);
+    const result = { content: [{ type: 'text', text: canonicalJSON(value.response) }], isError: false };
+    if (value.response.statusText !== value.statusText ||
         digest(canonicalJSON(value.client === 'claude' ? result.content : result)) !== value.resultHash) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   }
   return value;
@@ -74,9 +76,10 @@ const receiptPath = ({ client, sessionId, callId }) => {
   return `control-dispatch/${client}/${sessionId}/${digest(callId).slice(0, 24)}.json`;
 };
 
-async function selectionGuard(transaction, source, selectionHash, unitId, authorize) {
+// A one-time capture's store admits only its own scope, so a read for it names that scope.
+async function selectionGuard(transaction, source, selectionHash, unitId, authorize, scopeId = null) {
   const store = await assertIntakeTransaction(transaction);
-  await assertIntakePrivacy(transaction, { identity: { client: source.client, sessionId: source.sessionId, unitId }, projectRoot: source.projectRoot });
+  await assertIntakePrivacy(transaction, { identity: { client: source.client, sessionId: source.sessionId, unitId }, projectRoot: source.projectRoot, scopeId });
   const selected = await readSelection(store, { client: source.client, sessionId: source.sessionId });
   if (!selected.state || selected.hash !== selectionHash) fail('STALE_SELECTION');
   if (canonicalJSON(selected.state.source) !== canonicalJSON(source)) fail('SOURCE_IDENTITY_MISMATCH');
@@ -114,21 +117,22 @@ export async function recordProcessingControlDispatch(transaction, { source, sel
  * receipt is ordinary evidence, not an error or permission to skip that unit.
  * Current selection is pinned independently of the historical receipt hash.
  */
-export function createProcessingControlResolver(transaction, { state, selectionHash, authorize }) {
+export function createProcessingControlResolver(transaction, { state, selectionHash, authorize, scopeId = null }) {
   validateSelectionState(state); hash(selectionHash);
+  if (scopeId !== null) nativeId(scopeId);
   const source = structuredClone(state.source);
   return async query => {
     query = structuredClone(query);
     keys(query, ['client', 'sessionId', 'unitId', 'callId', 'tool', 'argsHash']);
     nativeId(query.unitId); hash(query.argsHash);
     if (query.client !== source.client || query.sessionId !== source.sessionId) return null;
-    const store = await selectionGuard(transaction, source, selectionHash, query.unitId, authorize);
+    const store = await selectionGuard(transaction, source, selectionHash, query.unitId, authorize, scopeId);
     const snapshot = await intakeSnapshot(store, 'state', receiptPath(query), { maxBytes: MAX_RECEIPT_BYTES });
     if (snapshot.bytes === null) return null;
     const value = readReceipt(snapshot);
     if (canonicalJSON(value.source) !== canonicalJSON(source) ||
         Object.entries(query).some(([key, item]) => value.dispatch[key] !== item)) return null;
-    await selectionGuard(transaction, source, selectionHash, query.unitId, authorize);
+    await selectionGuard(transaction, source, selectionHash, query.unitId, authorize, scopeId);
     return Object.freeze({ ...value.dispatch });
   };
 }

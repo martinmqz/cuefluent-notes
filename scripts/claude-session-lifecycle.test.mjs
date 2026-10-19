@@ -526,6 +526,27 @@ test('only a prompt wake lets the worker freeze a floor; it waits briefly for a 
     const call = A.call('review'); await A.append([call]);
     assert.equal((await A.resolve(call)).unitId, P1);
   });
+  // A root attachment row can identify the session before its first prompt
+  // is written; the floor must still hold that prompt.
+  await t.test('the first prompt lands after an identifying attachment row and the frozen floor', async t => {
+    const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
+    await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
+    await A.append([A.meta('mode', { mode: 'normal' }), A.root('attachment', { attachment: { type: 'hook_additional_context', content: ['Synthetic context'] } })]);
+    const rows = A.control('review', P1), open = fs.open;
+    let landed = false;
+    t.mock.method(fs, 'open', async function (file, ...args) {
+      if (!landed && path.basename(String(file)) === path.basename(A.file)) {
+        landed = true; await fs.appendFile(A.file, rows.map(line).join(''));
+      }
+      return open.call(this, file, ...args);
+    });
+    assert.deepEqual(sessionCodes(await f.run({ trigger: { client: 'claude', sessionId: A.sessionId } }), A.sessionId), ['NATIVE_BOUNDARY_PENDING']);
+    assert(landed);
+    t.mock.restoreAll();
+    assert.equal((await floorOf(f, A)).snapshot.eofByte, (await fs.stat(A.file)).size);
+    const call = A.call('review'); await A.append([call]);
+    assert.equal((await A.resolve(call)).unitId, P1);
+  });
   await t.test('only the session whose hook launched the worker waits for its file', async t => {
     const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
     await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);

@@ -6,7 +6,7 @@ import { createCapture, validateCapture, clientVersion } from './capture-contrac
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
 import { absolutePath } from './workflow-paths.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
-import { verifyCodexProcessingControl, isProcessingControlProof, processingControlText } from './processing-control-proof.mjs';
+import { verifyCodexProcessingControl, isProcessingControlProof } from './processing-control-proof.mjs';
 import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
@@ -26,6 +26,18 @@ export const CODEX_READER_VERSION = '4';
 export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2' });
 export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup', '4': 'mention' });
 const SKILL_MARKUP_RULES = Object.freeze(['markup', 'mention']);
+// Which mentioned-skill message is only a command is decided with the command
+// grammar and draft-code alphabet as version 4 shipped them, frozen here: a
+// later grammar changes what a new reader version accepts, never the evidence
+// of a capture version 4 published. `#` stands for a draft code.
+export const CODEX_V4_CONTROL_FORMS = Object.freeze(['help', 'status', 'status --verbose', 'process', 'process repo', 'process chat',
+  'process resume', 'process cancel', 'review', 'review #', 'review cancel', 'review cancel #', 'save', 'save #', 'skip', 'skip #']
+  .map(form => Object.freeze(form.split(' '))));
+export const CODEX_V4_CODE = /^[a-hjkmnp-tv-z2-9]{6}$/;
+const v4Control = text => typeof text === 'string' && text.length <= 64 && CODEX_V4_CONTROL_FORMS.some(form => {
+  const words = text.split(' ');
+  return form.length === words.length && form.every((word, index) => word === '#' ? CODEX_V4_CODE.test(words[index]) : word === words[index]);
+});
 const CONTROL_SERVER = 'cuefluent_control';
 // Evidence rules are a pure function of the transcript and the capture's reader
 // version, so a published unit replays to the same bytes after an upgrade or a
@@ -271,12 +283,12 @@ function blocks(collector, record, content, kind, syntax, skillRules = 'retain',
     // command. Other messages, and a mention typed by hand, stay as typed.
     const after = syntax === 'user' && selected ? codexMentionText(content) : null;
     if (after !== null) {
-      if (after.startsWith(' ') && processingControlText(after.slice(1)) !== null) return;
+      if (after.startsWith(' ') && v4Control(after.slice(1))) return;
       collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
     }
     // The older skill part with exactly one action is only the command too.
     if (syntax === 'user' && content.length === 2 && pluginSkillBlock(content[0]) && content[1]?.type === 'text' &&
-        processingControlText(content[1].text) !== null) return;
+        v4Control(content[1].text)) return;
     // An assistant message that only repeats this plugin's reply in this turn,
     // compared in the form `codexReplyForm` gives both, is that reply, not the
     // assistant's own text.
