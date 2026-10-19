@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
-import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock } from './intake-io.mjs';
+import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, intakeSnapshot, replaceIntakeJSON, replaceIntakeBytes } from './intake-io.mjs';
 import { controlSelection, readSelection } from './intake-store.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { resolveProcessingInvocation, isProcessingInvocation } from './processing-native-invocation.mjs';
@@ -12,6 +12,7 @@ import { canonicalJSON, digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { collectionIngress, processingSourcePath } from './collection-ingress.mjs';
 import { processingControlCall } from './processing-control-proof.mjs';
+import { continuedPath, continuesPath, readContinuedLink, ensureContinuesPointer } from './claude-continuation.mjs';
 
 const stamp = '2026-10-10T12:00:00.000Z';
 const line = value => JSON.stringify(value) + '\n';
@@ -988,5 +989,112 @@ test('the skill typed with nothing after it binds as a request for the command l
     assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
     assert.equal(bound.typedHelp === true, expected === 'help');
     assert.deepEqual(bound.typedSuggestions, expected === 'suggestions' ? ['help', 'review', 'status'] : undefined);
+  });
+});
+
+// A Claude continuation link as the worker records it (claude-continuation.mjs),
+// joining the fixture session and a synthetic peer. Into the fixture session,
+// its pre-boundary record is the re-homed prefix, so the binding window starts
+// past it; out of it, the fixture session is an origin continued elsewhere.
+// The peer's transcript is never read.
+function continuation(f, { into = true, peer = randomUUID(), lineage } = {}) {
+  const { startByte, endByte, hash } = f.boundary.record, record = { startByte, endByte, hash };
+  const self = { sessionId: f.context.sessionId, registrationId: randomUUID(), sourcePath: f.source.path, sourceIdentity: f.source.fileIdentity };
+  const other = { sessionId: peer, registrationId: randomUUID(), sourcePath: path.join(f.project, `${peer}.jsonl`), sourceIdentity: digest(`synthetic ${peer}`) };
+  const [from, to] = into ? [other, self] : [self, other];
+  return { format: 'cuefluent-session-continuation', version: 1, client: 'claude', lineage: lineage ?? from.sessionId,
+    from: { ...from, marker: record }, to: { ...to, prefix: record, sessionKinds: [] }, linkedAt: stamp };
+}
+// Recorded through the helpers as the worker does: the link, then its pointer.
+const recordContinuation = (f, link) => withIntakeLock(f.store, async tx => {
+  await replaceIntakeJSON(tx, continuedPath(link.from.sessionId), link, null);
+  await ensureContinuesPointer(tx, f.store, await readContinuedLink(f.store, link.from.sessionId), async () => {});
+});
+const canonicalBytes = value => canonicalJSON(value) + '\n';
+const stateFile = (f, name) => path.join(f.collection.intakeStateDir, name);
+// Replace one private state file with exact, possibly non-canonical, bytes.
+const putState = (f, name, bytes) => withIntakeLock(f.store, async tx =>
+  replaceIntakeBytes(tx, name, Buffer.from(bytes), (await intakeSnapshot(f.store, 'state', name, { maxBytes: 16384 })).hash));
+// Re-record the link as these exact bytes and re-point the successor's pointer
+// at them, so only the check under test tells them from a verified link.
+async function repoint(f, link, bytes, pointer = {}) {
+  await putState(f, continuedPath(link.from.sessionId), bytes);
+  await putState(f, continuesPath(link.to.sessionId), canonicalBytes({ format: 'cuefluent-session-continues', version: 1, client: 'claude',
+    sessionId: link.to.sessionId, from: link.from.sessionId, lineage: link.lineage, linkHash: digest(bytes), ...pointer }));
+}
+// One verified typed Claude decision, built as in the typed review tests above.
+async function typedDecision(f) {
+  const command = 'cuefluent-notes:cuefluent-notes', typed = 'save t7xb88';
+  f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, decision: 'save', draft: 't7xb88' };
+  await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+  await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+  const input = f.spacer();
+  input.message.content = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${typed}</command-args>`;
+  const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+    message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\nSynthetic control ${typed}\n` }] } };
+  const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+  await f.append([input, companion, call]);
+}
+
+test('a tampered Claude continuation link or pointer binds no typed control in the successor', async t => {
+  const duplicateVersion = bytes => bytes.replace('"version":1', '"version":0,"version":1');
+  // Every changed record still parses; the case names what no longer verifies.
+  const cases = {
+    'non-canonical pointer bytes': async (f, link) => putState(f, continuesPath(link.to.sessionId),
+      duplicateVersion(await fs.readFile(stateFile(f, continuesPath(link.to.sessionId)), 'utf8'))),
+    'non-canonical link bytes named by its pointer': (f, link) => repoint(f, link, duplicateVersion(canonicalBytes(link))),
+    'an unsupported link version named by its pointer': (f, link) => repoint(f, link, canonicalBytes({ ...link, version: 2 })),
+    'a link changed after its pointer': (f, link) => putState(f, continuedPath(link.from.sessionId),
+      canonicalBytes({ ...link, linkedAt: '2026-10-10T12:00:01.000Z' })),
+    'a pointer whose link is gone': (f, link) => fs.rm(stateFile(f, continuedPath(link.from.sessionId))),
+    'a pointer recorded for another session': (f, link) => repoint(f, link, canonicalBytes(link), { sessionId: randomUUID() }),
+    // Another origin's link, also filed under its own origin, named by this pointer.
+    'a link filed under another origin': async (f, link) => {
+      const other = randomUUID(), bytes = canonicalBytes({ ...link, from: { ...link.from, sessionId: other } });
+      await putState(f, continuedPath(other), bytes); await repoint(f, link, bytes);
+    },
+    'a link into another successor': (f, link) => repoint(f, link, canonicalBytes({ ...link, to: { ...link.to, sessionId: randomUUID() } })),
+    'a link of another lineage than its pointer': (f, link) => repoint(f, link, canonicalBytes({ ...link, lineage: randomUUID() })),
+    'a link into another transcript': (f, link) => repoint(f, link, canonicalBytes({ ...link, to: { ...link.to, sourceIdentity: digest('another transcript') } })),
+  };
+  for (const [name, tamper] of Object.entries(cases)) await t.test(name, async t => {
+    const f = await fixture(t, 'claude'), link = continuation(f);
+    await recordContinuation(f, link); await typedDecision(f);
+    // Verified, the successor's typed decision binds in the origin's lineage.
+    const bound = await f.resolve();
+    assert.equal(bound.typedControl, 'save t7xb88');
+    assert.deepEqual(bound.chatLineage, { client: 'claude', sessionId: link.from.sessionId });
+    await tamper(f, link);
+    await assert.rejects(f.resolve(), unavailable);
+  });
+});
+
+test('a continuation link or pointer changed after the binding first read it refuses the typed control', async t => {
+  const lineage = randomUUID();
+  // [case, starts as a verified successor, change, what a fresh binding then reports]
+  for (const [name, linked, change, after] of [
+    ['the link and its pointer re-recorded for another lineage', true,
+      (f, link) => repoint(f, link, canonicalBytes({ ...link, lineage }), { lineage }), { client: 'claude', sessionId: lineage }],
+    ['the pointer removed', true, (f, link) => fs.rm(stateFile(f, continuesPath(link.to.sessionId))), undefined],
+    ['a pointer recorded for a session first read without one', false,
+      f => recordContinuation(f, continuation(f, { peer: lineage })), { client: 'claude', sessionId: lineage }],
+    ['the session continued elsewhere', false, f => recordContinuation(f, continuation(f, { into: false })), 'PROCESSING_CHAT_CONTINUED'],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t, 'claude'), link = linked ? continuation(f) : null;
+    if (link) await recordContinuation(f, link);
+    await typedDecision(f);
+    assert.deepEqual((await f.resolve()).chatLineage, link ? { client: 'claude', sessionId: link.from.sessionId } : undefined);
+    // The change lands at the binding's first transcript open: after it first
+    // read the pointer and links, before a guard re-checks their pinned hashes.
+    const original = fs.open; let changed = false;
+    const mocked = t.mock.method(fs, 'open', async function(file, ...args) {
+      const handle = await original.call(this, file, ...args);
+      if (file === f.source.path && !changed) { changed = true; await change(f, link); }
+      return handle;
+    });
+    await assert.rejects(f.resolve(), unavailable); mocked.mock.restore(); assert.equal(changed, true);
+    // Only a fresh binding reads the changed records; the earlier lineage is never reused.
+    if (typeof after === 'string') await assert.rejects(f.resolve(), { code: after });
+    else assert.deepEqual((await f.resolve()).chatLineage, after);
   });
 });
