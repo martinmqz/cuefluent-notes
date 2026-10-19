@@ -97,10 +97,10 @@ exec/tool call, repeat the same tool and arguments with its returned `retryToken
 once. This handshake does not start processing or approve a proposal. Do not
 retry inside the same exec or invent a token. Never repeat an action to poll;
 use `status` when requested. After a successful control call, return only the
-tool's `statusText`. A refused or failed control call returns a plain-text error
-message for the user: return that message and stop. If the tool itself is
-unavailable, report that limitation and stop; do not silently fall back to inline
-processing or invent selection metadata.
+tool's `statusText`, unchanged. A refused or failed control call returns a
+plain-text error message for the user: return that message unchanged and stop.
+If the tool itself is unavailable, report that limitation and stop; do not
+silently fall back to inline processing or invent selection metadata.
 
 Natural-language processing requests typed without this skill's command can use
 the same handoff; after the command, only an exact action calls a control.

@@ -38,10 +38,16 @@ start `setup`, which follows the [setup workflow](setup.md) and is not itself a
 processing control.
 
 Replies are short, plain Markdown. They name a draft by its code and first note
-path, list commands and other drafts as one list item each, and contain no
-hashes, identifiers or diagnostic codes. A review reply links the review folder
-and each listed file's proposed copy as `file://` links that open with one click
-(a very long folder path is shown as plain text instead). A status reply or
+path, list commands and other drafts as one list item each after a blank line
+(a draft as its code, one space and its note path), and contain no hashes,
+identifiers or diagnostic codes. A review reply links the review folder and each
+listed file's proposed copy: in Claude as `file://` links that open with one
+click, in Codex as the local links Codex's model writes itself,
+`[name](/absolute/path)` with the folder's or file's name (angle brackets around
+a path with spaces or parentheses), so a relayed reply keeps its form. A very
+long folder path, or in Codex a path Markdown cannot carry as such a link (for
+example a Windows path), is shown as a code span instead, so it reads exactly
+as written; note paths are quoted with Markdown's inline characters escaped. A status reply or
 completed decision that has diagnostics says to type `status --verbose`; that
 reply adds the status, next action, diagnostics, request and chat identifiers,
 scope, counts and each draft's exact revision. The review folder's `summary.txt`
@@ -507,9 +513,9 @@ state intact until the supported operation succeeds.
 Invoke the same skill with `review` (or `review <code>` for one draft). Its
 `cuefluent_control.processing_review` call writes the exact outstanding proposal
 to a private review folder in the collection's private state, never in the notes
-folder or the project, and replies with the folder and each listed file's
-proposed copy as one-click `file://` links, each note path with its size, and the
-decision commands. Open the folder in any editor:
+folder or the project, and replies with links to the folder and each listed
+file's proposed copy (see [commands and replies](#commands-and-replies)), each
+note path with its size, and the decision commands. Open the folder in any editor:
 
 - `proposed.md` holds the exact Markdown that Save would write, and `current.md`
   the note as it is now when the draft updates an existing note. A draft with
@@ -658,7 +664,9 @@ list with its selection item) and either call form (a direct call, or code
 mode's two verification cells with any `wait` on the second). The proof covers
 the whole completed turn and admits only: the typed message and its mirror, the
 selection item, native and hook context, the call with its native MCP items and
-outputs, and the one final reply, which must be the control's own status text.
+outputs, and the one final reply, which must be the control's own status text
+byte for byte; a reply the model reformatted keeps the turn collectible, where
+the relay rule below still leaves it out.
 Commentary or any other assistant message is the assistant's own text and keeps
 the turn collectible, however short. Each code-mode cell must print exactly what its
 call returned. The receipt names both cells and the retry call by the native IDs
@@ -700,8 +708,12 @@ skill. In every Codex turn, with or without the skill, this plugin's control
 calls, their results, code-mode cells that only made such calls and an
 assistant message that only repeats one of their replies (a status, the command
 list, a not-a-command reply or a refusal) are left out, identified by native
-identity, never by text. The assistant's own words, a reply with words added,
-other tools and a cell that also did other work stay. Claude captures only human
+identity, never by text. The message and the reply are compared after one
+[defined Markdown normalization](session-workflow.md#generated-output-provenance-gate),
+so a relay the model only reformatted (its own link form, a blank line before a
+list, indentation) is left out too. The assistant's own words, a paraphrase
+(such as a refusal relayed in other words), a reply with words added, other
+tools and a cell that also did other work stay. Claude captures only human
 input, so no tool call, result or assistant reply is captured from it in any turn.
 See the [session contract](session-workflow.md#generated-output-provenance-gate).
 Existing captures, active claims and issued packet hashes are never rewritten by

@@ -447,6 +447,7 @@ test('Codex 0.163 control turns prove in both message forms, in code mode with o
     ['menu, code mode', {}], ['menu, code mode finished by wait', { waits: 1 }], ['menu, code mode finished by three waits', { waits: 3 }],
     ['older skill part, code mode', { form: 'block' }], ['menu, direct call', { mode: 'direct' }],
     ['menu, first turn of a session', { firstTurn: true }],
+    ['a reply of several Markdown blocks, relayed exactly', { statusText: 'Cuefluent: Draft t7xb88 is ready.\n\nReview folder: <file:///private/review/t7xb88/>' }],
   ]) await t.test(name, async t => {
     const f = await turnFixture(t, options), proof = await verifyCodexProcessingControl(f.request, f);
     assert.equal(isProcessingControlProof(proof), true);
@@ -496,6 +497,12 @@ test('Codex 0.163 control turns with anything outside the exact shape stay colle
     'annotated reply': [{}, rows => { rows[rows.findLastIndex(row => row.payload?.role === 'assistant')].payload.content[0].annotations = [{ url: 'https://example.invalid' }]; }],
     'reply is not the status': [{}, rows => { for (const row of rows) if (row.payload?.item?.phase === 'final_answer') row.payload.item.content[0].text += ' Also 605.';
       rows[rows.findLastIndex(row => row.payload?.role === 'assistant')].payload.content[0].text += ' Also 605.'; }],
+    // The proof stays byte-exact: a reply the model reformatted is not the
+    // status text, so the turn is read under the reader rules instead, which
+    // leave that relay out (codex-reader.mjs, codexReplyForm).
+    'reformatted reply': [{ statusText: 'Cuefluent: Draft t7xb88 is ready.\n\nReview folder: <file:///private/review/t7xb88/>',
+      reply: 'Cuefluent: Draft t7xb88 is ready.\n\nReview folder: [t7xb88](/private/review/t7xb88/)' }],
+    'reply with a blank line added': [{ statusText: 'Cuefluent: Pending drafts:\n- t7xb88 "notes/a.md"', reply: 'Cuefluent: Pending drafts:\n\n- t7xb88 "notes/a.md"' }],
     'final reply before the result': [{}, rows => { const final = rows.splice(rows.findLastIndex(isItem('AgentMessage')), 2);
       rows.splice(at(rows, isPayload('custom_tool_call')), 0, ...final); }],
     'unknown record': [{}, rows => { rows.splice(-2, 0, { type: 'future-user-content', payload: { text: 'correction' } }); }],

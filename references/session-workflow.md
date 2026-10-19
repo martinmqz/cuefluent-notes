@@ -170,14 +170,47 @@ code-mode record. From version 4, an assistant message that only repeats the
 status text (including the command list and a not-a-command reply) or the
 refusal message of one of those left-out calls in the same unit (as Codex
 recorded it, or the plain message inside Codex CLI 0.163's own error framing)
-is that reply, not evidence. Text alone never identifies anything: the person's
-words stay as typed, even an exact action typed without the skill, and
-commentary, any other assistant text, a reply with words added and other tools
-stay. Legacy history records MCP calls without native MCP items, so its control
-calls and replies stay. Published captures keep the rules of their reader
-version: versions 1 and 2 keep the block as an omission and the exchanges,
-version 3 applies the block rules and leaves out exchanges only in units
-started with this skill, version 4 the rules above.
+is that reply, not evidence. The message and each reply are compared in one
+comparison form, which changes only how the same words are marked up:
+
+1. CRLF and CR line endings become LF.
+2. A code span (a run of backticks closed by the next run of the same length)
+   is one unit: its content, with a line ending read as a space and one space
+   dropped from each end when both ends have one and it is not all spaces, is
+   compared as written, and no other rule looks inside it. A run that is never
+   closed is text, and so is a backtick after an odd number of backslashes
+   outside a code span (an escaped backtick), which never opens one; the rest of
+   its run still may. Inside a code span a backslash is literal.
+3. Outside code spans, a `<file:///…>` autolink (no host, query or fragment)
+   becomes its path, percent-decoded as UTF-8, and a link `[name](target)` or
+   `[name](<target>)` whose target is an absolute path or such a `file:///` URL
+   becomes that decoded path when `name` is exactly the path's last segment.
+   Any other link stays as written, and so does a link or autolink whose path
+   does not decode or decodes to a control or line-separator character. A
+   decoded path is one unit, compared as written.
+4. Spaces and tabs at the start and end of each line are dropped, but never
+   inside a code span or a decoded path. Inside a line they stay as written, so
+   a path or name that differs only in its spacing stays distinct.
+5. A line starting with `* `, `+ ` or `• ` starts with `- ` instead.
+6. Empty lines are dropped.
+
+The message and the reply match when they give the same lines of text, path and
+code units. So a relay Codex's model only reformatted (its own link form for a
+local path, a blank line before a list, indentation, another code fence) is that
+reply, while a paraphrase, added or changed words, changed spacing inside a line
+or a path, a link named otherwise, a path shown as a link on one side and as
+text or a code span on the other, emphasis or joined lines keep the message; a
+refusal relayed in other words, for example without its `Cuefluent:` prefix,
+therefore stays as assistant text. These rules belong to reader version 4;
+changing one needs a new reader version.
+Text alone never identifies anything: the person's words stay as typed, even an
+exact action typed without the skill, and commentary, any other assistant text,
+a reply with words added and other tools stay. Legacy history records MCP calls
+without native MCP items, so its control calls and replies stay. Published
+captures keep the rules of their reader version: versions 1 and 2 keep the
+block as an omission and the exchanges, version 3 applies the block rules and
+leaves out exchanges only in units started with this skill, version 4 the rules
+above.
 
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same

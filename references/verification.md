@@ -49,13 +49,22 @@ contracts for supported commands, formats, permissions and recovery procedures.
   [capture prevention](processing-chat.md#capture-prevention-and-limits).
 - In every Codex turn, including a plain-language request without the skill,
   this plugin's control calls, their results, code-mode cells that only made such
-  calls and the assistant's exact repetition of a control reply are left out of
-  captures by native identity. The request's own words stay, and so do
-  commentary, a paraphrase or a reply with words added, a cell that also did other
-  work, every code-mode record of a turn with a nested call no single cell owns or
-  a child agent, and transcripts in legacy history, whose MCP calls have no
-  native MCP items. Copies of a reply in another turn or chat are not detected.
-  These rules are tested with synthetic transcripts, not live Codex sessions.
+  calls and the assistant's repetition of a control reply are left out of
+  captures by native identity. A repetition is compared after one
+  [defined Markdown normalization](session-workflow.md#generated-output-provenance-gate)
+  of link form, line endings, spacing at line ends, bullets and blank lines,
+  with code spans and decoded paths compared as written. The request's own
+  words stay, and so do commentary, a paraphrase (such as a refusal relayed in
+  other words), a reply with words added or other formatting such as emphasis or
+  code spans, a cell that also did other work, every code-mode record of a turn
+  with a nested call no single cell owns or a child agent, and transcripts in
+  legacy history, whose MCP calls have no native MCP items. Copies of a reply in
+  another turn or chat are not detected. These rules are tested with synthetic
+  transcripts, not live Codex sessions.
+- Codex replies link the review folder and proposed copies in the form Codex's
+  model writes a local link, `[name](/absolute/path)`; a path Markdown cannot
+  carry that way, including any Windows path, is shown as a code span without a
+  link. How Codex on Windows writes and relays such paths is unverified.
 - Routing text typed after the skill command, such as a plain-language request
   that starts with `save`, depends on the model following
   [the skill](../SKILL.md#formal-processing-controls). Verified inexact text

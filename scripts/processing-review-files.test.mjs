@@ -10,6 +10,7 @@ import { inspectProcessing, completeProcessing, proposeProcessing } from './proc
 import { reviewCode, presentReviewFiles, readReviewPresentations } from './processing-review-files.mjs';
 import { readReviewPreview } from './processing-host-review.mjs';
 import { REVIEW_CODE, REVIEW_COMMANDS, processingControlCall } from './processing-control-proof.mjs';
+import { reviewPathLink } from './processing-control-server.mjs';
 import { fingerprint } from './safe-update.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { readSelection } from './intake-store.mjs';
@@ -197,7 +198,7 @@ test('a replaced revision needs a fresh verified review: bare save and the old c
   const bare = await review(h, { decision: 'save' });
   assert.equal(bare.review, 'unresolved');
   assert.deepEqual(bare.drafts, [{ code: codeB, path: 'meetings/rollout.md', fileCount: 1 }]);
-  assert(bare.statusText.endsWith(`\n\nPending drafts:\n- ${codeB}  "meetings/rollout.md"`)); assertPlainReply(bare, f);
+  assert(bare.statusText.endsWith(`\n\nPending drafts:\n\n- ${codeB} "meetings/rollout.md"`)); assertPlainReply(bare, f);
   // Naming B's code does not bypass the typed review: B's only display was unverified.
   const coded = await review(h, { decision: 'save', draft: codeB });
   assert.equal(coded.review, 'not-shown'); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
@@ -245,12 +246,12 @@ test('acceptance, in either client: A typed-reviewed and replaced by B shown unv
     const bare = await typed('save');
     assert.equal(bare.review, 'unresolved');
     assert.equal(bare.statusText, `Cuefluent: Nothing was applied: name the draft to decide on, as in ${prefix} save <draft code>, after reading it with ${prefix} review <draft code>.` +
-      `\n\nPending drafts:\n- ${codeB}  "meetings/rollout.md"`);
+      `\n\nPending drafts:\n\n- ${codeB} "meetings/rollout.md"`);
     // A was replaced: the refusal names that cause, and B is listed.
     const old = await typed(`save ${codeA}`);
     assert.equal(old.review, 'changed'); assert.equal(old.reason, 'not-pending'); assert.equal(old.draft.code, codeA);
     assert.equal(old.statusText, `Cuefluent: Nothing was applied: draft ${codeA} is not pending. Review the current draft with ${prefix} review before deciding.` +
-      `\n\nPending drafts:\n- ${codeB}  "meetings/rollout.md"`);
+      `\n\nPending drafts:\n\n- ${codeB} "meetings/rollout.md"`);
     const coded = await typed(`save ${codeB}`);
     assert.equal(coded.review, 'not-shown');
     assert(coded.statusText.endsWith(`Read it first with ${prefix} review ${codeB}.`), coded.statusText);
@@ -538,7 +539,8 @@ test('Codex keeps its native form, names the review folder, and accepts the same
     h.answer(await next, { action: 'accept', content: { decision: 'later' } });
     const later = body(await call), code = later.draft.code;
     assert.equal(later.review, 'deferred');
-    assert.equal(later.statusText, `Cuefluent: Review deferred with Later. Draft ${code} ("meetings/rollout.md") remains pending; nothing was saved.\n\nReview folder: <${pathToFileURL(later.draft.folder).href}/>\n\n` +
+    // Codex links the folder the way its model writes a local link.
+    assert.equal(later.statusText, `Cuefluent: Review deferred with Later. Draft ${code} ("meetings/rollout.md") remains pending; nothing was saved.\n\nReview folder: ${reviewPathLink(codex, later.draft.folder, { folder: true }) ?? later.draft.folder}\n\n` +
       `To decide, type ${codex} save ${code} or ${codex} skip ${code}.`);
     // The typed text alone carries the decision; the call has no review fields.
     h.typedControl = `save ${code}`;
@@ -698,13 +700,13 @@ test('help, the bare skill, status and status --verbose reply in the client spel
     // Plain status lists the pending draft by code and note path, without codes.
     const plain = await status('status', {});
     assert.deepEqual(plain.drafts, [{ code, path: 'meetings/rollout.md', fileCount: 1 }]);
-    assert(plain.statusText.includes(`\n\nDrafts awaiting review:\n- ${code}  "meetings/rollout.md"\n\nRead one with ${prefix} review <draft code>.`));
+    assert(plain.statusText.includes(`\n\nDrafts awaiting review:\n\n- ${code} "meetings/rollout.md"\n\nRead one with ${prefix} review <draft code>.`));
     assertPlainReply(plain, f);
     // The verbose reply names the exact revision and every detail.
     const verbose = await status('status --verbose', { verbose: true });
     assert.equal(verbose.verbose, true);
     assert.deepEqual(verbose.drafts, [{ code, path: 'meetings/rollout.md', fileCount: 1, operationId: f.operationId, proposalHash: p.proposalHash, claimHash: p.claimHash }]);
-    assert(verbose.statusText.includes(`\n- ${code}  "meetings/rollout.md": operation ${f.operationId}; proposal ${p.proposalHash}; claim ${p.claimHash}`));
+    assert(verbose.statusText.includes(`\n\n- ${code} "meetings/rollout.md": operation ${f.operationId}; proposal ${p.proposalHash}; claim ${p.claimHash}`));
     assert.match(verbose.statusText, /\n- Diagnostics: [^\n]+\.\n/);
     // Nothing was displayed, decided, dispatched or written.
     assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);

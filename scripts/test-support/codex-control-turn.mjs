@@ -8,7 +8,8 @@ import { canonicalJSON, digest } from '../workflow-values.mjs';
 // person's own words with no skill and no mention), the control call
 // (`code`: the two cells of the verification handshake, optionally finished by
 // `wait` calls; `direct`: one MCP function call), commentary and the final
-// reply. Rows have no ordinals or timestamps; fixtures add them. The receipt
+// reply (`reply`: the status text unless the model wrote it otherwise). Rows
+// have no ordinals or timestamps; fixtures add them. The receipt
 // fields are what the control server records for exactly this turn. Typed text
 // that is no exact control calls `calledTool`, as a model might.
 export const MENU_MENTION = '$cuefluent-notes:cuefluent-notes';
@@ -23,7 +24,7 @@ export const codexToolError = (tool, message, { server = 'cuefluent_control', co
   `tool call error: tool call failed for \`${server}/${tool}\`\n\nCaused by:\n    Mcp error: ${code}: ${message.split('\n').join('\n    ')}${data ? `(${JSON.stringify(data)})` : ''}`;
 
 export function codexControlTurn({ sessionId, unitId, skillPath, control = 'review', form = 'menu', mode = 'code', waits = 0,
-  commentary = [], statusText = 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88',
+  commentary = [], statusText = 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88', reply = statusText,
   firstTurn = false, server = 'cuefluent_control', calledTool = 'processing_review' } = {}) {
   const evt = (type, fields = {}) => ({ type: 'event_msg', payload: { type, ...fields } });
   const item = value => evt('item_completed', { thread_id: sessionId, turn_id: unitId, item: value });
@@ -90,7 +91,7 @@ export function codexControlTurn({ sessionId, unitId, skillPath, control = 'revi
     Object.assign(receipt, { callId: first, outerItemId: 'ctc_first', retryItemId: 'ctc_second', retryCallId: second,
       handshakeResultHash: digest(canonicalJSON(handshake)) });
   }
-  rows.push(evt('token_count', { info: null }), ...assistant('msg-final', statusText, 'final_answer'), usage(),
-    evt('task_complete', { turn_id: unitId, root_turn_id: unitId, last_agent_message: statusText }));
+  rows.push(evt('token_count', { info: null }), ...assistant('msg-final', reply, 'final_answer'), usage(),
+    evt('task_complete', { turn_id: unitId, root_turn_id: unitId, last_agent_message: reply }));
   return { rows, receipt, result, args, tool, text };
 }

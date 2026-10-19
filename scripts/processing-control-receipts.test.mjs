@@ -444,6 +444,30 @@ test('Codex 0.163 code-mode receipts name both cells and the retry call, and exc
         [[['assistant', 'Diagnosis: the Cedar cache bug is the 25-minute TTL.']]]);
     });
   });
+  // A receipted turn whose reply the model reformatted: the proof stays exact
+  // and refuses it, and the reader's relay rule leaves that reply out, so the
+  // turn still contributes nothing, or only its commentary.
+  const statusText = 'Cuefluent: Nothing was applied: draft a42ksb is not pending.\n\nPending drafts:\n- x3x499 "meetings/rollout.md"';
+  const reply = 'Cuefluent: Nothing was applied: draft a42ksb is not pending.\n\nPending drafts:\n\n- x3x499 "meetings/rollout.md"';
+  for (const mode of ['code', 'direct']) for (const commentary of [[], ['Diagnosis: the Cedar cache bug is the 25-minute TTL.']]) {
+    await t.test(`a reformatted reply in a receipted turn (${mode}${commentary.length ? ', with commentary' : ''})`, async t => {
+      const g = await fixture(t, { mixed: true, turn: { control: 'save', mode, commentary, statusText, reply } });
+      await withIntakeLock(g.store, async tx => {
+        assert.equal((await g.record(tx)).status, 'recorded');
+        const read = await g.read(tx);
+        assert.equal(read.processingControls.length, 0);
+        assert.deepEqual(read.noEvidence, commentary.length ? [] : [unitId]);
+        assert.deepEqual(await processScope(tx, g.store, g.selection, g.scopeId, authorize),
+          { saved: commentary.length ? 3 : 2, pending: null, incomplete: false, drained: true });
+        const head = await readCaptureHead(g.store, { client: 'codex', sessionId, unitId });
+        if (!commentary.length) assert.equal(head.head, null);
+        else {
+          assert.deepEqual(head.capture.evidence.map(item => [item.kind, item.text]), [['assistant', commentary[0]]]);
+          assert.doesNotMatch(JSON.stringify(head.capture), /a42ksb|x3x499|Pending drafts|cuefluent_control/);
+        }
+      });
+    });
+  }
 });
 
 test('a plain-language Codex request is captured as typed, without this plugin\'s control traffic or the relayed reply', async t => {

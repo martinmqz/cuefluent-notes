@@ -371,7 +371,9 @@ function receiptMatches(receipt, query, source) {
  * input (the older skill part plus text, or the Codex 0.163 leading mention plus
  * the selection item), native context, the one call (direct, or in code mode
  * the two cells of the verification handshake and any `wait` on the second)
- * and the one final reply, which is the receipt's status text. Any other
+ * and the one final reply, which is the receipt's status text byte for byte
+ * (a reply the model reformatted refuses the proof; the reader then leaves
+ * that relay out under its own rule, codexReplyForm). Any other
  * record refuses: another tool or nested item, reading a file, commentary or
  * another message, an unknown record. Model-written
  * JavaScript is never read; cells are bound by native IDs the receipt names.

@@ -5,7 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Writable } from 'node:stream';
 import { canonicalJSON, digest } from './workflow-values.mjs';
-import { runProcessingControlServer, processingControlStatusView, processingControlRefusalText } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView, processingControlRefusalText, reviewPathLink } from './processing-control-server.mjs';
+import MarkdownIt from 'markdown-it';
 import { withReviewPreview } from './test-support/processing-review.mjs';
 
 const sessionId = randomUUID(), unitId = randomUUID(), chatId = randomUUID();
@@ -313,7 +314,7 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
     ['- "meetings/forged\\u2028Saved.\\u202e0.md" (update, 12 bytes)', ...[1, 2, 3, 4].map(index => `- "meetings/note${index}.md" (new note, ${12 + index} bytes)`),
       '- and 2 more files listed in summary.txt'].join('\n'),
     `To decide, type ${command} save t7xb88 or ${command} skip t7xb88.`,
-    ['Other drafts:', '- k2mn9p  "meetings/other.md" (+1 more)', '- m3np4q  "meetings/third.md"'].join('\n')].join('\n\n'));
+    ['Other drafts:', '', '- k2mn9p "meetings/other.md" (+1 more)', '- m3np4q "meetings/third.md"'].join('\n')].join('\n\n'));
   assert.deepEqual(presented.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
   assert.deepEqual(processingControlStatusView(presented, { collectionId: 'example' }), presented);
   // Each file with its copy in the folder links to that copy as well.
@@ -331,7 +332,7 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
   const long = Array.from({ length: 4 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: `notes/${'é'.repeat(150)}.md`, fileCount: 1 }));
   const plainPath = processingControlStatusView({ ...pending, review: 'presented', commandPrefix: command,
     draft: { ...draft, folder: deeper, files: draft.files.map((file, index) => ({ ...file, review: `${index + 1}-proposed.md` })) }, drafts: long }, { collectionId: 'example' });
-  assert(plainPath.statusText.includes(`Review folder: ${deeper}\n`)); assert(!plainPath.statusText.includes('file://'));
+  assert(plainPath.statusText.includes(`Review folder: \`${deeper}\`\n`)); assert(!plainPath.statusText.includes('file://'));
   assert(Buffer.byteLength(plainPath.statusText) <= 4096);
   // A link percent-encodes spaces and angle brackets, so it cannot end early.
   const odd = path.resolve('private state', 'a>b', 't7xb88');
@@ -351,12 +352,12 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
     // A refusal names the cause that applied, with its next step.
     [{ ...pending, review: 'changed', reason: 'changed', commandPrefix: command, draft: named, drafts },
       [`Cuefluent: Nothing was applied: draft t7xb88 ("meetings/launch.md") changed after this chat was shown it. Review the current draft with ${command} review before deciding.`,
-        ['Pending drafts:', '- k2mn9p  "meetings/other.md" (+1 more)', '- m3np4q  "meetings/third.md"'].join('\n')].join('\n\n')],
+        ['Pending drafts:', '', '- k2mn9p "meetings/other.md" (+1 more)', '- m3np4q "meetings/third.md"'].join('\n')].join('\n\n')],
     [{ ...pending, review: 'changed', reason: 'destination', commandPrefix: command, draft: named },
       `Cuefluent: Nothing was applied: a note at the destination of draft t7xb88 ("meetings/launch.md") changed after the draft was prepared. Restore that note, or process again for a new draft, then review it with ${command} review.`],
     [{ ...pending, review: 'changed', reason: 'not-pending', commandPrefix: command, draft: { code: 't7xb88' }, drafts },
       [`Cuefluent: Nothing was applied: draft t7xb88 is not pending. Review the current draft with ${command} review before deciding.`,
-        ['Pending drafts:', '- k2mn9p  "meetings/other.md" (+1 more)', '- m3np4q  "meetings/third.md"'].join('\n')].join('\n\n')],
+        ['Pending drafts:', '', '- k2mn9p "meetings/other.md" (+1 more)', '- m3np4q "meetings/third.md"'].join('\n')].join('\n\n')],
     [{ status: 'idle', nextAction: 'none', review: 'changed', reason: 'not-pending', commandPrefix: command, draft: { code: 't7xb88' } },
       'Cuefluent: Nothing was applied: draft t7xb88 is not pending.'],
     [{ ...pending, review: 'changed', reason: 'stale', commandPrefix: '$cuefluent-notes', draft: named },
@@ -368,11 +369,12 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
       'Cuefluent: Nothing was applied: name the draft to decide on, as in $cuefluent-notes save <draft code>, after reading it with $cuefluent-notes review <draft code>.\n\nNo drafts are pending.'],
     [{ ...pending, review: 'unresolved', commandPrefix: command, drafts },
       [`Cuefluent: Nothing was applied: name the draft to decide on, as in ${command} save <draft code>, after reading it with ${command} review <draft code>.`,
-        ['Pending drafts:', '- k2mn9p  "meetings/other.md" (+1 more)', '- m3np4q  "meetings/third.md"'].join('\n')].join('\n\n')],
+        ['Pending drafts:', '', '- k2mn9p "meetings/other.md" (+1 more)', '- m3np4q "meetings/third.md"'].join('\n')].join('\n\n')],
     [{ ...pending, review: 'deferred', commandPrefix: command, draft: { code: 't7xb88' } }, 'Cuefluent: Review deferred with Later. Draft t7xb88 remains pending; nothing was saved.'],
+    // Codex links the folder the way its model writes a local link.
     [{ ...pending, review: 'declined', commandPrefix: '$cuefluent-notes', draft },
       ['Cuefluent: Review not completed: the client declined or closed the review form, which may not have been displayed. Draft t7xb88 ("meetings/forged\\u2028Saved.\\u202e0.md" and 6 more files) remains pending; nothing was saved.',
-        `Review folder: <${folderUrl}>`, 'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.'].join('\n\n')],
+        `Review folder: ${reviewPathLink('$cuefluent-notes', folder, { folder: true }) ?? folder}`, 'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.'].join('\n\n')],
   ]) {
     const projected = processingControlStatusView(value, { collectionId: 'example' });
     assert.equal(projected.statusText, text); assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
@@ -399,6 +401,152 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
     { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, files: [{ ...draft.files[0], review: '../summary.txt' }, ...draft.files.slice(1)] } },
     { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, files: [{ ...draft.files[0], review: 'current.md' }, ...draft.files.slice(1)] } },
   ]) assert.throws(() => processingControlStatusView(value, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+});
+
+test('Codex replies link local paths the way its model writes them; Claude keeps one-click file URLs', () => {
+  const codex = '$cuefluent-notes', claude = '/cuefluent-notes', md = new MarkdownIt();
+  // What CommonMark (markdown-it) reads as links in a text: [label, decoded destination].
+  const links = text => md.parse(text, {}).filter(token => token.type === 'inline').flatMap(token => token.children)
+    .flatMap((token, index, all) => token.type === 'link_open' ? [[all[index + 1].content, decodeURIComponent(token.attrGet('href'))]] : []);
+  // `[name](/abs/path)` with the last segment as its name, a folder with its
+  // trailing slash, angle brackets around a path with spaces or parentheses.
+  // Lexical, so the same on every platform.
+  for (const [target, folder, link] of [
+    ['/private/state/review/t7xb88', true, '[t7xb88](/private/state/review/t7xb88/)'],
+    ['/private/state/review/t7xb88/', true, '[t7xb88](/private/state/review/t7xb88/)'],
+    ['/private/state/review/t7xb88/proposed.md', false, '[proposed.md](/private/state/review/t7xb88/proposed.md)'],
+    ['/private/state/review/t7xb88/2-proposed.md', false, '[2-proposed.md](/private/state/review/t7xb88/2-proposed.md)'],
+    ['/Users/zo\u00eb/state/review/t7xb88', true, '[t7xb88](/Users/zo\u00eb/state/review/t7xb88/)'],
+    ['/Users/x/Library/Application Support/Cuefluent Notes/review/t7xb88', true,
+      '[t7xb88](</Users/x/Library/Application Support/Cuefluent Notes/review/t7xb88/>)'],
+    ['/srv/state (copy)/review/t7xb88/proposed.md', false, '[proposed.md](</srv/state (copy)/review/t7xb88/proposed.md>)'],
+    ['/srv/state)/review/t7xb88', true, '[t7xb88](</srv/state)/review/t7xb88/>)'],
+  ]) {
+    const destination = folder ? target.replace(/\/?$/, '/') : target;
+    assert.equal(reviewPathLink(codex, target, { folder }), link, target);
+    assert.deepEqual(links(`Review folder: ${link}`), [[destination.split('/').filter(Boolean).at(-1), destination]], target);
+  }
+  // A path CommonMark would end, escape or decode, or that is not a POSIX
+  // absolute path (a Windows path has backslashes), is shown without a link.
+  for (const target of ['C:\\Users\\x\\review\\t7xb88', '\\\\server\\share\\review\\t7xb88', 'relative/review/t7xb88', '//server/review/t7xb88',
+    '/a/b<c/review/t7xb88', '/a/b>c/review/t7xb88', '/a/b\\c/review/t7xb88', '/a/b&amp;c/review/t7xb88', '/a/b%20c/review/t7xb88', '/a/b`c/review/t7xb88',
+    '/a/b\tc/review/t7xb88', '/a/b\nc/review/t7xb88', '/a/b\u00a0c/review/t7xb88', '/a/b\u2028c/review/t7xb88', '/a/b\u202ec/review/t7xb88', '/a/b\u0085c/review/t7xb88',
+    '/', '/a/review/t7 xb88', '/a/review/[x]', '/a/review/..']) {
+    assert.equal(reviewPathLink(codex, target, { folder: true }), null, JSON.stringify(target));
+  }
+  // Claude: a percent-encoded file URL autolink, which cannot end early.
+  const native = path.resolve(path.sep, 'private state', 'a>b', 't7xb88');
+  assert.equal(reviewPathLink(claude, native, { folder: true }), `<${pathToFileURL(native).href}/>`);
+  assert.equal(reviewPathLink(claude, path.join(native, 'proposed.md')), `<${pathToFileURL(path.join(native, 'proposed.md')).href}>`);
+
+  // Codex replies: the folder and each file's proposed copy in that form, a
+  // blank line before every list and `code path` listings. A file path is
+  // joined natively, so on Windows only the folder is linked here.
+  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+  const folder = '/private/state/review/t7xb88', spaced = '/Users/x/Library/Application Support/Cuefluent Notes/review/t7xb88';
+  const fileLink = (dir, name) => path.sep === '/' ? `: ${reviewPathLink(codex, `${dir}/${name}`)}` : '';
+  const draft = dir => ({ code: 't7xb88', folder: dir, fileCount: 2, files: [{ path: 'meetings/rollout.md', bytes: 120, change: 'create', review: '1-proposed.md' },
+    { path: 'decisions/cache.md', bytes: 80, change: 'update', review: '2-proposed.md' }] });
+  const drafts = [{ code: 'k2mn9p', path: 'meetings/other.md', fileCount: 1 }, { code: 'm3np4q', path: 'meetings/third.md', fileCount: 3 }];
+  const view = value => processingControlStatusView(value, { collectionId: 'example' });
+  for (const [value, text] of [
+    [{ ...pending, review: 'presented', commandPrefix: codex, draft: draft(folder), drafts }, [
+      'Cuefluent: Draft t7xb88 ("meetings/rollout.md" and 1 more file) is ready for review; nothing has been saved.',
+      'Review folder: [t7xb88](/private/state/review/t7xb88/)',
+      [`- "meetings/rollout.md" (new note, 120 bytes)${fileLink(folder, '1-proposed.md')}`, `- "decisions/cache.md" (update, 80 bytes)${fileLink(folder, '2-proposed.md')}`].join('\n'),
+      'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.',
+      'Other drafts:\n\n- k2mn9p "meetings/other.md"\n- m3np4q "meetings/third.md" (+2 more)'].join('\n\n')],
+    // Later, with the default macOS state folder: its spaces need angle brackets.
+    [{ ...pending, review: 'deferred', commandPrefix: codex, draft: { ...draft(spaced), fileCount: 1, files: draft(spaced).files.slice(0, 1) } }, [
+      'Cuefluent: Review deferred with Later. Draft t7xb88 ("meetings/rollout.md") remains pending; nothing was saved.',
+      'Review folder: [t7xb88](</Users/x/Library/Application Support/Cuefluent Notes/review/t7xb88/>)',
+      'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.'].join('\n\n')],
+    [{ ...pending, review: 'changed', reason: 'not-pending', commandPrefix: codex, draft: { code: 'a42ksb' }, drafts: drafts.slice(0, 1) },
+      'Cuefluent: Nothing was applied: draft a42ksb is not pending. Review the current draft with $cuefluent-notes review before deciding.\n\nPending drafts:\n\n- k2mn9p "meetings/other.md"'],
+    [{ ...pending, commandPrefix: codex, drafts },
+      'Cuefluent: Draft ready for review.\n\nDrafts awaiting review:\n\n- k2mn9p "meetings/other.md"\n- m3np4q "meetings/third.md" (+2 more)\n\nRead one with $cuefluent-notes review <draft code>.'],
+    // A folder Markdown cannot carry is shown as the plain path, and its files without links.
+    [{ ...pending, review: 'presented', commandPrefix: codex, draft: draft('/private/a>b/review/t7xb88') }, [
+      'Cuefluent: Draft t7xb88 ("meetings/rollout.md" and 1 more file) is ready for review; nothing has been saved.',
+      'Review folder: `/private/a>b/review/t7xb88`',
+      '- "meetings/rollout.md" (new note, 120 bytes)\n- "decisions/cache.md" (update, 80 bytes)',
+      'To decide, type $cuefluent-notes save t7xb88 or $cuefluent-notes skip t7xb88.'].join('\n\n')],
+  ]) {
+    const projected = view(value);
+    assert.equal(projected.statusText, text);
+    assert.deepEqual(view(projected), projected);
+    // The structured fields keep the native path; only the text changed form.
+    if (value.draft?.folder) assert.equal(projected.draft.folder, value.draft.folder);
+    assert(!projected.statusText.includes('file://'));
+  }
+  // The same reply for Claude keeps its file URLs.
+  const claudeShown = view({ ...pending, review: 'presented', commandPrefix: claude, draft: draft(folder) }).statusText;
+  assert(claudeShown.includes(`Review folder: <${pathToFileURL(folder).href}/>`), claudeShown);
+  assert(!claudeShown.includes('](/'));
+  // The bound still holds with the longest folder: the file links go first.
+  const deep = `/private/${'\u00e9'.repeat(250)}/${'\u00e9'.repeat(200)}/review/t7xb88`;
+  const files = Array.from({ length: 5 }, (_, index) => ({ path: `notes/${'\u00e9'.repeat(70)}${index}.md`, bytes: 10, change: 'create', review: `${index + 1}-proposed.md` }));
+  const long = view({ ...pending, review: 'presented', commandPrefix: codex, draft: { code: 't7xb88', folder: deep, fileCount: 5, files },
+    drafts: Array.from({ length: 4 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: `notes/${'\u00e9'.repeat(150)}.md`, fileCount: 1 })) });
+  assert(long.statusText.includes(`Review folder: [t7xb88](${deep}/)\n`)); assert(!long.statusText.includes('-proposed.md)'));
+  assert(Buffer.byteLength(long.statusText) <= 4096);
+});
+
+test('a folder shown without a link and every note path render in Markdown exactly as written', () => {
+  const md = new MarkdownIt(), codex = '$cuefluent-notes', claude = '/cuefluent-notes';
+  // The rendered text of one line, and the inline markup CommonMark found in it.
+  const rendered = line => {
+    const children = md.parseInline(line, {})[0].children;
+    return { text: children.map(token => token.type === 'softbreak' ? '\n' : token.content).join(''),
+      markup: children.filter(token => !['text', 'code_inline', 'softbreak'].includes(token.type)).map(token => token.type) };
+  };
+  const lineOf = (text, start) => text.split('\n').find(line => line.startsWith(start));
+  const pending = { status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review' };
+  const view = value => processingControlStatusView(value, { collectionId: 'example' });
+  // A folder Codex cannot link is a code span: backslashes before punctuation,
+  // a Windows path and backticks inside or at either end stay as written.
+  // The server takes only a native absolute folder, so a Windows path is shown on Windows.
+  const windows = path.sep === '\\' ? ['C:\\Users\\x\\_drafts\\*copy*\\review\\t7xb88'] : [];
+  for (const folder of [...windows, '/private/a\\_b/review/t7xb88', '/private/x\\_drafts\\*copy*/review/t7xb88', '/private/a`b/review/t7xb88',
+    '/private/a``b`/review/t7xb88', '/private/review/t7xb88`', '/private/a>b/[x](y)/review/t7xb88', '/private/&amp;/review/t7xb88']) {
+    const text = view({ ...pending, review: 'deferred', commandPrefix: codex, draft: { code: 't7xb88', folder, fileCount: 1, files: [{ path: 'a.md', bytes: 1, change: 'create' }] } }).statusText;
+    const line = lineOf(text, 'Review folder: '), shown = rendered(line);
+    assert.equal(shown.text, `Review folder: ${folder}`, line);
+    assert.deepEqual(shown.markup, [], line);
+  }
+  // So is the folder in a reply too long for links (Claude's percent-encoded
+  // file URLs reach that bound first; Codex links the raw path).
+  const deeper = path.resolve('private_state', '\u00e9'.repeat(250), '*\u00e9*'.repeat(60), 'review', 't7xb88');
+  const long = Array.from({ length: 4 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: `notes/${'\u00e9'.repeat(150)}.md`, fileCount: 1 }));
+  const files = Array.from({ length: 5 }, (_, index) => ({ path: `notes/${'\u00e9'.repeat(70)}${index}.md`, bytes: 10, change: 'create', review: `${index + 1}-proposed.md` }));
+  const tooLong = view({ ...pending, review: 'presented', commandPrefix: claude, draft: { code: 't7xb88', folder: deeper, fileCount: 5, files }, drafts: long }).statusText;
+  assert(Buffer.byteLength(tooLong) <= 4096); assert(!tooLong.includes('file://'));
+  const shownLong = rendered(lineOf(tooLong, 'Review folder: '));
+  assert.equal(shownLong.text, `Review folder: ${deeper}`); assert.deepEqual(shownLong.markup, []);
+  // The folder's shown form, fences included, stays within its bound.
+  const atBound = `/${'a'.repeat(1021)}`;
+  assert.equal(view({ ...pending, review: 'deferred', commandPrefix: claude, draft: { code: 't7xb88', folder: atBound, fileCount: 1, files: [{ path: 'a.md', bytes: 1, change: 'create' }] } }).draft.folder, atBound);
+  assert.throws(() => view({ ...pending, review: 'deferred', commandPrefix: claude,
+    draft: { code: 't7xb88', folder: `${atBound}a`, fileCount: 1, files: [{ path: 'a.md', bytes: 1, change: 'create' }] } }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  // A quoted note path renders as written: no emphasis, code, link, image, raw
+  // HTML, entity or strikethrough, in every place a reply names a note.
+  const notes = ['notes/*b*.md', 'notes/_a_ and __b__.md', 'notes/`c`.md', 'notes/[x](https://example.invalid).md', 'notes/![i](y).md',
+    'notes/<b>x</b>.md', 'notes/&amp;.md', 'notes/~~s~~.md', 'notes/a\\_b\\*.md', 'notes/"q".md', 'meetings/juniper-rollout.md'];
+  for (const note of notes) {
+    for (const commandPrefix of [claude, codex]) {
+      const value = view({ ...pending, review: 'presented', commandPrefix,
+        draft: { code: 't7xb88', folder: '/private/state/review/t7xb88', fileCount: 1, files: [{ path: note, bytes: 1, change: 'create' }] },
+        drafts: [{ code: 'k2mn9p', path: note, fileCount: 1 }] });
+      for (const start of ['Cuefluent: Draft t7xb88 (', '- "', '- k2mn9p ']) {
+        const shown = rendered(lineOf(value.statusText, start));
+        assert(shown.text.includes(`"${note}"`), `${start}: ${shown.text}`);
+        assert.deepEqual(shown.markup, [], `${start}: ${note}`);
+      }
+    }
+  }
+  // An ordinary path keeps its plain quoted form.
+  assert(view({ ...pending, review: 'presented', commandPrefix: codex, draft: { code: 't7xb88', folder: '/private/state/review/t7xb88', fileCount: 1,
+    files: [{ path: 'meetings/juniper-rollout.md', bytes: 1, change: 'create' }] } }).statusText.includes('("meetings/juniper-rollout.md")'));
 });
 
 test('a typed non-command reply applies nothing, names grammar commands only and carries only its own text', () => {
@@ -450,10 +598,10 @@ test('the command list is built from the grammar in the client spelling and carr
     requestId: randomUUID(), chat: { client: 'claude', sessionId: chatId }, scope: 'repo', drafts: [{ code: 'k2mn9p', path: 'a.md', fileCount: 1 }] };
   for (const command of ['/cuefluent-notes', '$cuefluent-notes']) {
     const projected = processingControlStatusView({ ...base, help: true, commandPrefix: command }, { collectionId: 'example' });
-    // One Markdown list item per command; Codex also says how to attach the skill.
+    // One Markdown list item per command after a blank line; Codex also says how to attach the skill.
     assert.equal(projected.statusText, [command === '$cuefluent-notes'
       ? 'Cuefluent: Type one of these yourself, exactly as written; for the first word, type $ and choose cuefluent-notes from the list:'
-      : 'Cuefluent: Type one of these yourself, exactly as written:',
+      : 'Cuefluent: Type one of these yourself, exactly as written:', '',
       `- ${command} setup: choose collection and processing settings.`,
       `- ${command} status: show processing, captures and drafts (also: status --verbose).`,
       `- ${command} process: draft notes from pending captures (also: process repo, process chat, process resume, process cancel).`,
@@ -478,7 +626,7 @@ test('plain status lists drafts as code and path; status --verbose adds every de
   const drafts = [{ code: 'k2mn9p', path: 'notes/a.md', fileCount: 1 }, { code: 'm3np4q', path: 'notes/"b" .md', fileCount: 3 }];
   const plain = processingControlStatusView({ ...base, drafts }, { collectionId: 'example' });
   assert.equal(plain.statusText, ['Cuefluent: Draft ready for review. Scope: repo. Inventory (partial): 3 pending, 1 claimed, 2 drafts awaiting review.',
-    ['Drafts awaiting review:', '- k2mn9p  "notes/a.md"', '- m3np4q  "notes/\\"b\\"\\u2028.md" (+2 more)'].join('\n'),
+    ['Drafts awaiting review:', '', '- k2mn9p "notes/a.md"', '- m3np4q "notes/\\"b\\"\\u2028.md" (+2 more)'].join('\n'),
     `Read one with ${command} review <draft code>.`, `For details, type ${command} status --verbose.`].join('\n\n'));
   // One draft is counted in the singular.
   assert.match(processingControlStatusView({ ...base, inventory: { ...inventory, awaitingReview: 1 } }, { collectionId: 'example' }).statusText, / 1 draft awaiting review\./);
@@ -492,8 +640,8 @@ test('plain status lists drafts as code and path; status --verbose adds every de
     '- Diagnostics: PROCESSING_EXCLUSION_UNVERIFIED.', `- Request: ${requestId}.`, `- Processing chat: codex session ${chatId}.`, '- Scope: repo.',
     '- Inventory (partial): 3 pending, 1 claimed, 0 blocked by a claim, 2 inspected, 4 handled, 1 unfinished operation, 2 awaiting review.',
     '- Progress: 2 selected, 0 unattempted, 1 handled, 0 unavailable, 0 cancelled, 1 unfinished operation, 2 awaiting review.']);
-  assert.deepEqual(lines.slice(9, 12), ['', 'Drafts awaiting review:',
-    `- k2mn9p  "notes/a.md": operation ${operationId}; proposal ${'0'.repeat(64)}; claim ${'2'.repeat(64)}`]);
+  assert.deepEqual(lines.slice(9, 13), ['', 'Drafts awaiting review:', '',
+    `- k2mn9p "notes/a.md": operation ${operationId}; proposal ${'0'.repeat(64)}; claim ${'2'.repeat(64)}`]);
   assert.equal(verbose.verbose, true); assert.deepEqual(processingControlStatusView(verbose, { collectionId: 'example' }), verbose);
   // Without a detail the first line is the bare status, once.
   assert(processingControlStatusView({ status: 'idle', nextAction: 'none', verbose: true }, { collectionId: 'example' }).statusText

@@ -80,7 +80,7 @@ test('a plain-language Claude request is captured as typed, never this plugin\'s
   // human input, so none of them is copied.
   const typed = 'Please process my notes.';
   for (const [name, reply, isError] of [['draft', 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88', false],
-    ['command list', 'Cuefluent: Type one of these yourself, exactly as written:\n- /cuefluent-notes status: show processing.', false],
+    ['command list', 'Cuefluent: Type one of these yourself, exactly as written:\n\n- /cuefluent-notes status: show processing.', false],
     ['not a command', 'Cuefluent: Nothing was applied: that was not an exact command.', false],
     ['refusal', 'Cuefluent: Nothing was applied and nothing was saved.', true]]) await t.test(name, async t => {
     const call = message('assistant', [{ type: 'tool_use', id: 'toolu_control', name: 'mcp__cuefluent_control__processing_status', input: {} }], { promptId: A });

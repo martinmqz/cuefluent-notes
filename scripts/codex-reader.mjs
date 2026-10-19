@@ -18,7 +18,8 @@ import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fa
 // from the `$` list (its selection item and leading mention are markup), a
 // mention typed out by hand (kept as typed) and control exchanges made in code
 // mode, and leaves out this plugin's control exchanges and the assistant's
-// repetition of their replies in every unit, with or without this skill.
+// repetition of their replies in every unit, with or without this skill,
+// comparing a reply and its relay in the form `codexReplyForm` gives both.
 // Published v1-v3 captures remain immutable under their own rules.
 export const CODEX_READER_VERSION = '4';
 // Retain every supported historical reader independently of later reader bumps.
@@ -102,6 +103,110 @@ export function codexToolRenderings(item) {
       Object.keys(content[0]).every(key => ['type', 'text'].includes(key))) renderings.push(content[0].text);
   return renderings;
 }
+// A link destination that is a local path: an absolute path or a `file:///`
+// URL (no host, query or fragment), decoded as Codex decodes a local link
+// (percent-decoding as UTF-8). Null when it is neither, does not decode, or
+// decodes to a control or line-separator character.
+const FILE_URL = /^file:\/\/(\/[^?#]*)$/;
+const LINE_CONTROLS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+function linkedPath(target) {
+  const encoded = FILE_URL.exec(target)?.[1] ?? target;
+  if (!encoded.startsWith('/')) return null;
+  let decoded;
+  try { decoded = decodeURIComponent(encoded); } catch { return null; }
+  return LINE_CONTROLS.test(decoded) ? null : decoded;
+}
+// A Markdown link with a plain or angle-bracket destination, or a file URL autolink.
+const LOCAL_LINKS = /\[([^[\]\n]*)\]\((?:<([^<>\n]*)>|([^\s()<>]+))\)|<(file:\/\/[^\s<>]*)>/g;
+// Prose with each local link that rule 3 recognizes replaced by its path.
+function linkPieces(text, pieces) {
+  let at = 0;
+  for (const match of text.matchAll(LOCAL_LINKS)) {
+    const [whole, name, angled, plain, autolink] = match;
+    const decoded = linkedPath(autolink ?? angled ?? plain);
+    if (decoded === null || (autolink === undefined && decoded.split('/').filter(Boolean).at(-1) !== name)) continue;
+    if (match.index > at) pieces.push({ prose: text.slice(at, match.index) });
+    pieces.push({ path: decoded });
+    at = match.index + whole.length;
+  }
+  if (at < text.length) pieces.push({ prose: text.slice(at) });
+}
+/** The form in which reader version 4 compares a control reply with an
+ * assistant message that may relay it, so a relay Codex's model reformatted is
+ * still recognized as that reply. Each rule changes only how the same words
+ * are marked up, never which words appear, and is part of version 4's
+ * evidence rules: changing one needs a new reader version.
+ * 1. CRLF and CR become LF.
+ * 2. A code span (a run of backticks closed by the next run of the same
+ *    length) is one unit: its content, with a line ending read as a space and
+ *    one space dropped from each end when both ends have one and it is not all
+ *    spaces, is compared as written; no other rule looks inside it. An
+ *    unclosed run is text, and so is a backtick after an odd number of
+ *    backslashes outside a code span (escaped), so it never opens one; the
+ *    rest of its run still may.
+ * 3. Outside code spans, a file URL autolink (`<file:///…>`) becomes its
+ *    decoded path, and a link `[name](target)` or `[name](<target>)` whose
+ *    target is an absolute path or a `file:///` URL becomes its decoded path
+ *    when `name` is exactly the path's last segment; any other link stays as
+ *    written, so words in its label stay distinct. A path that does not
+ *    decode, or decodes to a control or line-separator character, keeps its
+ *    link as written. A decoded path is one unit, compared as written.
+ * 4. Spaces and tabs at the start and end of each line are dropped, except
+ *    inside a code span or a decoded path. Inside a line they stay as written,
+ *    so a path or name that differs only in its spacing stays distinct.
+ * 5. A line starting with `* `, `+ ` or `• ` starts with `- ` instead.
+ * 6. Empty lines are dropped.
+ * The result is a canonical encoding of these lines and their units ('' when
+ * no line is left), so text never collides with a unit. Pure and
+ * deterministic: no platform, locale or file system is consulted. */
+export function codexReplyForm(text) {
+  const source = text.replace(/\r\n?/g, '\n'), pieces = [];
+  // Code spans first: a backtick run closes only on the next run of its length.
+  // An opening backtick after an odd number of backslashes is escaped text;
+  // inside a code span a backslash is literal, so a closing run is any run.
+  const runs = [...source.matchAll(/`+/g)].map(match => ({ at: match.index, length: match[0].length }));
+  const byLength = new Map(), seen = new Map();
+  runs.forEach((run, index) => { if (!byLength.has(run.length)) byLength.set(run.length, []); byLength.get(run.length).push(index); });
+  let at = 0;
+  for (let index = 0; index < runs.length; index++) {
+    const raw = runs[index];
+    if (raw.at < at) continue;
+    let slashes = 0;
+    while (raw.at - slashes - 1 >= at && source[raw.at - slashes - 1] === '\\') slashes++;
+    const run = slashes % 2 ? { at: raw.at + 1, length: raw.length - 1 } : raw, same = byLength.get(run.length);
+    if (!same) continue;
+    let position = seen.get(run.length) ?? 0;
+    while (position < same.length && same[position] <= index) position++;
+    seen.set(run.length, position);
+    if (position === same.length) continue;
+    const close = runs[same[position]];
+    if (run.at > at) linkPieces(source.slice(at, run.at), pieces);
+    let code = source.slice(run.at + run.length, close.at).replace(/\n/g, ' ');
+    if (code.length > 1 && code.startsWith(' ') && code.endsWith(' ') && /[^ ]/.test(code)) code = code.slice(1, -1);
+    pieces.push({ code });
+    at = close.at + close.length;
+  }
+  if (at < source.length) linkPieces(source.slice(at), pieces);
+  // Lines of units: prose splits on line endings; a code span or a path never does.
+  const lines = [[]];
+  for (const piece of pieces) {
+    if (piece.prose === undefined) { lines.at(-1).push(piece); continue; }
+    piece.prose.split('\n').forEach((part, index) => {
+      if (index) lines.push([]);
+      const line = lines.at(-1), last = line.at(-1);
+      if (last?.prose !== undefined) last.prose += part;
+      else if (part !== '') line.push({ prose: part });
+    });
+  }
+  const kept = [];
+  for (const line of lines) {
+    if (line[0]?.prose !== undefined) line[0].prose = line[0].prose.replace(/^[ \t]+/, '').replace(/^[*+\u2022] /, '- ');
+    if (line.at(-1)?.prose !== undefined) line.at(-1).prose = line.at(-1).prose.replace(/[ \t]+$/, '');
+    const units = line.filter(unit => unit.prose !== '');
+    if (units.length) kept.push(units.map(unit => unit.prose ?? (unit.path !== undefined ? ['path', unit.path] : ['code', unit.code])));
+  }
+  return kept.length ? JSON.stringify(kept) : '';
+}
 const structural = new Set(['compacted', 'token_usage_record', 'world_state', 'retained_context', 'security_risk_score',
   'inter_agent_communication', 'inter_agent_communication_metadata', 'realtime_item']);
 const ignoredEvents = new Set(['token_count', 'thread_goal_updated', 'thread_settings_applied', 'agent_reasoning',
@@ -172,10 +277,11 @@ function blocks(collector, record, content, kind, syntax, skillRules = 'retain',
     // The older skill part with exactly one action is only the command too.
     if (syntax === 'user' && content.length === 2 && pluginSkillBlock(content[0]) && content[1]?.type === 'text' &&
         processingControlText(content[1].text) !== null) return;
-    // An assistant message that only repeats this plugin's reply in this turn
-    // is that reply, not the assistant's own text.
+    // An assistant message that only repeats this plugin's reply in this turn,
+    // compared in the form `codexReplyForm` gives both, is that reply, not the
+    // assistant's own text.
     if (kind === 'assistant' && replies?.size && content.length && content.every(item => ['text', 'output_text', 'Text'].includes(item?.type) && typeof item.text === 'string') &&
-        replies.has(content.map(item => item.text).join(''))) return;
+        replies.has(codexReplyForm(content.map(item => item.text).join('')))) return;
   }
   for (const item of content) {
     // Selecting this skill is command markup around the typed text, which stays.
@@ -251,25 +357,26 @@ function codexErrorReply(item) {
   return /^-?\d+: ([\s\S]+?)\(\{"code":"[A-Z_]+"\}\)$/.exec([first, ...rest.map(line => line.slice(4))].join('\n'))?.[1] ?? null;
 }
 
-// The plain replies this plugin's control calls in the unit returned: the
-// status text of each result (including the command list and a not-a-command
-// reply), or a refusal's message, both as Codex recorded it and as the plain
-// message inside its framing. Identified through the native items already
-// proven to be control exchanges, never by text alone.
+// The plain replies this plugin's control calls in the unit returned, in the
+// form `codexReplyForm` gives them: the status text of each result (including
+// the command list and a not-a-command reply), or a refusal's message, both as
+// Codex recorded it and as the plain message inside its framing. Identified
+// through the native items already proven to be control exchanges, never by
+// text alone.
 function controlReplies(unit, exchanges) {
-  const replies = new Set();
+  const replies = new Set(), add = text => { const form = codexReplyForm(text); if (form) replies.add(form); };
   for (const record of unit.records) {
     const item = completedItem(record.value);
     if (item?.type !== 'McpToolCall' || item.server !== CONTROL_SERVER || !exchanges.has(item.id)) continue;
     const content = item.result?.content;
     if (Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string') {
-      try { const value = JSON.parse(content[0].text); if (typeof value?.statusText === 'string' && value.statusText) replies.add(value.statusText); }
+      try { const value = JSON.parse(content[0].text); if (typeof value?.statusText === 'string' && value.statusText) add(value.statusText); }
       catch { /* Not a control reply. */ }
     }
     if (typeof item.error?.message === 'string' && item.error.message) {
-      replies.add(item.error.message);
+      add(item.error.message);
       const reply = codexErrorReply(item);
-      if (reply) replies.add(reply);
+      if (reply) add(reply);
     }
   }
   return replies;

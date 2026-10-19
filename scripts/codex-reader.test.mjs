@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader } from './codex-reader.mjs';
+import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm } from './codex-reader.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { newSelectionState, applySelectionControl, stableSourceIdentity, inspectSourceBoundary } from './capture-selection.mjs';
 import { digest } from './workflow-values.mjs';
@@ -846,6 +846,195 @@ test('Codex: a plain-language request keeps its words while this plugin\'s contr
     const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
     assert.equal(again.evidenceHash, replayed.evidenceHash); assert.deepEqual(serializeCapture(again), serializeCapture(replayed));
   });
+});
+
+// The comparison form: each rule maps only markup, so a relay the model
+// reformatted equals the reply while any change of words stays distinct.
+test('reply comparison form: one defined Markdown normalization, each rule exact', () => {
+  const live = 'file:///private/tmp/fixture/codex/state/review/a42ksb/';
+  const helpBefore = helpReply.replace(':\n\n- ', ':\n- ');
+  assert.notEqual(helpBefore, helpReply);
+  for (const [name, reply, relay] of [
+    // The three reformattings of the 2026-10-18 attended run.
+    ['a review folder autolink relayed as Codex links a local folder', `Review folder: <${live}>`, 'Review folder: [a42ksb](/private/tmp/fixture/codex/state/review/a42ksb/)'],
+    ['a blank line before a list', 'Pending drafts:\n- x3x499 "meetings/rollout.md"', 'Pending drafts:\n\n- x3x499 "meetings/rollout.md"'],
+    ['the command list with a blank line before it', helpBefore, helpReply],
+    // Link forms: angle brackets, a file URL target, percent-encoding (UTF-8).
+    ['an angle-bracket target', 'Review folder: <file:///Users/x/Application%20Support/review/a42ksb/>', 'Review folder: [a42ksb](</Users/x/Application Support/review/a42ksb/>)'],
+    ['a file URL with spaces', '<file:///Users/x/Application%20Support/review/a42ksb/>', '[a42ksb](</Users/x/Application Support/review/a42ksb/>)'],
+    ['a percent-encoded plain target', '[a42ksb](/Users/x/Application%20Support/review/a42ksb/)', '[a42ksb](</Users/x/Application Support/review/a42ksb/>)'],
+    ['UTF-8 percent-encoding', '<file:///Users/zo%C3%AB/review/a42ksb/>', '[a42ksb](/Users/zoë/review/a42ksb/)'],
+    ['a file URL as a link target', '- "notes/a.md" (new note, 5 bytes): [proposed.md](file:///s/review/a42ksb/proposed.md)', '- "notes/a.md" (new note, 5 bytes): [proposed.md](/s/review/a42ksb/proposed.md)'],
+    // Line endings, bullets, whitespace and empty lines.
+    ['Windows line endings', 'A\r\n\r\n- b\r\n- c', 'A\n- b\n- c'],
+    ['a lone carriage return', 'A\rB', 'A\nB'],
+    ['other bullet markers', '- a\n- b\n- c', '* a\n+ b\n• c'],
+    ['an indented bullet', '- a', '   * a'],
+    ['spaces and tabs at the ends of a line', ' \tDraft a42ksb is ready. \t', 'Draft a42ksb is ready.'],
+    ['leading and trailing whitespace and empty lines', '\n\n A \t\n \n\n\tB\n', 'A\nB'],
+    // Code spans: one unit, whatever its fence, padding or line ending.
+    ['a code span with a longer fence or padding', 'Review folder: `` /s/a`b/r ``', 'Review folder: ```/s/a`b/r```'],
+    ['a code span across a line ending', 'A `x\ny` B', 'A `x y` B'],
+    ['spaces at line ends beside a code span', ' `x` \t', '`x`'],
+    ['an unclosed backtick run is text', 'a ` b', ' a ` b  '],
+    ['a code span after an escaped backtick', 'x \\``y` z', 'x \\`` y ` z'],
+    ['a code span after an escaped backslash', 'x \\\\`y` z', 'x \\\\` y ` z'],
+    ['a code span of spaces and a tab keeps only its padding rule', '`` \t ``', '``\t``'],
+  ]) {
+    assert.equal(codexReplyForm(reply), codexReplyForm(relay), name);
+  }
+  // The form encodes lines of text, path and code units, so text never collides with a unit.
+  assert.equal(codexReplyForm('Review folder: [a42ksb](</Users/x/Application Support/review/a42ksb/>)\r\n\r\n* save'),
+    JSON.stringify([['Review folder: ', ['path', '/Users/x/Application Support/review/a42ksb/']], ['- save']]));
+  assert.equal(codexReplyForm('Review folder: `` /s/a`b/r ``  '), JSON.stringify([['Review folder: ', ['code', '/s/a`b/r']]]));
+  assert.equal(codexReplyForm(' \n\t\n'), '');
+  assert.notEqual(codexReplyForm('["path","/s/"]'), codexReplyForm('[s](/s/)'));
+  for (const [name, reply, relay] of [
+    ['words added', 'Cuefluent: Draft a42ksb is ready.', 'Cuefluent: Draft a42ksb is ready. The audit ends Friday.'],
+    ['a link named otherwise', `Review folder: <${live}>`, 'Review folder: [the review folder](/private/tmp/fixture/codex/state/review/a42ksb/)'],
+    ['a link to another path', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: [a42ksb](/s/other/a42ksb/)'],
+    ['a link and the plain path text', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: /s/review/a42ksb/'],
+    ['a relative target', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: [a42ksb](review/a42ksb/)'],
+    ['a web link', 'Review folder: [a42ksb](/a42ksb/)', 'Review folder: [a42ksb](https://example.invalid/a42ksb/)'],
+    ['a file URL with a host', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: <file://server/s/review/a42ksb/>'],
+    ['a file URL with a query', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: <file:///s/review/a42ksb/?x>'],
+    ['a target that does not decode', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: [a42ksb](/s/%E0%A4%A/a42ksb/)'],
+    ['a target that decodes to a line break', 'Review folder: [a42ksb](/s/a42ksb/)', 'Review folder: <file:///s/a%0Ab/a42ksb/>'],
+    ['lines joined', 'Draft a42ksb is ready.\nNothing was saved.', 'Draft a42ksb is ready. Nothing was saved.'],
+    // Spacing inside a line is significant: a path or name may differ only there.
+    ['a path that differs only in its spacing', '- "meetings/A  B.md" (new note, 5 bytes)', '- "meetings/A B.md" (new note, 5 bytes)'],
+    ['a run of spaces inside a line (the old two-space listing)', 'Pending drafts:\n- x3x499  "meetings/rollout.md"', 'Pending drafts:\n\n- x3x499 "meetings/rollout.md"'],
+    ['a tab inside a line', 'Draft\ta42ksb is ready.', 'Draft a42ksb is ready.'],
+    // A decoded path and a code span are compared as written, even at a line end.
+    ['a linked file name with a trailing space', 'x: [proposed.md](/a/proposed.md)', 'x: [proposed.md ](/a/proposed.md%20)'],
+    ['a linked folder name with a trailing space', 'Review folder: [a42ksb](/s/a42ksb/)', 'Review folder: [a42ksb ](</s/a42ksb /> )'],
+    ['link-like text inside a code span', 'Review folder: `/s//a/x/r`', 'Review folder: `/s/[x](/a/x)/r`'],
+    ['an autolink inside a code span', 'Review folder: `/s/review/a42ksb/`', 'Review folder: `<file:///s/review/a42ksb/>`'],
+    ['a code span and the same text outside one', 'Review folder: `/s/r/`', 'Review folder: /s/r/'],
+    ['a code span and a link to the same path', 'Review folder: `/s/review/a42ksb/`', 'Review folder: [a42ksb](/s/review/a42ksb/)'],
+    ['spaces inside a code span', 'Review folder: `/s/a  b/`', 'Review folder: `/s/a b/`'],
+    ['words before an unclosed backtick run', 'Draft a42ksb ` is ready.', 'Draft x3x499 ` is ready.'],
+    // An escaped backtick is text and opens nothing; an escaped backslash does not escape.
+    ['escaped backticks in a quoted note path, doubled', '- k2mn9p "notes/\\`c\\`.md"', '- k2mn9p "notes/\\``c\\``.md"'],
+    ['an escaped backslash before a backtick', '\\\\`x`', '\\\\\\`x`'],
+    ['an ordered list', '- save', '1. save'],
+    ['a bullet without its space', '- save', '*save'],
+    ['emphasis', 'Draft a42ksb is ready.', 'Draft **a42ksb** is ready.'],
+    ['code formatting', 'Type $cuefluent-notes save a42ksb.', 'Type `$cuefluent-notes save a42ksb`.'],
+    ['a non-breaking space', 'Draft a42ksb', 'Draft a42ksb'],
+    // The attended run's paraphrased refusal stays the assistant's own text.
+    ['a paraphrased refusal', processingControlRefusalText('PROCESSING_CONTROL_REGISTRATION_UNVERIFIED', { client: 'codex', stage: 'binding', tool: 'processing_review' }),
+      'Nothing was applied and nothing was saved. Cuefluent Notes has registered this chat but cannot confirm commands in it yet. Type the command again.'],
+  ]) assert.notEqual(codexReplyForm(reply), codexReplyForm(relay), name);
+});
+
+test('Codex reader v4: a control reply the model reformatted is left out like an exact one; other text stays', async t => {
+  // The shapes of the 2026-10-18 attended run (Codex 0.163, code mode): every
+  // control turn has commentary, so it stays collectible without its command,
+  // control traffic and the relayed reply, which the model rewrote.
+  const commentary = ['I’ll open the pending draft for review.\n'];
+  const folderUrl = code => `<file:///private/fixture/state/review/${code}/>`;
+  const later = code => `Cuefluent: Review deferred with Later. Draft ${code} ("meetings/rollout.md") remains pending; nothing was saved.\n\n` +
+    `Review folder: ${folderUrl(code)}\n\nTo decide, type $cuefluent-notes save ${code} or $cuefluent-notes skip ${code}.`;
+  const laterRelay = code => later(code).replace(folderUrl(code), `[${code}](/private/fixture/state/review/${code}/)`);
+  const notPending = 'Cuefluent: Nothing was applied: draft a42ksb is not pending. Review the current draft with $cuefluent-notes review before deciding.\n\nPending drafts:\n- x3x499 "meetings/rollout.md"';
+  const notPendingRelay = notPending.replace(':\n- x3x499 ', ':\n\n- x3x499 ');
+  // This slice's own Codex form, which the model can relay unchanged.
+  const current = processingControlStatusView({ status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', review: 'deferred', commandPrefix,
+    draft: { code: 'a42ksb', folder: '/private/fixture/state/review/a42ksb', fileCount: 1, files: [{ path: 'meetings/rollout.md', bytes: 9, change: 'create' }] } },
+  { collectionId: 'example' }).statusText;
+  assert(current.includes('Review folder: [a42ksb](/private/fixture/state/review/a42ksb/)'), current);
+  const cases = [
+    ['Later: a review folder link', { control: 'review', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }],
+    ['not pending: a blank line before the list', { control: 'save', statusText: notPending, reply: notPendingRelay }],
+    ['the command list: a blank line', { control: 'help', calledTool: 'processing_status', statusText: helpReply.replace(':\n\n- ', ':\n- '), reply: helpReply }],
+    ['finished by wait', { control: 'review', waits: 2, statusText: later('a42ksb'), reply: laterRelay('a42ksb') }],
+    ['direct call', { control: 'review', mode: 'direct', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }],
+    ['the current form, relayed unchanged', { control: 'review', statusText: current, reply: current }],
+    ['the current form, relayed with other bullets and spacing', { control: 'help', calledTool: 'processing_status', statusText: helpReply,
+      reply: helpReply.replaceAll('\n- ', '\n* ').replace(':\n\n', ':\n\n\n') }],
+    ['Windows line endings', { control: 'review', statusText: current, reply: current.replaceAll('\n', '\r\n') }],
+    ['a folder as a code span, relayed with another fence', { control: 'review', statusText: later('a42ksb').replace(folderUrl('a42ksb'), '`/private/a\\_b/review/a42ksb`'),
+      reply: later('a42ksb').replace(folderUrl('a42ksb'), '`` /private/a\\_b/review/a42ksb ``') }],
+  ];
+  for (const [name, options] of cases) await t.test(name, async t => {
+    const capture = (await readCodexSelection((await fixture(t, turn({ commentary, ...options }).rows)).args)).candidates[0].capture;
+    assert.equal(capture.reader.version, '4');
+    assert.deepEqual(kept(capture), [['assistant', commentary[0]]]);
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+    assert.doesNotMatch(serializeCapture(capture).toString(), /a42ksb|x3x499|Review folder|Pending drafts|Type one of these|cuefluent_control/);
+    // Without commentary the turn holds no evidence at all.
+    const bare = await readCodexSelection((await fixture(t, turn(options).rows)).args);
+    assert.deepEqual(bare.candidates, []); assert.deepEqual(bare.noEvidence, [A]);
+  });
+  // In a plain-language unit, too: only the typed words stay.
+  await t.test('a plain-language unit', async t => {
+    const typed = 'What is my Cuefluent processing status?';
+    const rows = turn({ form: 'plain', control: typed, calledTool: 'processing_status', commentary, statusText: notPending, reply: notPendingRelay }).rows;
+    assert.deepEqual(kept((await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture), [['user', typed], ['assistant', commentary[0]]]);
+  });
+  // Identity stays native and words stay distinct.
+  for (const [name, options, relay] of [
+    ['a reformatted reply with words added', { control: 'review', statusText: later('a42ksb') }, `${laterRelay('a42ksb')} The audit ends Friday.`],
+    ['a link the model named otherwise', { control: 'review', statusText: later('a42ksb') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '[the review folder](/private/fixture/state/review/a42ksb/)')],
+    ['a link to another folder', { control: 'review', statusText: later('a42ksb') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '[a42ksb](/private/fixture/state/review/x3x499/a42ksb/)')],
+    ['the reply of another server', { control: 'review', statusText: later('a42ksb'), server: 'other_control' }, laterRelay('a42ksb')],
+    // A relay whose linked file name gained a trailing space names another file.
+    ['a relay that adds a trailing space to a linked file', { control: 'review', statusText: later('a42ksb').replace(folderUrl('a42ksb'), '[proposed.md](/private/fixture/state/review/a42ksb/proposed.md)') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '[proposed.md ](/private/fixture/state/review/a42ksb/proposed.md%20)')],
+    // A folder shown as a code span compares as written: link-like text inside stays.
+    ['a relay that changes link-like text inside a code span', { control: 'review', statusText: later('a42ksb').replace(folderUrl('a42ksb'), '`/private/a\\b/[x](/a/x)/a42ksb`') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '`/private/a\\b//a/x/a42ksb`')],
+    // Escaped backticks in a note path are text: doubling them names another note.
+    ['a relay that doubles escaped backticks in a note path', { control: 'save', statusText: notPending.replace('meetings/rollout.md', 'notes/\\`c\\`.md') },
+      notPendingRelay.replace('meetings/rollout.md', 'notes/\\``c\\``.md')],
+    // A relay whose note path differs only in its spacing names another note.
+    ['a relay that respaces a note path', { control: 'save', statusText: notPending.replace('meetings/rollout.md', 'meetings/A  B.md') },
+      notPendingRelay.replace('meetings/rollout.md', 'meetings/A B.md')],
+  ]) await t.test(`${name} stays`, async t => {
+    const capture = (await readCodexSelection((await fixture(t, turn({ commentary, ...options, reply: relay }).rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture).filter(([kind]) => kind === 'assistant'), [['assistant', commentary[0]], ['assistant', relay]]);
+  });
+  // The attended run's paraphrased refusal is the assistant's own text (a documented limit).
+  await t.test('a paraphrased refusal stays', async t => {
+    const message = processingControlRefusalText('PROCESSING_CONTROL_REGISTRATION_UNVERIFIED', { client: 'codex', stage: 'binding', tool: 'processing_review' });
+    const relay = 'Nothing was applied and nothing was saved. Cuefluent Notes has registered this chat but cannot confirm commands in it yet. Type the command again.';
+    const capture = (await readCodexSelection((await fixture(t, refused(turn({ control: 'review', commentary }).rows, message, 'code', { relay }))).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['assistant', commentary[0]], ['assistant', relay]]);
+    assert.doesNotMatch(serializeCapture(capture).toString(), /cuefluent_control|tool call error/);
+  });
+  // Only the assistant can relay: the person's message in that form is their input.
+  await t.test('the person pasting the reformatted reply keeps it', async t => {
+    const rows = turn({ control: 'review', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }).rows;
+    rows.splice(rows.findIndex(row => row.payload?.item?.phase === 'final_answer'), 0, evt('item_completed', { thread_id: S, turn_id: A,
+      item: { type: 'UserMessage', id: 'pasted-message', content: [{ type: 'text', text: laterRelay('a42ksb'), text_elements: [] }] } }));
+    assert.deepEqual(kept((await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture), [['user', laterRelay('a42ksb')]]);
+  });
+  await t.test('the same words in another unit stay', async t => {
+    const rows = [...turn({ control: 'review', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }).rows,
+      start(B), user(B, 'What did it say?'), assistant(B, laterRelay('a42ksb')), end(B)];
+    const read = await readCodexSelection((await fixture(t, rows)).args);
+    assert.deepEqual(kept(read.candidates.find(entry => entry.capture.identity.unitId === B).capture), [['user', 'What did it say?'], ['assistant', laterRelay('a42ksb')]]);
+  });
+  // Published version 1-3 heads keep the reformatted relay and replay to the
+  // same bytes; a version 4 head replays to the same bytes too. The older
+  // skill part, direct, is where version 3 already leaves the exchange out.
+  const options = { control: 'review', commentary, statusText: later('a42ksb'), reply: laterRelay('a42ksb') };
+  for (const [form, mode] of [['menu', 'code'], ['menu', 'direct'], ['block', 'direct']]) for (const version of ['1', '2', '3', '4']) {
+    await t.test(`a published v${version} head replays unchanged (${form}, ${mode})`, async t => {
+      const f = await fixture(t, turn({ ...options, form, mode }).rows);
+      const current = (await readCodexSelection(f.args)).candidates[0].capture;
+      const head = { ...current, reader: { ...current.reader, version } };
+      const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: head }) })).candidates[0].capture;
+      assert.equal(replayed.reader.version, version);
+      assert.equal(kept(replayed).some(([kind, text]) => kind === 'assistant' && text === laterRelay('a42ksb')), version !== '4');
+      if (version === '4') assert.deepEqual(serializeCapture(replayed), serializeCapture(current));
+      const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+      assert.equal(again.evidenceHash, replayed.evidenceHash); assert.deepEqual(serializeCapture(again), serializeCapture(replayed));
+    });
+  }
 });
 
 test('reader version 3 replays a published 0.163 unit unchanged: its mention and code-mode cells stay', async t => {

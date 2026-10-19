@@ -312,7 +312,7 @@ New responses also include `statusDetail`: `accepted`, `already-processing`,
 `discovery`, `continuation`, `cancelled`, `selection-limit`, `selection-complete`,
 `pending` and `inventory-incomplete` for shortcut results. A status reply also
 returns `drafts` (at most four `{code, path, fileCount}`) for drafts awaiting
-review, listed one per line as code, two spaces and note path. Claude's
+review, listed one per line as code, one space and note path. Claude's
 `verbose: true` mirrors a typed `status --verbose` (Codex: the verified typed text
 alone); that reply returns `verbose: true`, adds `operationId`, `proposalHash` and
 `claimHash` to each listed draft, and its `statusText` lists the status, next
@@ -432,14 +432,22 @@ have status `awaiting-review`. Review responses built from review fields also re
 first note path while it is pending, or `{code, folder, files, fileCount}`, with at
 most five `{path, bytes, change, review?}` files, `review` naming the file's
 proposed copy in the folder) and optional `drafts` (at most four
-`{code, path, fileCount}`, one Markdown list item each as code, two spaces and
-note path), and their `statusText` omits diagnostic codes. Its Markdown blocks are
-separated by blank lines; the folder and each file's proposed copy appear as
-percent-encoded `file://` autolinks, dropped in favour of the plain folder path
-when they would not fit the reply bound. `saved`, `skipped` and `cancelled` may
-carry `{code, path, fileCount}` for the decided draft. A completed decision whose
-only diagnostic is `PROCESSING_EXCLUSION_UNVERIFIED` does not add the
-`status --verbose` hint.
+`{code, path, fileCount}`, one Markdown list item each as code, one space and
+note path), and their `statusText` omits diagnostic codes. Note paths are quoted
+as JSON strings with the characters CommonMark or GFM read as inline markup
+(`` ` ``, `*`, `_`, `[`, `]`, `<`, `>`, `&`, `~`) backslash-escaped, so
+each renders exactly as written. Its Markdown blocks
+are separated by blank lines, and every list follows one. For Claude the folder
+and each file's proposed copy appear as percent-encoded `file://` autolinks; for
+Codex as `[name](/absolute/path)` links named by the path's last segment, with
+`[name](</absolute/path>)` for a path with spaces or parentheses and no link for
+a path Markdown cannot carry, such as a Windows path. Links are dropped in
+favour of the folder path as a code span when they would not fit the reply
+bound, and that code span, with its controls escaped and its fences counted,
+stays within 1024 bytes; the `draft.folder` field always holds the native path. `saved`, `skipped` and
+`cancelled` may carry `{code, path, fileCount}` for the decided draft. A
+completed decision whose only diagnostic is `PROCESSING_EXCLUSION_UNVERIFIED`
+does not add the `status --verbose` hint.
 A status reply may add `collection: {state: "stopped", code}` when the latest
 collection pass reported `CLAUDE_HISTORY_REQUIRES_REVIEW` or
 `UNSUPPORTED_SESSION_OWNERSHIP` for exactly the invoking session; its

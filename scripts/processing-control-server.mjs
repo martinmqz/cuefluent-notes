@@ -73,17 +73,35 @@ export function reviewNotePath(value) {
   return `${text}…`;
 }
 const notePath = value => { string(value, REVIEW_NOTE_PATH_BYTES); if (Buffer.byteLength(value) > REVIEW_NOTE_PATH_BYTES) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); return value; };
+// Replies are Markdown, so text from elsewhere must render exactly as written.
+// A quoted note path escapes what CommonMark or GFM could read as inline markup
+// (emphasis, code, links, raw HTML, entities, strikethrough); JSON quoting
+// already escapes `\` and `"`, and an image needs the escaped `[`.
+const MARKDOWN_INLINE = /[`*_[\]<>&~]/g;
+const markdownScalar = value => displayScalar(value).replace(MARKDOWN_INLINE, '\\$&');
+// Text shown literally: a code span, whose content is never read as markup,
+// an entity or an escape. Its fence is one backtick longer than the longest
+// run inside, and a space pads both ends when the text starts or ends with a
+// backtick or a space, which the span strips again.
+const codeSpan = text => {
+  const fence = '`'.repeat(Math.max(0, ...(text.match(/`+/g) ?? []).map(run => run.length)) + 1);
+  const pad = /^[` ]|[` ]$/.test(text) ? ' ' : '';
+  return `${fence}${pad}${text}${pad}${fence}`;
+};
 // Untrusted note paths are quoted, escaped and bounded; the folder is a private
-// path the person opens, so only its controls are escaped.
+// path the person opens, so only its controls are escaped. Shown without a link
+// in a reply, it is a code span (a Windows path keeps its backslashes); the
+// review form's message is plain text, so it shows the folder as it is.
 function displayPath(value) {
   let text = '';
   for (const char of value) {
-    if (Buffer.byteLength(displayScalar(text + char)) > REVIEW_PATH_BYTES) return `${displayScalar(text).slice(0, -1)}…"`;
+    if (Buffer.byteLength(markdownScalar(text + char)) > REVIEW_PATH_BYTES) return `${markdownScalar(text).slice(0, -1)}…"`;
     text += char;
   }
-  return displayScalar(text);
+  return markdownScalar(text);
 }
-const displayFolder = value => value.replace(DISPLAY_CONTROLS, displayEscape);
+const plainFolder = value => value.replace(DISPLAY_CONTROLS, displayEscape);
+const displayFolder = value => codeSpan(plainFolder(value));
 const reviewCode = value => { if (typeof value !== 'string' || !REVIEW_CODE.test(value)) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); return value; };
 const fileCount = value => { integer(value); if (value < 1 || value > 100) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); return value; };
 // A draft in a reply: its code alone, its code with its first note path (named),
@@ -128,17 +146,39 @@ const draftName = draft => {
   const first = draft?.path ?? draft?.files?.[0]?.path;
   return draft === undefined ? undefined : `draft ${draft.code}${first === undefined ? '' : ` (${displayPath(first)}${moreFiles(draft.fileCount)})`}`;
 };
-// One pending draft per line: its code, two spaces and its first note path.
-const listingLine = item => `${item.code}  ${displayPath(item.path)}${item.fileCount > 1 ? ` (+${item.fileCount - 1} more)` : ''}`;
+// One pending draft per line: its code, one space and its first note path.
+const listingLine = item => `${item.code} ${displayPath(item.path)}${item.fileCount > 1 ? ` (+${item.fileCount - 1} more)` : ''}`;
 // Replies are Markdown in both clients: a single newline joins lines into one
-// paragraph and continues a list item, so every list line is a list item and
-// blocks are separated by a blank line.
-const listing = (title, drafts) => [title, ...drafts.map(item => `- ${listingLine(item)}`)].join('\n');
+// paragraph and continues a list item, so every list line is a list item,
+// blocks are separated by a blank line and so is every list from the line
+// before it, as Codex's model writes a list it relays.
+const listing = (title, drafts) => [title, '', ...drafts.map(item => `- ${listingLine(item)}`)].join('\n');
 const replyText = blocks => `Cuefluent: ${blocks.join('\n\n')}`;
-// A local file the person opens with one click: a percent-encoded file URL as
-// a Markdown autolink. Display only; opening it grants and changes nothing.
-const fileLink = file => `<${pathToFileURL(file).href}>`;
-const folderLink = folder => `<${pathToFileURL(folder).href.replace(/\/?$/, '/')}>`;
+// Characters a link destination cannot carry as written: controls, other
+// whitespace than a space, characters CommonMark reads as markup in a
+// destination (`<`, `>`, a backslash escape, an `&` entity), `%`, which Codex
+// decodes in a path, and a backtick, which its model is told to keep out of links.
+const UNLINKABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069<>\\&%`]|[^\S ]/u;
+/** A local file or folder in a reply, as a link the person opens. Claude: a
+ * percent-encoded file URL as a Markdown autolink, which opens with one click
+ * in Claude Desktop. Codex: the local link its model writes, so a relayed reply
+ * keeps its form (the model instructions Codex CLI 0.163 ships: "plain label, absolute
+ * target", angle brackets around a target with spaces, no file URLs): the
+ * path's last segment linked to the absolute path, `[name](/abs/path)`, a
+ * folder with its trailing slash, and `[name](</abs/path>)` when the path
+ * holds spaces or parentheses. A Codex path Markdown cannot carry that way
+ * (see UNLINKABLE, a path that is not a POSIX absolute path such as a Windows
+ * path, or an unusual last segment) has no link: null, and the reply shows the
+ * plain path. Display only; opening it grants and changes nothing. */
+export function reviewPathLink(commandPrefix, target, { folder = false } = {}) {
+  if (commandPrefix !== REVIEW_COMMANDS.codex) {
+    const href = pathToFileURL(target).href;
+    return `<${folder ? href.replace(/\/?$/, '/') : href}>`;
+  }
+  const destination = folder ? target.replace(/\/?$/, '/') : target, name = destination.split('/').filter(Boolean).at(-1) ?? '';
+  if (!/^\/(?!\/)/.test(destination) || !/^[A-Za-z0-9._-]{1,128}$/.test(name) || /^\.+$/.test(name) || UNLINKABLE.test(destination)) return null;
+  return /[ ()]/.test(destination) ? `[${name}](<${destination}>)` : `[${name}](${destination})`;
+}
 // Links make a reply longer; they are left out before it could exceed its bound.
 const REVIEW_TEXT_BYTES = 3840;
 // Why a decision found its revision no longer decidable, each with its next step.
@@ -156,13 +196,18 @@ function changedText(reason, name, code, cmd, others) {
 function reviewText(review, { draft, drafts, reason, commandPrefix: command }) {
   const code = draft?.code, name = draftName(draft), cmd = words => `${command} ${words}`;
   const choices = `To decide, type ${cmd(`save ${code}`)} or ${cmd(`skip ${code}`)}.`;
-  const folder = links => `Review folder: ${links === 'none' ? displayFolder(draft.folder) : folderLink(draft.folder)}`;
+  const folder = links => `Review folder: ${(links !== 'none' && reviewPathLink(command, draft.folder, { folder: true })) || displayFolder(draft.folder)}`;
+  // A file's proposed copy is linked only with every link shown, and only when it can be.
+  const fileLink = (links, file) => {
+    const link = links === 'all' && file.review !== undefined ? reviewPathLink(command, path.join(draft.folder, file.review)) : null;
+    return link ? `: ${link}` : '';
+  };
   const variants = links => {
     const blocks = [];
     if (review === 'presented') {
       blocks.push(`${capital(name)} is ready for review; nothing has been saved.`, folder(links),
         [...draft.files.map(file => `- ${displayPath(file.path)} (${file.change === 'create' ? 'new note' : 'update'}, ${file.bytes} bytes)${
-          links === 'all' && file.review !== undefined ? `: ${fileLink(path.join(draft.folder, file.review))}` : ''}`),
+          fileLink(links, file)}`),
         ...(draft.fileCount > draft.files.length ? [`- and ${draft.fileCount - draft.files.length} more files listed in summary.txt`] : [])].join('\n'),
         choices);
       if (drafts?.length) blocks.push(listing('Other drafts:', drafts));
@@ -209,7 +254,7 @@ function helpText({ commandPrefix: command, statusDetail }) {
     ? 'Type one of these yourself, exactly as written; for the first word, type $ and choose cuefluent-notes from the list:'
     : 'Type one of these yourself, exactly as written:';
   const intro = statusDetail === 'unbound' ? `${STATUS_DETAILS.unbound.text(words => `${command} ${words}`)} ${how}` : how;
-  return [`Cuefluent: ${intro}`,
+  return [`Cuefluent: ${intro}`, '',
     ...PROCESSING_HELP.map(item => `- ${command} ${item.word}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
 }
 const counted = (value, one, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
@@ -227,7 +272,7 @@ function verboseText(result) {
     ['unavailable', 'unavailable'], ['cancelled', 'cancelled'], ['unfinishedOperations', 'unfinished operation', 'unfinished operations'], ['awaitingReview', 'awaiting review']]));
   if (result.collection) lines.push(`Collection: stopped for this chat (${result.collection.code}).`);
   const blocks = [result.statusText, lines.map(line => `- ${line}`).join('\n')];
-  if (result.drafts?.length) blocks.push(['Drafts awaiting review:', ...result.drafts.map(item =>
+  if (result.drafts?.length) blocks.push(['Drafts awaiting review:', '', ...result.drafts.map(item =>
     `- ${listingLine(item)}: operation ${item.operationId}; proposal ${item.proposalHash}; claim ${item.claimHash}`)].join('\n'));
   return blocks.join('\n\n');
 }
@@ -716,7 +761,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
                 oneOf: proposal.choices.map(item => ({ const: item.operationId, title: item.label })) } }, required: ['operationId'] } } }
               : { jsonrpc: '2.0', id: formId, method: 'elicitation/create', params: { mode: 'form',
               message: 'Review the proposed notes, then choose a proposal action. Closing this form or using its own Skip button leaves the proposal pending.' +
-                (proposal.folder === undefined ? '' : ` The same proposal is in the private review folder ${displayFolder(proposal.folder)}`),
+                (proposal.folder === undefined ? '' : ` The same proposal is in the private review folder ${plainFolder(proposal.folder)}`),
               requestedSchema: { type: 'object', properties: {
                 // Optional: a client that cannot show the preview still lets
                 // the person choose Later. Save, Skip and Cancel apply only
