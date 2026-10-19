@@ -21,8 +21,63 @@ contracts for supported commands, formats, permissions and recovery procedures.
   status does not report the resolved model; neither successful dispatch nor
   structural Markdown checks certify classification or summary quality.
 - Host hook trust, launch PATH, session reload and native review rendering depend
-  on the client. Installation grants neither collection nor processing consent.
-  See [installation](distribution.md) and [setup](setup.md).
+  on the client. Tested Claude Desktop and CLI versions cannot complete a native
+  review form, so Claude reviews through the private review folder and typed
+  decisions; see [Claude limitations](processing-chat.md#claude-limitations).
+  Opening or reading the review folder is not verified by the plugin. Installation grants
+  neither collection nor processing consent. See [installation](distribution.md)
+  and [setup](setup.md).
+- Typed controls and decisions are verified against the client's native
+  transcript: Claude's skill command with its skill expansion, or Codex's skill
+  block or `$`-list skill selection with the typed text. Input recorded in another
+  shape, including a Codex mention typed out by hand, is treated as unverified
+  and decides nothing. These channels resist the chat model, not a local
+  process: any process running as the user can drive the client or the helper
+  commands. See [review controls](processing-chat.md#review-controls).
+- A verified Codex control turn, direct or in code mode, is kept out of captures
+  only when the whole completed turn has exactly the verified shape. Anything
+  else in it, such as commentary, the assistant reading a file or calling another
+  tool, keeps that turn collectible with the assistant's own words; its exact
+  command, command markup, this plugin's control calls and the assistant's
+  repetition of the plugin's reply are still left out. A mention typed out by hand
+  is collected as typed. Code-mode cells are
+  bound through the IDs Codex sends with the call, which Codex CLI 0.163's source
+  shows model-written code cannot set; other Codex versions and the installed
+  binaries themselves are not checked. A nested tool that leaves no native record
+  is not visible to the check. A Claude Desktop session connected for Remote
+  Control stops collection at its first `bridge-session` record; one connected
+  before collection started for it confirms only a command typed as its first
+  prompt. See
+  [capture prevention](processing-chat.md#capture-prevention-and-limits).
+- In every Codex turn, including a plain-language request without the skill,
+  this plugin's control calls, their results, code-mode cells that only made such
+  calls and the assistant's repetition of a control reply are left out of
+  captures by native identity. A repetition is compared after one
+  [defined Markdown normalization](session-workflow.md#generated-output-provenance-gate)
+  of link form, line endings, spacing at line ends, bullets and blank lines,
+  with code spans and decoded paths compared as written. The request's own
+  words stay, and so do commentary, a paraphrase (such as a refusal relayed in
+  other words), a reply with words added or other formatting such as emphasis or
+  code spans, a cell that also did other work, every code-mode record of a turn
+  with a nested call no single cell owns or a child agent, and transcripts in
+  legacy history, whose MCP calls have no native MCP items. Copies of a reply in
+  another turn or chat are not detected. These rules are tested with synthetic
+  transcripts, not live Codex sessions.
+- Codex replies link the review folder and proposed copies in the form Codex's
+  model writes a local link, `[name](/absolute/path)`; a path Markdown cannot
+  carry that way, including any Windows path, is shown as a code span without a
+  link. How Codex on Windows writes and relays such paths is unverified.
+- Routing text typed after the skill command, such as a plain-language request
+  that starts with `save`, depends on the model following
+  [the skill](../SKILL.md#formal-processing-controls). Verified inexact text
+  applies nothing whichever control is called; text that cannot be verified
+  binds as a model-chosen call, which can display a draft or run another control
+  but never decides a draft.
+- A control typed as the first prompt of a fresh Claude session binds through
+  its registration within a bounded read; a Codex control binds once the session
+  has a collection selection or processing-only binding. A continued Claude CLI
+  session joins the review lineage only under the
+  [continuation conditions](session-workflow.md#claude-reader-contract).
 - Windows profile, package visibility and indexing policies vary by host. Existing
   package stores have limits on additions and replacement setup, and automatic
   migration is unsupported. No universal protection from third-party indexing or
@@ -31,6 +86,10 @@ contracts for supported commands, formats, permissions and recovery procedures.
   collection, processing and a duplicate-safe retry, remains unverified.
 - Recovery does not guarantee survival of every OS termination or sudden power
   loss. Windows lacks Node directory fsync, so its power-loss durability is weaker.
+- Windows refuses to replace a file another process has open. A private-state or
+  settings write then retries for up to about 0.6 s (a hook's for 70 ms) and
+  otherwise fails, changing nothing. Note saves do not wait this way, so a note
+  an editor, indexer or sync client holds open can refuse a save.
 - Plugin filesystem and Markdown checks do not establish Cuefluent recursive file
   admission, rendering, image loading or search ranking. See the
   [authoring contract](authoring.md).

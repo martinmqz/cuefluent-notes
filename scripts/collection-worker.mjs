@@ -3,6 +3,7 @@ import { collectionJobs, readCollectionScheduler, reserveCollectionAttempt } fro
 import { collectionGrantHash } from './collection-grant.mjs';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isMain, lstatOrNull } from './file-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
@@ -11,16 +12,19 @@ import { inspectIntakeStore, openWorkflowIntake, intakePath, intakeSnapshot, int
 import { readSelection, controlSelection, resolveStoredSelectionAnchor, readCaptureHead, publishCapture, commitReaderProgress, recoverPendingPublication, inspectPendingPublication, readReaderProgress } from './intake-store.mjs';
 import { newSelectionState, inspectSourceBoundary, currentIntervals, stableSourceIdentity } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexProgressPlan, codexCheckpoint } from './codex-reader.mjs';
-import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan, CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
+import { claudeRegistrationHeader, readClaudeSelection, claudePublicationPlan, isClaudeHumanRow, CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
+import { readSessionRange } from './session-jsonl.mjs';
 import { createProcessingExecutionResolver } from './processing-execution-receipts.mjs';
 import { hydrateReaderCheckpoint } from './reader-pages.mjs';
 import { readTombstone } from './capture-retention.mjs';
-import { readRegistration, publishIngressMetadata, wakePath, collectionStatusPath, registrationPath, drainedPath, suspendedPath, READER_SUSPENSION_VERSION, assertRegistrationGrant } from './collection-ingress.mjs';
+import { readRegistration, publishIngressMetadata, wakePath, collectionStatusPath, registrationPath, drainedPath, suspendedPath, READER_SUSPENSION_VERSION, assertRegistrationGrant,
+  registrationFloorPath, snapshotSourceMetadata } from './collection-ingress.mjs';
 import { withWorkflowBudget, checkWorkflowBudget } from './workflow-budget.mjs';
 import { CLIENTS, fail, nativeId, keys, hash, integer, choice, canonicalJSON, digest } from './workflow-values.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { canonicalWorkflowProject } from './workflow-paths.mjs';
 import { createProcessingControlResolver } from './processing-control-receipts.mjs';
+import { readContinuesLink, readContinuedLink, continuationTarget, continuationOrigin, linkClaudeContinuation, ensureContinuesPointer } from './claude-continuation.mjs';
 
 // ACKs are disposable scheduling hints. They never replace fresh policy,
 // immutable registration/source checks, native boundaries, or reader progress.
@@ -45,43 +49,131 @@ async function hasAcknowledgement(store, name, expected) {
   catch { return false; }
 }
 
+// A fresh Claude session can create its transcript only after its prompt hook
+// ran, so neither the registration nor that prompt's wake holds a floor. The
+// worker then waits, at most as long as control binding settles, for the file
+// to appear, and takes the hook's own metadata-only snapshot itself. Claude
+// can write bookkeeping rows before the first row that identifies the session,
+// so a header that is not readable yet is retried within the same wait.
+const PROMPT_SOURCE_WAIT_MS = 1000;
+const promptWakeWithoutFloor = (registration, wake) => registration.client === 'claude' && registration.snapshot === null &&
+  wake?.event === 'UserPromptSubmit' && (wake.snapshot ?? null) === null;
+/** Wait for the transcript of a prompt wake without a floor; returns the end
+ * of this bounded wait, or null when the session is not in that state. */
+async function awaitPromptSource(store, registration) {
+  if (registration.client !== 'claude' || registration.snapshot !== null) return null;
+  let wake, floor;
+  try {
+    wake = intakeJSON(await intakeSnapshot(store, 'state', wakePath(registration), { maxBytes: 16384 }));
+    floor = (await intakeSnapshot(store, 'state', registrationFloorPath(registration), { maxBytes: 16384 })).bytes;
+  } catch { return null; } // A hint only: the locked pass validates everything again.
+  if (floor !== null || !promptWakeWithoutFloor(registration, wake)) return null;
+  const deadline = performance.now() + PROMPT_SOURCE_WAIT_MS;
+  const present = async () => { try { return (await lstatOrNull(registration.sourcePath))?.size > 0; } catch { return true; } };
+  for (let attempt = 0; !await present(); attempt++) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) break;
+    checkWorkflowBudget();
+    await delay(Math.min(50 * 2 ** attempt, remaining));
+  }
+  return deadline;
+}
+
 /** First registration waits for a real post-floor native boundary, excludes that
  * boundary prompt, then authorizes subsequent full units. Never look behind EOF.
  */
-async function armRegistration(transaction, store, registration, wake, authorize, observeRead, current, grantHash) {
+async function armRegistration(transaction, store, registration, wake, authorize, observeRead, current, grantHash, link = null) {
   const selected = { client: registration.client, sessionId: registration.sessionId,
     path: registration.sourcePath, projectRoot: registration.cwd };
-  const floorName = `registration-floors/${registration.client}/${registration.sessionId}.json`;
+  const floorName = registrationFloorPath(registration);
   const floorSnapshot = await intakeSnapshot(store, 'state', floorName, { maxBytes: 16384 }), floor = intakeJSON(floorSnapshot);
   if (floor) { keys(floor, ['registrationId', 'snapshot']); nativeId(floor.registrationId); }
   if (floor && floor.registrationId !== registration.id) fail('REGISTRATION_REQUIRES_REVIEW');
-  const frozen = registration.snapshot ?? floor?.snapshot ?? wake?.snapshot;
+  let frozen = registration.snapshot ?? floor?.snapshot ?? wake?.snapshot ?? null;
+  // Only the worker freezes a floor. Later is never wider: the first prompt,
+  // already persisted, stays before it and the next prompt is the boundary.
+  const freezing = !frozen && promptWakeWithoutFloor(registration, wake);
+  if (freezing) frozen = await snapshotSourceMetadata(registration.sourcePath);
   if (!frozen) return { pending: 'SOURCE_BOUNDARY_PENDING' };
   keys(frozen, ['path', 'fileIdentity', 'eofByte']); hash(frozen.fileIdentity); integer(frozen.eofByte);
   if (frozen.path !== selected.path) fail('SOURCE_IDENTITY_MISMATCH');
-  const verifyHeader = registration.client === 'codex' ? codexRegistrationHeader(selected) : claudeRegistrationHeader(selected);
+  // A verified continuation of a registered root session may carry Claude's
+  // background kind and re-homes that session's history, which is never
+  // collected again: its boundary is the first own prompt after both floors.
+  const continued = registration.client === 'claude' ? await readContinuesLink(store, registration.sessionId) : null;
+  const sessionHeader = registration.client === 'codex' ? codexRegistrationHeader(selected)
+    : claudeRegistrationHeader(selected, { sessionKinds: continued?.link.to.sessionKinds ?? [] });
+  // A floor the worker freezes must already hold the rows that identify the
+  // session. Rows written after the snapshot (Claude writes bookkeeping first)
+  // would otherwise verify the header while the first prompt falls past the
+  // floor; such a pass finds the header unavailable and retries within its wait.
+  const verifyHeader = !freezing ? sessionHeader : io => sessionHeader({ ...io, size: Math.min(io.size, frozen.eofByte),
+    readHeader: (offset, length) => offset + length > frozen.eofByte ? fail('SESSION_HEADER_UNAVAILABLE') : io.readHeader(offset, length) });
   const observed = await inspectSourceBoundary(selected, { verifyHeader, frozen, currentUnitId: registration.unitId });
   if (observed.status !== 'registered') return { pending: 'SOURCE_BOUNDARY_PENDING' };
+  const continuation = registration.client === 'claude' ? await claudeContinuation(transaction, store, observed.source, link, authorize, observeRead) : null;
+  const target = continuation?.from ?? null;
+  // An attachment or system row can identify the session before its first
+  // prompt is written, so that floor must hold a complete human prompt of its
+  // own too: past a continuation's re-homed prefix, whose rows carry this
+  // session's ID. A record the bounded read cannot reach names its own cause.
+  if (freezing) {
+    const read = await readSessionRange({ source: observed.source, from: 0, endByte: frozen.eofByte,
+      readHeader: verifyHeader, verifyHeader: identity => identity, observeRead, maxBytes: 8 * 1024 * 1024 });
+    const own = target?.prefix.endByte ?? 0;
+    if (!read.records.some(record => record.startByte >= own && isClaudeHumanRow(record.value))) fail(read.blocked?.code ?? 'SESSION_HEADER_UNAVAILABLE');
+  }
   if (registration.snapshot === null && floor === null) await replaceIntakeJSON(transaction, floorName,
     { registrationId: registration.id, snapshot: frozen }, null);
   const intervalId = randomUUID(), temporary = newSelectionState(observed.source);
   temporary.active = true; temporary.intervals = [{ id: intervalId, lower: { ...observed.boundary, unitId: null }, upper: null }];
-  const result = await (registration.client === 'codex' ? readCodexSelection : readClaudeSelection)({ state: temporary, scopeId: intervalId, maxBytes: 8 * 1024 * 1024, observeRead });
-  const anchors = result.nativeAnchors;
-  const usable = anchors.filter(item => item.record.startByte >= frozen.eofByte && item.record.endByte - item.record.startByte <= 64 * 1024);
+  const result = await (registration.client === 'codex' ? readCodexSelection : readClaudeSelection)({ state: temporary, scopeId: intervalId, maxBytes: 8 * 1024 * 1024, observeRead,
+    ...(continuation ? { continuation } : {}) });
+  const anchors = result.nativeAnchors, floorByte = Math.max(frozen.eofByte, target?.prefix.endByte ?? 0);
+  const usable = anchors.filter(item => item.record.startByte >= floorByte && item.record.endByte - item.record.startByte <= 64 * 1024);
   const anchor = usable.find(item => item.unitId === registration.unitId) ?? usable[0];
-  if (!anchor) return { pending: result.blocked?.code ?? 'NATIVE_BOUNDARY_PENDING' };
+  if (!anchor) {
+    // A session continued before its first boundary prompt (a fresh session
+    // whose only prompt was a control) links here; it never arms afterwards.
+    if (result.continuedIn && link && !link.attempted) {
+      link.attempted = true;
+      await authorize();
+      const linked = await linkClaudeContinuation(transaction, store, { source: observed.source, registration, originKinds: target?.sessionKinds ?? [],
+        hint: result.continuedIn, config: link.config, authorize, observeRead });
+      if (linked) link.successor = linked.to.sessionId;
+    }
+    if (result.terminal && !result.blocked) return { pending: null };
+    return { pending: result.blocked?.code ?? 'NATIVE_BOUNDARY_PENDING' };
+  }
   const boundary = { ...observed.boundary, unitId: anchor.unitId, record: anchor.record };
   const selection = await controlSelection(transaction, { source: observed.source, expectedHash: current.hash, boundary, authorize, grantHash,
     request: { id: registration.id, operation: 'start', client: registration.client, sessionId: registration.sessionId, unitId: anchor.unitId, expectedRevision: current.state?.revision ?? 0 } });
   return { selection, boundaryExcluded: anchor.unitId };
 }
 
-export async function processScope(transaction, store, selection, scopeId, authorize, observeRead) {
+// Verified links of this Claude source, read fresh on every pass. They never
+// widen a scope: a successor skips its re-homed prefix, an origin stops at its
+// marker. Only the worker, with the registration and policy, creates a link.
+async function claudeContinuation(transaction, store, source, link, authorize, observeRead) {
+  const registration = link?.registration ?? null;
+  const origin = await readContinuedLink(store, source.sessionId);
+  // Repair a pointer lost between the two create-once writes.
+  if (origin && registration) await ensureContinuesPointer(transaction, store, origin, authorize);
+  // The pinned prefix record is re-read here, so a rewrite behind a floor that
+  // starts past it still fails this pass rather than reading as structural.
+  const from = await continuationTarget(await readContinuesLink(store, source.sessionId), source, registration, { observeRead });
+  const into = continuationOrigin(origin, source, registration);
+  return from || into ? { from, into } : null;
+}
+
+// `link` carries the registration and policy for creating a session link; its
+// `attempted` flag is shared by all scopes of one registration visit.
+export async function processScope(transaction, store, selection, scopeId, authorize, observeRead, link = null) {
   let saved = 0, pending = null;
   for (let pass = 0; pass < 8; pass++) {
     checkWorkflowBudget();
     const identity = { client: selection.state.source.client, sessionId: selection.state.source.sessionId };
+    const continuation = identity.client === 'claude' ? await claudeContinuation(transaction, store, selection.state.source, link, authorize, observeRead) : null;
     const { snapshot: progress, cursor, checkpointRoot } = await readReaderProgress(store, identity, scopeId, selection.state.source.fileIdentity, { metadataOnly: true });
     const scope = currentIntervals(selection.state).find(item => item.id === scopeId) ?? selection.state.explicitScopes.find(item => item.id === scopeId);
     if (scope?.end && cursor?.offset === scope.end.endByte) return { saved, pending: null, incomplete: false, drained: true };
@@ -143,8 +235,8 @@ export async function processScope(transaction, store, selection, scopeId, autho
         authorize: () => authorize({ operation: 'capture', identity, projectRoot: selection.state.source.projectRoot,
           sourcePath: selection.state.source.path }) }),
       resolveProcessingDispatch: createProcessingControlResolver(transaction,
-        { state: selection.state, selectionHash: selection.hash, authorize }),
-      loadHead: unitId => readCaptureHead(store, { ...identity, unitId }) });
+        { state: selection.state, selectionHash: selection.hash, authorize, scopeId }),
+      loadHead: unitId => readCaptureHead(store, { ...identity, unitId }), ...(identity.client === 'claude' ? { continuation } : {}) });
     // A later event for an already published/pruned Codex unit is not harmless
     // structural content. Do not advance through it as an excluded prefix.
     for (const unitId of result.unanchoredUnits) {
@@ -182,6 +274,16 @@ export async function processScope(transaction, store, selection, scopeId, autho
         selectionHash: selection.hash, cursorHash: progress.hash, scan: plan.scan, checkpoint: plan.checkpoint, authorize });
       continue;
     }
+    // One bounded link attempt per registration visit; a refused link leaves
+    // the marker diagnostic exactly as before.
+    if (result.continuedIn && link && !link.attempted) {
+      link.attempted = true;
+      await authorize();
+      const linked = await linkClaudeContinuation(transaction, store, { source: selection.state.source, registration: link.registration,
+        originKinds: continuation?.from?.sessionKinds ?? [], hint: result.continuedIn, config: link.config, authorize, observeRead,
+        ...(scope?.upper ? { ceiling: scope.upper.eofByte } : {}) });
+      if (linked) { link.successor = linked.to.sessionId; continue; }
+    }
     const frozenBlock = !result.blocked || ['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
       'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
       'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
@@ -198,13 +300,18 @@ export async function processScope(transaction, store, selection, scopeId, autho
   return { saved, pending: 'WORKER_PASS_LIMIT', incomplete: true };
 }
 
-async function runRegistration(capability, registration, registrationHash, route, grantHash, observeRead) {
+// `linked` names a successor session this visit linked, if any. Only the
+// session whose hook launched this worker waits for its transcript: a stale
+// registration whose file never appears must not slow every later pass.
+async function runRegistration(capability, registration, registrationHash, route, grantHash, observeRead, config, { awaitSource = false } = {}) {
   const identity = { client: registration.client, sessionId: registration.sessionId };
   const selectionIdentity = { ...identity, cwd: registration.cwd };
   await assertWorkflowStorage(capability, selectionIdentity, 'collect');
   const store = await openWorkflowIntake(capability, selectionIdentity, 'collect');
   const authorize = async () => { await assertWorkflowStorage(capability, selectionIdentity, 'collect'); return true; };
-  return withIntakeLock(store, async transaction => {
+  // Outside the intake lock: waiting for a file holds no other session up.
+  const settleBy = awaitSource ? await awaitPromptSource(store, registration) : null;
+  const visit = link => withIntakeLock(store, async transaction => {
     if (await lstatOrNull(await intakePath(store, 'state', '.intake-maintenance'))) fail('INTAKE_OFFLINE_MAINTENANCE');
     // Another worker may have left an intent after this pass's initial recovery.
     // Never reconcile it through the registration currently being visited.
@@ -224,7 +331,7 @@ async function runRegistration(capability, registration, registrationHash, route
     }
     if (selection.state === null || (!selection.state.active && !selection.state.paused)) {
       await authorize(); // Before ANY selected-source bytes are read.
-      const armed = await armRegistration(transaction, store, registration, intakeJSON(wakeSnapshot), authorize, observeRead, selection, grantHash);
+      const armed = await armRegistration(transaction, store, registration, intakeJSON(wakeSnapshot), authorize, observeRead, selection, grantHash, link);
       if (!armed.selection) return { saved: 0, pending: armed.pending };
       selection = armed.selection; boundaryExcluded = armed.boundaryExcluded;
     }
@@ -234,7 +341,7 @@ async function runRegistration(capability, registration, registrationHash, route
     let saved = 0, pending = null, incomplete = false, drained = true, suspended = true;
     for (const scope of [...currentIntervals(selection.state), ...selection.state.explicitScopes]) {
       await authorize();
-      const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead);
+      const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link);
       saved += result.saved; pending ??= result.pending; incomplete ||= Boolean(result.incomplete);
       drained &&= result.drained === true; suspended &&= result.suspended === true || result.drained === true;
       selection = await readSelection(store, identity);
@@ -260,6 +367,19 @@ async function runRegistration(capability, registration, registrationHash, route
     }
     return { saved, pending: pending ?? (selection.state.paused ? 'COLLECTION_PAUSED' : null), incomplete, boundaryExcluded };
   });
+  for (let attempt = 0; ; attempt++) {
+    const link = { registration, config, attempted: false, successor: null };
+    try { return { ...await visit(link), linked: link.successor }; }
+    catch (error) {
+      // Only within the triggering session's bounded wait, and outside the
+      // lock: a transcript holding only bookkeeping so far has no readable
+      // header yet. Every other failure, or one after the wait, stands.
+      const remaining = settleBy === null ? 0 : settleBy - performance.now();
+      if (error?.code !== 'SESSION_HEADER_UNAVAILABLE' || remaining <= 0) throw error;
+      checkWorkflowBudget();
+      await delay(Math.min(50 * 2 ** attempt, remaining));
+    }
+  }
 }
 
 async function recoverOwner(capability, store, snapshot, collectionId) {
@@ -316,9 +436,13 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
       let hinted = trigger ? { ...trigger, file: registrationPath(trigger), cursor: null } : null;
       let preferHint = scheduler.value.triggerFirst, first = true, count = 0;
       const seen = new Set();
+      // A successor visited before its origin linked it in this pass is
+      // visited once more, so its floor and boundary follow the new link.
+      const revisits = [], revisited = new Set();
       for (; count < maxJobs; count++) {
         let job;
-        if (hinted && preferHint) { job = hinted; hinted = null; }
+        if (revisits.length) job = revisits.shift();
+        else if (hinted && preferHint) { job = hinted; hinted = null; }
         else {
           const next = await background.next();
           if (!next.done) job = next.value;
@@ -332,8 +456,16 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
         first = false;
         if (job.diagnostic && !output.pending.includes(job.diagnostic)) output.pending.push(job.diagnostic);
         if (job.maintenance) continue;
-        if (seen.has(job.file)) continue;
+        if (seen.has(job.file) && !job.revisit) continue;
         seen.add(job.file);
+        if (job.revisit) {
+          // This pass's earlier result for the session is superseded.
+          output.diagnostics = output.diagnostics.filter(item => {
+            if (item.client !== job.client || item.sessionId !== job.sessionId) return true;
+            const at = output.pending.indexOf(item.code); if (at >= 0) output.pending.splice(at, 1);
+            return false;
+          });
+        }
         output.lastRegistration = job.file;
         try {
           const { snapshot: registered, registration } = await readRegistration(store, job);
@@ -347,13 +479,18 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           if (!route.intended?.collect) continue;
           if (route.collection.id !== collectionId) continue;
           const grantHash = await collectionGrantHash(snapshot.config, route.route.id, registration);
-          const result = await runRegistration(capability, registration, registered.hash, route, grantHash, observeRead);
+          const result = await runRegistration(capability, registration, registered.hash, route, grantHash, observeRead, snapshot.config,
+            { awaitSource: Boolean(trigger) && job.file === registrationPath(trigger) });
           output.saved += result.saved;
           if (result.pending) {
             output.pending.push(result.pending);
             if (!passStopCodes.has(result.pending)) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: result.pending });
           }
           if (result.boundaryExcluded) output.boundaryExcluded.push({ client: registration.client, sessionId: registration.sessionId, unitId: result.boundaryExcluded });
+          if (result.linked) {
+            const successor = { client: 'claude', sessionId: result.linked, file: registrationPath({ client: 'claude', sessionId: result.linked }), cursor: null, revisit: true };
+            if (seen.has(successor.file) && !revisited.has(successor.file)) { revisited.add(successor.file); revisits.push(successor); }
+          }
         } catch (error) {
           output.pending.push(error.code ?? 'COLLECTION_FAILED');
           if (passStopCodes.has(error.code)) break;

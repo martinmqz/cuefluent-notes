@@ -6,7 +6,7 @@ import { canonicalWorkflowPath, validateWorkflowPlacement, resolveWorkflowConfig
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { prepareWorkflowStorage, verifyPrivateDirectories } from './workflow-storage.mjs';
 import { privacyIdentity, createPrivateDirectory, verifyPrivateEntries, rejectKnownSync, withStorageProbes } from './storage-platform.mjs';
-import { lstatOrNull, sameFileIdentity, isOwnedStage, removeOwnedStage, syncDirectory } from './file-io.mjs';
+import { lstatOrNull, sameFileIdentity, isOwnedStage, removeOwnedStage, syncDirectory, renameReplacing } from './file-io.mjs';
 import { withLock } from './safe-update.mjs';
 import { workflowDiagnostics } from './workflow-diagnostics.mjs';
 import { canonicalJSON, digest, fail, hash } from './workflow-values.mjs';
@@ -97,16 +97,19 @@ async function configure({ configPath, expectedHash, proposal }, options) {
         await handle.writeFile(bytes); await handle.sync();
       } finally { try { stageIdentity = await handle.stat({ bigint: true }); } finally { await handle.close(); } }
       await verifyPrivateEntries([{ path: stage, stat: stageIdentity, root: false }], identity);
-      await options.beforeCommit?.(); await guard();
-      // Revalidate active storage and placement after proposal staging.
-      const currentPlacement = await validateWorkflowPlacement(config, { configPath: file });
-      if (canonicalJSON(currentPlacement) !== canonicalJSON(placement)) fail('PRIVATE_STORAGE_REDIRECTED');
-      const currentRoots = await readyCollections(config, currentPlacement);
-      if (readyRoots.some((root, i) => root.path !== currentRoots[i]?.path ||
-          !sameFileIdentity(root.stat, currentRoots[i]?.stat))) fail('PRIVATE_STORAGE_CHANGED');
-      await recheck?.({ path: parent, stat: parentStat, entries: ['.lock', path.basename(stage)] });
-      if (!await isOwnedStage(stage, stageIdentity, bytes, { guard })) fail('WORKFLOW_CONFIG_STAGE_CHANGED');
-      await fs.rename(stage, file); await syncDirectory(parent);
+      await options.beforeCommit?.();
+      await renameReplacing(stage, file, { check: async () => {
+        await guard();
+        // Revalidate active storage and placement after proposal staging.
+        const currentPlacement = await validateWorkflowPlacement(config, { configPath: file });
+        if (canonicalJSON(currentPlacement) !== canonicalJSON(placement)) fail('PRIVATE_STORAGE_REDIRECTED');
+        const currentRoots = await readyCollections(config, currentPlacement);
+        if (readyRoots.some((root, i) => root.path !== currentRoots[i]?.path ||
+            !sameFileIdentity(root.stat, currentRoots[i]?.stat))) fail('PRIVATE_STORAGE_CHANGED');
+        await recheck?.({ path: parent, stat: parentStat, entries: ['.lock', path.basename(stage)] });
+        if (!await isOwnedStage(stage, stageIdentity, bytes, { guard })) fail('WORKFLOW_CONFIG_STAGE_CHANGED');
+      } });
+      await syncDirectory(parent);
     } finally {
       if (stageIdentity) await removeOwnedStage(stage, stageIdentity, bytes, { partial: true, guard: held });
     }

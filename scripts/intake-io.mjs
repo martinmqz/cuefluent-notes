@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { openGuarded, lstatOrNull, sameFileIdentity, readBoundedBytes, syncDirectory, isOwnedStage, removeOwnedStage } from './file-io.mjs';
+import { openGuarded, lstatOrNull, sameFileIdentity, readBoundedBytes, syncDirectory, isOwnedStage, removeOwnedStage, renameReplacing } from './file-io.mjs';
 import { canonicalWorkflowProject, canonicalWorkflowPath, overlaps, inside } from './workflow-paths.mjs';
 import { PACKAGE_ROOT } from './runtime-paths.mjs';
 import { canonicalJSON, digest, fail, keys, nativeId, list, unique } from './workflow-values.mjs';
@@ -253,24 +254,53 @@ export async function assertIntakeTransaction(transaction) {
 }
 
 export async function replaceIntakeJSON(transaction, name, value, expectedHash) {
-  checkWorkflowBudget();
-  const store = await assertIntakeTransaction(transaction);
   const bytes = Buffer.from(canonicalJSON(value) + '\n');
   if (bytes.length > META_LIMIT) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
-  if ((await intakeSnapshot(store, 'state', name)).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
+  return replaceIntakeBytes(transaction, name, bytes, expectedHash);
+}
+
+/** Atomically replace one private state file with exact bytes. The expected
+ * hash (null for absent) is checked before staging and again before rename. */
+export async function replaceIntakeBytes(transaction, name, bytes, expectedHash, { maxBytes = META_LIMIT } = {}) {
+  checkWorkflowBudget();
+  if (!Buffer.isBuffer(bytes) || bytes.length > maxBytes) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
+  const store = await assertIntakeTransaction(transaction);
+  if ((await intakeSnapshot(store, 'state', name, { maxBytes })).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
   const stageName = `metadata-stages/.metadata-${randomUUID()}.tmp`;
   const guard = () => assertIntakeTransaction(transaction);
   const stage = await writeIntakeStage(store, 'state', stageName, bytes, guard);
   try {
     const target = await intakePath(store, 'state', name, { createParents: true });
-    if ((await intakeSnapshot(store, 'state', name)).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
-    if (!await isOwnedStage(stage.file, stage.identity, bytes, { guard })) fail('INTAKE_STAGE_CHANGED');
-    await guard(); await guardStore(store, [stage.file, target]); await fs.rename(stage.file, target); await syncDirectory(path.dirname(target));
+    await renameReplacing(stage.file, target, { check: async () => {
+      checkWorkflowBudget();
+      if ((await intakeSnapshot(store, 'state', name, { maxBytes })).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
+      if (!await isOwnedStage(stage.file, stage.identity, bytes, { guard })) fail('INTAKE_STAGE_CHANGED');
+      await guard(); await guardStore(store, [stage.file, target]);
+    } });
+    await syncDirectory(path.dirname(target));
     return digest(bytes);
   } finally { await removeOwnedStage(stage.file, stage.identity, bytes, { guard }); }
 }
 
 /** No stealing, including incomplete owners. */
+/** Collection holds this lock for most of each short pass, so a step serving
+ * a person's command waits a bounded moment for it rather than failing as
+ * busy. The operation runs entirely under the lock or not at all, so trying
+ * again repeats nothing. */
+export async function withIntakeLockWaiting(store, operation, { waitMs = 2000, signal } = {}) {
+  const deadline = performance.now() + waitMs;
+  for (let attempt = 0; ; attempt++) {
+    let started = false;
+    try { return await withIntakeLock(store, transaction => { started = true; return operation(transaction); }); }
+    catch (error) {
+      const remaining = deadline - performance.now();
+      if (started || error?.code !== 'INTAKE_BLOCKED' || remaining <= 0 || signal?.aborted) throw error;
+      await delay(Math.min(25 * 2 ** attempt, 200, remaining));
+      signal?.throwIfAborted();
+    }
+  }
+}
+
 export async function withIntakeLock(store, operation, options) {
   if (!stores.has(store)) fail('UNRECOGNIZED_INTAKE_STORE');
   return withIntakeDirectoryLock(store.intakeStateDir, () => guardStore(store), async guard => {

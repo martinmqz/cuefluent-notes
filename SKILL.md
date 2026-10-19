@@ -38,41 +38,84 @@ to make a requested operation succeed.
 
 ### Formal processing controls
 
-Select this skill and supply one exact action:
+Type `/cuefluent-notes` in Claude or `$cuefluent-notes` in Codex, then one exact
+action. In Codex, type `$` and choose cuefluent-notes from the list (Codex then
+shows `$cuefluent-notes:cuefluent-notes`) before the action; the mention typed out
+by hand does not attach the skill and is no command:
 
 | Action | Scope and behavior | Tool call |
 | --- | --- | --- |
+| `help` | List these actions. Applies nothing; also works before setup. | `processing_status`; in Claude with `help: true` |
+| `setup` | Not a processing control: follow [setup](references/setup.md). | none |
+| `status` | Show execution, bounded collection inventory, unfinished operations and drafts awaiting review. | `processing_status` |
+| `status --verbose` | The same, plus diagnostics, identifiers and each draft's exact revision. | `processing_status`; in Claude with `verbose: true` |
 | `process` | Draft from pending retained captures across the existing collection, including its configured repos and clients. Resume unfinished work first. | `process_selected_captures` with no scope argument |
 | `process repo` | Draft from the current verified Git checkout; separate nested repositories are excluded. | `process_selected_captures` with `scope: "repo"` |
 | `process chat` | Draft from the invoking native chat. | `process_selected_captures` with `scope: "chat"` |
-| `resume` | Continue the saved unfinished selection and page checkpoints; do not add later captures. | `processing_resume` |
-| `status` | Show execution, bounded collection inventory, unfinished operations and drafts awaiting review. | `processing_status` |
-| `review` | Choose a pending draft if needed, then review its exact proposed changes. | `processing_review` |
-| `cancel` | Stop owned native execution before releasing unapplied operations; keep captures pending. | `processing_cancel` |
+| `process resume` | Continue the saved unfinished selection and page checkpoints; do not add later captures. | `processing_resume` |
+| `process cancel` | Stop owned native execution before releasing unapplied operations; keep captures pending. | `processing_cancel` |
+| `review` | Write a pending draft's exact proposed changes to a private review folder and report its path and draft code; Codex also opens its native review form. | `processing_review` |
+| `review <code>` | The same for the draft with that code. | `processing_review`; in Claude with `draft` |
+| `save`, `save <code>` | Save the exact draft this chat was shown by a typed `review`. Without a code, only the draft most recently shown that way. | `processing_review`; in Claude with `decision: "save"` and any `draft` |
+| `skip`, `skip <code>` | Handle that draft's captures without saving, under the same rule. | `processing_review`; in Claude with `decision: "skip"` and any `draft` |
+| `review cancel`, `review cancel <code>` | Cancel that draft's operation, under the same rule; its captures stay pending. | `processing_review`; in Claude with `decision: "cancel"` and any `draft` |
 
 For an exact action, call its available `cuefluent_control` tool once. Native
-clients may prefix tool names. The adapter derives request identity from that
+clients may prefix tool names. In Claude, copy the typed draft code, decision,
+`verbose` or `help` into the tool arguments exactly as the table shows; omit
+them when the action has none. In Codex, call the tool without those arguments;
+the typed text carries them. The adapter derives request identity from that
 native call; do not invent a request ID or selection. Omit `collectionId` unless
 already known; the adapter must resolve exactly one existing collection binding.
-These actions preserve collection settings. `process` and `resume` prepare drafts,
-never approve or save them. Bounded work can stop for review, an unfinished
-operation, a limit or a conflict; it does not promise to drain an arbitrary backlog.
-Use `resume` for a frozen remainder and `process` for the next inventory portion.
+These actions preserve collection settings. `process` and `process resume`
+prepare drafts, never approve or save them. Bounded work can stop for review, an
+unfinished operation, a limit or a conflict; it does not promise to drain an
+arbitrary backlog. Use `process resume` for a frozen remainder and `process` for
+the next inventory portion.
 
-Do not read more files, packets or notes or synthesize in this source chat. If the
+An exact action is one table row as written: same case, single spaces, a full
+draft code, nothing before or after it. With nothing typed after this skill,
+call `processing_status` once without arguments and return its `statusText`:
+the adapter applies nothing and lists the actions. When the text after this skill
+is a short near miss of an action (other case or spacing, a misspelling, a
+missing or extra word, a changed code, or an action word with a code-like word),
+do not repair, complete or interpret it, and never pass `draft`, `decision`,
+`verbose` or `help` for it. Call `processing_status` once without arguments and
+return its `statusText`: it applies nothing and names the nearest exact command
+to type. Text that starts with an action word but continues as a plain-language
+request, such as "save this meeting note: ...", is never a decision. Handle it
+with this skill's normal workflows, such as a direct save, without a control tool; if it asks for
+something only a control does (processing, a review or a decision), call
+`processing_status` once without arguments and return its `statusText`.
+
+Do not read more files, packets or notes or synthesize in this source chat. In
+Codex code mode, run the control call alone in its exec cell and print only its
+result; call no other tool and print nothing else in that turn, so the control
+turn can be kept out of captures. If the
 tool returns `verification-required`, end that exec/tool call. In a separate
 exec/tool call, repeat the same tool and arguments with its returned `retryToken`
 once. This handshake does not start processing or approve a proposal. Do not
 retry inside the same exec or invent a token. Never repeat an action to poll;
 use `status` when requested. After a successful control call, return only the
-tool's `statusText`. If the tool or verified source binding is unavailable, report
-that limitation and stop; do not silently fall back to inline processing or
-invent selection metadata.
+tool's `statusText`, unchanged. A refused or failed control call returns a
+plain-text error message for the user: return that message unchanged and stop.
+If the tool itself is unavailable, report that limitation and stop; do not
+silently fall back to inline processing or invent selection metadata.
 
-Natural-language processing requests can use the same handoff, but mixed messages
-remain original evidence. Preserve their facts, attachments and corrections.
-Approvals come through the native review form, not tool arguments supplied by the
-model. An unsupported form or no answer leaves the exact proposal pending. See
+Natural-language processing requests typed without this skill's command can use
+the same handoff. After the command, only an exact action calls its control;
+other text after it follows the rules above.
+Mixed messages remain original evidence. Preserve their facts, attachments and corrections.
+A draft shown by `review` is decided only by the user's exact typed `save`, `skip`
+or `review cancel`, or by the Codex native review form; never by tool arguments the
+model chooses, by chat text, or by applying it through the CLI. A typed decision
+applies only to the revision a typed `review` showed this chat; the Codex form
+decides only the exact revision it displays, however the review was requested. A
+changed draft or destination is refused and nothing is saved, and the reply names
+the next step.
+To keep a draft pending, the user types nothing; do not remind them. Codex's
+unsupported, declined or altered form, or no answer, leaves the exact proposal
+pending. A pending draft does not mean a form appeared. See
 [processing chat controls](references/processing-chat.md) for reuse, bounded work,
 corrections and recovery. Setup, status and merely loading this skill do not dispatch.
 

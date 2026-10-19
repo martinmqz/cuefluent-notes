@@ -20,6 +20,61 @@ registry recovery read the local client profile and stored state without
 launching a native client. A native executable is needed only when a request
 actually creates or resumes a processing run.
 
+## Commands and replies
+
+Type the skill, then one action: `/cuefluent-notes <action>` in Claude or
+`$cuefluent-notes <action>` in Codex, for example `/cuefluent-notes review`.
+Claude records the bare `/cuefluent-notes` as its full plugin name
+`/cuefluent-notes:cuefluent-notes`, which also works; type the full name when
+another command takes the bare one. In Codex, type `$` and choose cuefluent-notes
+from the list: Codex inserts `$cuefluent-notes:cuefluent-notes` and attaches the
+skill to the message. A mention typed out by hand attaches nothing, so it is no
+command: whichever control the assistant calls for it applies nothing, and the
+reply says how to type it and names the nearest commands. The actions are the
+[formal processing controls](../SKILL.md#formal-processing-controls), typed
+exactly as written. `help`, or the skill typed with nothing after it, lists them
+and applies nothing. Before setup, while nothing is registered for the chat, a
+command answered by the status tool (`help`, `status` or the skill alone)
+returns the command list and how to start `setup`, which follows the
+[setup workflow](setup.md) and is not itself a processing control; other actions
+are refused there.
+
+Replies are short, plain Markdown. They name a draft by its code and first note
+path, list commands and other drafts as one list item each after a blank line
+(a draft as its code, one space and its note path), and contain no hashes,
+identifiers or diagnostic codes. A review reply links the review folder and each
+listed file's proposed copy: in Claude as `file://` links, which open with one
+click in Claude Desktop, in Codex as the local links Codex's model writes itself,
+`[name](/absolute/path)` with the folder's or file's name (angle brackets around
+a path with spaces or parentheses), so a relayed reply keeps its form. A very
+long folder path, or in Codex a path Markdown cannot carry as such a link (for
+example a Windows path, or one with `#` or `?`), is shown as a code span instead, so it reads exactly
+as written; note paths are quoted with Markdown's inline characters escaped. A status reply or
+completed decision that has diagnostics says to type `status --verbose`; that
+reply adds the status, next action, diagnostics, request and chat identifiers,
+scope, counts and each draft's exact revision. The review folder's `summary.txt`
+also records the revision. A status reply also says when automatic collection has
+stopped for this chat, as the latest collection pass reported it, for example at
+a Claude Desktop Remote Control record (see
+[capture prevention](#capture-prevention-and-limits)).
+
+A refused or failed control answers with a plain sentence the assistant returns
+as its reply. A refusal before the requested action started says that nothing was
+applied (for `review`, `save`, `skip` and `review cancel`, also that nothing was
+saved) and what to do next; a failure after it started says the outcome is not
+certain and to check `status` first, unless it is a refusal that names its cause:
+the native client's sign-in or launch settings, a run that could not be confirmed
+stopped, a review shown again or decided before its reply was confirmed, another
+Cuefluent Notes step still finishing, or, for a review, the collection being
+busy. Those say what happened and to check `status`. The diagnostic code stays in the error's data
+for tools, as described in the [workflow CLI](workflow-cli.md#processing-chat-controls).
+
+Text after the skill that is not one exact action, such as a near miss or an
+action mixed with other words, is not a command. When its typed input verifies
+from the native transcript, no control applies anything and the reply names the
+nearest exact commands to type. That text stays evidence, as described under
+[capture prevention](#capture-prevention-and-limits).
+
 ## Claude launch settings
 
 ### Select the processor's authentication
@@ -240,9 +295,9 @@ Provider setup belongs to the native client; see its
 
 ## Entry and reuse
 
-Use the existing skill with the exact argument `process`: select Cuefluent Notes
-in Codex and enter `process`, or use `/cuefluent-notes:cuefluent-notes process` in
-Claude. Loading the skill, setup, status and direct saves do not start a processing
+Use the existing skill with the exact argument `process`: type
+`$cuefluent-notes process` in Codex or `/cuefluent-notes process` in Claude.
+Loading the skill, setup, status and direct saves do not start a processing
 session. In a configured source chat the skill calls
 `cuefluent_control.process_selected_captures`. The source adapter verifies
 native call metadata against that selected session's actual call record. If the
@@ -290,10 +345,11 @@ the authorized tail. Preserve the source and binding and inspect their mismatch;
 do not rewrite the transcript, reset the floor or claim a new identity to bypass it.
 Missing registrations and other unproven calls still report
 `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These refusals
-leave captures, proposals and notes unchanged. Claude retains a generic refusal
-when these source checks fail during discovery: its launch-session hint may be
-stale and another registered candidate may have failed, so that failure does not
-establish that the invoking chat is unsupported.
+leave captures, proposals and notes unchanged. In Claude these source checks
+report `PROCESSING_CONTROL_SOURCE_UNVERIFIED`, with a reply that nothing was
+applied: its launch-session hint may be stale and another registered candidate
+may have failed, so that failure does not establish that the invoking chat is
+unsupported.
 
 Explicit collection requests verify private storage and use guarded intake reads
 before classifying source metadata. Known storage refusals remain path-free:
@@ -308,8 +364,12 @@ runs once after that wait, or immediately if the launch session is unavailable.
 Stopped captures, over-limit tails and changed selections cannot supply a binding,
 but do not block another registered session from proving the exact call. A matching
 call with invalid arguments, tool identity or duplicate records is refused without
-retrying or substituting another session. Storage and source-identity failures
-still stop verification.
+retrying or substituting another session. Within the same wait the adapter also
+repeats a private-storage check that a concurrent collection worker kept busy
+(directories still gaining or losing entries on every attempt while no privacy
+check failed); if that outlasts the wait, the refusal is
+`PRIVATE_STORAGE_CHANGED`. Other storage and source-identity failures still stop
+verification at once.
 A Codex code-mode call needs a separate verification handshake:
 `verification-required` returns an opaque `retryToken` without delivering evidence,
 starting processing or opening a review. End the current exec, then repeat the
@@ -334,9 +394,12 @@ CLI processing remains available without a native source-chat binding.
 
 Return only the tool's `statusText` for an exact formal control invocation. Do not
 read packets or notes, synthesize a draft, print diagnostics containing source text,
-or add commentary in the source chat. A natural-language request may also dispatch,
-but it is not proof that the input contains no original work. Its text, facts,
-attachments and corrections remain eligible for normal collection.
+or add commentary in the source chat. A natural-language request typed without
+the skill command may also dispatch, but it is not proof that the input contains
+no original work. Its text, facts, attachments and corrections remain eligible
+for normal collection; this plugin's control traffic in that turn does not (see
+[capture prevention](#capture-prevention-and-limits)). After the skill command,
+verified inexact text dispatches nothing; see [review controls](#review-controls).
 
 The processing client has only the selected engine tools: inventory, operation
 status, bounded preparation, page reads and acknowledgments, note inspection,
@@ -347,11 +410,9 @@ before processing starts. Collection settings in the work project stay unchanged
 
 ### Shortcut scopes and continuation
 
-Use the [formal skill actions](../SKILL.md#formal-processing-controls) in either
-client. In Claude, append the action to `/cuefluent-notes:cuefluent-notes`; in
-Codex, select Cuefluent Notes and type the action. Plain `process` selects pending
-retained evidence across the existing collection, including configured repos and
-both clients. `process repo` uses the nearest verified Git checkout and excludes
+The [commands](#commands-and-replies) work alike in both clients. Plain `process`
+selects pending retained evidence across the existing collection, including
+configured repos and both clients. `process repo` uses the nearest verified Git checkout and excludes
 separate nested repositories. `process chat` selects the invoking native session.
 The invoking chat proves the request; it is not the default evidence boundary.
 These actions never create a new route or change collection settings.
@@ -369,7 +430,7 @@ run limit. A completed no-change operation allows another batch. Already handled
 revisions are not admitted again. A changed head is new evidence, not permission
 to replace an existing conflicted claim.
 
-`resume` keeps the saved evidence selection and inspection checkpoints. It does
+`process resume` keeps the saved evidence selection and inspection checkpoints. It does
 not add captures that arrived later, and reports a no-op when no unfinished work
 exists. A `process` request also resumes saved unfinished work first; it reports
 that selection's actual scope. A conflicting narrower request is refused rather
@@ -386,7 +447,7 @@ continue without replacing their hashes.
 The checkpoint contains scope, frozen inputs and continuation pointers. Existing
 engine worksets, claims, acknowledgments, proposals and outcomes remain the
 source of truth. It supplies no independent save or completion authority. Each
-proposal still needs its exact native review decision.
+proposal still needs its exact review decision.
 
 Redelivery of an exact verified formal call returns its original admitted response
 without dispatching again, reopening a review form or rewriting its receipt. That
@@ -413,16 +474,16 @@ assuming the background work completed.
 A native request cancellation received while admission is pending releases that
 admission without starting the model turn or returning a response. Once admission
 has completed, cancelling that finished request does not cancel the separate run
-or undo a saved note. The separate `cancel` action stops only native execution
+or undo a saved note. The separate `process cancel` action stops only native execution
 owned by this connected controller and waits for a verified terminal result
 before releasing unapplied claims. Unknown or externally owned execution reports
 `PROCESSING_CANCEL_UNVERIFIED`; preserve it for recovery. Cancellation is durable
-and resumable if interrupted; invoke `cancel` again to finish it. It never adopts
+and resumable if interrupted; invoke `process cancel` again to finish it. It never adopts
 unrelated standalone claims or drafts. Within the saved selection, it also cancels
 owned unsaved proposals, which can no longer be saved through review. The evidence
 and operation history remain on disk; generating a replacement proposal requires
-processing again and can incur model usage. Choose **Later** in review to preserve
-a proposal for later approval. Cancellation keeps captures pending, preserves saved notes,
+processing again and can incur model usage. To preserve a proposal for later
+approval, leave it undecided (or choose **Later** in the Codex form) instead. Cancellation keeps captures pending, preserves saved notes,
 and leaves collection/processing preferences unchanged. A new `process` request
 can select those pending captures after cancellation completes. This also provides
 a fresh selection after a policy change or an unavailable frozen input, without
@@ -444,62 +505,161 @@ reference was never recorded. An operation's existence is not proof that its
 processor is stopped. The shortcut does not invent ownership or replace its claim.
 
 Before a fresh selection, unfinished work is checked across the collection;
-unverified work can block `process` and `resume` even when only another repository
+unverified work can block `process` and `process resume` even when only another repository
 or chat was requested. An operation outside a narrower requested scope can instead
 report `PROCESSING_SHORTCUT_SCOPE_CONFLICT`. Existing authorized proposals remain
 available through `review`, subject to the usual execution and recovery guards.
 
 Confirm that the prior processor has stopped, inspect the affected operation and
 use the [explicit processing workflow](processing.md#outcomes-and-recovery) to
-finish it or safely cancel unapplied work. Shortcut `cancel` refuses with
+finish it or safely cancel unapplied work. Shortcut `process cancel` refuses with
 `PROCESSING_CANCEL_UNVERIFIED` when it cannot establish ownership; it is not a way
 to clear standalone or unverified operations. Keep claims, proposals and recovery
 state intact until the supported operation succeeds.
 
 ## Review controls
 
-Invoke the same skill with `review`. When several proposals are pending, first
-choose an authorized draft in the native selector. Drafts whose sources are no
-longer authorized remain preserved and are not offered. They do not prevent
-reviewing other authorized drafts. Selecting a draft is not approval. Its
-`cuefluent_control.processing_review` call requests a native host form displaying
-the exact proposal, original note contents, paths, new directories, input identities
-and known evidence limits. Read the full preview in the scrollable **Proposed
-changes** field, then advance to **Proposal action**. Choose **Save exact proposal**,
-**Skip these captures without saving**, **Cancel operation; keep captures pending**
-or **Later; keep proposal pending**. No action is selected by default. The host's
-own **Skip** or dismiss control is not the proposal's Skip action; it leaves the
-proposal pending. Draft bytes
-travel through that host-control channel; they are not returned as model tool
-output to the source chat. A host response is distinct from a model tool argument;
-it does not establish that a person physically clicked rather than a host policy
-answering the form.
+Invoke the same skill with `review` (or `review <code>` for one draft). Its
+`cuefluent_control.processing_review` call writes the exact outstanding proposal
+to a private review folder in the collection's private state, never in the notes
+folder or the project, and replies with links to the folder and each listed
+file's proposed copy (see [commands and replies](#commands-and-replies)), each
+note path with its size, and the decision commands. A review the model started
+without your typed command shows the draft too, but you still type `review
+<code>` yourself before deciding; its reply says so. Open the folder in any editor:
 
-Save uses the existing exact-proposal writer. Skip handles only those revisions;
-Cancel releases an unapplied operation; Later, declining or closing the form leaves
-it pending. No filesystem lock spans the decision. Changes to note contents,
-proposals, inputs or policy preserve a conflict and require fresh review. The form
-requires MCP `2025-11-25` string-default support. The server offers that protocol
-even if the host initially requests an older version. Hosts unable to accept it
-must use the explicit CLI workflow; hosts lacking form support leave the proposal
-pending. An exact review exceeding the 256 KiB form limit is refused without
-truncation; use the supported explicit proposal and save commands from an
-uncaptured context instead.
+- `proposed.md` holds the exact Markdown that Save would write, and `current.md`
+  the note as it is now when the draft updates an existing note. A draft with
+  several files numbers them (`1-proposed.md`, `1-current.md`, `2-proposed.md`;
+  from ten files on, with leading zeros, as in `01-proposed.md`).
+- `summary.txt` lists the note paths and sizes, new folders, source sessions and
+  turns with their known limits, inspection coverage, the draft code, the exact
+  decision commands and the revision's operation, claim and proposal hashes.
 
-The preview field displays the proposal; it is not an editor. Note-content lines
+The folder is a read-only copy; editing it changes nothing. It is removed when the
+draft is decided through review, or by a later review once the draft is replaced
+or no longer pending, together with Finder's `.DS_Store`; other files an editor
+added keep it until you delete them, and never affect a decision. At most 32
+review folders are kept, the oldest removed first. Drafts whose sources are no longer authorized remain
+preserved and are not offered. When several drafts are pending, `review` shows one
+and lists the others by code and note path.
+
+A draft code is six letters and digits derived from the exact proposal. A
+replaced proposal gets a new code. Decide by typing one command yourself:
+`save <code>` writes the exact proposal through the existing writer,
+`skip <code>` handles only those captures without saving, and `review cancel
+<code>` releases the unapplied operation and keeps its captures pending. To keep
+the draft pending, type nothing. In Claude, prefix these with `/cuefluent-notes`;
+in Codex, with `$cuefluent-notes`.
+
+A decision applies only when all of these hold:
+
+- the exact command was typed in the chat and verified from the native transcript;
+  model text, a natural-language reply or a tool argument the model chose is
+  refused. A near miss after the skill command (other case or spacing, a
+  misspelling, a missing or extra word, an invalid code) or a command mixed with
+  more words, lines or content is not a command and decides nothing; neither
+  does a plain-language request that starts with `save`. When that typed input
+  is verified from the transcript, no tool the model calls applies anything, and
+  the reply names the nearest exact command to type;
+- this chat was shown that exact revision by a typed `review` whose reply reached
+  the chat, recorded durably in private state; a draft never shown here, shown only
+  by a natural-language request or a model-initiated call, or whose review was
+  cancelled before its reply, is refused even when its code is given;
+- the draft's claim, proposal and destinations still match, rechecked before
+  anything is staged. Otherwise nothing is applied, this chat's stale record and
+  folder are removed, and the reply names the cause that applied: the draft
+  changed after this chat was shown it (review it again), a note at its
+  destination changed (restore the note or process again), the draft is not
+  pending, or its review here is no longer current (review it again).
+
+Without a code, `save`, `skip` and `review cancel` apply only to the revision this
+chat was most recently shown by a typed `review`.
+If that display came from a natural-language request or a model-initiated call, or
+nothing was shown, the reply lists the pending drafts and nothing is applied. Being
+the only pending draft or the only review folder never selects a draft. No
+filesystem lock spans the decision.
+
+Codex also opens its native host form for the same exact proposal, naming the review
+folder in its header; a proposal too large for the form is reviewed through the
+folder and typed decisions instead. When several proposals are pending, it first asks you to
+choose one in a native selector; selecting a draft is not approval. Read the full
+preview in the scrollable **Proposed changes** field, then advance to **Proposal
+action**. Choose **Save exact proposal**, **Skip these captures without saving**,
+**Cancel operation; keep captures pending** or **Later; keep proposal pending**. No
+action is selected by default. The host's own **Skip** or dismiss control is not the
+proposal's Skip action; it leaves the proposal pending. A host response is distinct
+from a model tool argument; it does not establish that a person physically clicked
+rather than a host policy answering the form. Codex accepts the same typed decisions,
+for example after choosing Later in the form, including when Codex runs the tool
+call through its code mode. A Codex host without form support reviews through the
+folder and typed decisions only.
+
+The **Proposed changes** field is optional, so a host that shows it empty (Codex
+CLI 0.163 does) still lets you choose Later or close the form; read the proposal in
+the review folder instead and decide by typed command. Save, Skip and Cancel in the
+form apply only when the host returns the preview unchanged. Changes to
+note contents, proposals, inputs or policy preserve a conflict and require fresh
+review. The form requires MCP `2025-11-25` string-default support. The server offers
+that protocol even if the host initially requests an older version. Hosts unable to
+accept it must use the explicit CLI workflow. A proposal whose form text would
+exceed the 256 KiB form limit is not truncated: Codex skips the form and reviews
+it through the review folder and typed decisions.
+
+The form preview displays the proposal; it is not an editor. Note-content lines
 are prefixed with `│ `, and control characters and backslashes are visibly escaped
 so note text cannot imitate the review's headings or terminal controls. Each
 file's original and proposed line endings are summarized separately. These display
-changes do not alter the Markdown that Save writes.
+changes do not alter the Markdown that Save writes. Host LF/CRLF/CR line-ending
+conversion is accepted when the rest of the preview is unchanged. If the host
+returns edited, trimmed, collapsed or missing preview text, no form decision is
+applied; the exact proposal remains pending and the stored draft is not treated as
+changed. Later is the exception that needs no intact preview, because it applies
+nothing.
 
-Host LF/CRLF/CR line-ending conversion is accepted when the rest of the preview is
-unchanged. Edited, trimmed or collapsed preview text is refused with
-`PROCESSING_REVIEW_PREVIEW_CHANGED`, leaving the exact proposal pending. Reopen
-review to restore the preview; if the host cannot preserve it, use the explicit
-proposal and save commands from an uncaptured context.
+The review result reports what happened, separately from whether a draft exists:
+presented, completed (saved, skipped or cancelled), deferred with Later, declined
+or closed, display altered, not shown in this chat, not typed by you, changed, or
+no draft named. A decline does not show whether a form appeared. Return that result
+to the user; do not describe a pending draft as a review that was displayed.
 
-For a factual correction, choose Later and provide the correction in the ordinary
-work chat. Capture it through the existing selected-source workflow before using
+### Claude limitations
+
+Claude Desktop 2.42304.0 declines review forms without displaying them, and Claude
+CLI 2.1.294 and 2.1.299 clip form text, so Claude never uses the review form: it
+reviews through the review folder and typed decisions. The review reply is a short
+paragraph, and the skill has the assistant return it as its own reply, so the
+folder path and commands stay visible however the client displays tool results.
+
+A typed control also works as the first prompt of a new Claude session whose
+hooks registered it: the control binds through that registration record within a
+bounded read of the transcript's start, as described under
+[processing chat controls](workflow-cli.md#processing-chat-controls). Claude can
+create a new session's transcript only after that prompt's hooks ran; the
+collection worker then records the session's starting point itself, and the
+binding briefly waits for it. If Claude
+keeps its tool process across `/clear`, the new session is found only among
+sources that already have a selection or a processing-only binding, so a control
+as its first prompt can still be refused until its collection is armed.
+
+A presentation belongs to the chat lineage that showed it. When Claude CLI
+continues a session into a new session ID, for example when it moves the session
+to the background, and both sessions are registered for collection, the new
+session joins the same lineage once both transcripts agree; see the
+[Claude reader contract](session-workflow.md#claude-reader-contract). A typed
+decision there, including a bare `save`, then applies to a draft reviewed before
+the move. Claude CLI writes the new session's transcript only at its first prompt,
+so the link is recorded when that prompt's hooks run; a typed `save` as that first
+prompt then binds. Until the link is recorded, drafts reviewed before the move are
+not decidable there, and controls in a Claude CLI background session are refused,
+with nothing applied. Once the link is recorded, the original session has handed
+its lineage on: a command typed there again, for example after resuming it, is
+refused with `PROCESSING_CHAT_CONTINUED` and applies nothing. Continuations on
+processing-only routes are not joined.
+
+For a factual correction, leave the draft undecided (or choose Later in the Codex
+form) and provide the correction in the ordinary work chat. Capture it through
+the existing selected-source workflow before using
 it to revise the proposal. A message combining approval and a correction remains
 original input, never a pure control. The restricted processing session does not
 silently admit new chat text as evidence. If original-input intake is unavailable,
@@ -515,10 +675,40 @@ proof covers the completed restricted unit, including native code-mode cells
 whose inner tool events are restricted to the engine contract. Claude proof covers its exact controller
 input; ordinary assistant/tool parentage still does not establish Claude ownership.
 
-The Codex code-mode handshake currently leaves its small source control turn
-collectible and reports `PROCESSING_EXCLUSION_UNVERIFIED` for formal controls.
-This does not disable the restricted processing chat's verified exclusion, and it
-never hides genuine work or corrections in the source chat.
+A verified Codex control turn is excluded with its receipt in either message
+form (the skill part of the message, or Codex CLI 0.163's mention from the `$`
+list with its selection item) and either call form (a direct call, or code
+mode's two verification cells with any `wait` on the second). The proof covers
+the whole completed turn and admits only: the typed message and its mirror, the
+selection item, native and hook context, the call with its native MCP items and
+outputs, and the one final reply, which must be the control's own status text
+byte for byte; a reply the model reformatted keeps the turn collectible, where
+the relay rule below still leaves it out.
+Commentary or any other assistant message is the assistant's own text and keeps
+the turn collectible, however short. Each code-mode cell must print exactly what its
+call returned. The receipt names both cells and the retry call by the native IDs
+Codex sent with the call; model-written code is never read, so a nested tool that
+leaves no native record is not visible to the proof. Anything else in the turn,
+such as reading a file, another tool, another message or other printed output,
+keeps the turn collectible as described below, so recorded work and corrections
+are never hidden. Such a turn still never contributes its exact command, this
+plugin's control calls or the assistant's repetition of the plugin's reply; see
+the [command markup rules](session-workflow.md#generated-output-provenance-gate). A verified control that could not record that receipt, for example
+because collection progressed during admission, reports
+`PROCESSING_EXCLUSION_UNVERIFIED`.
+
+Claude Desktop records a `bridge-session` row in a session connected for Remote
+Control. The Claude reader does not read past such a record, so automatic
+collection of that session stops there with `CLAUDE_HISTORY_REQUIRES_REVIEW`:
+captures made before it stay valid and nothing after it is collected. When
+collection had already started for the session, typed commands there still work,
+and a `status` reply says that collection has stopped. When the session was
+connected before collection started, as when Desktop connects every new session,
+collection never starts for it: only a command typed as its first prompt is
+confirmed, and later commands are refused as unconfirmed, however often they are
+typed. Type commands in a session that is not connected, or turn off connecting
+new sessions to Remote Control first. Resetting the selection or floor does not
+resume collection of such a session.
 
 In the source chat, only a verified formal skill control, actual controller call and
 receipt can exclude processing control input. Claude also checks the exact
@@ -528,9 +718,28 @@ wording. While proof is incomplete, the collector preserves the input and its
 cursor as pending rather than calling it excluded. A later independent human
 input releases an unsupported Claude candidate to ordinary capture. Genuine work
 before and after the control retains its own identity and order. Mixed inputs, altered bytes, unknown
-attribution and unsupported shapes remain evidence or explicitly pending. Existing
-captures, active claims and issued packet hashes are never rewritten by this path.
-Copies printed in unrelated work chats are not automatically detected.
+attribution and unsupported shapes remain evidence or explicitly pending. A
+message that selects the skill without a verified control stays evidence: Claude
+keeps the typed arguments without the command markup (empty arguments add
+nothing), and Codex keeps the user text but not the skill block, the selection
+item, the mention the `$` list inserted, or this plugin's own control-server
+calls, results and code-mode cells that only made such calls in that turn. A
+Codex mention typed out by hand attaches no skill, so its message is kept
+exactly as typed, and so is a request in the person's own words without the
+skill. In every Codex turn, with or without the skill, this plugin's control
+calls, their results, code-mode cells that only made such calls and an
+assistant message that only repeats one of their replies (a status, the command
+list, a not-a-command reply or a refusal) are left out, identified by native
+identity, never by text. The message and the reply are compared after one
+[defined Markdown normalization](session-workflow.md#generated-output-provenance-gate),
+so a relay the model only reformatted (its own link form, a blank line before a
+list, indentation) is left out too. The assistant's own words, a paraphrase
+(such as a refusal relayed in other words), a reply with words added, other
+tools and a cell that also did other work stay. Claude captures only human
+input, so no tool call, result or assistant reply is captured from it in any turn.
+See the [session contract](session-workflow.md#generated-output-provenance-gate).
+Existing captures, active claims and issued packet hashes are never rewritten by
+this path. Copies printed in unrelated work chats are not automatically detected.
 If collection progress changes during admission, processing rechecks its own
 authorization and may continue without a parent exclusion receipt, reporting
 `PROCESSING_EXCLUSION_UNVERIFIED`. The inspected selection hash is never silently
@@ -578,7 +787,7 @@ operation and use its ordinary resume, review or recovery commands. Abandonment
 does not mark evidence handled, save a note or prove an exclusion. Only a later
 explicit request with a new request ID can create a replacement session in the
 same namespace; it never resumes the retired native chat. Retries of the abandoned
-request are refused. After retirement, invoke `resume` to continue the saved
+request are refused. After retirement, invoke `process resume` to continue the saved
 selection, or `process` to apply its ordinary unfinished-selection-first behavior.
 Both require a fresh native call and current launch authentication; neither
 automatically resolves an unfinished claim or bypasses recovery. Status clears

@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { readBoundedBytes, windowsAbsolute, syncDirectory } from './file-io.mjs';
+import { readBoundedBytes, windowsAbsolute, syncDirectory, renameReplacing } from './file-io.mjs';
 
 test('Windows paths require an explicit drive or share and ordinary filenames', () => {
   for (const value of ['C:\\Users\\café\\Notes', 'c:/Notes/topic.md', '\\\\server\\share\\folder\\note.md']) assert.equal(windowsAbsolute(value), true, value);
@@ -121,4 +121,25 @@ test('checker rejects FIFO notes and FIFO cases without waiting for a writer', {
     assert.equal(run.status, 2, String(run.error ?? run.stderr));
     assert.match(run.stderr, /regular/);
   }
+});
+
+test('a replacing rename retries a Windows refusal within its wait, checking again before every attempt', async t => {
+  const refusal = code => Object.assign(new Error(code), { code });
+  const run = async ({ platform = 'win32', failures, maxWaitMs, check = () => {} }) => {
+    let renames = 0, checks = 0;
+    const mock = t.mock.method(fs, 'rename', async () => { if (renames++ < failures.length) throw refusal(failures[renames - 1]); });
+    try { await renameReplacing('from', 'to', { platform, maxWaitMs, check: async () => { checks++; check(checks); } }); return { renames, checks }; }
+    catch (error) { return { renames, checks, code: error.code }; }
+    finally { mock.mock.restore(); }
+  };
+  assert.deepEqual(await run({ failures: ['EPERM', 'EBUSY'] }), { renames: 3, checks: 3 });
+  assert.deepEqual(await run({ failures: ['ENOENT'] }), { renames: 1, checks: 1, code: 'ENOENT' });
+  // Past its wait the rename's own refusal is thrown: about 0.6 s, or a hook's shorter wait.
+  assert.deepEqual(await run({ failures: Array(20).fill('EACCES') }), { renames: 8, checks: 8, code: 'EACCES' });
+  assert.deepEqual(await run({ failures: Array(20).fill('EPERM'), maxWaitMs: 70 }), { renames: 5, checks: 5, code: 'EPERM' });
+  // A check that fails on a retry stops it with its own refusal.
+  assert.deepEqual(await run({ failures: ['EPERM'], check: n => { if (n === 2) throw refusal('INTAKE_STATE_CONFLICT'); } }),
+    { renames: 1, checks: 2, code: 'INTAKE_STATE_CONFLICT' });
+  // Other platforms replace an open file and never retry.
+  assert.deepEqual(await run({ platform: 'linux', failures: ['EPERM'] }), { renames: 1, checks: 1, code: 'EPERM' });
 });

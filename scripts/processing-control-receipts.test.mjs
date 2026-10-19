@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { privateIntakeFixture } from './test-support/intake-fixture.mjs';
+import { privateIntakeFixture, explicitIntakeFixture } from './test-support/intake-fixture.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { withIntakeLock, intakeSnapshot } from './intake-io.mjs';
 import { controlSelection, readSelection, readCaptureHead, readReaderProgress, commitReaderProgress, publishCapture } from './intake-store.mjs';
@@ -14,6 +14,8 @@ import { processScope } from './collection-worker.mjs';
 import { recordProcessingControlDispatch, createProcessingControlResolver } from './processing-control-receipts.mjs';
 import { SKILL_ROOT } from './runtime-paths.mjs';
 import { verifyProcessingExecution } from './processing-execution-proof.mjs';
+import { processingControlCall } from './processing-control-proof.mjs';
+import { codexControlTurn } from './test-support/codex-control-turn.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -32,7 +34,7 @@ const ordinary = turn => [evt('task_started', { turn_id: turn, root_turn_id: tur
   item(turn, { type: 'UserMessage', id: `user-${turn}`, content: [{ type: 'text', text: `Genuine work ${turn}.` }] }),
   evt('task_complete', { turn_id: turn })];
 
-async function claudeFixture(t, { partial = false, control = 'process', installedSkill = false } = {}) {
+async function claudeFixture(t, { partial = false, control = 'process', installedSkill = false, schemaLoad = null } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-claude-receipt-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = { client: 'claude', sessionId, projectRoot: root, path: path.join(root, 'native.jsonl'), fileIdentity: '' };
@@ -47,14 +49,26 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
   const input = row('user', `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${control}</command-args>`, { promptId: unitId, parentUuid: before.uuid });
   const companion = row('user', [{ type: 'text', text: expansion }],
     { promptId: unitId, isMeta: true, turnCompanion: true, parentUuid: input.uuid });
-  const tool = control === 'review' ? 'processing_review' : 'process_selected_captures';
-  const call = row('assistant', [{ type: 'tool_use', id: 'dispatch-call', name: `mcp__cuefluent_control__${tool}`, input: args }],
+  // Claude mirrors the typed fields in its call.
+  const mapped = processingControlCall(control), tool = mapped.tool, callArgs = { ...args, ...mapped.fields };
+  const call = row('assistant', [{ type: 'tool_use', id: 'dispatch-call', name: `mcp__cuefluent_control__${tool}`, input: callArgs }],
     { attributionSkill: command, attributionPlugin: 'cuefluent-notes', parentUuid: companion.uuid });
   const output = row('user', [{ type: 'tool_result', tool_use_id: 'dispatch-call', content: result.content }],
     { promptId: unitId, sourceToolAssistantUUID: call.uuid, toolUseResult: result.content, parentUuid: call.uuid });
   const final = row('assistant', [{ type: 'text', text: statusText }], { attributionSkill: command, attributionPlugin: 'cuefluent-notes',
     attributionMcpServer: 'cuefluent_control', attributionMcpTool: tool, parentUuid: output.uuid }); final.message.stop_reason = 'end_turn';
-  const all = [input, companion, call, output, final], lines = all.map(row => JSON.stringify(row) + '\n');
+  // Claude CLI 2.1.299 can load a deferred MCP schema with its built-in ToolSearch first.
+  const loaded = [];
+  if (schemaLoad) {
+    const name = `mcp__cuefluent_control__${tool}`, query = schemaLoad.query ?? `select:${name}`;
+    const loader = row('assistant', [{ type: 'tool_use', id: 'loader-call', name: 'ToolSearch', input: { query, max_results: 1 }, caller: { type: 'direct' } }],
+      { attributionSkill: command, attributionPlugin: 'cuefluent-notes', parentUuid: companion.uuid });
+    const loadedResult = row('user', [{ type: 'tool_result', tool_use_id: 'loader-call', content: (schemaLoad.matches ?? [name]).map(tool_name => ({ type: 'tool_reference', tool_name })) }],
+      { promptId: unitId, sourceToolAssistantUUID: loader.uuid, toolUseResult: { matches: schemaLoad.matches ?? [name], query, total_deferred_tools: 35 }, parentUuid: loader.uuid });
+    loaded.push(loader, loadedResult);
+  }
+  const all = schemaLoad?.after ? [input, companion, call, output, ...loaded, final] : [input, companion, ...loaded, call, output, final];
+  const lines = all.map(row => JSON.stringify(row) + '\n');
   await fs.writeFile(source.path, prefix + (partial ? lines[0] : lines.join('')));
   source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
   const store = await privateIntakeFixture(t, source);
@@ -64,7 +78,7 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
     boundary, request: { id: randomUUID(), client: 'claude', sessionId, expectedRevision: 0, operation: 'start', unitId: beforeId } }));
   const scopeId = selection.state.intervals[0].id;
   const dispatch = { client: 'claude', sessionId, unitId, callId: 'dispatch-call', tool: `mcp__cuefluent_control__${tool}`,
-    argsHash: digest(canonicalJSON(args)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
+    argsHash: digest(canonicalJSON(callArgs)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
     requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result.content)),
     inputId: input.uuid, inputHash: digest(input.message.content), companionId: companion.uuid, companionHash: digest(lines[1]),
     skillExpansionHash: digest(companion.message.content[0].text), skillCommand: command };
@@ -75,8 +89,8 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
       loadHead: id => readCaptureHead(store, { client: 'claude', sessionId, unitId: id }), resolveProcessingDispatch: resolve(tx), ...extra }) };
 }
 
-test('Claude formal process and review inputs advance without raw captures and remain excluded on checkpoint replay', async t => {
-  for (const control of ['process', 'review']) await t.test(control, async t => {
+test('Claude formal process, review, help and decision inputs advance without raw captures and remain excluded on checkpoint replay', async t => {
+  for (const control of ['process', 'review', 'help', 'status --verbose', 'save k2mn9p']) await t.test(control, async t => {
     const f = await claudeFixture(t, { control });
     await withIntakeLock(f.store, async tx => {
       await f.record(tx); const read = await f.read(tx), plan = claudePublicationPlan(read);
@@ -90,6 +104,22 @@ test('Claude formal process and review inputs advance without raw captures and r
       const later = await f.read(tx, { cursor: plan.scan.to, checkpoint: plan.checkpoint });
       assert.deepEqual(later.pending, []); assert.equal(later.candidates.length, 1);
       assert.deepEqual(later.candidates[0].capture.evidence.map(item => item.text), ['Correction: use SDK 606.']);
+    });
+  });
+});
+
+test('Claude deferred-schema ToolSearch for the exact control tool does not block exclusion; other searches do', async t => {
+  for (const [name, schemaLoad, excluded] of [
+    ['exact schema load', {}, true],
+    ['different tool', { query: 'select:mcp__other__tool', matches: ['mcp__other__tool'] }, false],
+    ['extra match', { matches: ['mcp__cuefluent_control__processing_review', 'mcp__other__tool'] }, false],
+    ['after the control call', { after: true }, false],
+  ]) await t.test(name, async t => {
+    const f = await claudeFixture(t, { control: 'review', schemaLoad });
+    await withIntakeLock(f.store, async tx => {
+      await f.record(tx); const read = await f.read(tx);
+      assert.equal(read.processingControls.length, excluded ? 1 : 0);
+      assert.equal(read.candidates.length, excluded ? 0 : 1);
     });
   });
 });
@@ -168,15 +198,20 @@ test('unsupported native markup cannot stall later human work or become an exclu
     const read = await f.read(tx);
     assert.deepEqual(read.pending, []); assert.equal(read.processingControls.length, 0); assert.equal(read.candidates.length, 2);
     assert(read.candidates.some(candidate => candidate.capture.evidence.some(item => item.text === 'A genuine new SDK finding.')));
+    // Deferral was never exclusion: the unproven control is captured as what was typed, without markup.
+    const control = read.candidates.find(candidate => candidate.capture.identity.unitId === unitId).capture;
+    assert.deepEqual(control.evidence.map(item => [item.recordId, item.text]), [[f.input.uuid, 'process']]);
   });
 });
 
-async function fixture(t, { mixed = false, ending = 'completed', mutate = () => {} } = {}) {
+async function fixture(t, { mixed = false, ending = 'completed', mutate = () => {}, turn = null } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-control-receipt-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = { client: 'codex', sessionId, projectRoot: root, path: path.join(root, 'native.jsonl'), fileIdentity: '' };
   const skillPath = path.join(root, 'SKILL.md');
-  const controls = [evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
+  // A Codex 0.163 turn (test-support/codex-control-turn.mjs) replaces the older one.
+  const built = turn ? codexControlTurn({ sessionId, unitId, skillPath, ...turn }) : null;
+  const controls = built ? built.rows : [evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
     { type: 'turn_context', payload: { turn_id: unitId, root_turn_id: unitId } },
     response({ type: 'message', id: 'native-user', role: 'user', content: [{ type: 'input_text', text: 'process' }] }, ['user.text']),
     item(unitId, { type: 'UserMessage', id: 'user', content: [{ type: 'skill', name: 'cuefluent-notes', path: skillPath },
@@ -207,7 +242,7 @@ async function fixture(t, { mixed = false, ending = 'completed', mutate = () => 
       scope: { unitIds: mixed ? [beforeId, unitId, afterId] : [unitId], start: anchors[1], end: anchors.at(-1) } } }));
   const dispatch = { client: 'codex', sessionId, unitId, callId: 'dispatch-call', tool: 'mcp__cuefluent.process',
     argsHash: digest(canonicalJSON(args)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
-    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result)) };
+    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result)), ...built?.receipt };
   const name = `control-dispatch/codex/${sessionId}/${digest(dispatch.callId).slice(0, 24)}.json`;
   const query = Object.fromEntries(['client', 'sessionId', 'unitId', 'callId', 'tool', 'argsHash'].map(k => [k, dispatch[k]]));
   const record = (tx, d = dispatch, hash = selection.hash, auth = authorize) =>
@@ -264,6 +299,49 @@ test('unfamiliar duplicate-key receipt bytes are preserved and cannot authorize 
     assert.equal(read.pending[0].reason, 'INVALID_PROCESSING_CONTROL_RECEIPT');
     assert.equal(codexProgressPlan(read).scan.to.offset, read.from.offset);
     assert.deepEqual((await intakeSnapshot(f.store, 'state', f.name)).bytes, altered);
+  });
+});
+
+test('a receipt keeps validating against its own recorded reply after replies are reworded', async t => {
+  // The exact reply v0.15.1 recorded for this status; this release words it differently.
+  const response = { chat: null, collectionId: 'fixture', diagnostics: ['PROCESSING_RECOVERY_REQUIRED'], interfaceVersion: 1,
+    nextAction: 'inspect', requestId: null, status: 'blocked', statusText: 'Cuefluent processing: blocked. PROCESSING_RECOVERY_REQUIRED. Next action: inspect.' };
+  const f = await fixture(t), resultHash = digest(canonicalJSON({ content: [{ type: 'text', text: canonicalJSON(response) }], isError: false }));
+  const dispatch = { ...f.dispatch, statusText: response.statusText, resultHash, response };
+  await withIntakeLock(f.store, async tx => {
+    for (const changed of [{ ...dispatch, statusText: 'Cuefluent processing: blocked.' }, { ...dispatch, resultHash: 'b'.repeat(64) },
+      { ...dispatch, response: { ...response, statusText: 'Cuefluent processing: blocked.' } }, { ...dispatch, response: [response] }]) {
+      await assert.rejects(f.record(tx, changed), { code: 'INVALID_PROCESSING_CONTROL_RECEIPT' });
+    }
+    assert.equal((await f.record(tx, dispatch)).status, 'recorded');
+    assert.deepEqual(await f.resolve(tx)(f.query), dispatch);
+  });
+});
+
+test('only a review reply names its exact presented revision, in full', async t => {
+  const f = await fixture(t), response = { collectionId: 'fixture', statusText };
+  const resultHash = digest(canonicalJSON({ content: [{ type: 'text', text: canonicalJSON(response) }], isError: false }));
+  const presentation = { operationId: randomUUID(), proposalHash: 'a'.repeat(64), claimHash: 'b'.repeat(64) };
+  const review = { ...f.dispatch, tool: 'mcp__cuefluent.processing_review', resultHash, response, presentation };
+  await withIntakeLock(f.store, async tx => {
+    for (const changed of [{ ...review, tool: 'mcp__cuefluent.process' }, { ...review, response: undefined, resultHash: f.dispatch.resultHash },
+      { ...review, presentation: { ...presentation, claimHash: 'short' } }, { ...review, presentation: { ...presentation, code: 't7xb88' } }]) {
+      await assert.rejects(f.record(tx, changed), { code: /^(INVALID_PROCESSING_CONTROL_RECEIPT|INVALID_WORKFLOW)$/ });
+    }
+    assert.equal((await f.record(tx, review)).status, 'recorded');
+  });
+});
+
+test('a one-time capture resolves its control receipts under its own scope', async t => {
+  const f = await fixture(t, { turn: { control: 'save t7xb88' } });
+  await withIntakeLock(f.store, tx => f.record(tx));
+  const store = await explicitIntakeFixture(f.store, f.source, { scopeId: f.scopeId, unitIds: [unitId] });
+  await withIntakeLock(store, async tx => {
+    assert.deepEqual(await processScope(tx, store, f.selection, f.scopeId, authorize), { saved: 0, pending: null, incomplete: false, drained: true });
+    assert.equal((await readCaptureHead(store, { client: 'codex', sessionId, unitId })).head, null);
+    // Another scope's read is still refused on this store.
+    await assert.rejects(createProcessingControlResolver(tx, { state: f.selection.state, selectionHash: f.selection.hash, authorize,
+      scopeId: randomUUID() })(f.query), { code: 'WORKFLOW_NOT_AUTHORIZED' });
   });
 });
 
@@ -370,5 +448,102 @@ test('receipt resolution rechecks the exact active selection and does not outliv
     await controlSelection(tx, { source: f.source, expectedHash: selected.hash, authorize,
       request: { id: randomUUID(), client: 'codex', sessionId, expectedRevision: selected.state.revision, operation: 'exclude', unitId } });
     await assert.rejects(resolve(f.query), { code: 'STALE_SELECTION' });
+  });
+});
+
+test('Codex 0.163 code-mode receipts name both cells and the retry call, and exclude exactly the proven turn', async t => {
+  for (const [name, turn] of [['code mode', {}], ['code mode finished by wait', { waits: 1 }], ['older skill part, code mode', { form: 'block' }],
+    ['direct call', { mode: 'direct' }]]) await t.test(name, async t => {
+    for (const mixed of [false, true]) {
+      const f = await fixture(t, { mixed, turn: { control: 'save t7xb88', ...turn } });
+      await withIntakeLock(f.store, async tx => {
+        assert.equal((await f.record(tx)).status, 'recorded');
+        assert.deepEqual(await f.resolve(tx)(f.query), f.dispatch);
+        const first = await processScope(tx, f.store, f.selection, f.scopeId, authorize);
+        assert.deepEqual(first, { saved: mixed ? 2 : 0, pending: null, incomplete: false, drained: true });
+        assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId, unitId })).head, null);
+        if (mixed) for (const id of [beforeId, afterId])
+          assert.match((await readCaptureHead(f.store, { client: 'codex', sessionId, unitId: id })).capture.evidence[0].text, /Genuine work/);
+      });
+    }
+  });
+  // Without its receipt the turn is not excluded, yet the exact command, the
+  // cells and the assistant's repetition of the plugin's reply are never
+  // evidence: nothing is captured.
+  const f = await fixture(t, { turn: { control: 'save t7xb88' } });
+  await withIntakeLock(f.store, async tx => {
+    const read = await f.read(tx);
+    assert.equal(read.processingControls.length, 0); assert.deepEqual(read.candidates, []); assert.deepEqual(read.noEvidence, [unitId]);
+  });
+  // With its receipt, commentary keeps the turn collectible: the assistant's
+  // own words are captured, never the command or the plugin's reply.
+  for (const mode of ['code', 'direct']) await t.test(`commentary in a receipted turn (${mode})`, async t => {
+    const g = await fixture(t, { turn: { control: 'save t7xb88', mode, commentary: ['Diagnosis: the Cedar cache bug is the 25-minute TTL.'] } });
+    await withIntakeLock(g.store, async tx => {
+      assert.equal((await g.record(tx)).status, 'recorded');
+      const read = await g.read(tx);
+      assert.equal(read.processingControls.length, 0);
+      assert.deepEqual(read.candidates.map(candidate => candidate.capture.evidence.map(item => [item.kind, item.text])),
+        [[['assistant', 'Diagnosis: the Cedar cache bug is the 25-minute TTL.']]]);
+    });
+  });
+  // A receipted turn whose reply the model reformatted: the proof stays exact
+  // and refuses it, and the reader's relay rule leaves that reply out, so the
+  // turn still contributes nothing, or only its commentary.
+  const statusText = 'Cuefluent: Nothing was applied: draft a42ksb is not pending.\n\nPending drafts:\n- x3x499 "meetings/rollout.md"';
+  const reply = 'Cuefluent: Nothing was applied: draft a42ksb is not pending.\n\nPending drafts:\n\n- x3x499 "meetings/rollout.md"';
+  for (const mode of ['code', 'direct']) for (const commentary of [[], ['Diagnosis: the Cedar cache bug is the 25-minute TTL.']]) {
+    await t.test(`a reformatted reply in a receipted turn (${mode}${commentary.length ? ', with commentary' : ''})`, async t => {
+      const g = await fixture(t, { mixed: true, turn: { control: 'save', mode, commentary, statusText, reply } });
+      await withIntakeLock(g.store, async tx => {
+        assert.equal((await g.record(tx)).status, 'recorded');
+        const read = await g.read(tx);
+        assert.equal(read.processingControls.length, 0);
+        assert.deepEqual(read.noEvidence, commentary.length ? [] : [unitId]);
+        assert.deepEqual(await processScope(tx, g.store, g.selection, g.scopeId, authorize),
+          { saved: commentary.length ? 3 : 2, pending: null, incomplete: false, drained: true });
+        const head = await readCaptureHead(g.store, { client: 'codex', sessionId, unitId });
+        if (!commentary.length) assert.equal(head.head, null);
+        else {
+          assert.deepEqual(head.capture.evidence.map(item => [item.kind, item.text]), [['assistant', commentary[0]]]);
+          assert.doesNotMatch(JSON.stringify(head.capture), /a42ksb|x3x499|Pending drafts|cuefluent_control/);
+        }
+      });
+    });
+  }
+});
+
+test('a plain-language Codex request is captured as typed, without this plugin\'s control traffic or the relayed reply', async t => {
+  // No skill picked, no mention: no receipt exists and none is looked for, yet
+  // the worker publishes only the person's words, beside genuine work.
+  const typed = 'Please process my notes.';
+  for (const mode of ['code', 'direct']) await t.test(mode, async t => {
+    const f = await fixture(t, { mixed: true, turn: { form: 'plain', control: typed, calledTool: 'process_selected_captures', mode } });
+    await withIntakeLock(f.store, async tx => {
+      assert.equal(await f.resolve(tx)(f.query), null);
+      assert.deepEqual(await processScope(tx, f.store, f.selection, f.scopeId, authorize), { saved: 3, pending: null, incomplete: false, drained: true });
+      const capture = (await readCaptureHead(f.store, { client: 'codex', sessionId, unitId })).capture;
+      assert.deepEqual(capture.evidence.map(item => [item.kind, item.text]), [['user', typed]]);
+      assert.doesNotMatch(JSON.stringify(capture), /cuefluent_control|Review folder|statusText/);
+      for (const id of [beforeId, afterId])
+        assert.match((await readCaptureHead(f.store, { client: 'codex', sessionId, unitId: id })).capture.evidence[0].text, /Genuine work/);
+    });
+  });
+});
+
+test('Codex code-mode receipt fields come all together, only for Codex, and name distinct cells and calls', async t => {
+  const f = await fixture(t, { turn: {} });
+  await withIntakeLock(f.store, async tx => {
+    const { outerItemId, retryItemId, retryCallId, handshakeResultHash, ...direct } = f.dispatch;
+    // Some fields without the others, or the same cell or call twice.
+    for (const dispatch of [{ ...direct, outerItemId }, { ...direct, outerItemId, retryItemId, retryCallId },
+      { ...f.dispatch, retryItemId: outerItemId }, { ...f.dispatch, retryCallId: f.dispatch.callId }]) {
+      await assert.rejects(f.record(tx, dispatch), { code: 'INVALID_PROCESSING_CONTROL_RECEIPT' });
+    }
+    for (const dispatch of [{ ...f.dispatch, outerItemId: 'ctc first' }, { ...f.dispatch, handshakeResultHash: 'not-a-hash' }]) {
+      await assert.rejects(f.record(tx, dispatch), { code: /INVALID_PROCESSING_CONTROL_RECEIPT|INVALID_WORKFLOW/ });
+    }
+    assert.equal((await intakeSnapshot(f.store, 'state', f.name)).bytes, null);
+    void handshakeResultHash; void retryCallId; void retryItemId;
   });
 });

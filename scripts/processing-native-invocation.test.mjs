@@ -4,13 +4,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
-import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock } from './intake-io.mjs';
+import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, intakeSnapshot, replaceIntakeJSON, replaceIntakeBytes } from './intake-io.mjs';
 import { controlSelection, readSelection } from './intake-store.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { resolveProcessingInvocation, isProcessingInvocation } from './processing-native-invocation.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { collectionIngress, processingSourcePath } from './collection-ingress.mjs';
+import { processingControlCall } from './processing-control-proof.mjs';
+import { continuedPath, continuesPath, readContinuedLink, ensureContinuesPointer } from './claude-continuation.mjs';
 
 const stamp = '2026-10-10T12:00:00.000Z';
 const line = value => JSON.stringify(value) + '\n';
@@ -99,10 +101,9 @@ test('Codex invocation rechecks resumed metadata in its selected tail', async t 
 });
 
 test('Claude maps formal shortcut controls through trusted companion and native skill attribution', async t => {
-  for (const control of ['process', 'process repo', 'process chat', 'resume', 'status', 'review', 'cancel']) await t.test(control, async t => {
-    const f = await fixture(t, 'claude');
-    f.invocation.tool = control.startsWith('process') ? 'process_selected_captures' : `processing_${control}`;
-    if (control.startsWith('process ')) f.invocation.arguments.scope = control.split(' ')[1];
+  for (const control of ['help', 'status', 'status --verbose', 'process', 'process repo', 'process chat', 'process resume', 'process cancel', 'review']) await t.test(control, async t => {
+    const f = await fixture(t, 'claude'), mapped = processingControlCall(control);
+    f.invocation.tool = mapped.tool; Object.assign(f.invocation.arguments, mapped.fields);
     await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
     await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
     const skillCommand = 'cuefluent-notes:cuefluent-notes', input = f.spacer();
@@ -117,6 +118,7 @@ test('Claude maps formal shortcut controls through trusted companion and native 
     assert.equal(bound.companionHash, digest(line(companion)));
     assert.equal(bound.inputHash, digest(input.message.content));
     assert.equal(bound.skillExpansionHash, digest(companion.message.content[0].text));
+    assert.equal(bound.typedControl, control);
   });
 });
 
@@ -439,8 +441,102 @@ test('Codex outer exec can request a handshake but only a completed exact inner 
   const pending = await f.resolve(); assert.equal(pending.pending, true); assert.equal(isProcessingInvocation(pending), false);
   await f.append([rows.call, rows.output]);
   const bound = await f.resolve(); assert.equal(isProcessingInvocation(bound), true);
-  assert.equal(bound.handshakeResultHash, digest(canonicalJSON(result))); assert.equal(bound.nativeSkill, false);
-  assert.equal(bound.controlExclusionUnsupported, true);
+  // The typed text verifies through code mode as well. The binding names the
+  // handshake's first cell and result, which its exclusion receipt records.
+  assert.equal(bound.handshakeResultHash, digest(canonicalJSON(result))); assert.equal(bound.nativeSkill, true);
+  assert.equal(bound.typedControl, 'process'); assert.equal(bound.outerItemId, f.context.itemId);
+  assert.equal(bound.callId, f.context.toolCallId);
+  // Without the typed skill input, a code-mode call carries no typed authority.
+  const g = await fixture(t), other = nestedRows(g, result);
+  await g.append([g.spacer(), other.outer, other.call, other.output]);
+  const plain = await g.resolve();
+  assert.equal(plain.nativeSkill, false); assert.equal(Object.hasOwn(plain, 'typedControl'), false);
+});
+
+// Codex 0.163: a skill picked from the `$` menu arrives as its own user context
+// item of the turn, and the message is one text part opening with the mention.
+function menuInput(f, text, { mention = '$cuefluent-notes:cuefluent-notes', placeholder = true, name = 'cuefluent-notes:cuefluent-notes',
+  skillPath = f.skillPath, turn = f.context.unitId, selections = 1 } = {}) {
+  const user = { timestamp: stamp, ordinal: 3, type: 'event_msg', payload: { type: 'item_completed', thread_id: f.context.sessionId, turn_id: f.context.unitId,
+    item: { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text, text_elements: placeholder
+      ? [{ byte_range: { start: 0, end: Buffer.byteLength(mention) }, placeholder: mention }] : [] }] } } };
+  const selection = (skillName, file) => ({ timestamp: stamp, ordinal: 3, type: 'response_item', payload: { type: 'message', id: randomUUID(), role: 'user',
+    content: [{ type: 'input_text', text: `<skill>\n<name>${skillName}</name>\n<path>${file}</path>\n---\nname: cuefluent-notes\n---\nSynthetic instructions\n</skill>` }],
+    internal_chat_message_metadata_passthrough: { turn_id: turn, content_item_kinds: ['skills.selected_skill_instructions'] } } });
+  return [user, ...Array.from({ length: selections }, (_, i) => i ? selection('other-plugin:other-skill', '/synthetic/other/SKILL.md') : selection(name, skillPath))];
+}
+test('Codex 0.163 typed controls verify from the menu mention and its selected-skill item, directly and through code mode', async t => {
+  for (const [text, tool, typed, options] of [
+    ['$cuefluent-notes:cuefluent-notes process', 'process', 'process'],
+    ['$cuefluent-notes:cuefluent-notes save t7xb88', 'processing_review', 'save t7xb88'],
+    ['$cuefluent-notes:cuefluent-notes review', 'processing_review', 'review'],
+    ['$cuefluent-notes:cuefluent-notes status --verbose', 'processing_status', 'status --verbose'],
+    ['$cuefluent-notes:cuefluent-notes help', 'processing_status', 'help'],
+    // The mention without its placeholder element, or the bare skill name.
+    ['$cuefluent-notes:cuefluent-notes save', 'processing_review', 'save', { placeholder: false }],
+    ['$cuefluent-notes skip', 'processing_review', 'skip', { mention: '$cuefluent-notes', name: 'cuefluent-notes' }],
+  ]) for (const nested of [false, true]) await t.test(`${text}${nested ? ' (code mode)' : ''}`, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = tool; f.invocation.arguments = tool === 'process' ? f.invocation.arguments : { collectionId: f.collection.id };
+    const input = menuInput(f, text, options);
+    if (nested) {
+      const result = { content: [{ type: 'text', text: 'Synthetic challenge' }], isError: false }, rows = nestedRows(f, result);
+      await f.append([f.spacer(), ...input, rows.outer, rows.call, rows.output]);
+    } else await f.append([f.spacer(), ...input, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, typed);
+    assert.equal(bound.handshakeResultHash !== undefined, nested);
+  });
+  await t.test('a typed control that names another tool is refused', async t => {
+    const f = await fixture(t); f.invocation.tool = 'processing_status'; f.invocation.arguments = { collectionId: f.collection.id };
+    await f.append([f.spacer(), ...menuInput(f, '$cuefluent-notes:cuefluent-notes save t7xb88'), f.nativeCall()]);
+    await assert.rejects(f.resolve(), { code: 'PROCESSING_CONTROL_SELECTION_MISMATCH' });
+  });
+});
+
+test('Codex 0.163 menu input that is not one exact action is a typed non-command; a plain-text mention gains nothing', async t => {
+  const review = f => { f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id }; };
+  for (const [name, text, options, expected] of [
+    ['the skill alone', '$cuefluent-notes:cuefluent-notes', {}, { typedHelp: true }],
+    ['a mixed message', '$cuefluent-notes:cuefluent-notes save please, and note that the launch moved to Friday', {}, { typedSuggestions: ['save <draft code>'] }],
+    ['a near miss', '$cuefluent-notes:cuefluent-notes sav', {}, { typedSuggestions: ['save'] }],
+    ['two spaces', '$cuefluent-notes:cuefluent-notes  save', {}, { typedSuggestions: ['save'] }],
+    ['a second line', '$cuefluent-notes:cuefluent-notes save\nThe rollout moved.', {}, { typedSuggestions: ['save'] }],
+    ['a placeholder not covering the mention', '$cuefluent-notes:cuefluent-notes save', { placeholder: true, mention: '$cuefluent-notes:cuefluent-note' }, { typedSuggestions: ['save'] }],
+    ['the mention after other words', 'please $cuefluent-notes:cuefluent-notes save', { placeholder: false }, { typedSuggestions: ['save'] }],
+    ['another skill selected too', '$cuefluent-notes:cuefluent-notes save', { selections: 2 }, { typedSuggestions: ['save'] }],
+    // The mention typed out by hand, with no selected-skill item of this turn:
+    // no command and no authority; it only names the commands to type.
+    ['a plain-text mention', '$cuefluent-notes save', { placeholder: false, mention: '$cuefluent-notes', selections: 0 }, { typedUnattached: ['save'] }],
+    ['a plain-text full mention', '$cuefluent-notes:cuefluent-notes save k2mn9p', { placeholder: false, selections: 0 }, { typedUnattached: ['save k2mn9p'] }],
+    ['a plain-text mention alone', '$cuefluent-notes', { placeholder: false, mention: '$cuefluent-notes', selections: 0 }, { typedUnattached: ['help', 'review', 'status'] }],
+    ['a selection of another turn', '$cuefluent-notes:cuefluent-notes save', { turn: randomUUID() }, { typedUnattached: ['save'] }],
+    // A selected skill that is not this installed one: the call binds as model-chosen.
+    ['another installed copy', '$cuefluent-notes:cuefluent-notes save', { skillPath: '/synthetic/other-copy/SKILL.md' }, {}],
+    ['another skill', '$cuefluent-notes:cuefluent-notes save', { name: 'other-plugin:cuefluent-notes' }, {}],
+    ['other text', 'Please save the cuefluent-notes draft', { placeholder: false, selections: 0 }, {}],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t); review(f);
+    await f.append([f.spacer(), ...menuInput(f, text, options), f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.equal(bound.typedHelp, expected.typedHelp); assert.deepEqual(bound.typedSuggestions, expected.typedSuggestions);
+    assert.deepEqual(bound.typedUnattached, expected.typedUnattached);
+  });
+  await t.test('a selection whose message lies before the binding window', async t => {
+    const f = await fixture(t); review(f);
+    const [, selection] = menuInput(f, '$cuefluent-notes:cuefluent-notes save');
+    await f.append([f.spacer(), selection, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(bound.typedHelp, undefined); assert.equal(bound.typedSuggestions, undefined);
+  });
+  await t.test('a changed mirror of the selected-skill item', async t => {
+    const f = await fixture(t); review(f);
+    const [user, selection] = menuInput(f, '$cuefluent-notes:cuefluent-notes save');
+    const mirror = structuredClone(selection); mirror.payload.content[0].text += ' altered';
+    await f.append([f.spacer(), user, selection, mirror, f.nativeCall()]);
+    await assert.rejects(f.resolve(), unavailable);
+  });
 });
 test('Codex nested binding rejects forged metadata, arguments, duplicate calls and incomplete native results', async t => {
   for (const [name, change] of Object.entries({
@@ -683,4 +779,322 @@ test('exact Claude shortcut scope cannot be broadened despite a valid native too
   const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
   await f.append([input, companion, call]);
   await assert.rejects(f.resolve(), { code: 'PROCESSING_CONTROL_SELECTION_MISMATCH' });
+});
+
+test('Claude typed review actions bind exact draft and decision arguments and report the typed action', async t => {
+  const command = 'cuefluent-notes:cuefluent-notes';
+  for (const [typed, args, expected] of [
+    ['save t7xb88', { decision: 'save', draft: 't7xb88' }, true],
+    ['skip t7xb88', { decision: 'skip', draft: 't7xb88' }, true],
+    ['review cancel t7xb88', { decision: 'cancel', draft: 't7xb88' }, true],
+    ['review t7xb88', { draft: 't7xb88' }, true],
+    ['save', { decision: 'save' }, true], ['skip', { decision: 'skip' }, true], ['review cancel', { decision: 'cancel' }, true],
+    ['review', {}, true],
+    // A model cannot turn a typed display request into a decision, change the
+    // decision, retarget the draft code or drop the code from a typed decision.
+    ['review t7xb88', { decision: 'save', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['skip t7xb88', { decision: 'save', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['save t7xb88', { decision: 'save', draft: 'k2mn9p' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['save t7xb88', { decision: 'save' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['review cancel t7xb88', { decision: 'skip', draft: 't7xb88' }, 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    // Near misses, old spellings and plain text stay ordinary input; they never verify a decision.
+    ['save T7XB88', { decision: 'save', draft: 't7xb88' }, false],
+    ['save  t7xb88', { decision: 'save', draft: 't7xb88' }, false],
+    ['save t7xb81', { decision: 'save', draft: 't7xb88' }, false],
+    ['review save t7xb88', { decision: 'save', draft: 't7xb88' }, false],
+    ['review skip t7xb88', { decision: 'skip', draft: 't7xb88' }, false],
+  ]) await t.test(`${typed} -> ${JSON.stringify(args)}`, async t => {
+    const f = await fixture(t, 'claude');
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, ...args };
+    await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+    await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+    const input = f.spacer();
+    input.message.content = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${typed}</command-args>`;
+    const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+      message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\nSynthetic control ${typed}\n` }] } };
+    const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+    await f.append([input, companion, call]);
+    if (typeof expected === 'string') return assert.rejects(f.resolve(), { code: expected });
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, expected);
+    assert.equal(bound.typedControl, expected ? typed : undefined);
+    if (expected) assert.equal(bound.inputHash, digest(input.message.content));
+  });
+});
+
+test('Codex typed review actions bind from the verified typed text to a call without review fields', async t => {
+  for (const [typed, tool, expected] of [
+    ['save t7xb88', 'processing_review', true], ['skip', 'processing_review', true], ['review cancel', 'processing_review', true],
+    ['review cancel t7xb88', 'processing_review', true], ['review t7xb88', 'processing_review', true], ['review', 'processing_review', true],
+    ['status --verbose', 'processing_status', true], ['help', 'processing_status', true],
+    // Exact text only; a mismatched tool is refused rather than reinterpreted.
+    ['save T7XB88', 'processing_review', false], ['please save t7xb88', 'processing_review', false], ['review save t7xb88', 'processing_review', false],
+    ['save t7xb88', 'processing_status', 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+    ['help', 'processing_review', 'PROCESSING_CONTROL_SELECTION_MISMATCH'], ['status --verbose', 'processing_review', 'PROCESSING_CONTROL_SELECTION_MISMATCH'],
+  ]) await t.test(`${typed} -> ${tool}`, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = tool; f.invocation.arguments = { collectionId: f.collection.id };
+    const user = f.nativeSkill(); user.payload.item.content[1].text = typed;
+    await f.append([f.spacer(), user, f.nativeCall()]);
+    if (typeof expected === 'string') return assert.rejects(f.resolve(), { code: expected });
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, expected);
+    assert.equal(bound.typedControl, expected ? typed : undefined);
+  });
+  // Without the typed skill input, a model-initiated review call is display only.
+  const f = await fixture(t);
+  f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+  await f.append([f.spacer(), f.nativeCall()]);
+  const bound = await f.resolve();
+  assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+});
+
+test('a verified Claude skill invocation that is not an exact action binds as a typed non-command with grammar suggestions', async t => {
+  const command = 'cuefluent-notes:cuefluent-notes';
+  for (const [typed, args, suggestions] of [
+    ['sav t7xb88', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
+    ['Review', {}, ['review']], [' review', {}, ['review']], ['review ', {}, ['review']],
+    // Old spellings are near misses that name the new forms.
+    ['review save t7xb88', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
+    ['resume', {}, ['process resume']],
+    ['save t7xbo8', { decision: 'save' }, ['save <draft code>']],
+    // A control with more words or lines is not a control: nothing applies.
+    ['save t7xb88 and tag it urgent', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
+    ['save t7xb88\nThe rollout moved.', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
+    // A plain-language request starting with an action word is never a decision.
+    ['save this meeting note: the rollout moved to Friday', { decision: 'save' }, ['save']],
+    ['Remember that the rollout moved to Friday.', {}, ['help', 'review', 'status']],
+  ]) await t.test(JSON.stringify(typed), async t => {
+    const f = await fixture(t, 'claude');
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, ...args };
+    await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+    await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+    const input = f.spacer();
+    input.message.content = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${typed}</command-args>`;
+    const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+      message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\nSynthetic control ${typed}\n` }] } };
+    const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+    await f.append([input, companion, call]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.equal(Object.hasOwn(bound, 'inputId'), false);
+    assert.deepEqual(bound.typedSuggestions, suggestions); assert(Object.isFrozen(bound.typedSuggestions));
+    // Without the native companion of the trusted expansion the text is not
+    // verified typed input: the call binds as an ordinary model-chosen call.
+    const g = await fixture(t, 'claude');
+    g.invocation.tool = 'processing_review'; g.invocation.arguments = { collectionId: g.collection.id, ...args };
+    await fs.mkdir(path.dirname(g.skillPath), { recursive: true });
+    await fs.writeFile(g.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+    const altered = { ...companion, message: { role: 'user', content: [{ type: 'text', text: `${companion.message.content[0].text} altered` }] } };
+    const otherCall = g.nativeCall(); otherCall.attributionSkill = command; otherCall.attributionPlugin = 'cuefluent-notes';
+    const otherInput = { ...input, uuid: randomUUID() };
+    await g.append([otherInput, { ...altered, uuid: randomUUID(), parentUuid: otherInput.uuid }, otherCall]);
+    const unverified = await g.resolve();
+    assert.equal(unverified.nativeSkill, false); assert.equal(Object.hasOwn(unverified, 'typedSuggestions'), false);
+  });
+});
+
+test('identical Codex mirrors of the typed message are one message; a changed mirror is unverified', async t => {
+  const f = await fixture(t), typed = f.nativeSkill(), mirror = structuredClone(typed);
+  mirror.payload.completed_at_ms = 1; // Mirrors may differ outside the native item.
+  await f.append([f.spacer(), typed, mirror, f.nativeCall()]);
+  const bound = await f.resolve();
+  assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, 'process'); assert.equal(Object.hasOwn(bound, 'typedSuggestions'), false);
+  const g = await fixture(t), original = g.nativeSkill(), changed = structuredClone(original);
+  changed.payload.item.content[1].text = 'process repo';
+  await g.append([g.spacer(), original, changed, g.nativeCall()]);
+  await assert.rejects(g.resolve(), { code: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
+});
+
+test('Codex binds this skill with anything but one exact action as a typed non-command', async t => {
+  for (const [name, users, suggestions] of [
+    ['case', [['SAVE T7XB88']], ['save t7xb88']],
+    ['old spelling', [['review save t7xb88']], ['save t7xb88']],
+    ['old resume', [['resume']], ['process resume']],
+    ['extra words', [['please save t7xb88']], ['save t7xb88']],
+    ['second line', [['save t7xb88\nAlso tag it urgent.']], ['save t7xb88']],
+    ['extra content', [['save t7xb88', { type: 'text', text: 'Also tag it urgent.' }]], ['save t7xb88']],
+    ['second message', [['save t7xb88'], null], ['save t7xb88']],
+    ['plain-language save', [['save this meeting note: the rollout moved to Friday']], ['save']],
+    ['nothing typed with an attachment', [['', { type: 'image', url: 'synthetic.png' }]], ['help', 'review', 'status']],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+    const rows = users.map((parts, index) => {
+      const row = f.nativeSkill(); row.ordinal = 3 + index;
+      if (parts === null) row.payload.item.content = [{ type: 'text', text: 'Correction: the rollout moved.' }];
+      else row.payload.item.content = [row.payload.item.content[0], { type: 'text', text: parts[0] }, ...parts.slice(1)];
+      return row;
+    });
+    const call = f.nativeCall(); call.ordinal = 3 + rows.length;
+    await f.append([f.spacer(), ...rows, call]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.deepEqual(bound.typedSuggestions, suggestions);
+  });
+  // The same holds for a processing-only binding with collection off.
+  const only = await fixture(t, 'codex', { register: false, collection: false, mode: 'prompted' });
+  await collectionIngress('codex', { session_id: only.context.sessionId, turn_id: only.boundary.unitId, cwd: only.project,
+    transcript_path: only.source.path, hook_event_name: 'UserPromptSubmit' }, { configPath: only.options.configPath, launch: () => assert.fail('no collection') });
+  const typed = only.nativeSkill(); typed.payload.item.content[1].text = 'Review';
+  only.invocation.tool = 'processing_review'; only.invocation.arguments = { collectionId: only.collection.id };
+  await only.append([only.spacer(), typed, only.nativeCall()]);
+  const processingOnly = await only.resolve();
+  assert.equal(processingOnly.nativeSkill, false); assert.deepEqual(processingOnly.typedSuggestions, ['review']);
+  // Plain text without the skill block is ordinary input, not a typed command.
+  const f = await fixture(t), plain = f.nativeSkill();
+  plain.payload.item.content = [{ type: 'text', text: 'review sav t7xb88' }];
+  f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+  await f.append([f.spacer(), plain, f.nativeCall()]);
+  const bound = await f.resolve();
+  assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedSuggestions'), false);
+});
+
+test('the skill typed with nothing after it binds as a request for the command list in both clients', async t => {
+  // Claude records it as the two-line envelope, and its expansion of a body
+  // without $ARGUMENTS then has no ARGUMENTS line.
+  const command = 'cuefluent-notes:cuefluent-notes', head = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>`;
+  for (const [name, body, expansion, content, expected] of [
+    ['real shape', 'Synthetic control.\n', 'Synthetic control.\n', head, 'help'],
+    ['$ARGUMENTS body', 'Synthetic control $ARGUMENTS\n', 'Synthetic control \n', head, 'help'],
+    ['empty arguments element', 'Synthetic control.\n', 'Synthetic control.\n', `${head}\n<command-args></command-args>`, 'help'],
+    ['with an attachment', 'Synthetic control.\n', 'Synthetic control.\n', [{ type: 'text', text: head }, { type: 'image', source: { type: 'url', url: 'https://example.invalid/a.png' } }], 'suggestions'],
+    ['an ARGUMENTS line for nothing typed', 'Synthetic control.\n', 'Synthetic control.\n\n\nARGUMENTS: ', head, 'unverified'],
+  ]) await t.test(`Claude ${name}`, async t => {
+    const f = await fixture(t, 'claude');
+    f.invocation.tool = 'processing_status'; f.invocation.arguments = { collectionId: f.collection.id };
+    await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+    await fs.writeFile(f.skillPath, `---\nname: cuefluent-notes\n---\n\n${body}`);
+    const input = f.spacer(); input.message.content = content;
+    const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+      message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\n${expansion}` }] } };
+    const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+    await f.append([input, companion, call]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false); assert.equal(Object.hasOwn(bound, 'inputId'), false);
+    assert.equal(bound.typedHelp === true, expected === 'help');
+    assert.deepEqual(bound.typedSuggestions, expected === 'suggestions' ? ['help', 'review', 'status'] : undefined);
+  });
+  for (const [name, parts, expected] of [
+    ['skill alone', [], 'help'], ['empty text', [{ type: 'text', text: '', text_elements: [] }], 'help'],
+    ['empty text without elements', [{ type: 'text', text: '' }], 'help'],
+    ['whitespace', [{ type: 'text', text: ' ', text_elements: [] }], 'suggestions'],
+    ['attachment', [{ type: 'image', url: 'synthetic.png' }], 'suggestions'],
+  ]) await t.test(`Codex ${name}`, async t => {
+    const f = await fixture(t);
+    f.invocation.tool = 'processing_status'; f.invocation.arguments = { collectionId: f.collection.id };
+    const user = f.nativeSkill(); user.payload.item.content = [user.payload.item.content[0], ...parts];
+    await f.append([f.spacer(), user, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
+    assert.equal(bound.typedHelp === true, expected === 'help');
+    assert.deepEqual(bound.typedSuggestions, expected === 'suggestions' ? ['help', 'review', 'status'] : undefined);
+  });
+});
+
+// A Claude continuation link as the worker records it (claude-continuation.mjs),
+// joining the fixture session and a synthetic peer. Into the fixture session,
+// its pre-boundary record is the re-homed prefix, so the binding window starts
+// past it; out of it, the fixture session is an origin continued elsewhere.
+// The peer's transcript is never read.
+function continuation(f, { into = true, peer = randomUUID(), lineage } = {}) {
+  const { startByte, endByte, hash } = f.boundary.record, record = { startByte, endByte, hash };
+  const self = { sessionId: f.context.sessionId, registrationId: randomUUID(), sourcePath: f.source.path, sourceIdentity: f.source.fileIdentity };
+  const other = { sessionId: peer, registrationId: randomUUID(), sourcePath: path.join(f.project, `${peer}.jsonl`), sourceIdentity: digest(`synthetic ${peer}`) };
+  const [from, to] = into ? [other, self] : [self, other];
+  return { format: 'cuefluent-session-continuation', version: 1, client: 'claude', lineage: lineage ?? from.sessionId,
+    from: { ...from, marker: record }, to: { ...to, prefix: record, sessionKinds: [] }, linkedAt: stamp };
+}
+// Recorded through the helpers as the worker does: the link, then its pointer.
+const recordContinuation = (f, link) => withIntakeLock(f.store, async tx => {
+  await replaceIntakeJSON(tx, continuedPath(link.from.sessionId), link, null);
+  await ensureContinuesPointer(tx, f.store, await readContinuedLink(f.store, link.from.sessionId), async () => {});
+});
+const canonicalBytes = value => canonicalJSON(value) + '\n';
+const stateFile = (f, name) => path.join(f.collection.intakeStateDir, name);
+// Replace one private state file with exact, possibly non-canonical, bytes.
+const putState = (f, name, bytes) => withIntakeLock(f.store, async tx =>
+  replaceIntakeBytes(tx, name, Buffer.from(bytes), (await intakeSnapshot(f.store, 'state', name, { maxBytes: 16384 })).hash));
+// Re-record the link as these exact bytes and re-point the successor's pointer
+// at them, so only the check under test tells them from a verified link.
+async function repoint(f, link, bytes, pointer = {}) {
+  await putState(f, continuedPath(link.from.sessionId), bytes);
+  await putState(f, continuesPath(link.to.sessionId), canonicalBytes({ format: 'cuefluent-session-continues', version: 1, client: 'claude',
+    sessionId: link.to.sessionId, from: link.from.sessionId, lineage: link.lineage, linkHash: digest(bytes), ...pointer }));
+}
+// One verified typed Claude decision, built as in the typed review tests above.
+async function typedDecision(f) {
+  const command = 'cuefluent-notes:cuefluent-notes', typed = 'save t7xb88';
+  f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id, decision: 'save', draft: 't7xb88' };
+  await fs.mkdir(path.dirname(f.skillPath), { recursive: true });
+  await fs.writeFile(f.skillPath, '---\nname: cuefluent-notes\n---\n\nSynthetic control $ARGUMENTS\n');
+  const input = f.spacer();
+  input.message.content = `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${typed}</command-args>`;
+  const companion = { ...input, uuid: randomUUID(), parentUuid: input.uuid, isMeta: true, turnCompanion: true,
+    message: { role: 'user', content: [{ type: 'text', text: `Base directory for this skill: ${path.dirname(f.skillPath)}\n\nSynthetic control ${typed}\n` }] } };
+  const call = f.nativeCall(); call.attributionSkill = command; call.attributionPlugin = 'cuefluent-notes';
+  await f.append([input, companion, call]);
+}
+
+test('a tampered Claude continuation link or pointer binds no typed control in the successor', async t => {
+  const duplicateVersion = bytes => bytes.replace('"version":1', '"version":0,"version":1');
+  // Every changed record still parses; the case names what no longer verifies.
+  const cases = {
+    'non-canonical pointer bytes': async (f, link) => putState(f, continuesPath(link.to.sessionId),
+      duplicateVersion(await fs.readFile(stateFile(f, continuesPath(link.to.sessionId)), 'utf8'))),
+    'non-canonical link bytes named by its pointer': (f, link) => repoint(f, link, duplicateVersion(canonicalBytes(link))),
+    'an unsupported link version named by its pointer': (f, link) => repoint(f, link, canonicalBytes({ ...link, version: 2 })),
+    'a link changed after its pointer': (f, link) => putState(f, continuedPath(link.from.sessionId),
+      canonicalBytes({ ...link, linkedAt: '2026-10-10T12:00:01.000Z' })),
+    'a pointer whose link is gone': (f, link) => fs.rm(stateFile(f, continuedPath(link.from.sessionId))),
+    'a pointer recorded for another session': (f, link) => repoint(f, link, canonicalBytes(link), { sessionId: randomUUID() }),
+    // Another origin's link, also filed under its own origin, named by this pointer.
+    'a link filed under another origin': async (f, link) => {
+      const other = randomUUID(), bytes = canonicalBytes({ ...link, from: { ...link.from, sessionId: other } });
+      await putState(f, continuedPath(other), bytes); await repoint(f, link, bytes);
+    },
+    'a link into another successor': (f, link) => repoint(f, link, canonicalBytes({ ...link, to: { ...link.to, sessionId: randomUUID() } })),
+    'a link of another lineage than its pointer': (f, link) => repoint(f, link, canonicalBytes({ ...link, lineage: randomUUID() })),
+    'a link into another transcript': (f, link) => repoint(f, link, canonicalBytes({ ...link, to: { ...link.to, sourceIdentity: digest('another transcript') } })),
+  };
+  for (const [name, tamper] of Object.entries(cases)) await t.test(name, async t => {
+    const f = await fixture(t, 'claude'), link = continuation(f);
+    await recordContinuation(f, link); await typedDecision(f);
+    // Verified, the successor's typed decision binds in the origin's lineage.
+    const bound = await f.resolve();
+    assert.equal(bound.typedControl, 'save t7xb88');
+    assert.deepEqual(bound.chatLineage, { client: 'claude', sessionId: link.from.sessionId });
+    await tamper(f, link);
+    await assert.rejects(f.resolve(), unavailable);
+  });
+});
+
+test('a continuation link or pointer changed after the binding first read it refuses the typed control', async t => {
+  const lineage = randomUUID();
+  // [case, starts as a verified successor, change, what a fresh binding then reports]
+  for (const [name, linked, change, after] of [
+    ['the link and its pointer re-recorded for another lineage', true,
+      (f, link) => repoint(f, link, canonicalBytes({ ...link, lineage }), { lineage }), { client: 'claude', sessionId: lineage }],
+    ['the pointer removed', true, (f, link) => fs.rm(stateFile(f, continuesPath(link.to.sessionId))), undefined],
+    ['a pointer recorded for a session first read without one', false,
+      f => recordContinuation(f, continuation(f, { peer: lineage })), { client: 'claude', sessionId: lineage }],
+    ['the session continued elsewhere', false, f => recordContinuation(f, continuation(f, { into: false })), 'PROCESSING_CHAT_CONTINUED'],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t, 'claude'), link = linked ? continuation(f) : null;
+    if (link) await recordContinuation(f, link);
+    await typedDecision(f);
+    assert.deepEqual((await f.resolve()).chatLineage, link ? { client: 'claude', sessionId: link.from.sessionId } : undefined);
+    // The change lands at the binding's first transcript open: after it first
+    // read the pointer and links, before a guard re-checks their pinned hashes.
+    const original = fs.open; let changed = false;
+    const mocked = t.mock.method(fs, 'open', async function(file, ...args) {
+      const handle = await original.call(this, file, ...args);
+      if (file === f.source.path && !changed) { changed = true; await change(f, link); }
+      return handle;
+    });
+    await assert.rejects(f.resolve(), unavailable); mocked.mock.restore(); assert.equal(changed, true);
+    // Only a fresh binding reads the changed records; the earlier lineage is never reused.
+    if (typeof after === 'string') await assert.rejects(f.resolve(), { code: after });
+    else assert.deepEqual((await f.resolve()).chatLineage, after);
+  });
 });

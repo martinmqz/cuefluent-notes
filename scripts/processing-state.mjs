@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { assertWorkflowStorage, assertPrivatePaths } from './workflow-storage.mjs';
 import { openProcessingIntake, inspectIntakeStore, withIntakeLock, guardStore, intakePath, intakeSnapshot, intakeJSON, writeIntakeStage } from './intake-io.mjs';
 import { withWorkflowWriterLocks } from './capture-maintenance.mjs';
-import { lstatOrNull, removeOwnedStage, syncDirectory, isOwnedStage } from './file-io.mjs';
+import { lstatOrNull, removeOwnedStage, syncDirectory, isOwnedStage, renameReplacing } from './file-io.mjs';
 import { canonicalJSON, fail, isNativeId } from './workflow-values.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { assertNoProcessingReinspection, PROCESSING_REINSPECTION_FILE } from './writer-protocol.mjs';
@@ -70,12 +70,15 @@ export async function writeProcessingBytes(ctx, name, bytes, expectedHash, { bef
   };
   const stage = await writeIntakeStage(ctx.writer, 'state', stageName, bytes, stageGuard);
   try {
-    await ctx.guard();
-    if ((await processingSnapshot(ctx, name)).hash !== expectedHash || !await isOwnedStage(stage.file, stage.identity, bytes, { guard: stageGuard })) fail('PROCESSING_STATE_CHANGED');
-    await guardStore(ctx.writer, [stage.file, target]);
-    // Synchronous admission boundary, immediately before durable publication.
-    beforePublish?.();
-    await fs.rename(stage.file, target); await syncDirectory(path.dirname(target));
+    let admitted = false;
+    await renameReplacing(stage.file, target, { check: async () => {
+      await ctx.guard();
+      if ((await processingSnapshot(ctx, name)).hash !== expectedHash || !await isOwnedStage(stage.file, stage.identity, bytes, { guard: stageGuard })) fail('PROCESSING_STATE_CHANGED');
+      await guardStore(ctx.writer, [stage.file, target]);
+      // Synchronous admission boundary, once, immediately before durable publication.
+      if (!admitted) { admitted = true; beforePublish?.(); }
+    } });
+    await syncDirectory(path.dirname(target));
   } finally { await removeOwnedStage(stage.file, stage.identity, bytes, { guard: stageGuard }); }
   return processingSnapshot(ctx, name);
 }

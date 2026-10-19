@@ -115,14 +115,102 @@ the native client's tools to the existing engine, and seals exact native executi
 records. Codex can prove a completed restricted unit; Claude can prove its exact
 controller input without inferring ownership of assistant/tool rows. Source-chat
 exclusion requires an actual formal skill invocation, its verified native control
-call and the matching helper receipt. Claude additionally verifies the exact
-installed skill expansion and native companion, excluding only the formal input
-after its actual MCP result; assistant parentage or final wording is not proof.
+call and the matching helper receipt. Codex proves the whole completed control
+turn, including code-mode cells, as described under
+[capture prevention](processing-chat.md#capture-prevention-and-limits). Claude
+additionally verifies the exact installed skill expansion and native companion,
+excluding only the formal input after its actual MCP result; assistant parentage
+or final wording is not proof.
 Pure controls can be deferred while their proof is incomplete, retaining the
 original input and cursor. A later independent human input releases an unsupported
 Claude candidate to ordinary capture. Mixed inputs and new corrections retain
 their evidence. Interrupted or unproven runs do not grant collection exclusion.
 Existing capture heads, packets and claims remain unchanged.
+
+Nothing else that selects the skill is excluded. A Claude human input that is
+exactly the trusted skill command's envelope
+(`<command-message>`, `<command-name>`, `<command-args>` in that order, for
+`cuefluent-notes:cuefluent-notes`, the name Claude records whether the bare
+`/cuefluent-notes` or the full name was typed) without a proof keeps its typed
+arguments as evidence, exactly as written, without the markup. When nothing was
+typed after the command, Claude can record only the first two lines,
+and that input, like an empty arguments element, is structural under every reader
+version; a published head that kept it as text replays unchanged. Another skill or plugin, any other shape or
+text outside the envelope, and SDK input stay verbatim. A control mixed with
+more words or content is therefore retained in full. A Codex unit started with
+this skill keeps all user text and assistant text, without its command markup,
+which is never an omission. It is started with this skill when its user message
+carries this skill's block (its exact native shape and the skill name
+`cuefluent-notes`) or, from reader version 4, when the turn carries Codex CLI
+0.163's `skills.selected_skill_instructions` item naming
+`cuefluent-notes:cuefluent-notes` or `cuefluent-notes`. The block, the selection
+item and, on the message the selection was made for (the turn's latest user
+message before the item), its leading mention (`$cuefluent-notes:cuefluent-notes`
+or `$cuefluent-notes`) plus one space are the markup; any other message in the
+turn keeps its text, even one that starts with the mention. From version 4, a
+message whose text after that markup (or after the block) is exactly one action
+is only the command and leaves no evidence. The installed path, which changes
+with each plugin version, is not consulted, so a published unit replays
+unchanged after an upgrade.
+
+Calls to this plugin's control server and their results are left out as its own
+processing and review activity: under version 3 in a unit started with this
+skill, and from version 4 in every Codex unit, whether the skill was picked, its
+mention typed by hand (kept exactly as typed, since Codex attached no skill) or
+the request made in the person's own words. They are identified by native
+identity alone: the call namespace `mcp__cuefluent_control` plus a native MCP
+item for the same call ID with server `cuefluent_control` and the same tool.
+From version 4, a code-mode `exec` cell is left out too, with its `wait` calls,
+outputs and nested MCP items, when every nested native item within the cell's
+span (from its call to its last output) is a call to `cuefluent_control` and
+every output of the cell is Codex's own framing around nothing or around exactly
+what one of those calls returned; other cells stay. A nested item outside every
+cell or within two open cells, or a child agent in the unit, keeps every
+code-mode record. From version 4, an assistant message that only repeats the
+status text (including the command list and a not-a-command reply) or the
+refusal message of one of those left-out calls in the same unit (as Codex
+recorded it, or the plain message inside Codex CLI 0.163's own error framing)
+is that reply, not evidence. The message and each reply are compared in one
+comparison form, which changes only how the same words are marked up:
+
+1. CRLF and CR line endings become LF.
+2. A code span (a run of backticks closed by the next run of the same length)
+   is one unit: its content, with a line ending read as a space and one space
+   dropped from each end when both ends have one and it is not all spaces, is
+   compared as written, and no other rule looks inside it. A run that is never
+   closed is text, and so is a backtick after an odd number of backslashes
+   outside a code span (an escaped backtick), which never opens one; the rest of
+   its run still may. Inside a code span a backslash is literal.
+3. Outside code spans, a `<file:///…>` autolink (no host, query or fragment)
+   becomes its path, percent-decoded as UTF-8, and a link `[name](target)` or
+   `[name](<target>)` whose target is an absolute path or such a `file:///` URL
+   becomes that decoded path when `name` is exactly the path's last segment.
+   Any other link stays as written, and so does a link or autolink whose path
+   does not decode or decodes to a control or line-separator character. A
+   decoded path is one unit, compared as written.
+4. Spaces and tabs at the start and end of each line are dropped, but never
+   inside a code span or a decoded path. Inside a line they stay as written, so
+   a path or name that differs only in its spacing stays distinct.
+5. A line starting with `* `, `+ ` or `• ` starts with `- ` instead.
+6. Empty lines are dropped.
+
+The message and the reply match when they give the same lines of text, path and
+code units. So a relay Codex's model only reformatted (its own link form for a
+local path, a blank line before a list, indentation, another code fence) is that
+reply, while a paraphrase, added or changed words, changed spacing inside a line
+or a path, a link named otherwise, a path shown as a link on one side and as
+text or a code span on the other, emphasis or joined lines keep the message; a
+refusal relayed in other words, for example without its `Cuefluent:` prefix,
+therefore stays as assistant text. These rules belong to reader version 4;
+changing one needs a new reader version.
+Text alone never identifies anything: the person's words stay as typed, even an
+exact action typed without the skill, and commentary, any other assistant text,
+a reply with words added and other tools stay. Legacy history records MCP calls
+without native MCP items, so its control calls and replies stay. Published
+captures keep the rules of their reader version: versions 1 and 2 keep the
+block as an omission and the exchanges, version 3 applies the block rules and
+leaves out exchanges only in units started with this skill, version 4 the rules
+above.
 
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same
@@ -227,7 +315,7 @@ and immutable publication through the [workflow CLI](workflow-cli.md) and
 privacy; collection requires a verified private-storage capability.
 
 Registration fixes the source identity and current EOF, allowing at most a
-bounded 64 KiB source-header check and one byte before EOF. A missing source
+bounded 1 MiB source-header check and one byte before EOF. A missing source
 returns `pending-source`: this inspection result is not durable registration or
 acknowledgement that collection is enabled. Durable ingress retries preserve the
 registration boundary; later appearance cannot imply an authorized offset of zero.
@@ -381,7 +469,13 @@ Stable native item IDs deduplicate identical mirrors; distinct IDs retain repeat
 text. Native source ranges remain attached to the unit's actual records. Reasoning,
 compaction summaries, hook prompts and inter-agent content are excluded structurally.
 Native collaboration call IDs and pinned collaboration tool names exclude their
-outputs with an omission. Native user text, including IDE context supplied in
+outputs with an omission. Reader version 3 treats this plugin's own skill block
+as command markup and leaves out its control-server exchanges in a unit started
+with that skill; version 4 leaves them out in every unit (see
+[the provenance gate](#generated-output-provenance-gate)); versions 1 and 2
+record the block as an `unsupported-content-block` omission and keep those
+exchanges. A published unit is always reread under its own version.
+Native user text, including IDE context supplied in
 that text, stays attributed evidence; prose delimiters do not authorize stripping
 arbitrary parts of a user's message.
 
@@ -398,7 +492,7 @@ call identity have omissions. Tool namespaces are preserved. Mirrored auxiliary
 items already represented by the same native call ID do not add false omissions.
 
 Reads stop at a frozen EOF and seek from the authorized floor/current cursor.
-Header reads are bounded to 64 KiB; records to 8 MiB; one pass to 64 MiB and
+Header reads are bounded to 1 MiB (a Codex header line to 64 KiB); records to 8 MiB; one pass to 64 MiB and
 16,384 records. Incomplete lines remain unconsumed, and a split registration record
 is discarded through its newline. Invalid UTF-8/JSON, changed source identities,
 non-increasing paginated ordinals and oversized lines do not advance past the
@@ -450,17 +544,31 @@ No assistant/tool payload is put into a capture or checkpoint on that basis.
 Claude captures therefore remain `terminal: unconfirmed` with partial coverage.
 They must not be described downstream as complete dialogue or completed work.
 
-The header may have known native metadata before its first identity row; the
-entire header read is still bounded to 64 KiB. The header fixes the registered project, tolerating its stored canonical path
+The header may have known native metadata before its first identity row
+(Claude CLI 2.1.303 writes about 160 KiB of API request snapshots there); the
+entire header read is still bounded to 1 MiB. The header fixes the registered project, tolerating its stored canonical path
 when the project later moves. Later root rows must match session and ownership;
 their working directory and client version may change. Version strings must be
 bounded and nonempty; `reader.headerClientVersion` explicitly records only the
 header's client version, not the emitting version of later rows.
 Malformed metadata or unsupported record types block at that row while preserving
 the supported prefix. Unsupported history relocation,
-rewinds or native ownership produce diagnostics. Compaction summaries, injected
+rewinds or native ownership produce diagnostics; a verified continuation is
+described below. A Claude Desktop session connected for Remote Control records
+`bridge-session` rows; the reader treats the first as a history discontinuity, so
+collection of that session stops there with `CLAUDE_HISTORY_REQUIRES_REVIEW`
+(captures before it stay valid). Compaction summaries, injected
 context, sidechain/child records, reasoning and queued attachment records are
-excluded. Selected human prose is not filtered by instruction-like words.
+excluded. API request snapshot records (`api-request-shape`, `api-request-blob`
+and `api-request`, written by Claude CLI 2.1.299) are excluded transport metadata;
+their message copies never become evidence. Selected human prose is not filtered
+by instruction-like words. Capture reader version 2 keeps only the typed
+arguments of the trusted skill command's exact envelope (see
+[the provenance gate](#generated-output-provenance-gate)); a version 1 head
+extends with verbatim text, except that an envelope with nothing typed is
+structural under both. Both share the structural checkpoint version
+`claude-transcript/1`; an unknown capture reader version refuses that unit with
+`UNSUPPORTED_CLAUDE_READER` rather than being reinterpreted.
 Classification uses the documented native types, ownership fields and known
 injection flags. Neither reader validates every optional field: a future producer
 that changes human/injected-message semantics under a known type needs a reader
@@ -471,6 +579,37 @@ advanced scope checks that exact record and byte range against the active head,
 then skips it rather than copying it twice. Empty follow-ups do not create
 provenance-only revisions. Inline attachment omissions preserve MIME and counts.
 Inline binary is omitted, while actual URL references remain references.
+
+Claude CLI can continue a session into a new session ID: the old transcript ends
+with a `continued-in` record naming the new ID, and the new transcript re-homes the
+earlier records under that ID. Claude CLI's background sessions also mark every
+record `sessionKind: "bg"`. The worker links the two sessions only when both are
+registered through their own hooks for the same route, project and collection;
+the new transcript is the old one's sibling `<new session ID>.jsonl` and was never
+collected on its own; the marker is followed only by session bookkeeping of the
+old session (Claude CLI 2.1.302 writes cost, file-history and last-prompt rows
+after it): known metadata types other than queued prompts and API request
+snapshots, with no or the old session's `sessionId`, no rewind, within 64 KiB and
+64 records, and no root row or other discontinuity; and, within
+the new transcript's first 16 MiB, its first root record and the old session's
+last human input (found within 4 MiB before the marker) are re-homed copies with
+the same UUID, type, timestamp and message. The link is recorded once in private
+state, never inferred from timing, titles or the marker alone. The old session is
+then terminal at the marker: captures made before it stay valid, nothing after it
+is evidence, and on each pass the bytes after it are checked again under the same
+bookkeeping rule (never past a paused ceiling); anything else there reports
+`CLAUDE_HISTORY_REQUIRES_REVIEW`, and a record still being written waits. The
+successor's file can hold only metadata until its first prompt, which writes the
+re-homed history; when one worker pass visits the successor before the old
+session links it, the pass visits the successor once more. The
+new session accepts the `bg` kind, treats its re-homed prefix as structural (never
+captured again, including records from before the old session's floor) and
+otherwise registers its own floor and excluded boundary prompt normally. The
+link's exact prefix boundary record is re-read and compared on every worker pass
+and every control binding, wherever reading starts; a prefix rewritten in place
+fails `SOURCE_CHANGED` for that session and binds nothing in the lineage. Without a
+link the marker keeps `CLAUDE_HISTORY_REQUIRES_REVIEW` and a session kind remains
+an ownership refusal; agent, sidechain and other session kinds never join.
 
 Incremental reads seek from the saved cursor. The helper reads exact immutable
 heads as baselines when a selected prompt has more proven human records. Prior
@@ -607,7 +746,12 @@ operations verify roots and touched paths; unrelated archive size does not gate
 collection. A concurrent child write may change a directory's timestamps, size or
 link count; verification makes at most three attempts, re-reading ACLs on each retry while preserving
 the original identity, mode and owner. Files, replaced roots, permission changes
-and persistent churn fail closed. Policy checks retain their exact configuration
+and persistent churn fail closed; persistent churn reports `PRIVATE_STORAGE_CHANGED`.
+Only a command binding repeats a check whose every attempt saw nothing but
+directory churn on the very roots its storage capability pinned, from scratch
+with ACLs re-read, within its existing settle window
+([entry and reuse](processing-chat.md#entry-and-reuse)); a check that found a
+real change, including a replaced root that keeps churning, is never repeated. Policy checks retain their exact configuration
 hash and a final fresh placement check. Explicit setup audits existing roots. `auditWorkflowStorage` reports
 incompleteness at its 20,000-entry default limit. Setup/probes stay outside
 synchronous prompt hooks; production worker probe latency remains unverified.
@@ -701,8 +845,13 @@ proven boundary is still excluded. A reader update does not import pre-floor
 history or replace that saved floor with the upgrade time. If the source was
 missing at registration and its header has never verified, there is no saved
 floor yet: the first successful verification uses the available authorized wake's
-EOF. Earlier work is not automatically retained. Stale grants, changed sources
-and paused selections keep their existing refusal and recovery rules.
+EOF. A Claude prompt wake whose file was still missing too (Claude can create a
+new transcript only after that prompt's hooks ran) lets the worker take the same
+metadata-only snapshot itself when it handles that wake (the worker launched by
+that prompt's hook first waits at most one second for the file); it is never
+earlier than the hook would have seen, so the
+floor is never wider. Earlier work is not automatically retained. Stale grants,
+changed sources and paused selections keep their existing refusal and recovery rules.
 
 The configure helper assigns collection generations. Collection consent, source
 routing, raw/state locations, session selectors and overlapping route changes

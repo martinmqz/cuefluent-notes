@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { openGuarded, sameFileIdentity } from './file-io.mjs';
-import { stableSourceIdentity } from './capture-selection.mjs';
+import { stableSourceIdentity, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
 import { integer, digest, fail } from './workflow-values.mjs';
 import { checkWorkflowBudget, consumeWorkflowBytes, workflowReadLimit } from './workflow-budget.mjs';
 
@@ -50,7 +50,7 @@ export async function readSessionRange({ source, from, endByte, startsMidRecord 
       return bytes;
     };
     const metadata = await verifyHeader(await readHeader({ size: stop, readHeader: (offset, length) => {
-      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1 || offset + length > Math.min(stop, 64 * 1024)) fail('SESSION_HEADER_LIMIT');
+      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1 || offset + length > Math.min(stop, SOURCE_HEADER_BYTES)) fail('SESSION_HEADER_LIMIT');
       return read(offset, length, 'header');
     } }), source);
     const records = [], discarded = [];

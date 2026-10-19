@@ -69,14 +69,17 @@ paths to bypass a refusal; follow
 
 ## Processing
 
-Prefer the reusable processing chat: select Cuefluent Notes with `process` in
-Codex, or use `/cuefluent-notes:cuefluent-notes process` in Claude. Invoke the same
-skill with `review` to review the exact proposal through a supported host form.
+Prefer the reusable processing chat: type `$cuefluent-notes process` in Codex
+(type `$` and pick cuefluent-notes from the list) or `/cuefluent-notes process`
+in Claude. Invoke the same skill with `review` to
+write the exact proposal to a private review folder, then type `save <code>` or
+`skip <code>` to decide; `help` lists every action.
 This remains an explicit request in every mode, including Automatic.
 The restricted session disables inherited collection hooks; formal controls use
 verified native identities. Mixed work and corrections remain eligible evidence.
-If the native tool, binding or form is unavailable, leave the work pending and
-report the limitation. Standalone agents can use the explicit CLI workflow from
+If the native tool or binding is unavailable, leave the work pending and report
+the limitation; without a review form, review through the folder and typed
+decisions. Standalone agents can use the explicit CLI workflow from
 an uncaptured context; do not silently process inline in a captured work chat.
 See [processing and recovery](plugins/cuefluent-notes/skills/cuefluent-notes/references/processing-chat.md)
 and [verification limits](plugins/cuefluent-notes/skills/cuefluent-notes/references/verification.md).

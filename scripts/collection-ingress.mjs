@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { inspectIntakeStore, intakePath, intakeSnapshot, intakeJSON, writeIntakeStage, guardStore } from './intake-io.mjs';
-import { removeOwnedStage, syncDirectory, sameFileIdentity, lstatOrNull } from './file-io.mjs';
+import { removeOwnedStage, syncDirectory, sameFileIdentity, lstatOrNull, renameReplacing } from './file-io.mjs';
 import { collectionGrantHash } from './collection-grant.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { CLAUDE_READER_RULES_REVISION } from './claude-reader.mjs';
@@ -21,6 +21,7 @@ export const registrationPath = identity => `ingress/registrations/${choice(iden
 export const wakePath = identity => `ingress/wake/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const suspendedPath = identity => `ingress/suspended/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const drainedPath = identity => `ingress/drained/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
+export const registrationFloorPath = identity => `registration-floors/${choice(identity.client, ['codex', 'claude'])}/${nativeId(identity.sessionId)}.json`;
 export const processingSourceDirectory = client => `ingress/processing-sources/${choice(client, ['codex', 'claude'])}`;
 export const processingSourcePath = (identity, policyHash) => `${processingSourceDirectory(identity.client)}/${nativeId(identity.sessionId)}/${hash(policyHash)}/record.json`;
 // Shape version only; reader-owned rules revisions invalidate cached results.
@@ -97,9 +98,12 @@ export async function publishIngressMetadata(store, name, value, { exclusive = f
       catch (error) { if (['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error.code) && await lstatOrNull(directory)) return false; throw error; }
       await syncDirectory(path.dirname(directory));
     } else {
-      await intakeSnapshot(store, 'state', name, { maxBytes: 16384 });
-      await guardStore(store, [stage.file, destination]);
-      await fs.rename(stage.file, destination); moved = true;
+      // A hook must not hold up the prompt, so its wait stays short.
+      await renameReplacing(stage.file, destination, { maxWaitMs: 70, check: async () => {
+        await intakeSnapshot(store, 'state', name, { maxBytes: 16384 });
+        await guardStore(store, [stage.file, destination]);
+      } });
+      moved = true;
     }
     await syncDirectory(path.dirname(destination)); return true;
   } catch (error) { failure = error; throw error; } finally {

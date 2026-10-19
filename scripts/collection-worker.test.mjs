@@ -7,7 +7,7 @@ import { collectionIngress, snapshotSourceMetadata, registrationPath, READER_SUS
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock, openWorkflowIntake } from './intake-io.mjs';
 import { readSelection, readCaptureHead, controlSelection, publishCapture, inspectPendingPublication, recoverPendingPublication } from './intake-store.mjs';
-import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
+import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint, CODEX_READER_VERSION } from './codex-reader.mjs';
 import { inspectSourceBoundary } from './capture-selection.mjs';
 import { randomUUID } from 'node:crypto';
 import { withWorkflowBudget, consumeWorkflowBytes, workflowTimeout } from './workflow-budget.mjs';
@@ -142,7 +142,7 @@ test('agent-created SessionStart excludes the creating agent seed before collect
   });
 });
 
-for (const held of [false, true]) test(`v1 Codex progress and published units continue under v2 with held cursor=${held}`, async t => {
+for (const held of [false, true]) test(`v1 Codex progress and published units continue under the current reader with held cursor=${held}`, async t => {
   const f = await fixture(t); await collectionIngress('codex', f.payload, f.options);
   await fs.appendFile(f.source, turn(A, 'Boundary')); await f.run();
   const selection = await readSelection(f.store, { client: 'codex', sessionId: S }), scopeId = selection.state.intervals[0].id;
@@ -172,7 +172,7 @@ for (const held of [false, true]) test(`v1 Codex progress and published units co
   assert.equal(run.saved, 1);
   assert(!run.pending.includes('READER_CHECKPOINT_CONFLICT')); assert(!run.pending.includes('FINAL_CAPTURE_CONFLICT'));
   if (held) assert(run.pending.includes('SOURCE_ANCHOR_LIMIT'));
-  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: D })).capture.reader.version, '2');
+  assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: D })).capture.reader.version, CODEX_READER_VERSION);
   const retained = await readCaptureHead(f.store, old.identity);
   assert.equal(retained.hash, saved.headHash); assert.deepEqual(serializeCapture(retained.capture), serializeCapture(old));
   assert.equal((await f.run()).saved, 0);
@@ -280,6 +280,27 @@ test('Claude collection preserves its human-only, unconfirmed snapshot boundary'
   await fs.writeFile(path.join(f.collection.intakeStateDir, 'heads', 'claude', S, `${B}.json`), '{invalid unrelated head', { mode: 0o600 });
   await fs.appendFile(f.source, message('user', 'Next decision', { promptId: randomUUID() }));
   const next = await f.run(); assert.deepEqual(next.pending, []); assert.equal(next.saved, 1);
+});
+
+test('Claude collection keeps typed skill arguments without markup and passes markup-only input', async t => {
+  const f = await fixture(t); let previous = null;
+  const message = (type, content, extra = {}) => {
+    const value = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version: '2.1.280',
+      isSidechain: false, cwd: f.project, message: { role: type, content }, ...extra }; previous = value.uuid; return JSON.stringify(value) + '\n';
+  };
+  const command = 'cuefluent-notes:cuefluent-notes', envelope = args =>
+    `<command-message>${command}</command-message>\n<command-name>/${command}</command-name>\n<command-args>${args}</command-args>`;
+  const C = randomUUID(), D = randomUUID();
+  await fs.writeFile(f.source, message('system', '', { subtype: 'init' }));
+  await collectionIngress('claude', { ...f.payload, prompt_id: A }, f.options);
+  await fs.appendFile(f.source, message('user', 'Boundary', { promptId: A }) + message('user', envelope('review sav t7xb88 and tag it'), { promptId: B }) +
+    message('user', envelope(''), { promptId: C }) + message('user', 'Next decision', { promptId: D }));
+  const result = await f.run(); assert.deepEqual(result.pending, []); assert.equal(result.saved, 2);
+  const typed = await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: B });
+  assert.deepEqual(typed.capture.evidence.map(item => item.text), ['review sav t7xb88 and tag it']); assert.equal(typed.capture.reader.version, '2');
+  assert.equal((await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: C })).head, null);
+  assert.deepEqual((await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: D })).capture.evidence.map(item => item.text), ['Next decision']);
+  assert.equal((await f.run()).saved, 0);
 });
 
 test('a new session wakes older durable work after the launching parent exits', async t => {

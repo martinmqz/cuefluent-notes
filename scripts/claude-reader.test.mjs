@@ -11,7 +11,7 @@ import { inspectIntakeStore, withIntakeLock, intakeSnapshot, intakeJSON } from '
 import { controlSelection, publishCapture, commitReaderProgress, readCaptureHead, resolveStoredSelectionAnchor } from './intake-store.mjs';
 import { digest } from './workflow-values.mjs';
 import { planReaderCheckpoint, hydrateReaderCheckpoint } from './reader-pages.mjs';
-import { serializeCapture } from './capture-contract.mjs';
+import { serializeCapture, createCapture } from './capture-contract.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002', C = '20000000-0000-4000-8000-000000000003';
@@ -71,6 +71,29 @@ test('Claude retains human-supplied processing copies and corrections without tr
   assert.deepEqual(capture.evidence.map(item => item.text), [text]);
   assert.equal(capture.coverage.partial, true);
   assert.deepEqual(await fs.readFile(f.source.path), f.bytes);
+});
+
+test('a plain-language Claude request is captured as typed, never this plugin\'s tool traffic or the relayed reply', async t => {
+  // No skill command: the model answers the person's own words by calling this
+  // plugin's control. Its call, the result (a draft reply, the command list, a
+  // not-a-command reply or a refusal) and the assistant's exact relay are not
+  // human input, so none of them is copied.
+  const typed = 'Please process my notes.';
+  for (const [name, reply, isError] of [['draft', 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88', false],
+    ['command list', 'Cuefluent: Type one of these yourself, exactly as written:\n\n- /cuefluent-notes status: show processing.', false],
+    ['not a command', 'Cuefluent: Nothing was applied: that was not an exact command.', false],
+    ['refusal', 'Cuefluent: Nothing was applied and nothing was saved.', true]]) await t.test(name, async t => {
+    const call = message('assistant', [{ type: 'tool_use', id: 'toolu_control', name: 'mcp__cuefluent_control__processing_status', input: {} }], { promptId: A });
+    const result = message('user', [{ type: 'tool_result', tool_use_id: 'toolu_control', is_error: isError,
+      content: [{ type: 'text', text: isError ? reply : JSON.stringify({ interfaceVersion: 1, status: 'idle', statusText: reply }) }] }],
+    { promptId: A, sourceToolAssistantUUID: call.uuid });
+    const f = await fixture(t, [human(A, typed), call, result, assistant(reply, { promptId: A })]);
+    const read = await readClaudeSelection(f.args), [{ capture }] = read.candidates;
+    assert.deepEqual(capture.evidence.map(item => [item.kind, item.text]), [['user', typed]]);
+    // The call, its result and the relay are unowned rows: not even an omission.
+    assert.deepEqual(capture.coverage.omissions, []); assert.equal(read.diagnostics.unownedRecords, 3);
+    assert.doesNotMatch(serializeCapture(capture).toString() + JSON.stringify(read.checkpoint), /cuefluent_control|toolu_control|Cuefluent:|statusText/);
+  });
 });
 
 test('Claude captures proven human input, never claims a transcript finality fence', async t => {
@@ -194,6 +217,21 @@ test('header registration accepts bounded metadata prefixes and checks exact sou
   const { fileIdentity: _identity, ...selected } = f.source;
   const inspected = await inspectSourceBoundary(selected, { currentUnitId: A, verifyHeader: claudeRegistrationHeader(f.source) });
   assert.equal(inspected.status, 'registered');
+});
+
+test('header registration reads past Claude CLI 2.1.303 request snapshots, within its bound', async t => {
+  const f = await fixture(t, [human()]), { fileIdentity: _identity, ...selected } = f.source;
+  // Claude CLI 2.1.303 writes bookkeeping and about 160 KiB of API request
+  // snapshots before a session's first identity row.
+  const snapshot = (type, bytes) => JSON.stringify({ type, sessionId: f.source.sessionId, body: 'x'.repeat(bytes) }) + '\n';
+  const prefix = [JSON.stringify({ type: 'mode', mode: 'normal' }) + '\n', snapshot('api-request-shape', 88000),
+    snapshot('api-request-blob', 32000), snapshot('api-request-blob', 36000), snapshot('api-request', 5700)].join('');
+  await fs.writeFile(f.source.path, prefix + f.bytes);
+  const inspected = await inspectSourceBoundary(selected, { currentUnitId: A, verifyHeader: claudeRegistrationHeader(f.source) });
+  assert.equal(inspected.status, 'registered');
+  // A prefix past the bound still finds no header.
+  await fs.writeFile(f.source.path, snapshot('api-request-shape', 1024 * 1024) + f.bytes);
+  await assert.rejects(inspectSourceBoundary(selected, { currentUnitId: A, verifyHeader: claudeRegistrationHeader(f.source) }), { code: 'SESSION_HEADER_UNAVAILABLE' });
 });
 
 test('large input has a bounded tail anchor and bounded normalized evidence', async t => {
@@ -475,4 +513,156 @@ test('reader capacity stops before the overflowing row and commits the entire ac
   assert.equal(blocked.code, 'READER_CHECKPOINT_CAPACITY');
   assert(progress.checkpoint.records.length > 25000); assert.equal(progress.cursor.offset, blocked.offset);
   assert(progress.cursor.offset < (await fs.stat(f.source.path)).size);
+});
+
+test('Claude 2.1.299 API request snapshots are skipped transport metadata, never evidence', async t => {
+  const apiShape = { type: 'api-request-shape', sessionId: S, shapeHash: 'a'.repeat(64), timestamp: stamp, version: '2.1.299', shape: {} };
+  const apiBlob = text => ({ type: 'api-request-blob', sessionId: S, hash: digest(text), message: { role: 'user', content: text } });
+  const apiRequest = { type: 'api-request', sessionId: S, id: randomUUID(), timestamp: stamp, version: '2.1.299', querySource: 'repl_main_thread',
+    shapeHash: 'a'.repeat(64), params: {}, keep: 1, tail: [], cacheControl: [], requestDigest: 'b'.repeat(64) };
+  const f = await fixture(t, [human(), apiShape, apiBlob('COPIED BLOB TEXT'), apiRequest, assistant()],
+    { prefix: JSON.stringify(apiShape) + '\n' });
+  const result = await readClaudeSelection(f.args);
+  assert.equal(result.blocked, null); assert.equal(result.candidates.length, 1);
+  assert.deepEqual(result.candidates[0].capture.evidence.map(item => item.text), ['Meeting: selected source.']);
+  assert(!JSON.stringify(result).includes('COPIED BLOB TEXT'));
+  await publish(f, result);
+});
+
+// Claude CLI 2.1.302 writes session bookkeeping after `continued-in`; a verified
+// link makes the marker terminal and only such bookkeeping may follow it.
+test('a linked continuation marker is terminal past later session bookkeeping, never past anything else', async t => {
+  const successor = randomUUID(), marker = { type: 'continued-in', sessionId: S, timestamp: stamp, continuedInSessionId: successor };
+  const bookkeeping = [{ type: 'cost-state', sessionId: S, totalCostUSD: 0 }, { type: 'file-history-snapshot', messageId: randomUUID(), snapshot: {}, isSnapshotUpdate: false },
+    { type: 'last-prompt', sessionId: S, lastPrompt: 'Synthetic last prompt', leafUuid: randomUUID() }];
+  const read = async (tail, extra = '') => {
+    const f = await fixture(t, [human(), assistant(), marker, ...tail]);
+    if (extra) await fs.appendFile(f.source.path, extra);
+    const at = f.anchors.find(anchor => anchor.id === undefined && f.bytes.subarray(anchor.startByte, anchor.endByte).includes('"continued-in"'));
+    return readClaudeSelection({ ...f.args, continuation: { from: null, into: { sessionId: successor, record: { startByte: at.startByte, endByte: at.endByte, hash: at.hash } } } });
+  };
+  for (const tail of [[], bookkeeping]) {
+    const result = await read(tail);
+    assert.equal(result.blocked, null); assert.equal(result.terminal, true); assert.equal(result.diagnostics.pendingTail, false);
+    assert.deepEqual(result.candidates[0].capture.evidence.map(item => item.text), ['Meeting: selected source.']);
+    assert(!JSON.stringify(result).includes('Synthetic last prompt'));
+  }
+  // A record still being written waits; it is not a review.
+  const partial = await read(bookkeeping, '{"type":"cost-state","sessionId"');
+  assert.equal(partial.blocked, null); assert.equal(partial.diagnostics.pendingTail, true);
+  for (const tail of [[human(B, 'Typed after the move.')], [{ type: 'last-prompt', sessionId: S, leafUuid: randomUUID(), rewound: true }],
+    [{ type: 'queue-operation', sessionId: S, operation: 'enqueue', content: 'Queued after the move.' }], [{ type: 'api-request', sessionId: S, id: randomUUID() }],
+    [{ type: 'bridge-session', sessionId: S, bridgeSessionId: 'cse_synthetic', lastSequenceNum: 0 }], [{ type: 'cost-state', sessionId: randomUUID() }],
+    Array.from({ length: 65 }, () => ({ type: 'cost-state', sessionId: S }))]) {
+    const result = await read(tail);
+    assert.equal(result.blocked?.code, 'CLAUDE_HISTORY_REQUIRES_REVIEW', JSON.stringify(tail[0]));
+    assert.equal(result.terminal, true);
+  }
+});
+
+const skillCommand = 'cuefluent-notes:cuefluent-notes';
+const envelope = (args, name = skillCommand) => `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>\n<command-args>${args}</command-args>`;
+test('a skill envelope that is not a verified control keeps exactly the typed arguments, without markup', async t => {
+  for (const typed of ['review sav t7xb88', 'Review', ' review', 'review ', 'save t7xb88', 'review save T7XB88',
+    'review save t7xb88 and tag it urgent', 'review save t7xb88\nThe rollout moved to Friday.', 'The rollout moved to Friday.',
+    // An exact control without a proof is captured the same way (see the receipt suite for the hold).
+    'process']) await t.test(JSON.stringify(typed), async t => {
+    const f = await fixture(t, [human(A, envelope(typed)), assistant()]);
+    const capture = (await readClaudeSelection(f.args)).candidates[0].capture;
+    assert.deepEqual(capture.evidence.map(item => [item.kind, item.text]), [['user', typed]]);
+    assert.equal(capture.reader.version, '2'); assert.equal(capture.coverage.partial, true);
+    assert.doesNotMatch(serializeCapture(capture).toString(), /command-(?:message|name|args)/);
+  });
+});
+
+test('empty skill arguments are structural; other plugins, malformed markup and SDK input stay verbatim', async t => {
+  const empty = await fixture(t, [human(A, envelope('')), assistant()]), result = await readClaudeSelection(empty.args);
+  assert.equal(result.candidates.length, 0); assert.deepEqual(result.noEvidence, [A]);
+  assert.equal(claudePublicationPlan(result).checkpoint.records.find(row => row.unitId === A).kind, 'human-empty');
+  const blocks = await fixture(t, [human(A, [{ type: 'text', text: envelope('') }, { type: 'text', text: '' }])]);
+  assert.deepEqual((await readClaudeSelection(blocks.args)).noEvidence, [A]);
+  for (const [name, text, extra] of [
+    ['another plugin', envelope('review sav t7xb88', 'other-plugin:cuefluent-notes')],
+    ['another skill', envelope('review sav t7xb88', 'cuefluent-notes:other')],
+    ['text after the envelope', `${envelope('review save t7xb88')}\nAnd a fact.`],
+    ['text before the envelope', `Note: ${envelope('review')}`],
+    ['line endings', envelope('review').replaceAll('\n', '\r\n')],
+    ['tag order', `<command-name>/${skillCommand}</command-name>\n<command-message>${skillCommand}</command-message>\n<command-args>review</command-args>`],
+    ['unclosed arguments', envelope('review').replace('</command-args>', '')],
+    ['SDK input', envelope('review sav t7xb88'), { promptSource: 'sdk' }],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t, [human(A, text, extra)]);
+    assert.deepEqual((await readClaudeSelection(f.args)).candidates[0].capture.evidence.map(item => item.text), [text]);
+  });
+  // The envelope block alone is stripped; other content of the input stays.
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/board.png' } };
+  const mixed = await fixture(t, [human(A, [{ type: 'text', text: envelope('review save t7xb88') }, image, { type: 'text', text: 'Board photo.' }])]);
+  assert.deepEqual((await readClaudeSelection(mixed.args)).candidates[0].capture.evidence.map(item => item.text ?? item.reference),
+    ['review save t7xb88', 'https://example.invalid/board.png', 'Board photo.']);
+});
+
+test('nothing typed after the skill (the two-line envelope) is markup only, as one text block too', async t => {
+  // Claude CLI 2.1.302 omits the arguments element when nothing was typed.
+  const bare = (name = skillCommand) => `<command-message>${name}</command-message>\n<command-name>/${name}</command-name>`;
+  for (const [name, content] of [['string', bare()], ['one block', [{ type: 'text', text: bare() }]],
+    ['with an empty block', [{ type: 'text', text: bare() }, { type: 'text', text: '' }]]]) await t.test(name, async t => {
+    const f = await fixture(t, [human(A, content), assistant()]), result = await readClaudeSelection(f.args);
+    assert.equal(result.candidates.length, 0); assert.deepEqual(result.noEvidence, [A]);
+    assert.equal(claudePublicationPlan(result).checkpoint.records.find(row => row.unitId === A).kind, 'human-empty');
+  });
+  // Another command, a trailing line or SDK input stays verbatim evidence.
+  for (const [name, text, extra] of [['another skill', bare('cuefluent-notes:other')], ['trailing newline', `${bare()}\n`],
+    ['SDK input', bare(), { promptSource: 'sdk' }]]) await t.test(name, async t => {
+    const f = await fixture(t, [human(A, text, extra)]);
+    assert.deepEqual((await readClaudeSelection(f.args)).candidates[0].capture.evidence.map(item => item.text), [text]);
+  });
+  // With other content, the envelope contributes nothing and the rest stays.
+  const image = { type: 'image', source: { type: 'url', url: 'https://example.invalid/board.png' } };
+  const mixed = await fixture(t, [human(A, [{ type: 'text', text: bare() }, image])]);
+  assert.deepEqual((await readClaudeSelection(mixed.args)).candidates[0].capture.evidence.map(item => item.reference), ['https://example.invalid/board.png']);
+});
+
+test('published heads that kept the two-line envelope verbatim replay unchanged at every reader version', async t => {
+  // Before this rule a reader captured the bare envelope as typed text. A held
+  // cursor rereads it: the published head covers it, nothing is re-captured.
+  const bare = `<command-message>${skillCommand}</command-message>\n<command-name>/${skillCommand}</command-name>`;
+  for (const version of ['1', '2']) await t.test(`version ${version}`, async t => {
+    const f = await fixture(t, [human(A, bare), assistant()]), [anchor] = f.anchors;
+    const range = { startByte: anchor.startByte, endByte: anchor.endByte, recordIds: [anchor.id] };
+    const old = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity: { client: 'claude', sessionId: S, unitId: A }, projectRoot: f.root,
+      source: { path: f.source.path, fileIdentity: f.source.fileIdentity, ranges: [{ ...range, hash: anchor.hash }] },
+      reader: { name: 'claude-transcript', version, headerClientVersion: '2.1.280' }, occurredAt: stamp, capturedAt: stamp, terminal: 'unconfirmed',
+      coverage: { partial: true, omissions: [] }, evidence: [{ kind: 'user', recordId: anchor.id, range, text: bare }] });
+    const head = { capture: old, head: { fileHash: 'f'.repeat(64) }, hash: 'e'.repeat(64) };
+    const replay = await readClaudeSelection({ ...f.args, heads: new Map([[A, head]]) });
+    assert.equal(replay.candidates.length, 0); assert.deepEqual(replay.pending, []); assert.equal(replay.blocked, null);
+    assert.deepEqual(replay.covered, [{ unitId: A, evidenceHash: old.evidenceHash, fileHash: 'f'.repeat(64) }]);
+  });
+});
+
+test('a version 1 head keeps its verbatim rules; an unknown reader version refuses explicitly', async t => {
+  const f = await fixture(t, [human(A, envelope('review sav t7xb88'))]);
+  const result = await readClaudeSelection(f.args), current = result.candidates[0].capture;
+  // A head published under version 1 copied the envelope verbatim.
+  const old = createCapture({ ...current, reader: { ...current.reader, version: '1' },
+    evidence: current.evidence.map(item => ({ ...item, text: envelope('review sav t7xb88') })) });
+  const plan = claudePublicationPlan(result, A);
+  const first = await withIntakeLock(f.store, tx => publishCapture(tx, { ...result.candidates[0], ...plan, capture: old,
+    selectionHash: f.selectionHash, cursorHash: null, authorize: async () => true }));
+  const head = await readCaptureHead(f.store, old.identity);
+  // Replay from the held start is covered by that exact head: nothing is re-captured.
+  const replay = await readClaudeSelection({ ...f.args, heads: new Map([[A, head]]) });
+  assert.equal(replay.candidates.length, 0); assert.deepEqual(replay.covered.map(item => item.unitId), [A]);
+  // A same-prompt extension stays under version 1 rules.
+  await append(f, [human(A, envelope('review skp t7xb88'))]);
+  const next = await readClaudeSelection({ ...f.args, cursor: first.cursor, checkpoint: first.checkpoint, heads: new Map([[A, head]]) });
+  const extended = next.candidates[0].capture;
+  assert.equal(extended.reader.version, '1');
+  assert.deepEqual(extended.evidence.map(item => item.text), [envelope('review sav t7xb88'), envelope('review skp t7xb88')]);
+  await publish(f, next, A, first.cursorHash);
+  assert.equal((await readCaptureHead(f.store, old.identity)).capture.evidenceHash, extended.evidenceHash);
+  // A reader version this code does not know is never reinterpreted.
+  const future = { ...head, capture: createCapture({ ...old, reader: { ...old.reader, version: 'future' } }) };
+  const refused = await readClaudeSelection({ ...f.args, heads: new Map([[A, future]]) });
+  assert.equal(refused.candidates.length, 0); assert.deepEqual(refused.pending, [{ unitId: A, reason: 'UNSUPPORTED_CLAUDE_READER' }]);
 });

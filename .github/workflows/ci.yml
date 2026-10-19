@@ -97,7 +97,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Platform-specific budgets cover the full native suite and artifact build.
     # Production worker/probe deadlines are independent of these job limits.
-    timeout-minutes: ${{ needs.scope.outputs.mode == 'packages' && 10 || matrix.os == 'windows-2025' && 45 || matrix.os == 'macos-14' && 30 || 20 }}
+    timeout-minutes: ${{ needs.scope.outputs.mode == 'packages' && 10 || matrix.os == 'windows-2025' && 60 || matrix.os == 'macos-14' && 45 || 20 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

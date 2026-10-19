@@ -209,11 +209,11 @@ The installed `cuefluent_control` MCP server exposes these strict tools:
 
 | Tool | Arguments |
 | --- | --- |
-| `processing_status` | `{collectionId?, retryToken?}` |
+| `processing_status` | Claude: `{collectionId?, retryToken?, verbose?, help?}`; Codex: `{collectionId?, retryToken?}` |
 | `process_selected_captures` | `{collectionId?, selection?, requestId?, retryToken?, scope?}` |
 | `processing_resume` | `{collectionId?, retryToken?}` |
 | `processing_cancel` | `{collectionId?, retryToken?}` |
-| `processing_review` | `{collectionId?, retryToken?}` |
+| `processing_review` | Claude: `{collectionId?, retryToken?, draft?, decision?}`; Codex: `{collectionId?, retryToken?}` |
 
 The MCP `arguments` member may be omitted or null for an empty argument object;
 other non-object values are rejected. Native source verification still applies.
@@ -227,10 +227,29 @@ is consumed on its first retry, and does not survive reconnects. A failed retry
 requires a fresh explicit invocation; it must not fall back to inline processing.
 
 Native metadata must bind the actual call to an already registered source: an
-active or paused selection, explicit capture scopes, or a processing-only hook
-binding. Processing-only bindings record a locator and future byte boundary under
-the current policy; they never enable collection. The explicit request verifies
-the native source header and exact call within the bounded recent range.
+active or paused selection, explicit capture scopes, a processing-only hook
+binding, or, for Claude, an exact current collection registration (its own grant
+still current) with no selection state yet. Processing-only bindings record
+a locator and future byte boundary under the current policy; they never enable
+collection. The explicit request verifies the native source header and exact call
+within the bounded recent range. Without a selection, a Claude source may also be
+read from its start (after a verified continuation's re-homed prefix) within the
+same 2 MiB bound when everything before the hook boundary holds at most the one
+prompt that registered it, so a typed control in a
+fresh session's first prompt binds. When neither the registration nor that
+prompt's wake could snapshot the transcript (Claude can create it only after the
+prompt's hooks ran), the collection worker freezes the floor itself from a
+metadata-only snapshot taken when it handles that prompt wake (the worker that
+prompt's hook launched waits at most one second for the file to appear); a later
+floor is never wider, and the
+binding waits for a floor within its existing settle window. Only the worker
+freezes a floor. This creates no selection, moves no floor and
+captures nothing earlier: the first full prompt after the floor is still the
+excluded boundary, so collection starts with the prompt after that. With
+collection on, a typed control that is itself that first prompt after the floor
+binds before the selection is armed (it can never be collected), provided the
+bounded read still reaches the floor; any later typed control, or one past a
+longer unarmed tail, binds only once the selection is armed.
 Omitted collection selection must resolve uniquely from bounded registration
 metadata; no new source is discovered. The optional `selection` must match the
 verified caller; it is not the default evidence boundary. Evidence `scope` is
@@ -240,6 +259,16 @@ session and call ID: redelivery replays, while another invocation is new even if
 the model repeats its optional `requestId` hint. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
+
+A refused or failed tool call is a JSON-RPC error whose `message` is a plain
+sentence for the person (no codes, paths or identifiers) and whose `data.code`
+is the bounded diagnostic code below. A failure before the requested action
+started says that nothing was applied; any other unknown failure binding the call
+reports `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. A failure after the action started
+reports `PROCESSING_CONTROL_FAILED` unless it is a known code, and its message
+says the outcome is not certain and to check `status`; a refusal for the native
+client's sign-in or launch settings, or an unconfirmed cancel, names that cause
+instead.
 
 Source-binding failures use bounded MCP error codes. An exact Codex ingress
 registration with current collection authority but without a selection or
@@ -253,9 +282,9 @@ Use a processing-only binding under existing processing policy or the standalone
 explicit workflow without enabling collection. Actual
 ownership, history or identity rejection for the invoking Codex source reports
 `UNSUPPORTED_SESSION_OWNERSHIP`, `UNSUPPORTED_CODEX_HISTORY` or
-`SOURCE_IDENTITY_MISMATCH`; Claude retains its generic refusal when discovery
-could have rejected a different registered candidate. An absent or otherwise
-unproven binding remains
+`SOURCE_IDENTITY_MISMATCH`; in Claude, where discovery could have rejected a
+different registered candidate, these report `PROCESSING_CONTROL_SOURCE_UNVERIFIED`
+instead. An absent or otherwise unproven binding remains
 `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. These errors contain no source paths or
 evidence and do not change the command schemas. See the
 [processing entry guidance](processing-chat.md#entry-and-reuse) for precedence,
@@ -263,55 +292,214 @@ storage-safety diagnostics and recovery.
 
 Outputs are versioned bounded status with `statusText`, `status`, `requestId`,
 `collectionId`, `chat`, `nextAction` and diagnostic codes. They contain no evidence
-or draft text. Optional `scope` is `collection`, `repo` or `chat`. Optional
+or draft text. `statusText` is for people: it carries no hashes, identifiers or
+diagnostic codes (when there are diagnostics it says to type `status --verbose`),
+except in the reply to `status --verbose` described below. Optional
+`commandPrefix` (`/cuefluent-notes` in Claude, `$cuefluent-notes` in Codex) is the
+spelling, followed by one space and the action, of every command the text names;
+replayed responses keep their original text. Optional `scope` is `collection`, `repo` or `chat`. Optional
 `progress` reports selected/unattempted/handled/unavailable/cancelled revisions,
 unfinishedOperations, awaitingReview and incomplete for the frozen selection.
 Status also returns `inventory` with pending, claimed, blockedByClaim, inspected,
 handled, unfinishedOperations, awaitingReview, incomplete and sourceCompleteness.
 Inventory is collection-wide but bounded to one metadata page; counts are not an
 atomic total. `nextAction` can additionally be `process` for another inventory
-portion or `cancel` for an unchanged frozen selection that cannot continue. Tool arguments accept no approval or source-proof object.
+portion or `cancel` (type `process cancel`) for an unchanged frozen selection
+that cannot continue. Tool arguments accept no approval or source-proof object.
 New responses also include `statusDetail`: `accepted`, `already-processing`,
 `processing`, `preparing`, `draft-ready`, `unfinished`, `inactive`, `missing`,
-`blocked` or `completed`, plus `nothing-pending`, `nothing-to-resume`,
+`blocked`, `completed` or `unbound`, plus `nothing-pending`, `nothing-to-resume`,
 `discovery`, `continuation`, `cancelled`, `selection-limit`, `selection-complete`,
-`pending` and `inventory-incomplete` for shortcut results. Admission, a competing request and a read-only progress
+`pending` and `inventory-incomplete` for shortcut results. A status reply also
+returns `drafts` (at most four `{code, path, fileCount}`) for drafts awaiting
+review, listed one per line as code, one space and note path. Claude's
+`verbose: true` mirrors a typed `status --verbose` (Codex: the verified typed text
+alone); that reply returns `verbose: true`, adds `operationId`, `proposalHash` and
+`claimHash` to each listed draft, and its `statusText` lists the status, next
+action, diagnostics, request and processing-chat identifiers, scope, counts and
+each draft's exact revision. Claude's `help: true` mirrors a typed `help` (Codex:
+the typed text alone); that reply returns `help: true` and only the command list,
+built from the grammar, in its `statusText`. `help` is a formal, read-only control
+receipted like `status`; the skill typed with nothing after it gets the same reply
+without a receipt. Help needs no configuration: when nothing is set up for the
+chat (no configuration, no route for this client, or no registration, selection
+or processing source for this session in any routed collection) and no
+`collectionId` was requested, `processing_status` alone still answers, with
+`status: "missing"`, `statusDetail: "unbound"`, `help: true`, `collectionId:
+null`, the diagnostic `PROCESSING_CONTROL_SOURCE_UNVERIFIED` and a `statusText`
+that names `setup` before the command list. It reads and writes no private
+storage and records no receipt. Every other tool, an explicit `collectionId`, a
+failed binding of a source that exists and a verification retry that still
+cannot bind refuse with that code as before. Admission, a competing request and a read-only progress
 snapshot remain distinct even when their stored execution state is `busy`.
 An idle native session with unfinished engine work reports `unfinished`, with
-`resume` or `inspect` as the next action. `inactive` does not mean an empty backlog.
+`resume` (type `process resume`) or `inspect` as the next action. `inactive` does not mean an empty backlog.
 Legacy response receipts omit this field and replay their original text unchanged.
 If the engine disposition committed but registry or receipt bookkeeping failed,
-the response is `completed` with `nextAction: "inspect"` and a bounded diagnostic.
+the response is `completed` with `nextAction: "inspect"` and a bounded diagnostic;
+its `statusText` keeps the decision's outcome and adds that something needs
+attention, with `status --verbose` for the details.
 Inspect the existing operation; do not repeat its save. That response does not
 claim successful capture-exclusion bookkeeping.
-`processing_review` sends the exact proposal through the correlated native host
-form; an unsupported or closed form preserves the pending proposal. A model's
-tool arguments cannot substitute for that host response.
+`processing_review` writes the exact outstanding proposal to a private review
+folder under the collection's intake state (`review/<code>/`, directories 0700 and
+files 0600 on POSIX, no links followed): `proposed.md` and, for an update,
+`current.md` (numbered `N-proposed.md`/`N-current.md` for several files), plus
+`summary.txt` with paths, sizes, sources (each with the numbers of the files it
+supports and at most five omission details plus a count), inspection limits, the
+decision commands and the operation, claim and proposal hashes, bounded to 1 MiB.
+Entries an editor or Finder adds inside a review folder are neither checked nor
+followed by the storage privacy check; Finder's `.DS_Store` is removed with the
+folder's own files, and anything else keeps the folder. At most 32 folders are
+kept, the oldest removed first, and a reused copy whose permissions changed is
+written again. A durable presentation record in the
+same private state stores `{chatLineage, operationId, proposalHash, claimHash,
+attempt, presentedAt, verified, delivered, typedDelivered}` for the invoking chat lineage:
+the native session, or the root session of a verified Claude continuation (see
+the [Claude reader contract](session-workflow.md#claude-reader-contract)), so the
+records outlive a continuation. `attempt` is a random ID naming the latest presentation attempt of
+that revision, and `verified` and `delivered` describe it (typed, and its reply committed), and `typedDelivered` records that
+some typed review of it was delivered to that session. A coded decision needs
+`typedDelivered`; a bare decision needs the session's latest attempt to be a
+delivered typed review. Before the reply is written, the attempt must still be
+this chat's current one; if another request settled or superseded it meanwhile
+(`PROCESSING_REVIEW_SUPERSEDED`), the reply is the error and the draft must be
+reviewed again. The attempt counts as delivered only once the reply was written;
+a failed write, a stopped process or a failed confirmation leaves the draft
+undecidable until it is shown again. A redelivery of that same call is refused
+the same way unless this chat's record of the exact revision its receipt names
+is live and delivered and that revision is still awaiting review. A cancelled, failed or model-started attempt
+therefore never makes a draft decidable, and never lets a bare decision fall
+back to an older draft. A folder is removed when its draft is
+decided through review, or by a later review or refused decision once its revision
+is no longer pending; records are bounded per collection (64 revision records and
+64 chats' latest attempts). A collection step that has not finished, such as a
+capture still being published, refuses a review or decision with
+`PROCESSING_REVIEW_BLOCKED` and leaves the draft and this chat's record as they
+are; a review step, and a control's receipt, waits up to two seconds for the
+collection lock before refusing with `INTAKE_BLOCKED`.
+
+The draft code is six characters from `a-h j k m n p-t v-z 2-9`, derived from a
+domain-separated hash of the proposal hash. Claude's optional `draft` (that code)
+and `decision` (`save`, `skip` or `cancel`) mirror the typed action `review`,
+`review <code>`, `save`, `save <code>`, `skip`, `skip <code>`, `review cancel` or
+`review cancel <code>`; the native transcript must show exactly that typed text,
+so changed or model-chosen fields are refused. Later exists only as a choice in
+the Codex form. Codex refuses these fields with
+`PROCESSING_CONTROL_INVALID_REQUEST`; its verified typed text alone names the
+draft and decision. Codex verifies typed text in either native form: a user
+message whose parts are this skill and the text, or (Codex CLI 0.163) one text
+part that starts with the skill's mention, optionally recorded as the `$` list's
+single placeholder element, plus exactly one `skills.selected_skill_instructions`
+item of the same turn naming this skill at its installed `SKILL.md` path; the
+typed text is what follows the mention and one space. A mention typed out without
+that item is no command. A code-mode call verifies the same typed text through
+its native MCP item and the completed handshake; its exclusion receipt also names
+both cells and the retry call, so the reader can prove the whole turn (see
+[capture prevention](processing-chat.md#capture-prevention-and-limits)).
+A decision applies only through a verified typed action, to a
+revision that a delivered typed review presented to the invoking chat lineage (a
+model-initiated or natural-language display records `verified: false` and does
+not count, even with the code), whose claim and proposal hashes still
+match; Save, Skip and Cancel then use the existing exact-hash engine paths. A
+decision without a code uses only the lineage's most recent presentation attempt,
+and only when that attempt was a delivered typed review. Tool arguments cannot
+substitute for the typed text or a host response.
+
+Codex with form support also sends the same exact proposal through the correlated
+native host form, whose header names the review folder; an unsupported or closed
+form preserves the pending proposal.
 The control server supports MCP `2025-11-25`, including the string defaults needed
 by native review. It offers this version even when the client's initial request
 names an older one. Clients unable to accept it cannot use this MCP server and
-must use the explicit CLI commands; clients accepting it without form capability receive
-`PROCESSING_REVIEW_UNSUPPORTED` for review. See
+must use the explicit CLI commands. Claude never receives a review form, and Codex
+without form capability reviews through the folder and typed decisions. See
 [MCP version negotiation](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#version-negotiation).
-When multiple proposals are pending, review first sends a selector with a required
+When multiple proposals are pending, Codex's form review first sends a selector with a required
 `operationId` string and titled `oneOf` choices (`const` is the exact operation ID).
 There is no default. Acceptance selects a preview only; decline/cancel leaves all
 proposals unchanged. The subsequent form remains bound to the selected exact
 proposal. This uses the [supported single-select schema](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation#requested-schema).
-The proposal form uses a short header, a required `changes` string containing
+The proposal form uses a short header, an optional `changes` string containing
 the complete readable preview as its default, and a required `decision` enum (`save`, `skip`,
-`cancel`, `later`) without a default. An accepted host response must echo the
-unchanged preview plus the chosen decision, allowing LF/CRLF/CR line-ending
-conversion only. Changed, trimmed or collapsed text produces
-`PROCESSING_REVIEW_PREVIEW_CHANGED`; it cannot revise or authorize different note
-bytes. Quoted note-content lines, escaped controls and per-file line-ending
+`cancel`, `later`) without a default. Save, Skip and Cancel apply only when the
+accepted host response echoes the unchanged preview, allowing LF/CRLF/CR
+line-ending conversion only. Changed, trimmed, collapsed, oversized or missing text
+applies no decision and leaves the exact proposal pending; it cannot revise or
+authorize different note bytes. Later applies nothing and is reported as
+`deferred` whatever the echo, so a host that renders the preview empty still lets
+the person defer.
+Review responses add `review`, separate from `statusDetail`: `presented` for a
+written review folder; `saved`, `skipped` or `cancelled` for a completed decision;
+`deferred` for Later; `declined` for a host decline or close, including a declined
+draft selector; `display-altered` for a changed echo; `not-shown` for a draft not
+presented to this session; `unverified` for a decision that was not a verified
+typed action; `changed` for a revision, destination or pending state that no
+longer matches; `unresolved` for a decision without a code and no verified latest
+presentation; `unavailable` for a pending draft without a review callback; and
+`busy` for a review typed while this chat's own processing run is still going,
+which applies nothing. A coded decision naming a draft that is no longer pending
+is `changed` with reason `not-pending`, whether or not this chat was shown it.
+A pending display the person did not type (`verified: false`) adds
+`untyped: true`, and its `statusText` says to type `review <code>` first.
+`changed` can add `reason`: `changed` (the revision differs from the one shown),
+`destination` (a note at its destination changed), `not-pending` (not
+pending) or `stale` (its review here is no longer current); its `statusText` then
+names that cause. `presented`, `deferred`, `declined`, `display-altered` and `unavailable` always
+have status `awaiting-review`. Review responses built from review fields also return
+`commandPrefix`, optional `draft` (`{code}`, `{code, path, fileCount}` naming its
+first note path while it is pending, or `{code, folder, files, fileCount}`, with at
+most five `{path, bytes, change, review?}` files, `review` naming the file's
+proposed copy in the folder) and optional `drafts` (at most four
+`{code, path, fileCount}`, one Markdown list item each as code, one space and
+note path), and their `statusText` omits diagnostic codes. Note paths are quoted
+as JSON strings with the characters CommonMark or GFM read as inline markup
+(`` ` ``, `*`, `_`, `[`, `]`, `<`, `>`, `&`, `~`) backslash-escaped, so
+each renders exactly as written. Its Markdown blocks
+are separated by blank lines, and every list follows one. For Claude the folder
+and each file's proposed copy appear as percent-encoded `file://` autolinks; for
+Codex as `[name](/absolute/path)` links named by the path's last segment, with
+`[name](</absolute/path>)` for a path with spaces or parentheses and no link for
+a path Markdown cannot carry, such as a Windows path or one with `#` or `?`. Links are dropped in
+favour of the folder path as a code span when they would not fit the reply
+bound, and that code span, with its controls escaped and its fences counted,
+stays within 1024 bytes; the `draft.folder` field always holds the native path. `saved`, `skipped` and
+`cancelled` may carry `{code, path, fileCount}` for the decided draft. A
+completed decision whose only diagnostic is `PROCESSING_EXCLUSION_UNVERIFIED`
+does not add the `status --verbose` hint.
+A status reply may add `collection: {state: "stopped", code}` when the latest
+collection pass reported `CLAUDE_HISTORY_REQUIRES_REVIEW` or
+`UNSUPPORTED_SESSION_OWNERSHIP` for exactly the invoking session; its
+`statusText` says in plain words that collection has stopped for this chat, and
+`status --verbose` names the code. It is display only and changes nothing.
+Note paths in these fields are truncated to 512 bytes for display; `summary.txt`
+keeps every full path.
+When the verified typed input that started the call selected this skill but is
+not one exact action (Claude: the trusted skill command's arguments with its
+native companion; Codex: a user message with the trusted skill block), every
+tool returns `command: "not-a-command"` with `commandPrefix` and one to three
+`suggestions` instead of acting: no dispatch, display, decision or receipt. Its
+`statusText` is only that sentence and the suggestions, without counts, scope or
+listings. A
+mixed message (an exact action plus more words, lines, content or a second
+message) is such input too, and so is a plain-language request that starts with
+an action word. Suggestions are exact actions, `setup`, or a form with
+`<draft code>` in place of an unusable code, computed deterministically from the
+command grammar and the typed text (text near no command gets `help`, `review`
+and `status`); they carry no authority. In Codex, a turn whose one message is a
+single text part starting with this skill's mention but without any
+selected-skill item (the mention typed out by hand) is answered the same way,
+with `command: "skill-not-attached"` and a `statusText` that says to choose
+cuefluent-notes from the `$` list; the suggestions come from the words after the
+mention.
+Quoted note-content lines, escaped controls and per-file line-ending
 summaries distinguish source text from review structure without changing saved bytes.
 The outgoing form is bounded to 256 KiB. Incoming frames allow up to six times
 that size for host JSON escaping, even after a form closes; ordinary MCP requests
 remain bounded to 64 KiB. Late or unknown response IDs are ignored within the
-framing bound. A correlated response whose normalized preview exceeds 256 KiB
-refuses only that review with `PROCESSING_REVIEW_TOO_LARGE`. Frames exceeding the
-hard framing bound still close the connection. Host decline/cancel responses leave
+framing bound. A correlated response whose preview echo exceeds 256 KiB is a
+changed display. Frames exceeding the hard framing bound still close the
+connection. Host decline/cancel responses leave
 the proposal pending, distinct from an accepted `skip` or `cancel` decision. See
 [review controls](processing-chat.md#review-controls) for the user workflow.
 Cancelling the MCP request before its save intent or disposition starts publication
@@ -370,7 +558,7 @@ A selection examines at most four metadata pages per call and freezes at most
 a frozen selection excludes later arrivals. It uses existing worksets, with at
 most 20 admissions and 16 MiB per workset; up to ten continuations preserve the
 same exact remaining inputs. Existing unfinished operations with a verified stopped native owner run first.
-Standalone claims without that proof remain preserved for explicit CLI handling. `resume`
+Standalone claims without that proof remain preserved for explicit CLI handling. `process resume`
 never opens a fresh evidence selection after the frozen one finishes; a new
 `process` may continue the inventory cursor. Incomplete discovery is not an empty
 backlog. A changed policy, scope conflict or recovery requirement preserves the

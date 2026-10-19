@@ -8,11 +8,20 @@ import { lstatOrNull, sameFileIdentity, syncDirectory } from './file-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { validateWorkflowPlacement, canonicalWorkflowPath, inside } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
-import { privacyIdentity, verifyPrivateEntries, createPrivateDirectory, hidePrivateDirectory, rejectKnownSync, withStorageProbes } from './storage-platform.mjs';
+import { privacyIdentity, verifyPrivateEntries, createPrivateDirectory, hidePrivateDirectory, rejectKnownSync, withStorageProbes, forgetStorageProbes } from './storage-platform.mjs';
 import { fail, canonicalJSON, hash, digest, list, keys } from './workflow-values.mjs';
 import { preflightWindowsStorage } from './windows-setup-guards.mjs';
 
 const capabilities = new WeakMap();
+// Exhausted directory churn: every attempt found only directory metadata
+// changes (a child created or removed) and no identity, type, mode, owner,
+// link, realpath or permission failure, and every root still was the one its
+// capability pinned. Every caller still sees PRIVATE_STORAGE_CHANGED; only a
+// caller with its own bounded deadline may repeat its whole verification.
+// Recorded here, never on the error, so no other error with that code can
+// claim it.
+const storageChurn = new WeakSet();
+export const isPrivateStorageChurn = error => storageChurn.has(error);
 const rootsOf = collection => [collection.rawDir, collection.intakeStateDir, collection.notes.writerStateDir];
 
 async function checkedSelection(configPath, expectedConfigHash, collectionId) {
@@ -35,8 +44,20 @@ async function checkCurrentPlacement(value) {
   return selected;
 }
 
+// Review folders (processing-review-files.mjs) are private copies people open
+// in an editor or Finder, which add files of their own. A full walk checks each
+// folder and its own files and skips, unfollowed, anything else in it, and
+// Finder's metadata file beside the folders.
+export const REVIEW_OWN_FILE = /^(?:\d{1,3}-)?(?:proposed|current)\.md$|^summary\.txt$/;
+export const FINDER_FILE = '.DS_Store';
+const reviewForeign = (reviewRoot, file) => {
+  const parent = path.dirname(file), name = path.basename(file);
+  return reviewRoot !== null && (parent === reviewRoot ? name === FINDER_FILE : path.dirname(parent) === reviewRoot && !REVIEW_OWN_FILE.test(name));
+};
+const reviewRootOf = collection => path.join(collection.intakeStateDir, 'review');
+
 /** Bounded metadata walk, never follows links or reads evidence. */
-export async function privateStorageEntries(roots, { limit = 20000, paths = null } = {}) {
+export async function privateStorageEntries(roots, { limit = 20000, paths = null, reviewRoot = null } = {}) {
   const entries = [], seen = new Set();
   async function visit(file, root, descend = paths === null) {
     if (seen.has(file)) return;
@@ -48,7 +69,10 @@ export async function privateStorageEntries(roots, { limit = 20000, paths = null
     entries.push({ path: file, stat, root }); seen.add(file);
     if (stat.isDirectory() && descend) {
       const stream = await fs.opendir(file);
-      for await (const child of stream) await visit(path.join(file, child.name), false);
+      for await (const child of stream) {
+        const entry = path.join(file, child.name);
+        if (!reviewForeign(reviewRoot, entry)) await visit(entry, false);
+      }
     }
   }
   for (const root of roots) await visit(root, true);
@@ -91,10 +115,14 @@ export async function privateStorageEntries(roots, { limit = 20000, paths = null
 
 async function verifyRoots(roots, identity, options = { paths: [] }) {
   const originals = new Map();
+  // Roots a capability pinned are compared on every attempt, so a replaced root
+  // fails at once even while it churns. Only such a check may report churn.
+  const pinned = options.pinned ? new Map(options.pinned.map(item => [item.path, item.stat])) : null;
   for (let attempt = 0; attempt < 3; attempt++) {
     checkWorkflowBudget();
     const entries = await privateStorageEntries(roots, options);
     for (const entry of entries) {
+      if (pinned && entry.root && !(pinned.has(entry.path) && sameFileIdentity(pinned.get(entry.path), entry.stat))) fail('PRIVATE_STORAGE_CHANGED');
       const original = originals.get(entry.path) ?? entry.stat;
       if (!sameFileIdentity(original, entry.stat) || original.mode !== entry.stat.mode ||
           original.uid !== entry.stat.uid || original.gid !== entry.stat.gid) fail('PRIVATE_STORAGE_CHANGED');
@@ -121,7 +149,14 @@ async function verifyRoots(roots, identity, options = { paths: [] }) {
     // Child creation changes directory ctime/link count without changing ACLs.
     // A retry must inspect fresh permissions; never waive version checks.
   }
-  fail('PRIVATE_STORAGE_CHANGED');
+  // Without pinned roots nothing proves the churned roots are the expected
+  // ones, so the check fails closed as it always did.
+  if (!pinned) fail('PRIVATE_STORAGE_CHANGED');
+  // A caller's retry re-reads ACLs too, like the attempts above.
+  forgetStorageProbes(originals.keys());
+  const churn = Object.assign(new Error('PRIVATE_STORAGE_CHANGED'), { code: 'PRIVATE_STORAGE_CHANGED' });
+  storageChurn.add(churn);
+  throw churn;
 }
 
 /** Additional configured writer roots are checked for explicit maintenance only. */
@@ -189,7 +224,7 @@ async function prepareStorage({ configPath, expectedConfigHash, collectionId }, 
     // can retain a directory alias while exposing relocation only on a child file.
     // Remove only exact owned probes; existing roots receive no permission edits.
     for (const root of rootsOf(selected.collection)) {
-      await verifyRoots([root], identity, { paths: null });
+      await verifyRoots([root], identity, { paths: null, reviewRoot: reviewRootOf(selected.collection) });
       const probe = path.join(root, `.privacy-probe-${randomUUID()}`);
       await fs.mkdir(probe, { mode: 0o700 });
       const stat = await fs.lstat(probe, { bigint: true });
@@ -323,7 +358,7 @@ export async function assertWorkflowStorage(capability, selection = null, operat
   if (!value) fail('STORAGE_CAPABILITY_REQUIRED');
   const selected = await checkedSnapshot(value.configPath, value.expectedConfigHash);
   if (await privacyIdentity() !== value.identity) fail('PRIVATE_STORAGE_CHANGED');
-  const roots = await verifyRoots(rootsOf(value.collection), value.identity);
+  const roots = await verifyRoots(rootsOf(value.collection), value.identity, { paths: [], pinned: value.roots });
   for (let i = 0; i < roots.length; i++) if (!sameFileIdentity(roots[i].stat, value.roots[i].stat)) fail('PRIVATE_STORAGE_CHANGED');
   if (!['maintenance', 'collect', 'explicitCollect', 'process', 'explicitProcess'].includes(operation)) fail('INVALID_WORKFLOW_OPERATION');
   if (operation !== 'maintenance') {
@@ -361,14 +396,14 @@ export async function assertPrivatePaths(capability, paths) {
   checkWorkflowBudget();
   const value = capabilities.get(capability);
   if (!value) fail('STORAGE_CAPABILITY_REQUIRED');
-  const roots = await verifyRoots(rootsOf(value.collection), value.identity, { paths });
+  const roots = await verifyRoots(rootsOf(value.collection), value.identity, { paths, pinned: value.roots });
   for (let i = 0; i < roots.length; i++) if (!sameFileIdentity(roots[i].stat, value.roots[i].stat)) fail('PRIVATE_STORAGE_CHANGED');
 }
 
 export async function auditWorkflowStorage(capability, { limit = 20000 } = {}) {
   await assertWorkflowStorage(capability);
   const value = capabilities.get(capability);
-  try { await verifyRoots(rootsOf(value.collection), value.identity, { paths: null, limit }); return { complete: true }; }
+  try { await verifyRoots(rootsOf(value.collection), value.identity, { paths: null, limit, reviewRoot: reviewRootOf(value.collection) }); return { complete: true }; }
   catch (error) { return { complete: false, reason: error.code ?? 'PRIVACY_INSPECTION_FAILED' }; }
 }
 

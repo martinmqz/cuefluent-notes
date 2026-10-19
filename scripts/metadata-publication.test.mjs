@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
-import { inspectIntakeStore, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
+import { inspectIntakeStore, withIntakeLock, replaceIntakeJSON, intakeSnapshot } from './intake-io.mjs';
 import { publishWriterReceipt } from './writer-protocol.mjs';
 import { publishIngressMetadata } from './collection-ingress.mjs';
 import { readProcessingState, processingSnapshot } from './processing-state.mjs';
@@ -150,4 +150,26 @@ test('configured direct saves reject changed staging permissions before writing 
   await assert.rejects(saveDirectNote({ plan, approvedPlanHash: digest(canonicalJSON(plan)) }, f.capability), /STORAGE_NOT_PRIVATE/);
   assert.deepEqual(await fs.readdir(path.join(plan.stateDir, 'metadata-stages')), []);
   await assert.rejects(fs.stat(path.join(plan.root, 'meeting.md')), { code: 'ENOENT' });
+});
+
+test('a state replacement waits out another reader\'s brief open and refuses a long one unchanged', async t => {
+  const f = await storageFixture(t), store = await inspectIntakeStore(f.collection), name = 'review-state/held-open.json';
+  const target = path.join(f.collection.intakeStateDir, ...name.split('/')), stages = path.join(f.collection.intakeStateDir, 'metadata-stages');
+  const replace = async version => withIntakeLock(store, async tx =>
+    replaceIntakeJSON(tx, name, { version }, (await intakeSnapshot(store, 'state', name)).hash));
+  await replace(1);
+  // Another process reads the file without the lock. Windows refuses to
+  // replace it while that read is open; elsewhere the replacement goes ahead.
+  const holdFor = async ms => { const handle = await fs.open(target, 'r'); return new Promise(resolve => setTimeout(() => handle.close().then(resolve), ms)); };
+  let closed = holdFor(100);
+  await replace(2); await closed;
+  assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), { version: 2 });
+  closed = holdFor(2000);
+  try {
+    if (process.platform === 'win32') {
+      await assert.rejects(replace(3), { code: 'EPERM' });
+      assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), { version: 2 });
+    } else await replace(3);
+  } finally { await closed; }
+  assert.deepEqual(await fs.readdir(stages), []);
 });

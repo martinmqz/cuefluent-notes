@@ -5,13 +5,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader } from './codex-reader.mjs';
+import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm, CODEX_V4_CONTROL_FORMS, CODEX_V4_CODE } from './codex-reader.mjs';
+import { PROCESSING_CONTROL_FORMS, REVIEW_CODE, REVIEW_CODE_PLACEHOLDER } from './processing-control-proof.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { newSelectionState, applySelectionControl, stableSourceIdentity, inspectSourceBoundary } from './capture-selection.mjs';
 import { digest } from './workflow-values.mjs';
 import { inspectIntakeStore, withIntakeLock, intakeSnapshot } from './intake-io.mjs';
 import { controlSelection, publishCapture, readCaptureHead } from './intake-store.mjs';
 import { serializeCapture, createCapture, captureRelativePath } from './capture-contract.mjs';
+import { codexControlTurn, MENU_MENTION, framing, codexToolError } from './test-support/codex-control-turn.mjs';
+import { processingControlStatusView, processingControlRefusalText } from './processing-control-server.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -482,7 +485,7 @@ test('fair tool budgets retain later native failures identically after a bounded
   const resumed = await readCodexSelection({ ...f.args, cursor });
   const full = await readCodexSelection(f.args), capture = resumed.candidates[0].capture;
   assert.deepEqual(serializeCapture(capture), serializeCapture(full.candidates[0].capture));
-  assert.equal(capture.reader.version, '2');
+  assert.equal(capture.reader.version, '4'); // Version 4 keeps the version 2 tool allocation.
   const result = capture.evidence.find(item => item.kind === 'tool-result' && item.callId === 'late');
   assert.equal(result.text, 'Failure: unchanged caller crashes.'); assert.equal(result.outcome, 'failed');
   assert(capture.evidence.some(item => item.kind === 'user' && item.text.startsWith('Correction:')));
@@ -542,4 +545,559 @@ test('malformed tool arguments after envelope exhaustion hold the unit with a wo
   const result = await readCodexSelection(f.args);
   assert.equal(result.candidates.length, 0);
   assert.deepEqual(result.pending, [{ unitId: A, reason: 'INVALID_WORKFLOW' }]);
+});
+
+// This plugin's skill selection and control server, by native identity. The
+// skill path is any install's (never this reader's own location): the rule
+// must not depend on where the plugin is installed.
+const skillPath = path.resolve('synthetic-plugin', 'skills', 'cuefluent-notes', 'SKILL.md');
+const skillUser = (turn, text, { path: selected = skillPath, name = 'cuefluent-notes', fields = {}, extra = [] } = {}) =>
+  item(turn, 'UserMessage', [{ type: 'skill', name, path: selected, ...fields }, { type: 'text', text, text_elements: [] }, ...extra]);
+const controlExchange = (turn, id, { namespace = 'mcp__cuefluent_control', server = 'cuefluent_control', tool = 'processing_review', native = true } = {}) => [
+  response(turn, 'function_call', { namespace, name: 'processing_review', call_id: id, arguments: '{}' }),
+  ...(native ? [evt('item_completed', { thread_id: S, turn_id: turn, item: { type: 'McpToolCall', id, server, tool, arguments: {}, status: 'completed',
+    result: { content: [{ type: 'text', text: '{"statusText":"Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88"}' }] } } })] : []),
+  response(turn, 'function_call_output', { call_id: id, output: '{"statusText":"Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88"}' })];
+const otherWork = turn => [response(turn, 'function_call', { name: 'exec_command', call_id: 'work', arguments: '{"cmd":"git status"}' }),
+  response(turn, 'function_call_output', { call_id: 'work', output: 'Working tree clean.' })];
+
+test('a Codex unit started with this skill keeps what the person typed and leaves out only its control exchange', async t => {
+  for (const typed of ['review sav t7xb88', 'review save t7xb88\nAlso tag it urgent.', 'Please process my notes.']) await t.test(JSON.stringify(typed), async t => {
+    const f = await fixture(t, [start(A), skillUser(A, typed), ...controlExchange(A, 'cue-1'), ...otherWork(A),
+      assistant(A, 'Nothing was applied.'), end(A)]);
+    const capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.equal(capture.reader.version, '4');
+    assert.deepEqual(capture.evidence.map(item => [item.kind, item.callId ?? null, item.text]), [
+      ['user', null, typed], ['tool-call', 'work', '{"cmd":"git status"}'], ['tool-result', 'work', 'Working tree clean.'],
+      ['assistant', null, 'Nothing was applied.']]);
+    // The skill block is command markup, not an omission: coverage is complete.
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+    assert.doesNotMatch(serializeCapture(capture).toString(), /Review folder|cuefluent_control/);
+  });
+  // A result persisted only as its native output item is left out the same way.
+  const [call, native] = controlExchange(A, 'cue-2');
+  const itemOnly = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88'), call, native,
+    evt('item_completed', { thread_id: S, turn_id: A, item: { type: 'FunctionCallOutput', id: 'cue-2', output: 'Cuefluent: Review folder: /private/review/t7xb88' } }), end(A)]);
+  const kept = (await readCodexSelection(itemOnly.args)).candidates[0].capture;
+  assert.deepEqual(kept.evidence.map(item => [item.kind, item.text]), [['user', 'review sav t7xb88']]);
+  // A control mixed with a second message in the same unit keeps both.
+  const mixed = await fixture(t, [start(A), skillUser(A, 'review save t7xb88'), user(A, 'Also: tag it urgent.'), ...controlExchange(A, 'cue-1'), end(A)]);
+  assert.deepEqual((await readCodexSelection(mixed.args)).candidates[0].capture.evidence
+    .filter(item => item.kind === 'user').map(item => item.text), ['review save t7xb88', 'Also: tag it urgent.']);
+});
+
+test('Codex control exchanges are left out in every unit by native identity alone, never by a name or text', async t => {
+  const exchanged = capture => capture.evidence.filter(item => item.callId === 'cue-1').map(item => item.kind);
+  // Without this skill (none, another skill, another block shape) the person's
+  // words stay and so does a skill block that is not this plugin's markup; the
+  // control exchange is left out all the same.
+  for (const [name, typed, { omission = false } = {}] of [
+    ['no skill block', user(A, 'review save t7xb88')],
+    ['another skill name', skillUser(A, 'review sav t7xb88', { name: 'other-notes' }), { omission: true }],
+    ['another block shape', skillUser(A, 'review sav t7xb88', { fields: { version: '1' } }), { omission: true }],
+  ]) await t.test(name, async t => {
+    const f = await fixture(t, [start(A), typed, ...controlExchange(A, 'cue-1'), end(A)]), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.deepEqual(exchanged(capture), []);
+    assert.deepEqual(capture.evidence.map(item => item.kind), ['user']);
+    assert.equal(capture.coverage.omissions.some(item => item.reason === 'unsupported-content-block'), omission);
+    // Version 3 left such an exchange in: a published v3 head replays unchanged.
+    const v3 = { ...capture, reader: { ...capture.reader, version: '3' } };
+    const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: v3 }) })).candidates[0].capture;
+    assert.deepEqual(exchanged(replayed), ['tool-call', 'tool-result']);
+    const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+    assert.equal(again.evidenceHash, replayed.evidenceHash);
+  });
+  // Anything short of the exact native identity stays, with or without the skill.
+  for (const [name, options] of [['another namespace', { namespace: 'mcp__other_control' }], ['another server', { server: 'other_control' }],
+    ['another native tool', { tool: 'processing_status' }], ['no native MCP item', { native: false }]]) {
+    for (const [form, typed] of [['skill', skillUser(A, 'review sav t7xb88')], ['no skill', user(A, 'Please review the draft.')]]) await t.test(`${name}, ${form}`, async t => {
+      const f = await fixture(t, [start(A), typed, ...controlExchange(A, 'cue-1', options), end(A)]), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+      assert.deepEqual(exchanged(capture), ['tool-call', 'tool-result']);
+    });
+  }
+});
+
+// Codex CLI 0.163 attaches a skill picked from the `$` list as a separate user
+// context item and records the mention as text; tool calls run in code mode.
+const turn = options => codexControlTurn({ sessionId: S, unitId: A, skillPath, ...options });
+const kept = capture => capture.evidence.map(entry => [entry.kind, entry.text]);
+test('Codex 0.163: a skill picked from the list is markup, and its code-mode control cells are left out', async t => {
+  for (const [name, options, typed] of [
+    ['not an exact command', { control: 'sav t7xb88' }, 'sav t7xb88'],
+    ['a control with more words', { control: 'save t7xb88 and tag it urgent' }, 'save t7xb88 and tag it urgent'],
+    ['finished by wait', { control: 'sav t7xb88', waits: 2 }, 'sav t7xb88'],
+    ['direct call', { control: 'sav t7xb88', mode: 'direct' }, 'sav t7xb88'],
+  ]) await t.test(name, async t => {
+    const { rows } = turn(options), f = await fixture(t, rows);
+    const capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.equal(capture.reader.version, '4');
+    // The typed words stay; the mention, the selection item, the cells, their
+    // nested calls and outputs and any wait are left out, and so is the
+    // assistant's repetition of this plugin's reply.
+    assert.deepEqual(kept(capture), [['user', typed]]);
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+    assert.doesNotMatch(serializeCapture(capture).toString(), /SYNTHETIC SKILL INSTRUCTIONS|cuefluent_control|tools\.mcp|verification-required|\$cuefluent-notes/);
+  });
+  // Exactly one action with the skill picked is only the command; with the
+  // plugin's reply and its cells left out, the turn holds no evidence.
+  await t.test('an exact control without its receipt', async t => {
+    const read = await readCodexSelection((await fixture(t, turn({ control: 'review' }).rows)).args);
+    assert.deepEqual(read.candidates, []); assert.deepEqual(read.noEvidence, [A]);
+  });
+  // The assistant's own words in the turn always stay, commentary included.
+  await t.test('commentary stays evidence', async t => {
+    const capture = (await readCodexSelection((await fixture(t, turn({ control: 'review',
+      commentary: ['Diagnosis: the Cedar cache bug is the 25-minute TTL.'] }).rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['assistant', 'Diagnosis: the Cedar cache bug is the 25-minute TTL.']]);
+  });
+  await t.test('a reply that adds to the plugin reply stays', async t => {
+    const rows = turn({ control: 'review' }).rows;
+    for (const row of rows) {
+      if (row.payload?.item?.phase === 'final_answer') row.payload.item.content[0].text += ' Note: the audit ends Friday.';
+      if (row.type === 'response_item' && row.payload.role === 'assistant' && row.payload.phase === 'final_answer') row.payload.content[0].text += ' Note: the audit ends Friday.';
+    }
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['assistant', 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88 Note: the audit ends Friday.']]);
+  });
+  // Markup belongs only to the message the selection was made for: a later
+  // message in the same turn that starts with the mention keeps it.
+  await t.test('a later message keeps its mention', async t => {
+    const rows = turn({ control: 'review' }).rows, later = '$cuefluent-notes is the command documented in our onboarding guide.';
+    rows.splice(rows.findIndex(row => row.payload?.item?.phase === 'final_answer'), 0, evt('item_completed', { thread_id: S, turn_id: A,
+      item: { type: 'UserMessage', id: 'later-message', content: [{ type: 'text', text: later, text_elements: [] }] } }));
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', later]]);
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+  });
+  // The mention alone (the command list) leaves no typed words.
+  const alone = await fixture(t, turn({ control: 'help' }).rows.map(row => row.payload?.item?.type === 'UserMessage'
+    ? { ...row, payload: { ...row.payload, item: { ...row.payload.item, content: [{ ...row.payload.item.content[0], text: MENU_MENTION }] } } } : row));
+  assert.deepEqual((await readCodexSelection(alone.args)).candidates, []);
+});
+
+test('Codex 0.163: a code-mode cell stays evidence when anything else could have happened in it', async t => {
+  const nestedItem = value => evt('item_completed', { thread_id: S, turn_id: A, item: value });
+  const command = () => nestedItem({ type: 'CommandExecution', id: `exec-${randomUUID()}`, status: 'completed', exit_code: 0 });
+  const insertAfter = (rows, test, ...added) => { rows.splice(rows.findIndex(test) + 1, 0, ...added); return rows; };
+  const firstCell = row => row.payload?.type === 'custom_tool_call';
+  const firstOutput = rows => rows.find(row => row.payload?.type === 'custom_tool_call_output');
+  for (const [name, mutate, keptCells] of [
+    // The other cell, which only made its control call, is still left out.
+    ['a nested command in the cell (reading SKILL.md)', rows => insertAfter(rows, firstCell, command()), ['call_cell_1']],
+    ['a nested call to another server', rows => insertAfter(rows, firstCell, nestedItem({ type: 'McpToolCall', id: `exec-${randomUUID()}`,
+      server: 'other_server', tool: 'write', arguments: {}, status: 'completed', result: { content: [] } })), ['call_cell_1']],
+    ['the cell printed something else', rows => { firstOutput(rows).payload.output[1].text += '\nA computed fact.'; return rows; }, ['call_cell_1']],
+    ['a notify output', rows => insertAfter(rows, firstCell, response(A, 'custom_tool_call_output', { call_id: 'call_cell_1', output: 'A fact the cell announced.' })), ['call_cell_1']],
+    ['a running cell printed something', rows => { firstOutput(rows).payload.output[0].text = framing('Script running with cell ID 3'); return rows; }, ['call_cell_1']],
+    // A nested item no single cell owns keeps every cell.
+    ['a nested item after every cell', rows => insertAfter(rows, row => row.payload?.item?.phase === 'final_answer', command()), ['call_cell_1', 'call_cell_2']],
+    ['two cells open at once', rows => { const second = rows.findIndex((row, i) => firstCell(row) && i > rows.findIndex(firstCell));
+      const [cell] = rows.splice(second, 1); rows.splice(rows.findIndex(firstCell) + 1, 0, cell); return rows; }, ['call_cell_1', 'call_cell_2']],
+    ['a child agent ran', rows => insertAfter(rows, firstCell, nestedItem({ type: 'CollabAgentToolCall', id: 'collab-1' })), ['call_cell_1', 'call_cell_2']],
+  ]) for (const [form, control] of [['menu', 'sav t7xb88'], ['plain', 'Please save the draft.']]) await t.test(`${name} (${form})`, async t => {
+    // The same per-cell rule applies whether or not the skill was picked.
+    const f = await fixture(t, mutate(turn({ form, control }).rows)), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    assert.deepEqual(capture.evidence.filter(entry => entry.kind === 'tool-call').map(entry => entry.callId), keptCells);
+    assert.deepEqual(capture.evidence.filter(entry => entry.kind === 'user').map(entry => entry.text), [control]);
+  });
+});
+
+test('Codex 0.163: a mention typed by hand is kept as typed while its control exchanges are left out', async t => {
+  for (const mode of ['code', 'direct']) await t.test(mode, async t => {
+    const f = await fixture(t, turn({ form: 'typed', control: 'save t7xb88', mode }).rows), capture = (await readCodexSelection(f.args)).candidates[0].capture;
+    // Codex attached no skill, so nothing is markup: the whole message stays.
+    assert.deepEqual(kept(capture)[0], ['user', '$cuefluent-notes save t7xb88']);
+    assert.equal(capture.evidence.filter(entry => entry.kind.startsWith('tool-')).length, 0);
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+  });
+  // As in the attended run: the assistant first reads SKILL.md in a cell of its
+  // own, and the control call it then makes is refused. The reading cell stays;
+  // the refused control cell is left out.
+  const rows = turn({ form: 'typed', control: 'review', commentary: [] }).rows;
+  const first = rows.findIndex(row => row.payload?.type === 'custom_tool_call');
+  rows.splice(first, 0, response(A, 'custom_tool_call', { call_id: 'call_read', name: 'exec', input: 'text(await tools.exec_command({cmd: "cat SKILL.md"}))' }),
+    evt('item_completed', { thread_id: S, turn_id: A, item: { type: 'CommandExecution', id: `exec-${randomUUID()}`, status: 'completed', exit_code: 0 } }),
+    { type: 'response_item', metadata: { client_authored: false }, payload: { type: 'custom_tool_call_output', call_id: 'call_read', output: [
+      { type: 'input_text', text: framing() }, { type: 'input_text', text: 'SYNTHETIC SKILL TEXT' }], internal_chat_message_metadata_passthrough: { turn_id: A } } });
+  const refusal = rows.find(row => row.payload?.item?.type === 'McpToolCall').payload.item, message = codexToolError(refusal.tool, 'Synthetic refusal: not a command.');
+  Object.assign(refusal, { status: 'failed', error: { message } }); delete refusal.result;
+  rows.find(row => row.payload?.call_id === 'call_cell_1' && row.payload.type === 'custom_tool_call_output').payload.output[1].text =
+    JSON.stringify({ content: [{ type: 'text', text: message }], isError: true });
+  const read = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+  assert.deepEqual(read.evidence.filter(entry => entry.kind.startsWith('tool-')).map(entry => [entry.kind, entry.callId]),
+    [['tool-call', 'call_read'], ['tool-result', 'call_read']]);
+  assert.doesNotMatch(serializeCapture(read).toString(), /Synthetic refusal|cuefluent_control/);
+  // Text that merely names the plugin elsewhere is the person's own words and
+  // stays as typed; the control exchange is left out as in every unit.
+  const later = turn({ form: 'typed', control: 'sav t7xb88', mode: 'direct' }).rows.map(row => row.payload?.item?.type === 'UserMessage'
+    ? { ...row, payload: { ...row.payload, item: { ...row.payload.item, content: [{ type: 'text', text: 'Please run $cuefluent-notes status.', text_elements: [] }] } } } : row);
+  const ordinaryUnit = (await readCodexSelection((await fixture(t, later)).args)).candidates[0].capture;
+  assert.deepEqual(kept(ordinaryUnit), [['user', 'Please run $cuefluent-notes status.']]);
+});
+
+// A Codex unit with no skill picked and no mention, such as a request in the
+// person's own words that the model answers by calling this plugin's control.
+const commandPrefix = '$cuefluent-notes';
+const helpReply = processingControlStatusView({ status: 'idle', nextAction: 'none', commandPrefix, help: true }, { collectionId: 'example' }).statusText;
+const notCommandReply = processingControlStatusView({ status: 'idle', nextAction: 'none', commandPrefix, command: 'not-a-command', suggestions: ['save'] },
+  { collectionId: 'example' }).statusText;
+// What a chat with nothing set up gets (processing-mcp.mjs unboundStatus).
+const unboundReply = processingControlStatusView({ status: 'missing', statusDetail: 'unbound', nextAction: 'none',
+  diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix }, { collectionId: null }).statusText;
+const refusalReply = processingControlRefusalText('PROCESSING_CONTROL_SOURCE_UNVERIFIED', { client: 'codex', stage: 'binding', tool: 'processing_status' });
+// The control call is refused: its native item fails with the error as Codex
+// records it (`recorded`, by default its framing around the refusal), which
+// the cell prints as Codex shows a failed call, and the assistant relays
+// `relay` (by default the plain refusal, as it is told to).
+function refused(rows, message, mode, { recorded, relay = message } = {}) {
+  const calls = rows.filter(row => row.payload?.item?.type === 'McpToolCall'), call = calls.at(-1).payload.item;
+  const error = recorded ?? codexToolError(call.tool, message);
+  Object.assign(call, { status: 'failed', error: { message: error } }); delete call.result;
+  const output = rows.findLast(row => row.payload?.call_id === (mode === 'direct' ? 'dispatch-call' : 'call_cell_2') && row.payload.type.endsWith('_output')).payload;
+  if (mode === 'direct') output.output = error;
+  else output.output[1].text = JSON.stringify({ content: [{ type: 'text', text: error }], isError: true });
+  for (const row of rows) {
+    if (row.payload?.item?.phase === 'final_answer') row.payload.item.content[0].text = relay;
+    if (row.type === 'response_item' && row.payload.role === 'assistant' && row.payload.phase === 'final_answer') row.payload.content[0].text = relay;
+    if (row.payload?.type === 'task_complete') row.payload.last_agent_message = relay;
+  }
+  return rows;
+}
+test('Codex: a plain-language request keeps its words while this plugin\'s control traffic and repeated replies are left out', async t => {
+  const typed = 'Please process my notes.', plain = options => turn({ form: 'plain', control: typed, calledTool: 'process_selected_captures', ...options });
+  for (const [name, rows] of [
+    ['code mode', plain().rows], ['code mode finished by wait', plain({ waits: 2 }).rows], ['direct call', plain({ mode: 'direct' }).rows],
+    ['a first turn', plain({ firstTurn: true }).rows],
+    ['the command list', plain({ statusText: helpReply, calledTool: 'processing_status' }).rows],
+    ['a not-a-command reply', plain({ statusText: notCommandReply, calledTool: 'processing_status', mode: 'direct' }).rows],
+    ['the reply before setup', plain({ statusText: unboundReply, calledTool: 'processing_status' }).rows],
+    ['a refusal in code mode', refused(plain({ calledTool: 'processing_status' }).rows, refusalReply, 'code')],
+    ['a refusal, direct', refused(plain({ calledTool: 'processing_status', mode: 'direct' }).rows, refusalReply, 'direct')],
+    ['a refusal relayed with Codex\'s framing', refused(plain({ calledTool: 'processing_status' }).rows, refusalReply, 'code',
+      { relay: codexToolError('processing_status', refusalReply) })],
+    ['a refusal of several lines', refused(plain({ calledTool: 'processing_status' }).rows, `${refusalReply}\n\nType $cuefluent-notes status.`, 'code')],
+  ]) await t.test(name, async t => {
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.equal(capture.reader.version, '4');
+    // The person's words stay exactly as typed; the cells, calls, outputs,
+    // nested items, waits and the assistant's repetition of the reply do not.
+    assert.deepEqual(kept(capture), [['user', typed]]);
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+    assert.doesNotMatch(serializeCapture(capture).toString(), /cuefluent_control|tools\.mcp|verification-required|statusText|Cuefluent:|Cuefluent processing/);
+  });
+  // Only Codex's exact framing yields the plain refusal: any other framing keeps
+  // the relay, while the call itself is still left out by native identity.
+  for (const [name, recorded, relay = refusalReply] of [
+    ['another tool in the framing', codexToolError('processing_review', refusalReply)],
+    ['another server in the framing', codexToolError('processing_status', refusalReply, { server: 'other_control' })],
+    ['no error data', codexToolError('processing_status', refusalReply, { data: null })],
+    ['other error data', codexToolError('processing_status', refusalReply, { data: { code: 'X', detail: 'y' } })],
+    // Four other characters where the indent belongs: stripping them would yield the relay.
+    ['a line not indented', codexToolError('processing_status', `${refusalReply}\nmore`).replace('\n    more', '\nXXXXmore'), `${refusalReply}\nmore`],
+    ['several causes', codexToolError('processing_status', refusalReply).replace('Caused by:\n    ', 'Caused by:\n    0: transport\n    1: ')],
+    ['no code', codexToolError('processing_status', refusalReply).replace('-32600: ', '')],
+  ]) for (const mode of ['code', 'direct']) await t.test(`${name} keeps the relay (${mode})`, async t => {
+    const rows = refused(plain({ calledTool: 'processing_status', mode }).rows, refusalReply, mode, { recorded, relay });
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', typed], ['assistant', relay]]);
+    assert.doesNotMatch(serializeCapture(capture).toString(), /cuefluent_control|tool call error/);
+  });
+  // Text alone never identifies anything: an exact action typed without the
+  // skill is the person's own words and stays.
+  await t.test('an exact action typed without the skill', async t => {
+    const capture = (await readCodexSelection((await fixture(t, turn({ form: 'plain', control: 'review' }).rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', 'review']]);
+  });
+  await t.test('commentary and a reply with added words stay', async t => {
+    const rows = plain({ commentary: ['Diagnosis: the Cedar cache bug is the 25-minute TTL.'] }).rows;
+    for (const row of rows) {
+      if (row.payload?.item?.phase === 'final_answer') row.payload.item.content[0].text += ' The audit ends Friday.';
+      if (row.type === 'response_item' && row.payload.role === 'assistant' && row.payload.phase === 'final_answer') row.payload.content[0].text += ' The audit ends Friday.';
+    }
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', typed], ['assistant', 'Diagnosis: the Cedar cache bug is the 25-minute TTL.'],
+      ['assistant', 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88 The audit ends Friday.']]);
+  });
+  // Only the assistant can repeat a reply: the person pasting it is their input.
+  await t.test('the person pasting the reply keeps it', async t => {
+    const rows = plain().rows, pasted = 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88';
+    rows.splice(rows.findIndex(row => row.payload?.item?.phase === 'final_answer'), 0, evt('item_completed', { thread_id: S, turn_id: A,
+      item: { type: 'UserMessage', id: 'pasted-message', content: [{ type: 'text', text: pasted, text_elements: [] }] } }));
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', typed], ['user', pasted]]);
+  });
+  // A reply is the reply of a control call in its own unit: the same words in
+  // another unit, with no control call there, are that unit's assistant text.
+  await t.test('the same words in another unit stay', async t => {
+    const echo = 'Cuefluent: Draft t7xb88 is ready. Review folder: /private/review/t7xb88';
+    const capture = (await readCodexSelection((await fixture(t, [...plain().rows, start(B), user(B, 'What did it say?'), assistant(B, echo), end(B)])).args))
+      .candidates.find(entry => entry.capture.identity.unitId === B).capture;
+    assert.deepEqual(kept(capture), [['user', 'What did it say?'], ['assistant', echo]]);
+  });
+  // Published version 1-3 heads keep their rules: the cells and the relayed
+  // reply stay, and every replay reproduces the same bytes.
+  for (const mode of ['code', 'direct']) for (const version of ['1', '2', '3']) await t.test(`a published v${version} head replays unchanged (${mode})`, async t => {
+    const f = await fixture(t, plain({ mode, statusText: helpReply, calledTool: 'processing_status' }).rows);
+    const current = (await readCodexSelection(f.args)).candidates[0].capture;
+    const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: { ...current, reader: { ...current.reader, version } } }) })).candidates[0].capture;
+    assert.equal(replayed.reader.version, version);
+    assert.deepEqual(replayed.evidence.filter(entry => entry.kind === 'tool-call').map(entry => entry.callId), mode === 'code' ? ['call_cell_1', 'call_cell_2'] : ['dispatch-call']);
+    assert.deepEqual(replayed.evidence.filter(entry => entry.kind !== 'tool-call' && entry.kind !== 'tool-result').map(entry => [entry.kind, entry.text]),
+      [['user', typed], ['assistant', helpReply]]);
+    const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+    assert.equal(again.evidenceHash, replayed.evidenceHash); assert.deepEqual(serializeCapture(again), serializeCapture(replayed));
+  });
+});
+
+// The comparison form: each rule maps only markup, so a relay the model
+// reformatted equals the reply while any change of words stays distinct.
+test('reply comparison form: one defined Markdown normalization, each rule exact', () => {
+  const live = 'file:///private/tmp/fixture/codex/state/review/a42ksb/';
+  const helpBefore = helpReply.replace(':\n\n- ', ':\n- ');
+  assert.notEqual(helpBefore, helpReply);
+  for (const [name, reply, relay] of [
+    // The three reformattings of the 2026-10-18 attended run.
+    ['a review folder autolink relayed as Codex links a local folder', `Review folder: <${live}>`, 'Review folder: [a42ksb](/private/tmp/fixture/codex/state/review/a42ksb/)'],
+    ['a blank line before a list', 'Pending drafts:\n- x3x499 "meetings/rollout.md"', 'Pending drafts:\n\n- x3x499 "meetings/rollout.md"'],
+    ['the command list with a blank line before it', helpBefore, helpReply],
+    // Link forms: angle brackets, a file URL target, percent-encoding (UTF-8).
+    ['an angle-bracket target', 'Review folder: <file:///Users/x/Application%20Support/review/a42ksb/>', 'Review folder: [a42ksb](</Users/x/Application Support/review/a42ksb/>)'],
+    ['a file URL with spaces', '<file:///Users/x/Application%20Support/review/a42ksb/>', '[a42ksb](</Users/x/Application Support/review/a42ksb/>)'],
+    ['a percent-encoded plain target', '[a42ksb](/Users/x/Application%20Support/review/a42ksb/)', '[a42ksb](</Users/x/Application Support/review/a42ksb/>)'],
+    ['UTF-8 percent-encoding', '<file:///Users/zo%C3%AB/review/a42ksb/>', '[a42ksb](/Users/zoë/review/a42ksb/)'],
+    ['a file URL as a link target', '- "notes/a.md" (new note, 5 bytes): [proposed.md](file:///s/review/a42ksb/proposed.md)', '- "notes/a.md" (new note, 5 bytes): [proposed.md](/s/review/a42ksb/proposed.md)'],
+    // Line endings, bullets, whitespace and empty lines.
+    ['Windows line endings', 'A\r\n\r\n- b\r\n- c', 'A\n- b\n- c'],
+    ['a lone carriage return', 'A\rB', 'A\nB'],
+    ['other bullet markers', '- a\n- b\n- c', '* a\n+ b\n• c'],
+    ['an indented bullet', '- a', '   * a'],
+    ['spaces and tabs at the ends of a line', ' \tDraft a42ksb is ready. \t', 'Draft a42ksb is ready.'],
+    ['leading and trailing whitespace and empty lines', '\n\n A \t\n \n\n\tB\n', 'A\nB'],
+    // Code spans: one unit, whatever its fence, padding or line ending.
+    ['a code span with a longer fence or padding', 'Review folder: `` /s/a`b/r ``', 'Review folder: ```/s/a`b/r```'],
+    ['a code span across a line ending', 'A `x\ny` B', 'A `x y` B'],
+    ['spaces at line ends beside a code span', ' `x` \t', '`x`'],
+    ['an unclosed backtick run is text', 'a ` b', ' a ` b  '],
+    ['a code span after an escaped backtick', 'x \\``y` z', 'x \\`` y ` z'],
+    ['a code span after an escaped backslash', 'x \\\\`y` z', 'x \\\\` y ` z'],
+    ['a code span of spaces and a tab keeps only its padding rule', '`` \t ``', '``\t``'],
+  ]) {
+    assert.equal(codexReplyForm(reply), codexReplyForm(relay), name);
+  }
+  // The form encodes lines of text, path and code units, so text never collides with a unit.
+  assert.equal(codexReplyForm('Review folder: [a42ksb](</Users/x/Application Support/review/a42ksb/>)\r\n\r\n* save'),
+    JSON.stringify([['Review folder: ', ['path', '/Users/x/Application Support/review/a42ksb/']], ['- save']]));
+  assert.equal(codexReplyForm('Review folder: `` /s/a`b/r ``  '), JSON.stringify([['Review folder: ', ['code', '/s/a`b/r']]]));
+  assert.equal(codexReplyForm(' \n\t\n'), '');
+  assert.notEqual(codexReplyForm('["path","/s/"]'), codexReplyForm('[s](/s/)'));
+  for (const [name, reply, relay] of [
+    ['words added', 'Cuefluent: Draft a42ksb is ready.', 'Cuefluent: Draft a42ksb is ready. The audit ends Friday.'],
+    ['a link named otherwise', `Review folder: <${live}>`, 'Review folder: [the review folder](/private/tmp/fixture/codex/state/review/a42ksb/)'],
+    ['a link to another path', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: [a42ksb](/s/other/a42ksb/)'],
+    ['a link and the plain path text', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: /s/review/a42ksb/'],
+    ['a relative target', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: [a42ksb](review/a42ksb/)'],
+    ['a web link', 'Review folder: [a42ksb](/a42ksb/)', 'Review folder: [a42ksb](https://example.invalid/a42ksb/)'],
+    ['a file URL with a host', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: <file://server/s/review/a42ksb/>'],
+    ['a file URL with a query', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: <file:///s/review/a42ksb/?x>'],
+    ['a target that does not decode', 'Review folder: [a42ksb](/s/review/a42ksb/)', 'Review folder: [a42ksb](/s/%E0%A4%A/a42ksb/)'],
+    ['a target that decodes to a line break', 'Review folder: [a42ksb](/s/a42ksb/)', 'Review folder: <file:///s/a%0Ab/a42ksb/>'],
+    ['lines joined', 'Draft a42ksb is ready.\nNothing was saved.', 'Draft a42ksb is ready. Nothing was saved.'],
+    // Spacing inside a line is significant: a path or name may differ only there.
+    ['a path that differs only in its spacing', '- "meetings/A  B.md" (new note, 5 bytes)', '- "meetings/A B.md" (new note, 5 bytes)'],
+    ['a run of spaces inside a line (the old two-space listing)', 'Pending drafts:\n- x3x499  "meetings/rollout.md"', 'Pending drafts:\n\n- x3x499 "meetings/rollout.md"'],
+    ['a tab inside a line', 'Draft\ta42ksb is ready.', 'Draft a42ksb is ready.'],
+    // A decoded path and a code span are compared as written, even at a line end.
+    ['a linked file name with a trailing space', 'x: [proposed.md](/a/proposed.md)', 'x: [proposed.md ](/a/proposed.md%20)'],
+    ['a linked folder name with a trailing space', 'Review folder: [a42ksb](/s/a42ksb/)', 'Review folder: [a42ksb ](</s/a42ksb /> )'],
+    ['link-like text inside a code span', 'Review folder: `/s//a/x/r`', 'Review folder: `/s/[x](/a/x)/r`'],
+    ['an autolink inside a code span', 'Review folder: `/s/review/a42ksb/`', 'Review folder: `<file:///s/review/a42ksb/>`'],
+    ['a code span and the same text outside one', 'Review folder: `/s/r/`', 'Review folder: /s/r/'],
+    ['a code span and a link to the same path', 'Review folder: `/s/review/a42ksb/`', 'Review folder: [a42ksb](/s/review/a42ksb/)'],
+    ['spaces inside a code span', 'Review folder: `/s/a  b/`', 'Review folder: `/s/a b/`'],
+    ['words before an unclosed backtick run', 'Draft a42ksb ` is ready.', 'Draft x3x499 ` is ready.'],
+    // An escaped backtick is text and opens nothing; an escaped backslash does not escape.
+    ['escaped backticks in a quoted note path, doubled', '- k2mn9p "notes/\\`c\\`.md"', '- k2mn9p "notes/\\``c\\``.md"'],
+    ['an escaped backslash before a backtick', '\\\\`x`', '\\\\\\`x`'],
+    ['an ordered list', '- save', '1. save'],
+    ['a bullet without its space', '- save', '*save'],
+    ['emphasis', 'Draft a42ksb is ready.', 'Draft **a42ksb** is ready.'],
+    ['code formatting', 'Type $cuefluent-notes save a42ksb.', 'Type `$cuefluent-notes save a42ksb`.'],
+    ['a non-breaking space', 'Draft a42ksb', 'Draft a42ksb'],
+    // The attended run's paraphrased refusal stays the assistant's own text.
+    ['a paraphrased refusal', processingControlRefusalText('PROCESSING_CONTROL_REGISTRATION_UNVERIFIED', { client: 'codex', stage: 'binding', tool: 'processing_review' }),
+      'Nothing was applied and nothing was saved. Cuefluent Notes has registered this chat but cannot confirm commands in it yet. Type the command again.'],
+  ]) assert.notEqual(codexReplyForm(reply), codexReplyForm(relay), name);
+});
+
+test('Codex reader v4: a control reply the model reformatted is left out like an exact one; other text stays', async t => {
+  // The shapes of the 2026-10-18 attended run (Codex 0.163, code mode): every
+  // control turn has commentary, so it stays collectible without its command,
+  // control traffic and the relayed reply, which the model rewrote.
+  const commentary = ['I’ll open the pending draft for review.\n'];
+  const folderUrl = code => `<file:///private/fixture/state/review/${code}/>`;
+  const later = code => `Cuefluent: Review deferred with Later. Draft ${code} ("meetings/rollout.md") remains pending; nothing was saved.\n\n` +
+    `Review folder: ${folderUrl(code)}\n\nTo decide, type $cuefluent-notes save ${code} or $cuefluent-notes skip ${code}.`;
+  const laterRelay = code => later(code).replace(folderUrl(code), `[${code}](/private/fixture/state/review/${code}/)`);
+  const notPending = 'Cuefluent: Nothing was applied: draft a42ksb is not pending. Review the current draft with $cuefluent-notes review before deciding.\n\nPending drafts:\n- x3x499 "meetings/rollout.md"';
+  const notPendingRelay = notPending.replace(':\n- x3x499 ', ':\n\n- x3x499 ');
+  // This slice's own Codex form, which the model can relay unchanged.
+  const current = processingControlStatusView({ status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', review: 'deferred', commandPrefix,
+    draft: { code: 'a42ksb', folder: '/private/fixture/state/review/a42ksb', fileCount: 1, files: [{ path: 'meetings/rollout.md', bytes: 9, change: 'create' }] } },
+  { collectionId: 'example' }).statusText;
+  assert(current.includes('Review folder: [a42ksb](/private/fixture/state/review/a42ksb/)'), current);
+  const cases = [
+    ['Later: a review folder link', { control: 'review', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }],
+    ['not pending: a blank line before the list', { control: 'save', statusText: notPending, reply: notPendingRelay }],
+    ['the command list: a blank line', { control: 'help', calledTool: 'processing_status', statusText: helpReply.replace(':\n\n- ', ':\n- '), reply: helpReply }],
+    ['finished by wait', { control: 'review', waits: 2, statusText: later('a42ksb'), reply: laterRelay('a42ksb') }],
+    ['direct call', { control: 'review', mode: 'direct', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }],
+    ['the current form, relayed unchanged', { control: 'review', statusText: current, reply: current }],
+    ['the current form, relayed with other bullets and spacing', { control: 'help', calledTool: 'processing_status', statusText: helpReply,
+      reply: helpReply.replaceAll('\n- ', '\n* ').replace(':\n\n', ':\n\n\n') }],
+    ['Windows line endings', { control: 'review', statusText: current, reply: current.replaceAll('\n', '\r\n') }],
+    ['a folder as a code span, relayed with another fence', { control: 'review', statusText: later('a42ksb').replace(folderUrl('a42ksb'), '`/private/a\\_b/review/a42ksb`'),
+      reply: later('a42ksb').replace(folderUrl('a42ksb'), '`` /private/a\\_b/review/a42ksb ``') }],
+  ];
+  for (const [name, options] of cases) await t.test(name, async t => {
+    const capture = (await readCodexSelection((await fixture(t, turn({ commentary, ...options }).rows)).args)).candidates[0].capture;
+    assert.equal(capture.reader.version, '4');
+    assert.deepEqual(kept(capture), [['assistant', commentary[0]]]);
+    assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
+    assert.doesNotMatch(serializeCapture(capture).toString(), /a42ksb|x3x499|Review folder|Pending drafts|Type one of these|cuefluent_control/);
+    // Without commentary the turn holds no evidence at all.
+    const bare = await readCodexSelection((await fixture(t, turn(options).rows)).args);
+    assert.deepEqual(bare.candidates, []); assert.deepEqual(bare.noEvidence, [A]);
+  });
+  // In a plain-language unit, too: only the typed words stay.
+  await t.test('a plain-language unit', async t => {
+    const typed = 'What is my Cuefluent processing status?';
+    const rows = turn({ form: 'plain', control: typed, calledTool: 'processing_status', commentary, statusText: notPending, reply: notPendingRelay }).rows;
+    assert.deepEqual(kept((await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture), [['user', typed], ['assistant', commentary[0]]]);
+  });
+  // Identity stays native and words stay distinct.
+  for (const [name, options, relay] of [
+    ['a reformatted reply with words added', { control: 'review', statusText: later('a42ksb') }, `${laterRelay('a42ksb')} The audit ends Friday.`],
+    ['a link the model named otherwise', { control: 'review', statusText: later('a42ksb') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '[the review folder](/private/fixture/state/review/a42ksb/)')],
+    ['a link to another folder', { control: 'review', statusText: later('a42ksb') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '[a42ksb](/private/fixture/state/review/x3x499/a42ksb/)')],
+    ['the reply of another server', { control: 'review', statusText: later('a42ksb'), server: 'other_control' }, laterRelay('a42ksb')],
+    // A relay whose linked file name gained a trailing space names another file.
+    ['a relay that adds a trailing space to a linked file', { control: 'review', statusText: later('a42ksb').replace(folderUrl('a42ksb'), '[proposed.md](/private/fixture/state/review/a42ksb/proposed.md)') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '[proposed.md ](/private/fixture/state/review/a42ksb/proposed.md%20)')],
+    // A folder shown as a code span compares as written: link-like text inside stays.
+    ['a relay that changes link-like text inside a code span', { control: 'review', statusText: later('a42ksb').replace(folderUrl('a42ksb'), '`/private/a\\b/[x](/a/x)/a42ksb`') },
+      later('a42ksb').replace(folderUrl('a42ksb'), '`/private/a\\b//a/x/a42ksb`')],
+    // Escaped backticks in a note path are text: doubling them names another note.
+    ['a relay that doubles escaped backticks in a note path', { control: 'save', statusText: notPending.replace('meetings/rollout.md', 'notes/\\`c\\`.md') },
+      notPendingRelay.replace('meetings/rollout.md', 'notes/\\``c\\``.md')],
+    // A relay whose note path differs only in its spacing names another note.
+    ['a relay that respaces a note path', { control: 'save', statusText: notPending.replace('meetings/rollout.md', 'meetings/A  B.md') },
+      notPendingRelay.replace('meetings/rollout.md', 'meetings/A B.md')],
+  ]) await t.test(`${name} stays`, async t => {
+    const capture = (await readCodexSelection((await fixture(t, turn({ commentary, ...options, reply: relay }).rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture).filter(([kind]) => kind === 'assistant'), [['assistant', commentary[0]], ['assistant', relay]]);
+  });
+  // The attended run's paraphrased refusal is the assistant's own text (a documented limit).
+  await t.test('a paraphrased refusal stays', async t => {
+    const message = processingControlRefusalText('PROCESSING_CONTROL_REGISTRATION_UNVERIFIED', { client: 'codex', stage: 'binding', tool: 'processing_review' });
+    const relay = 'Nothing was applied and nothing was saved. Cuefluent Notes has registered this chat but cannot confirm commands in it yet. Type the command again.';
+    const capture = (await readCodexSelection((await fixture(t, refused(turn({ control: 'review', commentary }).rows, message, 'code', { relay }))).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['assistant', commentary[0]], ['assistant', relay]]);
+    assert.doesNotMatch(serializeCapture(capture).toString(), /cuefluent_control|tool call error/);
+  });
+  // Only the assistant can relay: the person's message in that form is their input.
+  await t.test('the person pasting the reformatted reply keeps it', async t => {
+    const rows = turn({ control: 'review', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }).rows;
+    rows.splice(rows.findIndex(row => row.payload?.item?.phase === 'final_answer'), 0, evt('item_completed', { thread_id: S, turn_id: A,
+      item: { type: 'UserMessage', id: 'pasted-message', content: [{ type: 'text', text: laterRelay('a42ksb'), text_elements: [] }] } }));
+    assert.deepEqual(kept((await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture), [['user', laterRelay('a42ksb')]]);
+  });
+  await t.test('the same words in another unit stay', async t => {
+    const rows = [...turn({ control: 'review', statusText: later('a42ksb'), reply: laterRelay('a42ksb') }).rows,
+      start(B), user(B, 'What did it say?'), assistant(B, laterRelay('a42ksb')), end(B)];
+    const read = await readCodexSelection((await fixture(t, rows)).args);
+    assert.deepEqual(kept(read.candidates.find(entry => entry.capture.identity.unitId === B).capture), [['user', 'What did it say?'], ['assistant', laterRelay('a42ksb')]]);
+  });
+  // Published version 1-3 heads keep the reformatted relay and replay to the
+  // same bytes; a version 4 head replays to the same bytes too. The older
+  // skill part, direct, is where version 3 already leaves the exchange out.
+  const options = { control: 'review', commentary, statusText: later('a42ksb'), reply: laterRelay('a42ksb') };
+  for (const [form, mode] of [['menu', 'code'], ['menu', 'direct'], ['block', 'direct']]) for (const version of ['1', '2', '3', '4']) {
+    await t.test(`a published v${version} head replays unchanged (${form}, ${mode})`, async t => {
+      const f = await fixture(t, turn({ ...options, form, mode }).rows);
+      const current = (await readCodexSelection(f.args)).candidates[0].capture;
+      const head = { ...current, reader: { ...current.reader, version } };
+      const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: head }) })).candidates[0].capture;
+      assert.equal(replayed.reader.version, version);
+      assert.equal(kept(replayed).some(([kind, text]) => kind === 'assistant' && text === laterRelay('a42ksb')), version !== '4');
+      if (version === '4') assert.deepEqual(serializeCapture(replayed), serializeCapture(current));
+      const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+      assert.equal(again.evidenceHash, replayed.evidenceHash); assert.deepEqual(serializeCapture(again), serializeCapture(replayed));
+    });
+  }
+});
+
+test('reader version 3 replays a published 0.163 unit unchanged: its mention and code-mode cells stay', async t => {
+  const { rows } = turn({ control: 'sav t7xb88' }), f = await fixture(t, rows);
+  const current = (await readCodexSelection(f.args)).candidates[0].capture;
+  const prior = { ...current, reader: { ...current.reader, version: '3' } };
+  const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: prior }) })).candidates[0].capture;
+  assert.equal(replayed.reader.version, '3');
+  assert.deepEqual(replayed.evidence.find(entry => entry.kind === 'user').text, `${MENU_MENTION} sav t7xb88`);
+  assert.deepEqual(replayed.evidence.filter(entry => entry.kind === 'tool-call').map(entry => entry.callId), ['call_cell_1', 'call_cell_2']);
+  assert.notEqual(replayed.evidenceHash, current.evidenceHash);
+  // Version 3 never applied the code-mode rule, even with the older skill part.
+  const block = await fixture(t, turn({ form: 'block', control: 'sav t7xb88' }).rows);
+  const blockNow = (await readCodexSelection(block.args)).candidates[0].capture;
+  assert.deepEqual(blockNow.evidence.filter(entry => entry.kind === 'tool-call'), []);
+  const blockV3 = (await readCodexSelection({ ...block.args, loadHead: async () => ({ capture: { ...blockNow, reader: { ...blockNow.reader, version: '3' } } }) })).candidates[0].capture;
+  assert.deepEqual(blockV3.evidence.filter(entry => entry.kind === 'tool-call').map(entry => entry.callId), ['call_cell_1', 'call_cell_2']);
+  // Same rules, same bytes on every later replay of either version.
+  for (const capture of [replayed, current]) {
+    const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture }) })).candidates[0].capture;
+    assert.equal(again.evidenceHash, capture.evidenceHash);
+  }
+});
+
+test('the version 3 and 4 skill rules ignore the install path, so a published unit replays unchanged after an upgrade', async t => {
+  // Each plugin version installs at its own path and a transcript keeps the
+  // path of the version that ran; neither is this reader's location.
+  const installs = ['0.15.1', '0.16.0'].map(version => path.resolve('plugins', 'cache', 'cuefluent-notes', version, 'SKILL.md'));
+  for (const ran of installs) for (const version of ['3', '4']) await t.test(`${path.basename(path.dirname(ran))} v${version}`, async t => {
+    const f = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88', { path: ran }), ...controlExchange(A, 'cue-1'), assistant(A, 'Nothing was applied.'), end(A)]);
+    const read = (await readCodexSelection(f.args)).candidates[0].capture;
+    const published = { ...read, reader: { ...read.reader, version } };
+    assert.deepEqual(published.evidence.map(item => [item.kind, item.text]), [['user', 'review sav t7xb88'], ['assistant', 'Nothing was applied.']]);
+    assert.deepEqual(published.coverage, { partial: false, omissions: [] });
+    // Replaying the published head reproduces its exact evidence.
+    const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: published }) })).candidates[0].capture;
+    assert.equal(replayed.reader.version, version); assert.equal(replayed.evidenceHash, published.evidenceHash);
+    assert.deepEqual(replayed.evidence, published.evidence); assert.deepEqual(replayed.coverage, published.coverage);
+  });
+});
+
+test('published version 2 Codex captures keep their skill-block omission and control exchange on replay', async t => {
+  const { CODEX_SKILL_RULES, CODEX_READER_VERSION } = await import('./codex-reader.mjs');
+  assert.equal(CODEX_SKILL_RULES[CODEX_READER_VERSION], 'mention'); assert.equal(CODEX_SKILL_RULES['3'], 'markup');
+  const f = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1'), end(A)]);
+  const args = f.args, current = (await readCodexSelection(args)).candidates[0].capture;
+  for (const version of ['1', '2']) {
+    const prior = { ...current, reader: { ...current.reader, version } };
+    const replayed = (await readCodexSelection({ ...args, loadHead: async () => ({ capture: prior }) })).candidates[0].capture;
+    assert.equal(replayed.reader.version, version);
+    assert.deepEqual(replayed.coverage.omissions.map(item => item.reason), ['unsupported-content-block']);
+    assert.deepEqual(replayed.evidence.filter(item => item.callId === 'cue-1').map(item => item.kind), ['tool-call', 'tool-result']);
+    // Same rules, same bytes: re-reading a published v2 unit cannot replace it.
+    const again = (await readCodexSelection({ ...args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
+    assert.equal(again.evidenceHash, replayed.evidenceHash);
+  }
+});
+
+test('reader version 4 decides command-only messages with the grammar it shipped with', () => {
+  // Today the live grammar matches. When it changes, v4 keeps these forms and
+  // the new grammar goes into a new reader version, so v4 captures replay unchanged.
+  assert.deepEqual(CODEX_V4_CONTROL_FORMS.map(form => form.map(word => word === '#' ? REVIEW_CODE_PLACEHOLDER : word)),
+    PROCESSING_CONTROL_FORMS.map(form => [...form]), 'the command grammar changed: add a Codex reader version');
+  assert.equal(CODEX_V4_CODE.source, REVIEW_CODE.source, 'the draft-code alphabet changed: add a Codex reader version');
 });
