@@ -91,7 +91,8 @@ async function armRegistration(transaction, store, registration, wake, authorize
   let frozen = registration.snapshot ?? floor?.snapshot ?? wake?.snapshot ?? null;
   // Only the worker freezes a floor. Later is never wider: the first prompt,
   // already persisted, stays before it and the next prompt is the boundary.
-  if (!frozen && promptWakeWithoutFloor(registration, wake)) frozen = await snapshotSourceMetadata(registration.sourcePath);
+  const freezing = !frozen && promptWakeWithoutFloor(registration, wake);
+  if (freezing) frozen = await snapshotSourceMetadata(registration.sourcePath);
   if (!frozen) return { pending: 'SOURCE_BOUNDARY_PENDING' };
   keys(frozen, ['path', 'fileIdentity', 'eofByte']); hash(frozen.fileIdentity); integer(frozen.eofByte);
   if (frozen.path !== selected.path) fail('SOURCE_IDENTITY_MISMATCH');
@@ -99,8 +100,14 @@ async function armRegistration(transaction, store, registration, wake, authorize
   // background kind and re-homes that session's history, which is never
   // collected again: its boundary is the first own prompt after both floors.
   const continued = registration.client === 'claude' ? await readContinuesLink(store, registration.sessionId) : null;
-  const verifyHeader = registration.client === 'codex' ? codexRegistrationHeader(selected)
+  const sessionHeader = registration.client === 'codex' ? codexRegistrationHeader(selected)
     : claudeRegistrationHeader(selected, { sessionKinds: continued?.link.to.sessionKinds ?? [] });
+  // A floor the worker freezes must already hold the rows that identify the
+  // session. Rows written after the snapshot (Claude writes bookkeeping first)
+  // would otherwise verify the header while the first prompt falls past the
+  // floor; such a pass finds the header unavailable and retries within its wait.
+  const verifyHeader = !freezing ? sessionHeader : io => sessionHeader({ ...io, size: Math.min(io.size, frozen.eofByte),
+    readHeader: (offset, length) => offset + length > frozen.eofByte ? fail('SESSION_HEADER_UNAVAILABLE') : io.readHeader(offset, length) });
   const observed = await inspectSourceBoundary(selected, { verifyHeader, frozen, currentUnitId: registration.unitId });
   if (observed.status !== 'registered') return { pending: 'SOURCE_BOUNDARY_PENDING' };
   const continuation = registration.client === 'claude' ? await claudeContinuation(transaction, store, observed.source, link, authorize, observeRead) : null;
