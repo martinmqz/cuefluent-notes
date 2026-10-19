@@ -889,6 +889,9 @@ test('a review step waits a bounded moment for the collection lock', async t => 
   assert(performance.now() - started >= 1900);
   assert.equal(processingControlRefusalText('INTAKE_BLOCKED', { client: 'claude', stage: 'action', tool: 'processing_review' }),
     `Cuefluent: This command was refused: Cuefluent Notes was busy with another operation; type the command again in a moment. Type ${claude} status to see where things stand.`);
+  // Another action, such as a cancel, may have taken effect before its receipt found the lock busy.
+  assert.match(processingControlRefusalText('INTAKE_BLOCKED', { client: 'claude', stage: 'action', tool: 'processing_cancel' }),
+    /^Cuefluent: This command stopped before it finished, so it is not certain whether anything changed./);
 });
 
 test('an unlocked read of the presentation record survives another chat replacing it', async t => {

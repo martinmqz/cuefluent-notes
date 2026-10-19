@@ -111,15 +111,18 @@ async function armRegistration(transaction, store, registration, wake, authorize
     readHeader: (offset, length) => offset + length > frozen.eofByte ? fail('SESSION_HEADER_UNAVAILABLE') : io.readHeader(offset, length) });
   const observed = await inspectSourceBoundary(selected, { verifyHeader, frozen, currentUnitId: registration.unitId });
   if (observed.status !== 'registered') return { pending: 'SOURCE_BOUNDARY_PENDING' };
-  // An attachment or system row can identify the session before its first
-  // prompt is written, so that floor must hold a complete human prompt too.
-  if (freezing) {
-    const { records } = await readSessionRange({ source: observed.source, from: 0, endByte: frozen.eofByte,
-      readHeader: verifyHeader, verifyHeader: identity => identity, observeRead, maxBytes: 8 * 1024 * 1024 });
-    if (!records.some(record => isClaudeHumanRow(record.value))) fail('SESSION_HEADER_UNAVAILABLE');
-  }
   const continuation = registration.client === 'claude' ? await claudeContinuation(transaction, store, observed.source, link, authorize, observeRead) : null;
   const target = continuation?.from ?? null;
+  // An attachment or system row can identify the session before its first
+  // prompt is written, so that floor must hold a complete human prompt of its
+  // own too: past a continuation's re-homed prefix, whose rows carry this
+  // session's ID. A record the bounded read cannot reach names its own cause.
+  if (freezing) {
+    const read = await readSessionRange({ source: observed.source, from: 0, endByte: frozen.eofByte,
+      readHeader: verifyHeader, verifyHeader: identity => identity, observeRead, maxBytes: 8 * 1024 * 1024 });
+    const own = target?.prefix.endByte ?? 0;
+    if (!read.records.some(record => record.startByte >= own && isClaudeHumanRow(record.value))) fail(read.blocked?.code ?? 'SESSION_HEADER_UNAVAILABLE');
+  }
   if (registration.snapshot === null && floor === null) await replaceIntakeJSON(transaction, floorName,
     { registrationId: registration.id, snapshot: frozen }, null);
   const intervalId = randomUUID(), temporary = newSelectionState(observed.source);

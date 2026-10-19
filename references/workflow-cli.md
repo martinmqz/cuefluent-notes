@@ -373,8 +373,8 @@ is no longer pending; records are bounded per collection (64 revision records an
 64 chats' latest attempts). A collection step that has not finished, such as a
 capture still being published, refuses a review or decision with
 `PROCESSING_REVIEW_BLOCKED` and leaves the draft and this chat's record as they
-are; a review step waits up to two seconds for the collection lock before
-refusing with `INTAKE_BLOCKED`.
+are; a review step, and a control's receipt, waits up to two seconds for the
+collection lock before refusing with `INTAKE_BLOCKED`.
 
 The draft code is six characters from `a-h j k m n p-t v-z 2-9`, derived from a
 domain-separated hash of the proposal hash. Claude's optional `draft` (that code)

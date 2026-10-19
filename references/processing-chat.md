@@ -65,8 +65,8 @@ saved) and what to do next; a failure after it started says the outcome is not
 certain and to check `status` first, unless it is a refusal that names its cause:
 the native client's sign-in or launch settings, a run that could not be confirmed
 stopped, a review shown again or decided before its reply was confirmed, another
-Cuefluent Notes step still finishing, or the collection being busy. Those say
-what happened and to check `status`. The diagnostic code stays in the error's data
+Cuefluent Notes step still finishing, or, for a review, the collection being
+busy. Those say what happened and to check `status`. The diagnostic code stays in the error's data
 for tools, as described in the [workflow CLI](workflow-cli.md#processing-chat-controls).
 
 Text after the skill that is not one exact action, such as a near miss or an

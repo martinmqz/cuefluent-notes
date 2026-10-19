@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { openWorkflowIntake, withIntakeLock, assertIntakeTransaction, guardStore, intakePath, intakeSnapshot, intakeJSON, replaceIntakeJSON, replaceIntakeBytes } from './intake-io.mjs';
+import { openWorkflowIntake, withIntakeLockWaiting, assertIntakeTransaction, guardStore, intakePath, intakeSnapshot, intakeJSON, replaceIntakeJSON, replaceIntakeBytes } from './intake-io.mjs';
 import { assertWorkflowStorage, assertPrivatePaths, isPrivateStorageChurn, REVIEW_OWN_FILE as OWN_FILE, FINDER_FILE } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { lstatOrNull, readBoundedBytes, sameFileIdentity, syncDirectory, displayScalar } from './file-io.mjs';
@@ -79,33 +79,18 @@ async function readState(store) {
   return { value, hash: snapshot.hash };
 }
 
-// Collection holds the intake lock for most of each short pass, so a review
-// step waits a bounded moment for it rather than failing as busy. A step runs
-// entirely under the lock or not at all, so trying again repeats nothing.
-const LOCK_WAIT_MS = 2000;
 // Processing consent for the invoking chat covers this private copy, like the
-// proposal read it came from. No lock is held while the person reads or types.
-async function withReviewState(capability, selection, run, signal) {
-  const deadline = performance.now() + LOCK_WAIT_MS;
-  for (let attempt = 0; ; attempt++) {
-    let started = false;
-    try {
-      return await withStorageProbes(async () => {
-        const store = await openWorkflowIntake(capability);
-        return withIntakeLock(store, async tx => {
-          started = true;
-          const authorize = () => assertWorkflowStorage(capability, selection, 'explicitProcess');
-          await authorize();
-          return run({ store, tx, state: await readState(store), authorize });
-        });
-      });
-    } catch (error) {
-      const remaining = deadline - performance.now();
-      if (started || error?.code !== 'INTAKE_BLOCKED' || remaining <= 0 || signal?.aborted) throw error;
-      await delay(Math.min(25 * 2 ** attempt, 200, remaining));
-      signal?.throwIfAborted();
-    }
-  }
+// proposal read it came from. No lock is held while the person reads or types;
+// a step waits a bounded moment for one a collection pass holds.
+function withReviewState(capability, selection, run, signal) {
+  return withStorageProbes(async () => {
+    const store = await openWorkflowIntake(capability);
+    return withIntakeLockWaiting(store, async tx => {
+      const authorize = () => assertWorkflowStorage(capability, selection, 'explicitProcess');
+      await authorize();
+      return run({ store, tx, state: await readState(store), authorize });
+    }, { signal });
+  });
 }
 
 /** Presentation records for one chat lineage, read without the intake lock:

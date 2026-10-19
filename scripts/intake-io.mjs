@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { openGuarded, lstatOrNull, sameFileIdentity, readBoundedBytes, syncDirectory, isOwnedStage, removeOwnedStage } from './file-io.mjs';
@@ -278,6 +279,24 @@ export async function replaceIntakeBytes(transaction, name, bytes, expectedHash,
 }
 
 /** No stealing, including incomplete owners. */
+/** Collection holds this lock for most of each short pass, so a step serving
+ * a person's command waits a bounded moment for it rather than failing as
+ * busy. The operation runs entirely under the lock or not at all, so trying
+ * again repeats nothing. */
+export async function withIntakeLockWaiting(store, operation, { waitMs = 2000, signal } = {}) {
+  const deadline = performance.now() + waitMs;
+  for (let attempt = 0; ; attempt++) {
+    let started = false;
+    try { return await withIntakeLock(store, transaction => { started = true; return operation(transaction); }); }
+    catch (error) {
+      const remaining = deadline - performance.now();
+      if (started || error?.code !== 'INTAKE_BLOCKED' || remaining <= 0 || signal?.aborted) throw error;
+      await delay(Math.min(25 * 2 ** attempt, 200, remaining));
+      signal?.throwIfAborted();
+    }
+  }
+}
+
 export async function withIntakeLock(store, operation, options) {
   if (!stores.has(store)) fail('UNRECOGNIZED_INTAKE_STORE');
   return withIntakeDirectoryLock(store.intakeStateDir, () => guardStore(store), async guard => {

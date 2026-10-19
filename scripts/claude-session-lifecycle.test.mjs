@@ -312,6 +312,26 @@ test('a verified continuation ends the origin at its marker, never recollects re
   assert.equal((await readContinuedLink(f.store, A.sessionId)).value.linkedAt, link.linkedAt);
 });
 
+// Claude CLI writes a background successor's transcript, re-homed history
+// first, only at its first prompt. That history holds prompts under the
+// successor's own ID; only its own first prompt may satisfy the floor the
+// worker freezes.
+test('a successor\'s re-homed history alone never satisfies the floor the worker freezes', async t => {
+  const { f, B } = await continued(t, { register: false });
+  const Q1 = randomUUID(), staged = `${B.file}.staged`;
+  // The hook runs before the transcript exists; then only the history is there.
+  await fs.rename(B.file, staged); await B.hook('UserPromptSubmit', Q1); await fs.rename(staged, B.file);
+  await f.run(); await f.run();
+  assert(await readContinuesLink(f.store, B.sessionId));
+  await assert.rejects(floorOf(f, B), { code: 'ENOENT' });
+  // The prompt lands: the floor holds it, and its typed control binds.
+  await B.append([...B.control('review', Q1), B.snapshot()]);
+  await f.run();
+  assert.equal((await floorOf(f, B)).snapshot.eofByte, (await fs.stat(B.file)).size);
+  const call = B.call('review'); await B.append([call]);
+  assert.equal((await B.resolve(call)).unitId, Q1);
+});
+
 test('the origin of a verified continuation refuses a command typed in it again', async t => {
   const { f, A } = await continued(t);
   await f.run(); await f.run();

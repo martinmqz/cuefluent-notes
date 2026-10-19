@@ -367,11 +367,15 @@ const ACTION_REFUSALS = Object.freeze({
   PROCESSING_REVIEW_BLOCKED: 'another Cuefluent Notes step had not finished, or needs recovery, so nothing was shown or decided; type the command again in a moment',
   INTAKE_BLOCKED: 'Cuefluent Notes was busy with another operation; type the command again in a moment',
 });
+// Busy names its cause only for a review, whose steps run entirely under the
+// lock or not at all; another action, such as a cancel, may already have
+// taken effect before its receipt found the lock busy.
+const REVIEW_ACTION_REFUSALS = new Set(['INTAKE_BLOCKED']);
 // A review call can carry a decision, so its refusal says outright that
 // nothing was saved.
 export function processingControlRefusalText(code, { client, stage, tool }) {
   const command = REVIEW_COMMANDS[client];
-  if (stage === 'action' && Object.hasOwn(ACTION_REFUSALS, code)) {
+  if (stage === 'action' && Object.hasOwn(ACTION_REFUSALS, code) && (!REVIEW_ACTION_REFUSALS.has(code) || tool === 'processing_review')) {
     return `Cuefluent: This command was refused: ${ACTION_REFUSALS[code]}. Type ${command} status to see where things stand.`;
   }
   if (stage === 'action' && !PRE_ACTION.has(code)) {

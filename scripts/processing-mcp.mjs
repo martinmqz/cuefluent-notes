@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { workflowConfigPath, readWorkflowSnapshot } from './workflow-config.mjs';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
-import { openWorkflowIntake, withIntakeLock, intakeSnapshot, intakeJSON } from './intake-io.mjs';
+import { openWorkflowIntake, withIntakeLockWaiting, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readSelection, selectionPath } from './intake-store.mjs';
 import { processingSourceDirectory, processingSourcePath, registrationPath, readRegistration, assertRegistrationGrant, collectionStatusPath } from './collection-ingress.mjs';
 import { collectionGrantHash } from './collection-grant.mjs';
@@ -293,7 +293,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const authorize = async () => { await assertWorkflowStorage(capability, source.selection, 'collect'); return true; };
     const receipt = await withStorageProbes(async () => {
       const store = await openWorkflowIntake(capability, source.selection, 'collect');
-      return withIntakeLock(store, async tx => {
+      return withIntakeLockWaiting(store, async tx => {
         const selected = await readSelection(store, { client, sessionId: source.selection.sessionId });
         if (selected.hash !== source.selectionHash) return null;
         return createProcessingControlResolver(tx, { state: selected.state, selectionHash: selected.hash, authorize })({
@@ -759,7 +759,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         retryItemId: context.itemId, retryCallId: context.toolCallId, handshakeResultHash: source.handshakeResultHash };
       const store = await withStorageProbes(() => openWorkflowIntake(capability, source.selection, 'collect'));
       const authorize = async () => { signal?.throwIfAborted(); await assertWorkflowStorage(capability, source.selection, 'collect'); signal?.throwIfAborted(); return true; };
-      await withStorageProbes(() => withIntakeLock(store, tx => recordProcessingControlDispatch(tx, {
+      await withStorageProbes(() => withIntakeLockWaiting(store, tx => recordProcessingControlDispatch(tx, {
         source: source.source, selectionHash: source.selectionHash,
         dispatch: { client, sessionId: source.selection.sessionId, unitId: source.unitId, callId: source.callId,
           tool: source.tool, argsHash: source.argsHash, sourceIdentity: source.source.fileIdentity, sourcePath: source.source.path,
@@ -767,7 +767,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           statusText: view.statusText, resultHash: digest(canonicalJSON(client === 'claude' ? result.content : result)), response: view, ...codeMode,
           ...(client === 'claude' ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand']
             .map(key => [key, source[key]])) : {}) },
-      }, { authorize, beforePublish: commitAdmission })));
+      }, { authorize, beforePublish: commitAdmission }), { signal }));
       await release();
     } catch (error) {
       if (error.code === 'STALE_SELECTION' && !signal?.aborted) {
