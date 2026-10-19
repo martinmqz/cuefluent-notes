@@ -552,7 +552,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       target = matches[0];
     } else if (elicit && coded.length > 1) {
       const chosen = await elicit({ choices: coded.map(({ item }, index) => ({ operationId: item.operationId,
-        label: `Draft ${index + 1}: ${item.inputCount} captures; ${item.createdAt}` })) });
+        label: `Draft ${index + 1}: ${item.inputCount} captured ${item.inputCount === 1 ? 'turn' : 'turns'}; ${item.createdAt}` })) });
       if (chosen.action !== 'accept') return { response: { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', review: 'declined' } };
       target = coded.find(entry => entry.item.operationId === chosen.content.operationId);
       if (!target) fail('PROCESSING_REVIEW_INTERRUPTED');

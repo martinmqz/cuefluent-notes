@@ -296,17 +296,17 @@ test('review outcomes are projected separately from draft state and replay uncha
     [{ status: 'idle', statusDetail: 'inactive', nextAction: 'none', review: 'saved', diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED', 'PROCESSING_CHAT_CONFLICT'] },
       'Cuefluent: Review completed: the exact reviewed proposal was saved. No processing run is active.\n\nSomething needs attention; for details, type status --verbose.'],
     // A completed review can leave another draft pending; say both.
-    [{ ...pending, review: 'skipped' }, 'Cuefluent: Review completed: these captures were skipped without saving. Draft ready for review.'],
+    [{ ...pending, review: 'skipped' }, 'Cuefluent: Review completed: these captured turns were skipped without saving. Draft ready for review.'],
     [{ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: 'cancelled' },
-      'Cuefluent: Review completed: the operation was cancelled; its captures remain pending. Processing operation completed.\n\nSomething needs attention; for details, type status --verbose.'],
+      'Cuefluent: Review completed: the operation was cancelled; its captured turns remain pending. Processing operation completed.\n\nSomething needs attention; for details, type status --verbose.'],
     // A decided draft is named by its code and note path.
     [{ status: 'idle', statusDetail: 'inactive', nextAction: 'none', review: 'saved', commandPrefix: command, draft: named },
       'Cuefluent: Review completed: the exact reviewed proposal of draft t7xb88 ("notes/launch.md" and 1 more file) was saved. No processing run is active.'],
     [{ ...pending, review: 'skipped', commandPrefix: '$cuefluent-notes', draft: { ...named, fileCount: 1 } },
-      'Cuefluent: Review completed: the captures of draft t7xb88 ("notes/launch.md") were skipped without saving. Draft ready for review.'],
+      'Cuefluent: Review completed: the captured turns of draft t7xb88 ("notes/launch.md") were skipped without saving. Draft ready for review.'],
     // A named draft never hides that something else needs attention.
     [{ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_CONFLICT'], review: 'cancelled', commandPrefix: command, draft: { code: 't7xb88' } },
-      'Cuefluent: Review completed: the operation for draft t7xb88 was cancelled; its captures remain pending. Processing operation completed.\n\nSomething needs attention; for details, type /cuefluent-notes status --verbose.'],
+      'Cuefluent: Review completed: the operation for draft t7xb88 was cancelled; its captured turns remain pending. Processing operation completed.\n\nSomething needs attention; for details, type /cuefluent-notes status --verbose.'],
   ]) {
     const projected = processingControlStatusView(value, { collectionId: 'example' });
     assert.equal(projected.statusText, text); assert.equal(projected.review, value.review);
@@ -621,12 +621,12 @@ test('the command list is built from the grammar in the client spelling and carr
     assert.equal(projected.statusText, [command === '$cuefluent-notes'
       ? 'Cuefluent: Type one of these yourself, exactly as written; for the first word, type $ and choose cuefluent-notes from the list:'
       : 'Cuefluent: Type one of these yourself, exactly as written:', '',
-      `- ${command} setup: choose collection and processing settings.`,
-      `- ${command} status: show processing, captures and drafts (also: status --verbose).`,
-      `- ${command} process: draft notes from pending captures (also: process repo, process chat, process resume, process cancel).`,
+      `- ${command} setup: choose the capture and processing modes.`,
+      `- ${command} status: show processing, captured turns and drafts (also: status --verbose).`,
+      `- ${command} process: draft notes from captured turns (also: process repo, process chat, process resume, process cancel).`,
       `- ${command} review: write a pending draft to a private review folder (also: review <draft code>, review cancel, review cancel <draft code>).`,
       `- ${command} save: save the draft your last typed review showed, exactly as shown (also: save <draft code>).`,
-      `- ${command} skip: handle that draft's captures without saving (also: skip <draft code>).`,
+      `- ${command} skip: handle that draft's captured turns without saving (also: skip <draft code>).`,
       `- ${command} help: show this list.`].join('\n'));
     assert.equal(projected.help, true);
     assert.deepEqual(processingControlStatusView(projected, { collectionId: 'example' }), projected);
@@ -667,9 +667,9 @@ test('plain status lists drafts as code and path; status --verbose adds every de
     .startsWith('Cuefluent processing: idle.\n\n- Status: idle; next action: none.\n'));
   // A stopped collection is named in plain words, and by its code only when verbose.
   const stopped = processingControlStatusView({ ...base, collection: { state: 'stopped', code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' } }, { collectionId: 'example' });
-  assert(stopped.statusText.includes('\n\nCollection has stopped for this chat: ')); assert(!stopped.statusText.includes('CLAUDE_HISTORY'));
+  assert(stopped.statusText.includes('\n\nAutomatic capture has stopped for this chat: ')); assert(!stopped.statusText.includes('CLAUDE_HISTORY'));
   assert(processingControlStatusView({ ...base, verbose: true, collection: stopped.collection }, { collectionId: 'example' }).statusText
-    .includes('\n- Collection: stopped for this chat (CLAUDE_HISTORY_REQUIRES_REVIEW).'));
+    .includes('\n- Automatic capture: stopped for this chat (CLAUDE_HISTORY_REQUIRES_REVIEW).'));
   for (const collection of [{ state: 'stopped', code: 'SOURCE_BOUNDARY_PENDING' }, { state: 'paused', code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' },
     { state: 'stopped', code: 'CLAUDE_HISTORY_REQUIRES_REVIEW', path: '/private' }]) {
     assert.throws(() => processingControlStatusView({ ...base, collection }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
@@ -836,8 +836,8 @@ test('native review form isolates exact proposal bytes and serializes later tool
     assert.deepEqual(form.params.requestedSchema.properties.decision.enum, ['save', 'skip', 'cancel', 'later']);
     // Hosts may show only enum values, without the optional legacy titles.
     const description = form.params.requestedSchema.properties.decision.description;
-    for (const semantics of ['Save writes the exact proposal', 'Skip handles these captures without saving',
-      'Cancel releases the operation and keeps captures pending', 'Later keeps the proposal pending']) assert(description.includes(semantics));
+    for (const semantics of ['Save writes the exact proposal', 'Skip handles these captured turns without saving',
+      'Cancel releases the operation and keeps its captured turns pending', 'Later keeps the proposal pending']) assert(description.includes(semantics));
     h.send({ ...tool('processing_status', { collectionId: 'example' }, client === 'claude' ? claudeMeta() : codexMeta()), id: 2 });
     await new Promise(resolve => setImmediate(resolve)); assert.equal(h.calls.some(call => call[0] === 'status'), false);
     h.send({ jsonrpc: '2.0', id: form.id, result: withReviewPreview(form, { action: 'accept', content: { decision: 'save' } }) });

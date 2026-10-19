@@ -1,9 +1,10 @@
 # Setup and status
 
-Cuefluent Notes has two independent processes: deterministic collection of selected
+Cuefluent Notes has two independent processes: deterministic capture of selected
 session evidence, and agent processing into searchable Markdown. Both start inactive:
-collection disabled, processing Manual. A direct request to save selected material
-can proceed without setup. Installation or trusting hooks supplies no capture consent.
+capture mode Manual (collection disabled in settings) and processing Manual. A direct
+request to save selected material can proceed without setup. Installation or
+trusting hooks supplies no capture consent.
 
 ## Inspect before changing
 
@@ -15,46 +16,51 @@ mode, destinations and transport limits; preserve settings unrelated to the requ
 Use [workflow-cli](workflow-cli.md) for JSON request formats and inspected hashes.
 
 For a bare “Use Cuefluent Notes”, ask which operation is wanted. For setup, establish
-only missing choices: the project or explicit sessions; the finished-note destination;
-whether future session collection should be enabled; and Manual, Prompted or Automatic
-processing with its subject scope. Do not ask the user to classify notes. Infer note
+only missing choices: the project folder or explicit sessions; the notes folder or
+file for finished notes; the capture mode; and the processing mode with its subject
+scope. Do not ask the user to classify notes. Infer note
 type from context when saving; new folder destinations default to type folders.
-A chosen explicit file remains exact. Multiple projects/collections are supported;
-route ambiguity requires a specific selection, never a guessed destination.
+A chosen explicit file remains exact. Multiple projects and notes folders are
+supported; route ambiguity requires a specific selection, never a guessed destination.
 
-Explain the choices in ordinary terms:
+Explain the choices in ordinary terms, using the
+[words people see](../SKILL.md#words-people-see):
 
-- **Collection** makes sensitive local JSON copies of selected native session
-  evidence using scripts, with no model calls. It starts from its saved boundary,
-  not historical sessions. Raw material can include secrets and private remarks;
-  there is no automatic redaction. Raw captures are not finished Cuefluent notes.
-- **Manual processing** runs only when requested. **Prompted** prepares useful
-  changes for approval. **Automatic** uses the approved scope without a separate
-  save question when there is a verified trigger. Collection does not select a
-  processing mode, and processing existing captures does not require collection on.
+- **Capture mode: Manual or Automatic.** Manual, the default, captures nothing on
+  its own. Automatic lets the hooks capture every later turn of the sessions in the
+  project folder, or of listed sessions only. Capturing makes sensitive local JSON
+  copies using scripts, with no model calls, and starts from the moment it is
+  enabled, never earlier history. Captured sessions can include secrets and private
+  remarks; there is no automatic redaction. They are not finished Cuefluent notes.
+- **Processing mode: Manual or Prompted.** Manual runs only when you type
+  `process`. Prompted prepares useful changes for approval. The capture mode does
+  not select a processing mode, and processing existing captured turns does not
+  require Automatic capture.
+- **Automatic processing is not offered.** It has no verified trigger
+  (`status.transport.automaticProcessing: false`), so it would behave like
+  Manual. Save it only when the user explicitly asks, and then confirm it as below.
 - **Current limit:** live processing context transport is unverified. Processing
   requires an explicit request and native selection in every mode. Trusted hooks
-  can wake collection, but a saved Automatic preference does not make Markdown
-  processing run automatically. Do not promise native prompt rendering without
-  verifying it in the actual client.
+  can capture automatically, but no mode makes Markdown processing run on its own.
+  Do not promise native prompt rendering without verifying it in the actual client.
 
-## Confirm Automatic
+## Confirm Automatic processing
 
-When setup or a mode change saves Automatic, give a concise confirmation after the
-save succeeds, for each affected route/project. For example: “Automatic is saved
-for [project], limited to [approved processing subject scope]. Turning captured
-session evidence into notes still requires an explicit processing request.
-Collection is enabled for [N listed sessions].” Direct saves of supplied material
-retain their separate workflow.
+When setup or a mode change saves Automatic processing, give a concise confirmation
+after the save succeeds, for each affected route/project. For example: “Automatic
+processing is saved for [project], limited to [approved processing subject scope],
+but it is not active: turning captured turns into notes still needs an explicit
+`process`, and drafts still go to review. Capture mode: Automatic for
+[N listed sessions].” Direct saves of supplied material retain their separate workflow.
 
 Ground the processing limitation in the existing
 `status.transport.automaticProcessing: false` result. Saving the preference does
-not change that capability. Take each route's collection setting and selection
+not change that capability. Take each route's capture mode and session selection
 from the `config` returned by `configure`, or its post-save status read-back.
-Report off, enabled for project sessions, or enabled for N listed sessions;
-explicitly say “no sessions selected” for an empty list. Include any known pause
-or exclusion, and do not describe an excluded route as actively collecting.
-The processing subject scope limits note content; collection selection belongs
+Report Manual, Automatic for every session in the project folder, or Automatic for
+N listed sessions; explicitly say “no sessions selected” for an empty list. Include
+any known pause or exclusion, and do not describe an excluded route as capturing.
+The processing subject scope limits note content; the capture mode belongs
 to the route and may differ between projects.
 Keep the confirmation in ordinary language; this reports the result of the save
 and adds no approval question. Existing processing scope and save-consent rules

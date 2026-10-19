@@ -36,6 +36,21 @@ processing preference. Resolve ambiguous restrictions before affected writes.
 Do not discover sessions, expand a selection, or enable either process merely
 to make a requested operation succeed.
 
+### Words people see
+
+Settings, codes, tool fields and the references keep their internal names. When
+talking to people, use these words and never say “collection”:
+
+| Internal name | Say |
+| --- | --- |
+| collection enabled or disabled (route `collection`) | capture mode: Automatic or Manual |
+| collection selection `project` or `sessions` | every session in the project folder, or listed sessions |
+| a capture, captured evidence | a captured turn; together, captured sessions |
+| a collection (`collections`, `collectionId`) | the notes folder or file, with its projects |
+| collection worker, paused or stopped collection | capturing; automatic capture paused or stopped |
+
+“Capture” is the action, so name the setting “capture mode”, not “capture”.
+
 ### Formal processing controls
 
 Type `/cuefluent-notes` in Claude or `$cuefluent-notes` in Codex, then one exact
@@ -135,10 +150,10 @@ save questions through the unverified transport. An explicit processing request
 works now in every processing mode. Report this limitation when explaining whether
 processing runs automatically; saving an Automatic preference is not proof that
 live automatic processing is active.
-When setup or a mode change saves Automatic, give the
-[Automatic confirmation](references/setup.md#confirm-automatic): processing captured
-evidence still needs an explicit request, and each affected route's collection
-setting and session selection are reported separately.
+Setup does not offer Automatic processing. When the user explicitly asks and it is
+saved, give the [Automatic processing confirmation](references/setup.md#confirm-automatic-processing):
+processing captured turns still needs an explicit request, and each affected
+route's capture mode and session selection are reported separately.
 
 Future collection preserves the registered EOF and never imports earlier history.
 Without a proven boundary at that floor, the first later full native unit establishes

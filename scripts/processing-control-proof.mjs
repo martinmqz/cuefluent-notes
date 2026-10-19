@@ -84,12 +84,12 @@ const DEFAULT_SUGGESTIONS = Object.freeze(['help', 'review', 'status']);
 const SUGGESTION_FORMS = Object.freeze([...PROCESSING_CONTROL_FORMS, ...PROCESSING_KNOWN_WORDS.map(word => Object.freeze([word]))]);
 // The help list: each first word with what it does and its other forms.
 const HELP_SUMMARIES = Object.freeze({
-  setup: 'choose collection and processing settings',
-  status: 'show processing, captures and drafts',
-  process: 'draft notes from pending captures',
+  setup: 'choose the capture and processing modes',
+  status: 'show processing, captured turns and drafts',
+  process: 'draft notes from captured turns',
   review: 'write a pending draft to a private review folder',
   save: 'save the draft your last typed review showed, exactly as shown',
-  skip: 'handle that draft\'s captures without saving',
+  skip: 'handle that draft\'s captured turns without saving',
   help: 'show this list',
 });
 export const PROCESSING_HELP = Object.freeze(Object.entries(HELP_SUMMARIES).map(([word, summary]) => Object.freeze({ word, summary,

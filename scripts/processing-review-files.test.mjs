@@ -716,7 +716,7 @@ test('help works before setup: with no configuration a status request lists the 
       const lines = reply.statusText.split('\n');
       assert.equal(lines[0], `Cuefluent: This chat has no verified Cuefluent Notes source yet. To set up Cuefluent Notes, type ${prefix} setup. Type one of these yourself, exactly as written${
         client === 'codex' ? '; for the first word, type $ and choose cuefluent-notes from the list' : ''}:`);
-      assert(lines.includes(`- ${prefix} setup: choose collection and processing settings.`));
+      assert(lines.includes(`- ${prefix} setup: choose the capture and processing modes.`));
       assert(lines.includes(`- ${prefix} help: show this list.`));
       assertPlainReply(reply, f);
     }
@@ -744,7 +744,7 @@ test('help, the bare skill, status and status --verbose reply in the client spel
     const help = await status('help', { help: true });
     assert.equal(help.help, true); assert.equal(help.commandPrefix, prefix);
     assert.equal(help.statusText.split('\n')[0], `Cuefluent: Type one of these yourself, exactly as written${client === 'codex' ? '; for the first word, type $ and choose cuefluent-notes from the list' : ''}:`);
-    assert(help.statusText.includes(`\n- ${prefix} process: draft notes from pending captures (also: process repo, process chat, process resume, process cancel).`));
+    assert(help.statusText.includes(`\n- ${prefix} process: draft notes from captured turns (also: process repo, process chat, process resume, process cancel).`));
     assertPlainReply(help, f);
     if (client === 'codex') assert.equal(await receiptCount(), 1);
     // The skill typed alone gets the same list; it is no control, so no receipt.

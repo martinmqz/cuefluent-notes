@@ -120,7 +120,7 @@ test('a completed unchanged operation is inactive without implying saved notes o
   await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.statusDetail, 'selection-complete'); assert.equal(status.nextAction, 'none');
-  assert.match(status.statusText, /^Cuefluent: Selected captures have been handled\./);
+  assert.match(status.statusText, /^Cuefluent: The selected captured turns have been handled\./);
   assert.equal(status.inventory.pending, 0);
   assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
@@ -283,17 +283,17 @@ test('a status reply says when automatic collection stopped for this exact chat'
   await notice([own('CLAUDE_HISTORY_REQUIRES_REVIEW'), { client: 'claude', sessionId: randomUUID(), code: 'UNSUPPORTED_SESSION_OWNERSHIP' }]);
   const stopped = body(await h.call('processing_status', {}));
   assert.deepEqual(stopped.collection, { state: 'stopped', code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' });
-  assert(stopped.statusText.includes('\n\nCollection has stopped for this chat: its transcript has a record Cuefluent Notes does not read past, ' +
-    'for example a Remote Control connection in Claude Desktop or a session moved elsewhere. Captures made before that point are kept; later turns of this chat are not collected.'));
+  assert(stopped.statusText.includes('\n\nAutomatic capture has stopped for this chat: its transcript has a record Cuefluent Notes does not read past, ' +
+    'for example a Remote Control connection in Claude Desktop or a session moved elsewhere. Turns captured before that point are kept; later turns of this chat are not captured.'));
   assert(!/[A-Z]{3,}_[A-Z_]+/.test(stopped.statusText));
   h.nativeSkill = true; h.typedControl = 'status --verbose';
-  assert(body(await h.call('processing_status', {})).statusText.includes('\n- Collection: stopped for this chat (CLAUDE_HISTORY_REQUIRES_REVIEW).'));
+  assert(body(await h.call('processing_status', {})).statusText.includes('\n- Automatic capture: stopped for this chat (CLAUDE_HISTORY_REQUIRES_REVIEW).'));
   h.nativeSkill = false; delete h.typedControl;
   // Another chat's stop, a boundary still pending or no record says nothing.
   for (const diagnostics of [[{ client: 'claude', sessionId: randomUUID(), code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' }], [own('SOURCE_BOUNDARY_PENDING')]]) {
     await notice(diagnostics);
     const quiet = body(await h.call('processing_status', {}));
-    assert.equal(quiet.collection, undefined); assert(!quiet.statusText.includes('Collection has stopped'));
+    assert.equal(quiet.collection, undefined); assert(!quiet.statusText.includes('Automatic capture has stopped'));
   }
   // The help list and a review reply never carry it.
   await notice([own('UNSUPPORTED_SESSION_OWNERSHIP')]);

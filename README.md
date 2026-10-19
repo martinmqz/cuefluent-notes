@@ -2,16 +2,16 @@
 
 Capture and organize your knowledge for fast recall—right on cue.
 
-Cuefluent Notes has two independent steps: a local worker collects selected parts
-of Codex or Claude sessions as immutable JSON evidence; an agent turns selected
-evidence into clear, searchable Markdown. Directly saving user-selected material
-also works without session collection. Notes stay ordinary files with descriptive
+Cuefluent Notes has two independent steps: a local worker captures selected parts
+of Codex or Claude sessions as immutable JSON; an agent turns those captured turns
+into clear, searchable Markdown. Directly saving user-selected material also works
+without capturing sessions. Notes stay ordinary files with descriptive
 names and optional type folders.
 
 **v0.8.0** introduced this replacement workflow. Published versions through
 **v0.7.1** use the prior workflow. The new workflow does not import old capture
-settings. Fresh setup leaves collection off and processing Manual. Installation
-and hook trust enable neither process.
+settings. Fresh setup leaves the capture mode and the processing mode at Manual.
+Installation and hook trust enable neither process.
 
 The plugin requires no Cuefluent app or Devlog. User notes, raw evidence and private
 settings belong outside the replaceable package; examples in this repository are
@@ -93,9 +93,12 @@ for this user. Clone the repository and run its install:codex npm script
    include the server, which the client can start when loading the plugin.
 2. Say **“Set up Cuefluent Notes.”** Select a project and where Markdown should go.
    The agent prepares private, machine-local evidence and state directories.
-3. Choose collection and processing separately. Collection can cover selected
-   sessions or future sessions in the project. Processing can be Manual,
-   Prompted (approve Save / Skip), or Automatic within your chosen scope.
+3. Choose the capture mode and the processing mode separately. Capture mode
+   Manual captures nothing on its own; Automatic captures future turns of every
+   session in the project folder, or of listed sessions only. Processing mode
+   Manual runs when you type `process`; Prompted prepares changes for your
+   approval (Save / Skip). Automatic processing has no trigger yet, so setup
+   does not offer it.
 
 **Processing starts with an explicit request.** For the reusable processing chat,
 type `/cuefluent-notes process` in Claude or `$cuefluent-notes process` in Codex;
@@ -107,10 +110,10 @@ native form), then decide by typing `save <code>` or
 applies only to the draft your last typed `review` showed. A draft or destination
 that changed after your review is refused and nothing is saved. `help` lists
 every action, also before setup.
-Plain `process` covers pending captures across the existing collection; use
+Plain `process` covers every captured turn waiting for the notes folder's projects; use
 `process repo` or `process chat` to narrow it, `process resume` for saved
 unfinished work, `status` for progress, and `process cancel` to stop owned work
-while keeping captures pending. Processing prepares drafts; only your exact typed
+while keeping captured turns pending. Processing prepares drafts; only your exact typed
 `save` (or Save in the Codex form) saves them.
 The controller uses the existing native client and processing engine; it does not
 require the Cuefluent app. See [processing chats](references/processing-chat.md)
@@ -118,13 +121,13 @@ for prerequisites, capture prevention and recovery.
 
 Hook notifications do not automatically start Markdown processing. Explicit CLI
 processing remains available with selected native sessions/units; identity is
-never inferred from the current folder. Automatic collection can run after setup
+never inferred from the current folder. Automatic capture can run after setup
 and hook trust. New selection starts at the current file boundary, excluding the
 initial boundary unit; it does
 not sweep historical session contents. Explicit historical capture reviews a
 fixed byte window and named units.
 
-For example: “Process the pending captures from this selected session into a
+For example: “Process the captured turns from this selected session into a
 meeting note; show me the proposed change before saving.” Or: “Save this supplied
 meeting summary to my notes.” The latter needs no session capture setup.
 See [setup](references/setup.md) and [explicit controls](references/workflow-cli.md).
@@ -139,7 +142,7 @@ Cuefluent's recursive loading and search ranking remain separately unverified.
 
 ### Update a marketplace installation
 
-Before updating clients that share a collection, follow the
+Before updating clients that share a notes folder and its private storage, follow the
 [coordinated upgrade steps](references/setup.md#existing-settings). Preserve notes,
 settings, captures and active operations. The catalog's `release.json` identifies
 the available package version; it may lag development source or a newly published
@@ -162,8 +165,8 @@ claude plugin update cuefluent-notes@cuefluent --scope user
 Use the scope of your existing Claude installation if it differs from `user`.
 Restart affected clients after all shared-store helpers are updated. Review changed
 hooks and the `cuefluent_control` MCP registration and permissions before resuming;
-neither installation nor server availability enables collection or automatic
-Markdown processing. See [processing chat prerequisites](references/processing-chat.md).
+neither installation nor server availability enables automatic capture or
+automatic Markdown processing. See [processing chat prerequisites](references/processing-chat.md).
 
 #### Switch an older marketplace registration to main
 
@@ -225,7 +228,7 @@ independently of the source package version.
 ## Use the workflow
 
 Say **“Use Cuefluent Notes”** with selected sources and the desired outcome.
-The agent follows the configured collection/processing boundaries and checks
+The agent follows the configured capture and processing modes and checks
 [status](references/setup.md). Direct saves use the same guarded writer as
 processed session evidence.
 
@@ -247,7 +250,7 @@ without claiming Cuefluent rendering or search ranking.
 [Safe updates](references/refresh.md) apply reviewed text against inspected
 hashes. Derived manifests track source drift and detect manual edits. The writer
 replaces one file atomically at a time and supports bounded recovery; it does
-not infer facts, merge competing edits, or make a collection-wide transaction.
+not infer facts, merge competing edits, or make one transaction across several notes.
 
 ## Run from the source checkout
 
@@ -274,17 +277,17 @@ Node 22+, with no npm install or development checkout at runtime. See
 [package layout and installation](references/distribution.md#package-layout).
 
 Choose one variant per client. Manual packages register no hooks; hook-enabled
-packages provide collection ingress that still requires separate consent and
+packages provide automatic capture that still requires separate consent and
 client trust. Both variants use the same plugin identity.
 
 Repository maintainers can use the
 [build and publishing guide](https://github.com/martinmqz/cuefluent-notes/blob/main/.agents/publishing.md).
 
-## Optional session collection
+## Optional automatic capture
 
 Hook packages register SessionStart, UserPromptSubmit, Stop, SessionEnd, and
 Codex Interrupt or Claude StopFailure. Ingress stores bounded native metadata
-and launches a short-lived local worker only with fresh collection permission.
+and launches a short-lived local worker only with fresh capture permission.
 Unconfigured and fully disabled projects cause zero filesystem writes.
 Synchronous hooks never scan source text, call models, write Markdown, block a
 prompt, or request a recovery continuation. There is no old Stop completion check.
@@ -296,9 +299,9 @@ proof of ownership. Source text is untrusted evidence, not instructions.
 See the [reader coverage matrix](references/session-workflow.md) and
 [hook limits](references/hooks.md).
 
-Collection and processing can be paused independently; user opt-outs override
-saved permission. Raw evidence is private and may contain sensitive information;
-collection does not automatically redact it. Pruning and abandoned-lock recovery
+Capturing and processing can be paused independently; user opt-outs override
+saved permission. Captured sessions are private and may contain sensitive
+information; capturing does not automatically redact them. Pruning and abandoned-lock recovery
 require explicit, reviewed commands. Intake and writer state must stay on local
 storage, outside projects, notes and the plugin. Fresh Windows setups use a
 shared local profile directory; existing settings are preserved. See
