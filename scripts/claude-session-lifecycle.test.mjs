@@ -580,11 +580,22 @@ test('only a prompt wake lets the worker freeze a floor; it waits briefly for a 
   await t.test('only the session whose hook launched the worker waits for its file', async t => {
     const f = await claudeFixture(t), A = f.session(), P1 = randomUUID();
     await A.hook('SessionStart'); await A.hook('UserPromptSubmit', P1);
-    const timed = async extra => { const started = performance.now(); const result = await f.run(extra); return { result, ms: performance.now() - started }; };
+    // Each run counts its looks at the missing transcript, not wall-clock
+    // time, which a cold runner skews.
+    const { lstat } = fs;
+    const timed = async extra => {
+      let looks = 0;
+      const mock = t.mock.method(fs, 'lstat', async (file, ...args) => { if (String(file) === A.file) looks++; return lstat(file, ...args); });
+      const started = performance.now();
+      try { const result = await f.run(extra); return { result, looks, ms: performance.now() - started }; }
+      finally { mock.mock.restore(); }
+    };
     const background = await timed(), triggered = await timed({ trigger: { client: 'claude', sessionId: A.sessionId } });
     for (const { result } of [background, triggered]) assert.deepEqual(sessionCodes(result, A.sessionId), ['SOURCE_BOUNDARY_PENDING']);
-    // The transcript never appears: the triggered visit waited its bounded second.
-    assert(triggered.ms - background.ms >= 600, `${triggered.ms} ms vs ${background.ms} ms`);
+    // The transcript never appears: the triggered visit polled it for its
+    // bounded second; the background visit did not wait for it.
+    assert(triggered.ms >= 1000, `${triggered.ms} ms`);
+    assert(triggered.looks >= background.looks + 3, `${triggered.looks} vs ${background.looks} looks`);
     await assert.rejects(floorOf(f, A), { code: 'ENOENT' });
   });
   await t.test('a binding settles while the worker freezes the floor', async t => {

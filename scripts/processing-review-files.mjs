@@ -98,8 +98,9 @@ function withReviewState(capability, selection, run, signal) {
  * the chat's latest presentation attempt, delivered or not. They identify a
  * revision; the engine's current hashes still decide. Another chat may replace
  * the record during the read; a few fresh reads then see one whole version. */
-// A file replaced while open: its identity changed, or the opened one is unlinked.
-const REPLACED = new Set(['INTAKE_FILE_CHANGED', 'FILE_LINK_COUNT_INVALID']);
+// A file replaced while it was opened or read: its identity changed, or the
+// opened one is unlinked.
+const REPLACED = new Set(['FILE_IDENTITY_CHANGED', 'INTAKE_FILE_CHANGED', 'FILE_LINK_COUNT_INVALID']);
 export async function readReviewPresentations(capability, chatLineage) {
   for (let attempt = 0; ; attempt++) {
     try {

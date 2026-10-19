@@ -895,20 +895,32 @@ test('a review step waits a bounded moment for the collection lock', async t => 
 });
 
 test('an unlocked read of the presentation record survives another chat replacing it', async t => {
-  const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
-  const h = await claudeReview(t, f); h.nativeSkill = true;
-  const code = (await review(h)).draft.code, state = stateFile(f), open = fs.open.bind(fs);
-  let replaced = 0;
-  const mock = t.mock.method(fs, 'open', async (file, ...args) => {
-    const handle = await open(file, ...args);
-    // Replaced with the same bytes just after this read opened it.
-    if (file === state && replaced++ === 0) { const copy = `${state}.copy`; await fs.copyFile(state, copy); await fs.rename(copy, state); }
-    return handle;
+  // POSIX replaces the open file (the opened copy is unlinked); Windows refuses
+  // to, so there the read sees the path's identity change after it opened.
+  for (const variant of posix ? ['replaced', 'identity changed'] : ['identity changed']) await t.test(variant, async t => {
+    const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
+    const h = await claudeReview(t, f); h.nativeSkill = true;
+    const code = (await review(h)).draft.code, state = stateFile(f), { open, lstat } = fs;
+    let opens = 0, changed = false;
+    t.mock.method(fs, 'open', async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (file === state && opens++ === 0) {
+        if (variant === 'replaced') { const copy = `${state}.copy`; await fs.copyFile(state, copy); await fs.rename(copy, state); }
+        else changed = true;
+      }
+      return handle;
+    });
+    t.mock.method(fs, 'lstat', async (file, ...args) => {
+      const stat = await lstat(file, ...args);
+      if (!changed || file !== state) return stat;
+      changed = false;
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: stat.ino + (typeof stat.ino === 'bigint' ? 1n : 1) });
+    });
+    assert.equal((await readReviewPresentations(f.capability, { client: 'claude', sessionId: f.identity.sessionId })).bindings.length, 1);
+    t.mock.restoreAll();
+    assert(opens >= 2);
+    assert.equal((await review(h, { decision: 'skip', draft: code })).review, 'skipped');
   });
-  try { assert.equal((await readReviewPresentations(f.capability, { client: 'claude', sessionId: f.identity.sessionId })).bindings.length, 1); }
-  finally { mock.mock.restore(); }
-  assert(replaced >= 2);
-  assert.equal((await review(h, { decision: 'skip', draft: code })).review, 'skipped');
 });
 
 test('a redelivered review call whose presentation was superseded is refused again, never replayed as presented', async t => {
