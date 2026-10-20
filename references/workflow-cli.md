@@ -258,7 +258,8 @@ scope is refused. Narrower scopes still require existing per-input policy. MCP d
 session and call ID: redelivery replays, while another invocation is new even if
 the model repeats its optional `requestId` hint. A typed `capture`, `pause chat`
 or `resume chat` keeps its reply as well, so its redelivery answers as the first
-delivery did and acts once. A `pause chat` that paused Automatic capture is the
+delivery did and acts once; one whose reply cannot be kept reports
+`PROCESSING_CONTROL_FAILED` instead. A `pause chat` that paused Automatic capture is the
 exception: the chat's binding then starts after that call, so its redelivery is
 refused before acting and the pause stays. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described

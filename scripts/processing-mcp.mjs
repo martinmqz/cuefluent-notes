@@ -759,8 +759,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' })); outcome = { capture: 'resumed' }; }
     signal?.throwIfAborted();
     const response = { ...await currentView(source), ...outcome };
-    // Housekeeping: without the kept reply a redelivery acts again.
-    try { await withStorageProbes(() => recordChatCommandReply(capability, source.selection, call, response, { signal })); } catch { /* acts again */ }
+    // The command has acted. Without its kept reply a redelivery would act
+    // again, so no reply is given unless it is kept: the outcome is reported
+    // as not certain, and status shows it.
+    try { await withStorageProbes(() => recordChatCommandReply(capability, source.selection, call, response, { signal })); }
+    catch { signal?.throwIfAborted(); fail('PROCESSING_CONTROL_FAILED'); }
     return response;
   }
   // Whether the worker stopped Automatic capture of this chat, as status

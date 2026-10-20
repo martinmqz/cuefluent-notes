@@ -1166,6 +1166,16 @@ test('a redelivered capture command answers with its first reply and acts once',
     assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
     assert(await head(third));
   });
+  await t.test('capture whose reply cannot be kept', async t => {
+    const { h, parent, head } = await manualCaptureChat(t), first = await parent.work('Decision: ship on Friday.');
+    const mkdir = fs.mkdir;
+    fs.mkdir = async (dir, ...args) => { if (String(dir).split(path.sep).includes('replies')) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return mkdir(dir, ...args); };
+    let rpc; try { rpc = await h.call('capture_turns', {}); } finally { fs.mkdir = mkdir; }
+    // The turn was captured, but no reply claims it without a kept reply.
+    assert.equal(rpc.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(rpc));
+    assert.match(rpc.error.message, /not certain whether anything changed/);
+    assert(await head(first));
+  });
   await t.test('resume chat in an Automatic chat', async t => {
     const { f, h, parent } = await nativeIngressFixture(t);
     await parent.work('Captured automatically.');

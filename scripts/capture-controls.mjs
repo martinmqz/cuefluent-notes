@@ -374,8 +374,9 @@ async function recordTailAnchor(source, record) {
 // The reply a typed capture command gave, kept once for its exact native call,
 // as dispatch receipts are: a redelivered call answers with it instead of
 // acting again, whatever commands came after it. A later delivery never
-// replaces it; a reply too large to keep is not kept.
-const CHAT_REPLY_BYTES = 16384;
+// replaces it. The bound is a dispatch receipt's, above any reply the
+// transport can deliver; a reply that cannot be kept fails the command.
+const CHAT_REPLY_BYTES = 32 * 1024;
 const chatReplyPath = (chat, call) => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}/replies/${digest(canonicalJSON(call)).slice(0, 24)}.json`;
 const replyCall = call => { keys(call, ['unitId', 'callId', 'tool', 'argsHash']); nativeId(call.unitId);
   for (const field of ['callId', 'tool']) if (typeof call[field] !== 'string' || !call[field] || call[field].length > 256) fail('INVALID_INTAKE_METADATA');
@@ -394,7 +395,7 @@ export async function readChatCommandReply(capability, selection, call, { now } 
 }
 export async function recordChatCommandReply(capability, selection, call, response, { now, signal } = {}) {
   const chat = await selected(selection), value = { format: 'cuefluent-chat-command-reply', version: 1, call: replyCall(call), response };
-  if (Buffer.byteLength(canonicalJSON(value) + '\n') > CHAT_REPLY_BYTES) return;
+  if (Buffer.byteLength(canonicalJSON(value) + '\n') > CHAT_REPLY_BYTES) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
