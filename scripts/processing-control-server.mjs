@@ -344,6 +344,8 @@ const COLLECTION_STOPS = Object.freeze({
   UNSUPPORTED_CODEX_HEADER: 'its transcript starts in a form Cuefluent Notes does not support',
   UNSUPPORTED_CLAUDE_HEADER: 'its transcript starts in a form Cuefluent Notes does not support',
   READER_CHECKPOINT_ALLOCATION_CAPACITY: 'its saved reading progress has used all the space Cuefluent Notes sets aside for one chat',
+  INVALID_READER_CHECKPOINT: 'its saved reading progress is not valid',
+  READER_PAGE_CONFLICT: 'its saved reading progress no longer matches itself',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));
