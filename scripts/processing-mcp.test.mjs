@@ -16,7 +16,7 @@ import { inspectProcessing, readProcessingProposal, completeProcessing } from '.
 import { createProcessingWorkset } from './processing-workset.mjs';
 import { reviewProcessingProposal } from './processing-host-review.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
-import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
+import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON, intakePath } from './intake-io.mjs';
 import { collectionIngress, registrationPath, publishIngressMetadata, collectionStatusPath } from './collection-ingress.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
 import { processScope, READER_BLOCK_CODES, readReaderBlock } from './collection-worker.mjs';
@@ -1273,10 +1273,11 @@ test('a failed typed command whose turn could not be left out says so in its ref
   const full = { ...current.state, exclusions: [...current.state.exclusions, ...Array.from({ length: 2048 }, () => randomUUID())] };
   await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${identity.sessionId}.json`, full, current.hash));
   await parent.work('Decision: ship on Friday.');
-  await fs.appendFile(parent.source.path, 'not a transcript record\n');
-  await parent.work('Later turn.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+  // A file where this chat's captures are listed fails the capture.
+  const heads = await intakePath(store, 'state', `heads/codex/${identity.sessionId}`, { createParents: true });
+  await fs.writeFile(heads, '');
   const rpc = await h.call('capture_turns', {});
-  assert.equal(rpc.error.code, -32600, JSON.stringify(rpc));
+  assert.equal(rpc.error.code, -32600, JSON.stringify(rpc)); assert.equal(rpc.error.data.code, 'UNSAFE_INTAKE_PATH');
   assert.deepEqual(rpc.error.data.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
   assert(!(await readSelection(store, identity)).state.exclusions.includes(parent.controls.at(-1)));
 });
