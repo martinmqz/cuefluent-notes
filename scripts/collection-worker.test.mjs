@@ -1210,6 +1210,8 @@ test('a scope result is a reader block when any turn is held on one, not only th
   assert.equal(readerBlockOf({ pending: 'READER_CHECKPOINT_ALLOCATION_CAPACITY' }), 'READER_CHECKPOINT_ALLOCATION_CAPACITY');
   // So does saved reader progress that is malformed or no longer matches its root.
   for (const code of ['INVALID_READER_CHECKPOINT', 'READER_PAGE_CONFLICT']) assert.equal(readerBlockOf({ pending: code }), code);
+  // A turn captured by a newer reader version is held on every pass.
+  assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_READER'] }), 'UNSUPPORTED_CLAUDE_READER');
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted'] }), null);
   assert.equal(readerBlockOf({ saved: 1, pending: null, drained: true }), null);
 });
