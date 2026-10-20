@@ -691,6 +691,38 @@ test('a capture whose read ran long still selects its window, so the next captur
   assert.match((await A.head(P3)).capture.evidence[0].text, /ship on Monday/);
 });
 
+test('a window rewritten in place after it was selected is selected again as a new window', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [C1, C2] = [randomUUID(), randomUUID()], prompts = Array.from({ length: 12 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // Twelve turns: each window takes ten and ends where the eleventh begins.
+  await A.append(prompts.flatMap((promptId, index) => [A.prompt(`Decision ${index}.`, promptId), A.reply('Noted.')]));
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // The first capture selects the window but runs out of time to run it.
+  const first = await bind(C1), slow = slowReads(t);
+  slow.state.jump = 32_000;
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
+  slow.state.skew = slow.state.jump = 0;
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [selected] = (await A.selection()).state.explicitScopes;
+  assert.equal(selected.unitIds.length, 10);
+  // Its last record changes in place: same turns, same byte offsets.
+  const text = await fs.readFile(A.file), at = text.indexOf('Noted.', selected.end.startByte);
+  assert(at > 0 && at < selected.end.endByte);
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('X'), 0, 1, at); } finally { await handle.close(); }
+  // The same window is selected again, as a new one, and captured.
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2), { now: slow.clock }), { turns: 10, more: true, leftOut: 0 });
+  const scopes = (await A.selection()).state.explicitScopes;
+  assert.equal(scopes.length, 2); assert.notEqual(scopes[1].id, selected.id);
+  assert.deepEqual(scopes[1].unitIds, selected.unitIds);
+  assert.deepEqual([scopes[1].start.startByte, scopes[1].end.endByte], [selected.start.startByte, selected.end.endByte]);
+});
+
 test('a capture records the turns it left out before it moves past them', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
   const [P1, P2, C1, C2, C3] = Array.from({ length: 5 }, () => randomUUID());

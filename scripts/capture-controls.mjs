@@ -531,7 +531,8 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       const closing = records.filter(record => record.endByte <= until).at(-1);
       if (closing && closing.endByte > units[0].record.startByte && closing.endByte - closing.startByte <= CHAT_ANCHOR_BYTES) {
         return { current, unitIds: units.slice(0, count).map(item => item.unitId),
-          readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte }, more: more || count < units.length, leftOut };
+          readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte },
+          bounds: { start: units[0].record.hash, end: closing.hash }, more: more || count < units.length, leftOut };
       }
     }
     leftOut.push(units[0].unitId);
@@ -551,10 +552,10 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
 // after progress that is the budget too, while a real probe failure makes no
 // progress and is reported.
 const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'PRIVACY_PROBE_FAILED']);
-// Every reader block keeps a window waiting, except a turn too large to
-// anchor: it stops Automatic capture, but a typed capture leaves it out and
-// passes it.
-const WINDOW_HOLDS = new Set(READER_BLOCK_CODES.filter(code => code !== 'SOURCE_ANCHOR_LIMIT'));
+// Every reader block keeps a window waiting, except two that stop Automatic
+// capture but that a typed capture passes: a turn too large to anchor, which it
+// leaves out, and a turn already captured by a newer reader version.
+const WINDOW_HOLDS = new Set(READER_BLOCK_CODES.filter(code => !['SOURCE_ANCHOR_LIMIT', 'UNSUPPORTED_CLAUDE_READER'].includes(code)));
 async function storedTurns(capability, chat, unitIds, now) {
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
@@ -664,8 +665,11 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   // The window is selected now and runs while a run still fits; otherwise the
   // next capture runs it first.
   if (!timeFor(deadline, 1)) return { turns, more: true, leftOut };
+  // The window's identity covers the bytes of its first and last records, so a
+  // window rewritten in place over the same turns and offsets is a new window,
+  // never the earlier one replayed.
   const operationId = digestId('cuefluent-chat-capture-v1', { client: chat.client, sessionId: chat.sessionId,
-    unitIds: window.unitIds, readRange: window.readRange });
+    unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds });
   const fresh = window.leftOut.length ? await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat))) : window.current;
   await selectExplicitCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: fresh.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange }, { observeRead, now });
