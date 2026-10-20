@@ -1249,7 +1249,7 @@ test('a chat whose header turns unsupported keeps that reader block, and typed c
   assert.equal((await h.call('capture_turns', {})).error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
 });
 
-test('typed capture commands in a safety-stopped chat say capture stopped and change nothing', async t => {
+test('typed capture commands in a safety-stopped chat say its capture record is full and change nothing', async t => {
   const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
   await parent.work('Captured automatically.');
   await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
@@ -1258,8 +1258,10 @@ test('typed capture commands in a safety-stopped chat say capture stopped and ch
     { ...selected.state, safetyStop: { reason: 'capacity', unitId: randomUUID() } }, selected.hash));
   const stopped = await readSelection(parent.store, identity);
   for (const tool of ['capture_turns', 'pause_capture', 'resume_capture']) {
-    const rpc = await h.call(tool, {});
-    assert.equal(body(rpc)?.capture, 'stopped', JSON.stringify(rpc.error ?? body(rpc)));
+    const rpc = await h.call(tool, {}), reply = body(rpc);
+    assert.equal(reply?.capture, 'full', JSON.stringify(rpc.error ?? reply));
+    // Status does not bind here, so the reply does not point to it.
+    assert.match(reply.statusText, /capture record is full/); assert.doesNotMatch(reply.statusText, /status/);
     await parent.finish(rpc);
   }
   assert.equal((await readSelection(parent.store, identity)).hash, stopped.hash);
