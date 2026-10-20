@@ -707,8 +707,8 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
 
 // Bounded runs of a chat's capture scope, each publishing a few turns, while
 // they make progress and the command's time lasts. Publication keeps every turn
-// it finished; when runs, time or a budget run out, the rest of the scope waits
-// for the next capture. Finished runs count their own turns. Only after a run
+// it finished; when runs, time or a budget run out, or a later run fails, the
+// rest of the scope waits for the next capture. Finished runs count their own turns. Only after a run
 // is cut short are the scope's stored captures read, to count what that run
 // kept; a scope another capture started counts finished runs only. A privacy
 // probe started near the deadline gets only the time left and fails as a probe:
@@ -754,7 +754,10 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
     if (!finished && !run.saved) { if (stalled) held = holds[0]; break; }
   }
   if (!failure) return { saved, finished, ...(held ? { held } : {}) };
-  if (!RUN_BUDGET_CODES.has(failure.code)) throw failure;
+  // A later run that fails, such as on a busy lock or a selection another
+  // capture changed, keeps what earlier runs kept: the command reports those
+  // turns and the next capture meets the failure again.
+  if (!RUN_BUDGET_CODES.has(failure.code)) { if (saved) return { saved, finished: false }; throw failure; }
   if (fresh && timeFor(deadline, 1)) {
     try { saved = Math.max(saved, await storedTurns(capability, chat, scope.unitIds, now)); } catch { /* keep the finished runs' count */ }
   }

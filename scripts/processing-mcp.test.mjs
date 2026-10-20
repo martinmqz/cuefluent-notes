@@ -1113,6 +1113,23 @@ test('a typed capture whose reply cannot be built refuses before it captures any
   assert(await head(decision));
 });
 
+test('a typed capture that fails after a run kept turns reports them', async t => {
+  const { f, h, parent, head } = await manualCaptureChat(t);
+  const held = await parent.work('Decision: ship on Friday.');
+  await lateEvidence(parent, held);
+  const kept = await parent.work('Owner: Dana.');
+  // The window's first run keeps the later turn and holds the first; the
+  // intake lock stays busy for every later run.
+  const mkdir = fs.mkdir; let runs = 0;
+  t.mock.method(fs, 'mkdir', async (target, ...rest) => {
+    if (String(target).endsWith('.intake-lock') && new Error().stack.includes('runChatScope') && runs++ > 0) throw Object.assign(new Error('held'), { code: 'EEXIST' });
+    return mkdir.call(fs, target, ...rest);
+  });
+  const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+  assert.deepEqual([reply.capture, reply.turns, reply.more], ['captured', 1, true], JSON.stringify(rpc));
+  assert(await head(kept)); assert.equal(await head(held), null);
+});
+
 test('a window with a turn the reader holds for its records keeps waiting, never passed by a later window, and says so', async t => {
   const { f, h, parent, store, identity, head } = await manualCaptureChat(t);
   const first = await parent.work('Decision: ship on Friday.');
