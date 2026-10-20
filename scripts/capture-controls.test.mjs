@@ -8,7 +8,9 @@ import { storageFixture } from './test-support/storage-fixture.mjs';
 import { digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
-import { readCaptureHead, readReaderProgress, readSelection } from './intake-store.mjs';
+import { readCaptureHead, readReaderProgress, readSelection, publishCapture, inspectPendingPublication } from './intake-store.mjs';
+import { readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
+import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn, typedCaptureDeadline } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
@@ -414,6 +416,24 @@ test('a turn left out without room to record it does not stop the window around 
   assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 3, more: false, leftOut: 1 });
   for (const unitId of [A, B, D]) assert((await readCaptureHead(f.store, { ...identity, unitId })).head, unitId);
   assert.equal((await readCaptureHead(f.store, { ...identity, unitId: BIG })).head, null);
+});
+
+test('a typed or CLI capture stopped mid-publication is finished by the next collection pass', async t => {
+  // Collection is on, but this chat has no registration: only its explicit capture is pending.
+  const f = await fixture(t, { enabled: true });
+  const chosen = await selectExplicitCapture(f.capability, f.request), scopeId = f.request.operationId;
+  const result = await readCodexSelection({ state: chosen.state, scopeId });
+  const plan = codexPublicationPlan(result, A), store = await openExplicitCaptureIntake(f.capability, f.selection, { scopeId, unitIds: [A] });
+  await assert.rejects(withIntakeLock(store, tx => publishCapture(tx, { ...result.candidates[0], selectionHash: chosen.hash, cursorHash: null,
+    scan: plan.scan, checkpoint: codexCheckpoint(result, plan.scan.to.offset), authorize: async () => true,
+    fault: async point => { if (point === 'intent') throw new Error('simulated interruption'); } })), /simulated interruption/);
+  assert.equal((await inspectPendingPublication(f.store)).committed, false);
+  // The pass finishes it under the explicit capture's own authority instead
+  // of stopping every chat of the collection.
+  const pass = await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  assert(!pass.pending.includes('INTAKE_RECOVERY_REQUIRED'), JSON.stringify(pass));
+  assert.equal(await inspectPendingPublication(f.store), null);
+  assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head);
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {

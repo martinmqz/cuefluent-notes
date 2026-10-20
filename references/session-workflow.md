@@ -868,7 +868,11 @@ identity. Retired intervals and progress remain recorded but cannot be read or
 published; explicit scopes and exclusions remain intact. An own-session pending publication must
 be reconciled or explicitly restricted first. Another session can record its own
 start boundary while a foreign intent remains unchanged; publication still waits
-for the collection-wide pending intent to be handled. Exact retries under the same grant
+for the collection-wide pending intent to be handled. A collection pass finishes
+an explicit capture's interrupted intent (a typed `capture` or the CLI) under
+that capture's own explicit authority while its route still allows it, so one
+chat's interrupted capture does not stop the pass for every chat; an intent
+without such authority stays unchanged. Exact retries under the same grant
 reuse the saved boundary; a new grant requires a new operation and inspected hash.
 Configuration must be changed through the configure helper: restoring an identical
 old file by hand cannot establish an observed revocation history. This replacement

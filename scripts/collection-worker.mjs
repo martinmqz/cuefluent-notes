@@ -8,7 +8,7 @@ import { isMain, lstatOrNull } from './file-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
-import { inspectIntakeStore, openWorkflowIntake, intakePath, intakeSnapshot, intakeJSON, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
+import { inspectIntakeStore, openWorkflowIntake, openExplicitCaptureIntake, intakePath, intakeSnapshot, intakeJSON, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
 import { readSelection, controlSelection, resolveStoredSelectionAnchor, readCaptureHead, publishCapture, commitReaderProgress, recoverPendingPublication, inspectPendingPublication, readReaderProgress } from './intake-store.mjs';
 import { newSelectionState, inspectSourceBoundary, currentIntervals, stableSourceIdentity } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexProgressPlan, codexCheckpoint } from './codex-reader.mjs';
@@ -465,11 +465,15 @@ async function recoverOwner(capability, store, snapshot, collectionId) {
     };
   } else {
     // Exact lookup precedes the bounded registration batch. Missing/revoked
-    // ongoing authority leaves explicit or foreign intent untouched for recovery.
+    // ongoing authority leaves foreign intent untouched for recovery; an
+    // explicit capture's own is finished under its explicit authority.
     const { registration } = await readRegistration(store, pending.identity, { mismatchCode: 'INTAKE_RECOVERY_REQUIRED' });
-    if (registration === null) fail('INTAKE_RECOVERY_REQUIRED');
-    const route = await resolveWorkflowRoute(snapshot.config, registration);
-    if (!route.intended?.collect || route.collection.id !== collectionId) fail('INTAKE_RECOVERY_REQUIRED');
+    const route = registration && await resolveWorkflowRoute(snapshot.config, registration);
+    if (!registration || !route.intended?.collect || route.collection.id !== collectionId) {
+      ({ recoveryStore, authorize } = await explicitRecovery(capability, store, pending));
+      await withIntakeLock(recoveryStore, transaction => recoverPendingPublication(transaction, { expectedHash: pending.hash, authorize }));
+      return;
+    }
     const selected = await readSelection(store, pending.identity);
     await assertRegistrationGrant(store, registration, selected.state, await collectionGrantHash(snapshot.config, route.route.id, registration), route);
     if (!selected.state || ![...currentIntervals(selected.state), ...selected.state.explicitScopes].some(scope => scope.id === pending.scopeId) || selected.state.source.path !== registration.sourcePath ||
@@ -482,6 +486,28 @@ async function recoverOwner(capability, store, snapshot, collectionId) {
     };
   }
   await withIntakeLock(recoveryStore, transaction => recoverPendingPublication(transaction, { expectedHash: pending.hash, authorize }));
+}
+
+// An explicit capture (a typed `capture` or the CLI) stopped mid-publication
+// has no ongoing owner. While its chat's route still allows explicit capture it
+// is finished under that same authority, so one chat's interrupted capture
+// never stops a pass for every chat; any other intent stays untouched.
+async function explicitRecovery(capability, store, pending) {
+  const selected = await readSelection(store, pending.identity);
+  const scope = selected.state?.explicitScopes.find(item => item.id === pending.scopeId);
+  if (!scope) fail('INTAKE_RECOVERY_REQUIRED');
+  const identity = { client: pending.identity.client, sessionId: pending.identity.sessionId, cwd: selected.state.source.projectRoot };
+  const explicit = async () => {
+    try { await assertWorkflowStorage(capability, identity, 'explicitCollect'); }
+    catch (error) { if (error.code === 'WORKFLOW_NOT_AUTHORIZED') fail('INTAKE_RECOVERY_REQUIRED'); throw error; }
+  };
+  await explicit();
+  const recoveryStore = await openExplicitCaptureIntake(capability, identity, { scopeId: scope.id, unitIds: scope.unitIds });
+  const authorize = async context => {
+    if (context.identity.client !== identity.client || context.identity.sessionId !== identity.sessionId || context.scopeId !== pending.scopeId) fail('INTAKE_RECOVERY_REQUIRED');
+    await explicit(); return true;
+  };
+  return { recoveryStore, authorize };
 }
 
 const passStopCodes = new Set(['INTAKE_BLOCKED', 'INTAKE_RECOVERY_REQUIRED', 'WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET']);
