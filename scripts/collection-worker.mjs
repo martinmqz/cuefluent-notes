@@ -175,7 +175,8 @@ export const READER_BLOCK_CODES = Object.freeze(['UNSUPPORTED_CLAUDE_RECORD', 'C
 
 // The reader block a visit of a chat last ended on, kept per chat: a later
 // pass that does not visit the chat cannot erase it the way it rebuilds the
-// collection-wide status notice. A visit that ends without one clears it.
+// collection-wide status notice. A visit that ends without one clears it. The
+// visit keeps it under its own intake lock, so visits replace it in order.
 export const readerBlockPath = identity => `reader-blocks/${identity.client}/${nativeId(identity.sessionId)}.json`;
 async function recordReaderBlock(store, identity, code) {
   const next = READER_BLOCK_CODES.includes(code) ? code : null, name = readerBlockPath(identity);
@@ -331,7 +332,15 @@ async function runRegistration(capability, registration, registrationHash, route
   const authorize = async () => { await assertWorkflowStorage(capability, selectionIdentity, 'collect'); return true; };
   // Outside the intake lock: waiting for a file holds no other session up.
   const settleBy = awaitSource ? await awaitPromptSource(store, registration) : null;
+  const keepBlock = async code => { try { await recordReaderBlock(store, identity, code); } catch { /* the notice still reports this pass */ } };
   const visit = link => withIntakeLock(store, async transaction => {
+    let result;
+    try { result = await visitChat(transaction, link); }
+    catch (error) { if (READER_BLOCK_CODES.includes(error.code)) await keepBlock(error.code); throw error; }
+    await keepBlock(result.pending);
+    return result;
+  });
+  const visitChat = async (transaction, link) => {
     if (await lstatOrNull(await intakePath(store, 'state', '.intake-maintenance'))) fail('INTAKE_OFFLINE_MAINTENANCE');
     // Another worker may have left an intent after this pass's initial recovery.
     // Never reconcile it through the registration currently being visited.
@@ -386,7 +395,7 @@ async function runRegistration(capability, registration, registrationHash, route
         readerRulesRevision: CLAUDE_READER_RULES_REVISION, selectionHash: selection.hash });
     }
     return { saved, pending: pending ?? (selection.state.paused ? 'COLLECTION_PAUSED' : null), incomplete, boundaryExcluded };
-  });
+  };
   for (let attempt = 0; ; attempt++) {
     const link = { registration, config, attempted: false, successor: null };
     try { return { ...await visit(link), linked: link.successor }; }
@@ -502,7 +511,6 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           const result = await runRegistration(capability, registration, registered.hash, route, grantHash, observeRead, snapshot.config,
             { awaitSource: Boolean(trigger) && job.file === registrationPath(trigger) });
           output.saved += result.saved;
-          try { await recordReaderBlock(store, job, result.pending); } catch { /* the notice still reports this pass */ }
           if (result.pending) {
             output.pending.push(result.pending);
             if (!passStopCodes.has(result.pending)) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: result.pending });
@@ -514,7 +522,6 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           }
         } catch (error) {
           output.pending.push(error.code ?? 'COLLECTION_FAILED');
-          if (READER_BLOCK_CODES.includes(error.code)) try { await recordReaderBlock(store, job, error.code); } catch { /* reported below */ }
           if (passStopCodes.has(error.code)) break;
           output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: error.code ?? 'COLLECTION_FAILED' });
         }
