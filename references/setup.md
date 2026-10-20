@@ -27,18 +27,24 @@ Explain the choices in ordinary terms, using the
 [words people see](../SKILL.md#words-people-see):
 
 - **Capture mode: Manual or Automatic.** Manual, the default, captures nothing on
-  its own. Automatic lets the hooks capture every later turn of the sessions in the
-  project folder, or of listed sessions only. Capturing makes sensitive local JSON
-  copies using scripts, with no model calls, and starts from the moment it is
-  enabled, never earlier history. Captured sessions can include secrets and private
-  remarks; there is no automatic redaction. They are not finished Cuefluent notes.
-- **Processing mode: Manual or Prompted.** Manual runs only when you type
-  `process`. Prompted prepares useful changes for approval. The capture mode does
-  not select a processing mode, and processing existing captured turns does not
-  require Automatic capture.
-- **Automatic processing is not offered.** It has no verified trigger
-  (`status.transport.automaticProcessing: false`), so it would behave like
-  Manual. Save it only when the user explicitly asks, and then confirm it as below.
+  its own. Automatic lets the hooks capture later turns of the route's clients'
+  sessions in the project folder (a narrower excluded folder stays out), or of
+  listed sessions only. Capturing makes sensitive local JSON copies using scripts,
+  with no model calls. It starts from its saved boundary, never earlier history:
+  each session's first prompt after that boundary marks it and is not captured.
+  Captured sessions can include secrets and private remarks; there is no automatic
+  redaction. They are not finished Cuefluent notes.
+- **Processing mode: Manual or Prompted.** Manual runs only when requested.
+  Prompted prepares useful changes for approval. The capture mode does not select
+  a processing mode, and processing existing captured turns does not require
+  Automatic capture.
+- **Automatic processing is not offered.** Its live trigger is unverified
+  (`status.transport.automaticProcessing: false`): processing in a chat still
+  needs an explicit request, and the drafts it prepares still go to review. It is
+  not the same as Manual: hooks record session starts for it as for Prompted, and
+  a standalone CLI processing run may save without a review question (see
+  [processing](processing.md)). Save it only when the user explicitly asks, and
+  then confirm it as below.
 - **Current limit:** live processing context transport is unverified. Processing
   requires an explicit request and native selection in every mode. Trusted hooks
   can capture automatically, but no mode makes Markdown processing run on its own.
@@ -49,16 +55,16 @@ Explain the choices in ordinary terms, using the
 When setup or a mode change saves Automatic processing, give a concise confirmation
 after the save succeeds, for each affected route/project. For example: “Automatic
 processing is saved for [project], limited to [approved processing subject scope],
-but it is not active: turning captured turns into notes still needs an explicit
-`process`, and drafts still go to review. Capture mode: Automatic for
-[N listed sessions].” Direct saves of supplied material retain their separate workflow.
+but it does not run on its own: processing in a chat still needs an explicit
+`process`, and its drafts still go to review; a standalone CLI processing run may
+save without a review question. Capture mode: Automatic for [N listed sessions].” Direct saves of supplied material retain their separate workflow.
 
 Ground the processing limitation in the existing
 `status.transport.automaticProcessing: false` result. Saving the preference does
 not change that capability. Take each route's capture mode and session selection
 from the `config` returned by `configure`, or its post-save status read-back.
-Report Manual, Automatic for every session in the project folder, or Automatic for
-N listed sessions; explicitly say “no sessions selected” for an empty list. Include
+Report Manual, Automatic for every session of the route's clients in the project
+folder, or Automatic for N listed sessions; explicitly say “no sessions selected” for an empty list. Include
 any known pause or exclusion, and do not describe an excluded route as capturing.
 The processing subject scope limits note content; the capture mode belongs
 to the route and may differ between projects.

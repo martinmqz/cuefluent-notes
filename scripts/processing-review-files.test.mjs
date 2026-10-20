@@ -70,9 +70,11 @@ test('Claude review writes the exact proposal to a private review folder and rep
   for (const expected of [`draft ${code}`, 'Create "meetings/rollout.md"', `Proposed: proposed.md (${Buffer.byteLength(content)} bytes)`,
     `claude session ${f.identity.sessionId}, turn ${f.identity.unitId}`, '1 of 1 retained evidence pages inspected',
     `${claude} save ${code} (Codex: ${codex} save ${code})`, `${claude} skip ${code}`, `${claude} review cancel ${code}`,
-    'To keep the draft pending, type nothing.', `Operation: ${f.operationId}`, `Claim hash: ${p.claimHash}`, `Proposal hash: ${p.proposalHash}`]) {
+    'To keep the draft pending, type nothing.', `Operation: ${f.operationId}`, `Claim hash: ${p.claimHash}`, `Proposal hash: ${p.proposalHash}`,
+    'Skip these captured turns without saving', 'Cancel the draft; its captured turns stay pending']) {
     assert(summary.includes(expected), expected);
   }
+  assert.doesNotMatch(summary, /collect|captures/i);
   assert(!summary.includes('Keep the rollout paused'), 'note content stays in proposed.md');
   assert(!summary.includes('later') && !summary.includes('review save'), 'only current command spellings');
   // The folder and the proposed copy open with one click.

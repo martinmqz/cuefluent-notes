@@ -39,12 +39,12 @@ test('MCP admission returns while native processing is pending, and shutdown wai
   const admitted = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(admitted.status, 'busy'); assert.notEqual(admitted.requestId, requestId);
   assert.equal(admitted.statusDetail, 'accepted');
-  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted. Scope: collection.');
+  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder.');
   h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'busy'); assert.equal(status.chat.sessionId, admitted.chat.sessionId);
   assert.equal(status.statusDetail, 'processing');
-  assert.match(status.statusText, /^Cuefluent: Processing is in progress\. Scope: collection\. Inventory/);
+  assert.match(status.statusText, /^Cuefluent: Processing is in progress\. Scope: all projects of this notes folder\. Inventory/);
   const duplicate = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(duplicate.status, 'busy'); assert.deepEqual(duplicate.diagnostics, ['PROCESSING_CHAT_BUSY']);
   assert.equal(duplicate.requestId, admitted.requestId);
@@ -75,7 +75,7 @@ test('status exposes unfinished evidence, incompatible source scope and conflict
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'idle');
   assert.equal(status.statusDetail, 'unfinished');
-  assert.match(status.statusText, /^Cuefluent: Processing stopped with unfinished work\. Scope: collection\. Inventory/);
+  assert.match(status.statusText, /^Cuefluent: Processing stopped with unfinished work\. Scope: all projects of this notes folder\. Inventory/);
   assert.equal(status.nextAction, 'resume');
   assert.equal(h.dispatches, 1);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), before);
@@ -221,6 +221,27 @@ test('legacy status receipts replay unchanged after clearer status details are i
   assert.equal(await fs.readFile(file, 'utf8'), bytes);
 });
 
+test('a receipt written with earlier reply wording replays byte-for-byte, never re-rendered', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
+  await h.call('process_selected_captures', args); await closed;
+  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
+  const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
+  // The same reply as an earlier release worded it, recorded consistently.
+  const earlier = receipt.dispatch.response;
+  assert.equal(earlier.statusDetail, 'accepted'); assert.equal(earlier.scope, 'collection');
+  earlier.statusText = 'Cuefluent: Processing request accepted. Scope: collection.';
+  const result = { content: [{ type: 'text', text: canonicalJSON(earlier) }], isError: false };
+  receipt.dispatch.statusText = earlier.statusText;
+  receipt.dispatch.resultHash = digest(canonicalJSON(result));
+  const bytes = canonicalJSON(receipt) + '\n';
+  await fs.writeFile(file, bytes);
+  h.callId = 'call_1';
+  assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
+  assert.equal(h.dispatches, 1);
+  assert.equal(await fs.readFile(file, 'utf8'), bytes);
+});
+
 test('formal replay rejects a changed stored response without changing its receipt or dispatching', async t => {
   const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
   const args = { collectionId: f.collection.id }, closed = h.whenClosed();
@@ -343,7 +364,7 @@ test('verified native skill admission writes its exact parent control receipt be
   const receipt = JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
   assert.equal(receipt.dispatch.callId, 'call_1'); assert.equal(receipt.dispatch.unitId, f.identity.unitId);
   assert.equal(receipt.dispatch.argsHash, digest(canonicalJSON(args))); assert.equal(receipt.dispatch.resultHash, digest(canonicalJSON(row.result)));
-  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted. Scope: collection.');
+  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder.');
   assert.equal(receipt.dispatch.sourcePath, f.source.path);
   gate.resolve();
 });
@@ -1329,6 +1350,9 @@ test('review selects one exact collection proposal before presenting its content
   const selector = await choose;
   const choices = selector.params.requestedSchema.properties.operationId.oneOf;
   assert.equal(choices.length, 2); assert(choices.some(item => item.const === b.operationId));
+  // The picker names each draft by its captured turns, never in internal words.
+  for (const item of choices) assert.match(item.title, /^Draft [12]: \d+ captured turns?; /);
+  assert.doesNotMatch(JSON.stringify(selector.params), /collect|captures/i);
   const preview = h.nextForm(); h.answer(selector, { action: 'accept', content: { operationId: b.operationId } });
   const form = await preview;
   assert(form.params.requestedSchema.properties.changes.default.includes((await inspectProcessing(b.capability, b.operationId)).proposalHash));

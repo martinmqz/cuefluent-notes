@@ -45,7 +45,8 @@ check is not a reason to start over.
 For recognized `cuefluent-workflow` settings,
 preserve settings, paths, captures and active operations. Do not rerun setup
 unless the selected release requires it. Before replacing packages, stop
-automatic capture and processing, close affected sessions, and let workers
+capture entrypoints (hooks and capture commands) and processing, close affected
+sessions, and let workers
 and processing clients finish. Update every client plugin/helper sharing the
 store to the same released version before resuming. Check the release notes for
 storage compatibility and downgrade boundaries; a patch does not necessarily
