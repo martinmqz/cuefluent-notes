@@ -13,7 +13,7 @@ import { schedulerPath } from './collection-scheduler.mjs';
 import { readSelection, readCaptureHead, controlSelection, readReaderProgress } from './intake-store.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
-import { captureChatTurns, excludeChatTurn } from './capture-controls.mjs';
+import { captureChatTurns, excludeChatTurn, selectExplicitCapture } from './capture-controls.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { digest } from './workflow-values.mjs';
 
@@ -340,6 +340,48 @@ test('a stored scan position is dropped when the transcript changed under it', a
   assert(reads.some(read => read.purpose === 'range' && read.offset < saved.offset), JSON.stringify(reads.slice(0, 3)));
   assert.deepEqual(await capture(C3), { turns: 1, more: false, leftOut: 0 });
   assert((await A.head(P2)).head);
+});
+
+test('capture does not trust where an earlier capture ended once the transcript was cut back and regrown', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' });
+  const bind = async (A, promptId) => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // Cut the transcript back in place to `size`, then grow it past `end` with a replacement turn.
+  const regrow = async (A, size, end, P) => {
+    await fs.truncate(A.file, size);
+    await A.append([A.prompt('Replacement: ship on Monday.', P), A.reply('Noted. '.repeat(64))]);
+    assert((await fs.stat(A.file)).size > end);
+  };
+  await t.test('a finished capture', async () => {
+    const A = f.session(), [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
+    await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+    const size = (await fs.stat(A.file)).size;
+    await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+    const first = await bind(A, C1);
+    assert.deepEqual(await captureChatTurns(f.capability, first), { turns: 1, more: false, leftOut: 0 });
+    await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+    await regrow(A, size, (await A.selection()).state.explicitScopes.at(-1).end.endByte, P2);
+    assert.deepEqual(await captureChatTurns(f.capability, await bind(A, C2)), { turns: 1, more: false, leftOut: 0 });
+    assert.match((await A.head(P2)).capture.evidence[0].text, /ship on Monday/);
+  });
+  await t.test('an unfinished capture', async () => {
+    const A = f.session(), [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
+    await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+    const size = (await fs.stat(A.file)).size;
+    await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+    const end = (await fs.stat(A.file)).size, first = await bind(A, C1);
+    // A window selected but never run, as when a capture runs out of time.
+    await selectExplicitCapture(f.capability, { selection: first.selection, sourcePath: first.source.path,
+      expectedSourceIdentity: first.source.fileIdentity, expectedSelectionHash: (await A.selection()).hash,
+      operationId: randomUUID(), kind: 'historical', unitIds: [P1], readRange: { fromByte: size, endByte: end } });
+    await regrow(A, size, end, P2);
+    assert.deepEqual(await captureChatTurns(f.capability, await bind(A, C2)), { turns: 1, more: false, leftOut: 0 });
+    assert.equal((await A.head(P1)).head, null);
+    assert.match((await A.head(P2)).capture.evidence[0].text, /ship on Monday/);
+  });
 });
 
 test('a capture short on time still records the turns it left out, so the next one passes them', async t => {

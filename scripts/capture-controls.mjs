@@ -289,6 +289,7 @@ export async function excludeChatTurn(capability, { selection, source, unitId },
 // place under the same file identity drops it, so the next capture reads
 // again instead of trusting an offset into other contents.
 const CHAT_CURSOR_ANCHOR_BYTES = 4096;
+const SOURCE_CONFLICTS = ['SOURCE_CHANGED', 'SOURCE_ANCHOR_CONFLICT', 'SOURCE_IDENTITY_MISMATCH'];
 const chatCursorPath = chat => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}.json`;
 async function readChatCursor(store, chat, source) {
   const snapshot = await intakeSnapshot(store, 'state', chatCursorPath(chat), { maxBytes: 4096 }), value = intakeJSON(snapshot);
@@ -298,7 +299,7 @@ async function readChatCursor(store, chat, source) {
   if (value.sourceIdentity !== source.fileIdentity) return { snapshot, cursor: null };
   try { await verifySourceCursor(source, { sourceIdentity: value.sourceIdentity, offset: value.offset, anchor: value.anchor }); }
   catch (error) {
-    if (['SOURCE_CHANGED', 'SOURCE_ANCHOR_CONFLICT', 'SOURCE_IDENTITY_MISMATCH'].includes(error.code)) return { snapshot, cursor: null };
+    if (SOURCE_CONFLICTS.includes(error.code)) return { snapshot, cursor: null };
     throw error;
   }
   return { snapshot, cursor: value };
@@ -317,6 +318,17 @@ async function chatCursorAnchor(source, offset) {
     return { startByte, endByte: offset, hash: digest(bytes) };
   } finally { await handle.close(); }
 }
+// Whether the transcript still holds a stored record: the same bytes, ending at
+// the same offset. One truncated or rewritten in place under the same file
+// identity may not, and progress that ends with that record no longer counts.
+async function holdsRecord(source, record) {
+  if (record.endByte - record.startByte > CHAT_ANCHOR_BYTES) return false;
+  try {
+    await verifySourceCursor(source, { sourceIdentity: source.fileIdentity, offset: record.endByte,
+      anchor: { startByte: record.startByte, endByte: record.endByte, hash: record.hash } });
+    return true;
+  } catch (error) { if (SOURCE_CONFLICTS.includes(error.code)) return false; throw error; }
+}
 async function advanceChatCursor(capability, chat, source, position, { now, signal }) {
   if (position.eofByte <= 0) return;
   return bounded(now, async () => {
@@ -331,15 +343,21 @@ async function advanceChatCursor(capability, chat, source, position, { now, sign
 }
 
 // Where the next window may start: past the chat's own start (`floor`), its
-// last typed or explicit capture, how far captures read past turns they left
-// out, and whatever Automatic capture already covered (the worker's progress,
-// or its pause), so no turn is captured twice.
+// last typed or explicit capture whose end the transcript still holds, how far
+// captures read past turns they left out, and whatever Automatic capture
+// already covered (the worker's progress, or its pause), so no turn is
+// captured twice.
 async function chatStart(store, chat, state, floor, source) {
   let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
   const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
   const { cursor } = await readChatCursor(store, chat, source);
   if (cursor) later(cursor.offset, cursor.startsMidRecord);
-  for (const scope of state?.explicitScopes ?? []) later((scope.end ?? scope.start).endByte);
+  // Latest first: the first capture whose end still holds is the one that counts.
+  const ends = (state?.explicitScopes ?? []).map(scope => scope.end ?? scope.start).sort((a, b) => b.endByte - a.endByte);
+  for (const end of ends) {
+    if (end.endByte <= start.eofByte) break;
+    if (await holdsRecord(source, end)) { later(end.endByte); break; }
+  }
   for (const interval of state ? currentIntervals(state) : []) {
     if (interval.upper) { later(interval.upper.eofByte, interval.upper.startsMidRecord); continue; }
     // The worker's progress counts only while its anchor still matches the
@@ -348,7 +366,7 @@ async function chatStart(store, chat, state, floor, source) {
     let verified = false;
     if (cursor) {
       try { await verifySourceCursor(source, cursor); verified = true; }
-      catch (error) { if (!['SOURCE_CHANGED', 'SOURCE_ANCHOR_CONFLICT', 'SOURCE_IDENTITY_MISMATCH'].includes(error.code)) throw error; }
+      catch (error) { if (!SOURCE_CONFLICTS.includes(error.code)) throw error; }
     }
     if (verified) later(cursor.offset);
     else later(interval.lower.eofByte, interval.lower.startsMidRecord);
@@ -492,7 +510,8 @@ async function scopeDrained(capability, chat, state, scope, now) {
 
 /** `capture`: this chat's finished turns since its last capture, or since it
  * started, oldest first, as one explicit scope per window. A window a previous
- * capture could not finish runs first; a new window is read only once it has.
+ * capture could not finish runs first, while the transcript still holds its
+ * end; a new window is read only once it has.
  * The command turn is never part of a window. The command ends within 50 s
  * and stops on cancellation, keeping what it captured. */
 export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows, captureMs = CHAT_CAPTURE_MS } = {}) {
@@ -503,7 +522,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   signal?.throwIfAborted();
   const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
   const last = previous.state?.explicitScopes.filter(scope => scope.kind === 'historical').at(-1);
-  if (last && !await scopeDrained(capability, chat, previous.state, last, now)) {
+  if (last && !await scopeDrained(capability, chat, previous.state, last, now) && await bounded(now, () => holdsRecord(source, last.end))) {
     const rerun = await runChatScope(capability, chat, last, { ...options, fresh: false });
     turns += rerun.saved;
     if (!rerun.finished) return { turns, more: true, leftOut: 0 };
