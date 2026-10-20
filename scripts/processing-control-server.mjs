@@ -79,6 +79,9 @@ const CAPTURE_OUTCOMES = Object.freeze({
   // Automatic capture of this chat stopped (a safety stop or a record the
   // reader cannot pass): a typed capture cannot take its turns either.
   stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either. Type ${cmd('status --verbose')} to see where things stand.`,
+  // A typed capture stopped at a record it cannot read, which every later
+  // capture of the chat reaches too: the reply names why.
+  blocked: (cmd, turns, more, leftOut, reason) => `Capture stopped at a record of this chat: ${COLLECTION_STOPS[reason]}, so typing ${cmd('capture')} cannot capture its later turns.`,
   // A safety stop, in either capture mode: the chat's capture record is full,
   // and only these capture commands still bind in the chat, so the reply names
   // no other command.
@@ -675,6 +678,8 @@ export function processingControlStatusView(value, args) {
     if (value.verbose !== undefined) result.verbose = true;
     if (value.capture !== undefined) {
       choice(value.capture, Object.keys(CAPTURE_OUTCOMES));
+      if ((value.capture === 'blocked') !== (value.reason !== undefined) || (value.reason !== undefined && !Object.hasOwn(COLLECTION_STOPS, value.reason))) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (value.reason !== undefined) result.reason = value.reason;
       const counts = value.capture === 'captured' || value.capture === 'nothing-new';
       if (result.commandPrefix === undefined || (value.capture === 'captured') !== (value.turns !== undefined) ||
           (!counts && (value.more !== undefined || value.leftOut !== undefined)) || (value.more !== undefined && typeof value.more !== 'boolean')) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
@@ -682,7 +687,7 @@ export function processingControlStatusView(value, args) {
       if (value.turns !== undefined) { integer(value.turns); if (value.turns < 1 || value.turns > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); result.turns = value.turns; }
       if (value.more !== undefined) result.more = value.more;
       result.capture = value.capture;
-      result.statusText = `Cuefluent: ${CAPTURE_OUTCOMES[value.capture](cmd, value.turns, value.more === true, value.leftOut ?? 0)}`; ownReply = true;
+      result.statusText = `Cuefluent: ${CAPTURE_OUTCOMES[value.capture](cmd, value.turns, value.more === true, value.leftOut ?? 0, value.reason)}`; ownReply = true;
     }
     // A status reply can say that automatic collection stopped for this chat.
     if (value.collection !== undefined) {

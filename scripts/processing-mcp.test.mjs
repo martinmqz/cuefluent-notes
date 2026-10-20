@@ -1082,16 +1082,19 @@ test('typed status in a chat with no housekeeping room keeps its turn capturable
   assert(!after.exclusions.includes(parent.controls.at(-1)));
 });
 
-test('a typed capture that fails still leaves its own turn out of later captures', async t => {
+test('a typed capture stopped by a record it cannot read says why and leaves its own turn out', async t => {
   const { h, parent, store, identity } = await manualCaptureChat(t);
   await parent.work('Decision: ship on Friday.');
   // A record the reader cannot read stops the capture; enough later bytes keep
   // the command's own binding read past it.
   await fs.appendFile(parent.source.path, 'not a transcript record\n');
   await parent.work('Later turn.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
-  const rpc = await h.call('capture_turns', {});
-  assert.equal(rpc.error.code, -32600, JSON.stringify(rpc)); assert.equal(rpc.error.data.diagnostics, undefined);
-  assert((await readSelection(store, identity)).state.exclusions.includes(parent.controls.at(-1)));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+    assert.deepEqual([reply.capture, reply.reason], ['blocked', 'INVALID_SESSION_RECORD'], JSON.stringify(rpc));
+    assert.match(reply.statusText, /^Cuefluent: Capture stopped at a record of this chat: its transcript has a record that is not valid, so typing \$cuefluent-notes capture cannot capture its later turns\.$/);
+    assert((await readSelection(store, identity)).state.exclusions.includes(parent.controls.at(-1)));
+  }
 });
 
 test('a window with a turn the reader holds for its records keeps waiting, never passed by a later window', async t => {

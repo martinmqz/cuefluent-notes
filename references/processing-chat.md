@@ -107,7 +107,9 @@ ending in a record too large to anchor) is left out, and the reply says so; it
 never blocks the chat's later turns. Turns already left out stay out. In a chat
 Automatic capture covers it captures nothing and says so, and in a chat whose
 Automatic capture has stopped it says that capture cannot take its turns
-either; in a paused chat it works as in Manual mode. After a safety stop, which
+either; in a paused chat it works as in Manual mode. A record capture cannot
+read stops each later capture of the chat at the same place, and the reply names
+why instead of failing. After a safety stop, which
 a full capture record causes, `capture`, `pause chat` and `resume chat` say the
 record is full in either capture mode, and other commands, `status` included,
 no longer bind in that chat. `pause chat` and `resume chat` are the

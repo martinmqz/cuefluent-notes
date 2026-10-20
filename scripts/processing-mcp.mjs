@@ -16,7 +16,7 @@ import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, holdsTypedCapture } from './capture-controls.mjs';
-import { readReaderBlock } from './collection-worker.mjs';
+import { readReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -759,9 +759,15 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (automatic && !paused) outcome = { capture: stop ? 'stopped' : 'automatic' };
       else if (stop && holdsTypedCapture(stop)) outcome = { capture: 'stopped' };
       else {
-        const captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal }));
-        const left = captured.leftOut ? { leftOut: captured.leftOut } : {};
-        outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more, ...left } : { capture: 'nothing-new', more: captured.more, ...left };
+        let captured = null;
+        // A record the reader cannot read stops every capture of the chat at
+        // the same place: the reply names why rather than failing uncertain.
+        try { captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal })); }
+        catch (error) { if (!READER_BLOCK_CODES.includes(error.code) || !COLLECTION_STOP_CODES.includes(error.code)) throw error; outcome = { capture: 'blocked', reason: error.code }; }
+        if (captured) {
+          const left = captured.leftOut ? { leftOut: captured.leftOut } : {};
+          outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more, ...left } : { capture: 'nothing-new', more: captured.more, ...left };
+        }
       }
     } else if (!automatic) outcome = { capture: 'not-automatic' };
     else if (tool === 'pause_capture') {

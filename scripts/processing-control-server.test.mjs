@@ -684,6 +684,12 @@ test('plain status lists drafts as code and path; status --verbose adds every de
     assert.throws(() => processingControlStatusView({ ...base, collection }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
   }
   assert.throws(() => processingControlStatusView({ ...base, help: true, collection: stopped.collection }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  // A capture stopped at a record names the reason, which only that reply carries.
+  const blocked = processingControlStatusView({ ...base, capture: 'blocked', reason: 'INVALID_SESSION_RECORD' }, { collectionId: 'example' });
+  assert.equal(blocked.reason, 'INVALID_SESSION_RECORD'); assert(!blocked.statusText.includes('INVALID_SESSION'));
+  for (const value of [{ capture: 'blocked' }, { capture: 'blocked', reason: 'SOURCE_BOUNDARY_PENDING' }, { capture: 'stopped', reason: 'INVALID_SESSION_RECORD' }]) {
+    assert.throws(() => processingControlStatusView({ ...base, ...value }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  }
   // Revisions belong to the verbose reply only, and the verbose reply stays bounded.
   assert.throws(() => processingControlStatusView({ ...base, drafts: revisions }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
   assert.throws(() => processingControlStatusView({ ...base, verbose: true, drafts }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
@@ -1310,7 +1316,7 @@ test('replies people read never say collection', () => {
     }
     texts.push(view({ ...base, status: 'missing', help: true }).statusText);
     for (const capture of PROCESSING_CAPTURE_OUTCOMES) {
-      const counts = capture === 'captured' ? { turns: 2, more: true } : capture === 'nothing-new' ? { more: true } : {};
+      const counts = capture === 'captured' ? { turns: 2, more: true } : capture === 'nothing-new' ? { more: true } : capture === 'blocked' ? { reason: 'INVALID_SESSION_RECORD' } : {};
       const shown = view({ ...base, status: 'idle', capture, ...counts });
       assert(shown, capture); texts.push(shown.statusText);
     }
