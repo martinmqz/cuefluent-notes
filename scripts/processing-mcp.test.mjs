@@ -1125,6 +1125,19 @@ test('a turn whose terminal record is too large to anchor is left out even behin
   assert((await readSelection(store, identity)).state.exclusions.includes(big));
 });
 
+test('typed capture commands in a safety-stopped Manual chat also say its capture record is full', async t => {
+  const { h, parent, store, identity, typed } = await manualCaptureChat(t);
+  await typed('capture_turns', 'nothing-new');
+  const current = await readSelection(store, identity);
+  await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${identity.sessionId}.json`,
+    { ...current.state, safetyStop: { reason: 'capacity', unitId: randomUUID() } }, current.hash));
+  for (const tool of ['capture_turns', 'pause_capture', 'resume_capture']) {
+    const reply = await typed(tool, 'full');
+    // Status does not bind here, so the reply does not point to it.
+    assert.match(reply.statusText, /capture record is full/); assert.doesNotMatch(reply.statusText, /status/);
+  }
+});
+
 test('a failed typed command whose turn could not be left out says so in its refusal', async t => {
   const { h, parent, store, identity, typed } = await manualCaptureChat(t);
   await typed('capture_turns', 'nothing-new');

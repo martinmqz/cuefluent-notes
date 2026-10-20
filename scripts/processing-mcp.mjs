@@ -735,9 +735,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const paused = state?.paused === true;
     const chat = { selection: source.selection, source: source.source };
     let outcome;
-    // After a safety stop nothing of the chat is captured, and there is
-    // nothing to pause or resume.
-    if (automatic && state?.safetyStop) outcome = { capture: 'full' };
+    // After a safety stop nothing of the chat is captured, in either capture
+    // mode, and there is nothing to pause or resume.
+    if (state?.safetyStop) outcome = { capture: 'full' };
     else if (tool === 'capture_turns') {
       // A chat Automatic capture covers but has stopped is not covered.
       if (automatic && !paused) outcome = { capture: await automaticStopped(capability, source) ? 'stopped' : 'automatic' };

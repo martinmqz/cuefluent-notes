@@ -79,9 +79,10 @@ const CAPTURE_OUTCOMES = Object.freeze({
   // Automatic capture of this chat stopped (a safety stop or a record the
   // reader cannot pass): a typed capture cannot take its turns either.
   stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either. Type ${cmd('status --verbose')} to see where things stand.`,
-  // A safety stop: the chat's capture record is full, and only these capture
-  // commands still bind in the chat, so the reply names no other command.
-  full: cmd => `Automatic capture has stopped for this chat because its capture record is full, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either.`,
+  // A safety stop, in either capture mode: the chat's capture record is full,
+  // and only these capture commands still bind in the chat, so the reply names
+  // no other command.
+  full: cmd => `This chat's capture record is full, so its later turns are not captured, either automatically or by typing ${cmd('capture')}.`,
   paused: cmd => `Automatic capture is paused for this chat from this turn on; turns captured before it are kept. To restart it, type ${cmd('resume chat')}.`,
   'already-paused': cmd => `Automatic capture is already paused for this chat. To restart it, type ${cmd('resume chat')}.`,
   resumed: () => 'Automatic capture is on again for this chat; turns after this one are captured.',
@@ -347,6 +348,13 @@ const COLLECTION_STOPS = Object.freeze({
   INVALID_READER_CHECKPOINT: 'its saved reading progress is not valid',
   READER_PAGE_CONFLICT: 'its saved reading progress no longer matches itself',
   UNSUPPORTED_CLAUDE_READER: 'a turn of it was captured by a newer version of Cuefluent Notes',
+  READER_CHECKPOINT_CONFLICT: 'its saved reading progress does not fit the stretch it was saved for',
+  READER_CHECKPOINT_IDENTITY_MISMATCH: 'its saved reading progress belongs to another chat or transcript',
+  READER_ALLOCATION_INCONSISTENT: 'its saved reading progress accounts for its space inconsistently',
+  INVALID_READER_PROGRESS: 'its saved reading position is not valid',
+  INVALID_READER_SUSPENSION: 'its saved pause state is not valid',
+  READER_CHECKPOINT_REQUIRED: 'its saved reading position has lost the progress it depends on',
+  INVALID_INTAKE_CURSOR: 'its saved reading position does not fit its transcript',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));
