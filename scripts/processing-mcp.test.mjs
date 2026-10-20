@@ -1432,8 +1432,7 @@ test('typed capture takes a turn rewritten into the paused stretch after the pau
   const rpc = await h.call('pause_capture', {}); assert.equal(body(rpc).capture, 'paused'); await parent.finish(rpc); await run();
   const { upper, id } = (await readSelection(parent.store, identity)).state.intervals.at(-1);
   assert(upper.record && upper.record.endByte < upper.eofByte);
-  // No progress reached the pause's end, as when a read stopped short of it:
-  // only the pause turn's record vouches for the paused stretch.
+  // No progress reached the pause's end, as when a read stopped short of it.
   await fs.rm(path.join(f.collection.intakeStateDir, 'progress', 'codex', identity.sessionId, `${id}.json`));
   // The transcript is rewritten in place after the pause turn's anchored record,
   // keeping that record, the file and every byte from the pause's end on: a
@@ -1451,11 +1450,41 @@ test('typed capture takes a turn rewritten into the paused stretch after the pau
   assert.equal(replacement.length, upper.eofByte - upper.record.endByte);
   const handle = await fs.open(parent.source.path, 'r+');
   try { await handle.write(replacement, 0, replacement.length, upper.record.endByte); } finally { await handle.close(); }
-  // Only the pause record is vouched for, so the stretch after it is not
-  // Automatic capture's: a typed capture takes the turn.
+  // Automatic capture's progress never read the stretch, whatever the pause
+  // record still matches, so a typed capture takes the turn.
   const typed = await h.call('capture_turns', {}), reply = body(typed); await parent.finish(typed);
   assert.equal(reply.capture, 'captured', reply.statusText); assert.equal(reply.turns, 1);
   assert((await readCaptureHead(parent.store, { ...identity, unitId: inserted })).head);
+});
+
+test('typed capture in a paused chat takes a turn Automatic capture has not read yet', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await parent.work('Captured automatically.'); await run();
+  // Writes rows into ordinal slots the parent's own counter has passed.
+  const slots = async rows => {
+    for (const _ of rows) await parent.resume({});
+    const lines = (await fs.readFile(parent.source.path, 'utf8')).trimEnd().split('\n'), ordinals = lines.slice(-rows.length).map(line => JSON.parse(line).ordinal);
+    await fs.writeFile(parent.source.path, [...lines.slice(0, -rows.length), ...rows.map((row, i) =>
+      JSON.stringify({ timestamp: '2026-10-10T12:00:00.000Z', ordinal: ordinals[i], type: 'event_msg', payload: row }))].join('\n') + '\n');
+  };
+  // A turn still unfinished when the chat is paused holds the worker's progress
+  // before it, while the reader already anchors the later pause turn.
+  const late = randomUUID();
+  await slots([{ type: 'task_started', turn_id: late, root_turn_id: late },
+    { type: 'item_completed', thread_id: identity.sessionId, turn_id: late, item: { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text: 'Decision: finished late.' }] } }]);
+  const rpc = await h.call('pause_capture', {}); assert.equal(body(rpc).capture, 'paused'); await parent.finish(rpc); await run();
+  assert((await readSelection(parent.store, identity)).state.intervals.at(-1).upper.record);
+  await slots([{ type: 'task_complete', turn_id: late }]);
+  // Automatic capture has not read the finished turn, so a typed capture takes it.
+  const typed = await h.call('capture_turns', {}), reply = body(typed); await parent.finish(typed);
+  assert.equal(reply.capture, 'captured', reply.statusText); assert.equal(reply.turns, 1);
+  const head = await readCaptureHead(parent.store, { ...identity, unitId: late });
+  assert(head.head);
+  // The worker's later pass leaves it as it is.
+  await run();
+  assert.equal(await readReaderBlock(parent.store, identity), null);
+  assert.equal((await readCaptureHead(parent.store, { ...identity, unitId: late })).hash, head.hash);
 });
 
 test('agent-created hook registration reaches real capture, native processing and exact proposal review', async t => {

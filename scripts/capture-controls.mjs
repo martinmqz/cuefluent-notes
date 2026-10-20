@@ -458,15 +458,13 @@ async function chatStart(store, chat, state, floor, source) {
   }
   const covered = [];
   for (const interval of state ? currentIntervals(state) : []) {
-    // The worker's progress counts while its anchor still matches. A pause
-    // stores where the transcript ended, and its pause turn's record once the
-    // reader anchors it. The stretch counts through the pause's end only once
-    // the verified progress has reached it, since only progress is bound to the
-    // bytes read there; the pause record, while the transcript and the progress
-    // before it still hold it, vouches only for the stretch through that record.
-    // Otherwise only the stretch up to the verified progress is covered, or
-    // none. Either stretch starts where Automatic capture began, and counts only
-    // while the transcript still holds that start's record.
+    // Only what Automatic capture has read is covered: the stretch up to the
+    // worker's progress while its anchor still matches, and no further than
+    // where a pause ended the interval. A pause turn's record, which the reader
+    // may anchor before its progress gets there, is not coverage: the turns
+    // before it are not captured yet, and the pause turn itself is left out by
+    // its own exclusion. The stretch starts where Automatic capture began, and
+    // counts only while the transcript still holds that start's record.
     const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
     let verified = false;
     if (cursor) {
@@ -476,8 +474,6 @@ async function chatStart(store, chat, state, floor, source) {
     const { upper } = interval;
     let to = verified ? { eofByte: cursor.offset, startsMidRecord: false } : null;
     if (upper && to && to.eofByte >= upper.eofByte) to = { eofByte: upper.eofByte, startsMidRecord: upper.startsMidRecord };
-    else if (upper?.record && (!cursor || verified) && upper.record.endByte <= upper.eofByte && upper.record.endByte > (to?.eofByte ?? 0) &&
-        await holds(source, upper.record.endByte, upper.record)) to = { eofByte: upper.record.endByte, startsMidRecord: false };
     if (to && to.eofByte > interval.lower.eofByte && await holds(source, interval.lower.eofByte, interval.lower.record)) {
       covered.push({ from: interval.lower.eofByte, to });
     }
