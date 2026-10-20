@@ -33,7 +33,9 @@ for (const statuses of [[1, 0], [0, 7], [2, 7], [null, 0], ['spawn-error', 0], [
       };
       syncBuiltinESMExports();
     `);
-    const result = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(root, 'preload.mjs')).href, path.join(root, 'test.mjs'), '--test-concurrency=4'], { encoding: 'utf8' });
+    // CI runs this file inside a shard; the runner under test sees no shard.
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(root, 'preload.mjs')).href, path.join(root, 'test.mjs'), '--test-concurrency=4'],
+      { encoding: 'utf8', env: { ...process.env, CUEFLUENT_TEST_SHARD: '' } });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null, result.stderr);
     await assert.doesNotReject(() => fs.access(path.join(root, 'calls.json')), result.stderr);
@@ -82,6 +84,15 @@ test('test shards run every file exactly once, balanced by size, and refuse inva
   assert.equal(new Set(shards.flat()).size, Object.keys(sizes).length);
   const load = shard => shard.reduce((sum, name) => sum + sizes[name], 0);
   assert.deepEqual(shards.map(load), [1300, 1200]);
+  // Files of equal size spread by count too, so no shard is left empty.
+  await Promise.all(Object.keys(sizes).map(name => fs.writeFile(path.join(root, name), '')));
+  const even = [];
+  for (const spec of ['1/2', '2/2']) {
+    const { result, calls } = run(spec);
+    assert.equal(result.status, 0, result.stderr);
+    even.push(JSON.parse(await fs.readFile(calls, 'utf8')).flatMap(args => args.filter(arg => arg.endsWith('.test.mjs'))).length);
+  }
+  assert.deepEqual(even, [3, 3]);
   for (const spec of ['0/2', '3/2', '1/0', '2', 'a/b', '1/2/3']) {
     const { result } = run(spec);
     assert.notEqual(result.status, 0, spec); assert.match(result.stderr, /Invalid CUEFLUENT_TEST_SHARD/);

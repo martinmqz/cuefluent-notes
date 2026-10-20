@@ -9,18 +9,20 @@ const directory = path.dirname(fileURLToPath(import.meta.url));
 const all = (await fs.readdir(directory)).filter(file => file.endsWith('.test.mjs')).sort();
 if (!all.length) throw new Error('No test files found.');
 // CI can run the suite as parallel jobs: CUEFLUENT_TEST_SHARD=i/n runs the i-th
-// of n disjoint shards. Files are balanced by size, largest first, with ties
-// broken by name, so jobs of one checkout run every file in exactly one shard.
+// of n disjoint shards. Files are balanced by size, largest first, onto the
+// shard with the fewest bytes, then the fewest files, so jobs of one checkout
+// run every file in exactly one shard.
 async function shardOf(files, spec) {
   if (!spec) return files;
   const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(spec);
   if (!match || Number(match[1]) > Number(match[2])) throw new Error(`Invalid CUEFLUENT_TEST_SHARD: ${spec}`);
   const [index, count] = [Number(match[1]), Number(match[2])];
   const sizes = new Map(await Promise.all(files.map(async file => [file, (await fs.stat(path.join(directory, file))).size])));
-  const loads = Array(count).fill(0), owners = new Map();
+  const loads = Array.from({ length: count }, () => ({ bytes: 0, files: 0 })), owners = new Map();
   for (const file of [...files].sort((a, b) => sizes.get(b) - sizes.get(a) || (a < b ? -1 : 1))) {
-    const shard = loads.indexOf(Math.min(...loads));
-    loads[shard] += sizes.get(file); owners.set(file, shard + 1);
+    const shard = loads.reduce((best, load, index) => load.bytes < loads[best].bytes ||
+      (load.bytes === loads[best].bytes && load.files < loads[best].files) ? index : best, 0);
+    loads[shard].bytes += sizes.get(file); loads[shard].files++; owners.set(file, shard + 1);
   }
   return files.filter(file => owners.get(file) === index);
 }
