@@ -256,7 +256,11 @@ verified caller; it is not the default evidence boundary. Evidence `scope` is
 `collection` (default), `repo` or `chat`. A mismatched exact formal action and tool
 scope is refused. Narrower scopes still require existing per-input policy. MCP dispatch identity derives from the verified native
 session and call ID: redelivery replays, while another invocation is new even if
-the model repeats its optional `requestId` hint. The returned `requestId` is the
+the model repeats its optional `requestId` hint. A typed `capture`, `pause chat`
+or `resume chat` keeps its reply as well, so its redelivery answers as the first
+delivery did and acts once. A `pause chat` that paused Automatic capture is the
+exception: the chat's binding then starts after that call, so its redelivery is
+refused before acting and the pause stays. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
 

@@ -371,6 +371,38 @@ async function recordTailAnchor(source, record) {
     return { startByte: record.endByte - tail.length, endByte: record.endByte, hash: digest(tail) };
   } finally { await handle.close(); }
 }
+// The reply a typed capture command gave, kept per chat for its exact native
+// call: a redelivered call answers with it instead of acting again. Only the
+// latest command's reply is kept; one too large to keep is not.
+const CHAT_REPLY_BYTES = 16384;
+const chatReplyPath = chat => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}.reply.json`;
+const replyCall = call => { keys(call, ['unitId', 'callId', 'tool', 'argsHash']); nativeId(call.unitId);
+  for (const field of ['callId', 'tool']) if (typeof call[field] !== 'string' || !call[field] || call[field].length > 256) fail('INVALID_INTAKE_METADATA');
+  hash(call.argsHash); return call; };
+export async function readChatCommandReply(capability, selection, call, { now } = {}) {
+  const chat = await selected(selection); replyCall(call);
+  return bounded(now, async () => {
+    const store = await openWorkflowIntake(capability);
+    const value = intakeJSON(await intakeSnapshot(store, 'state', chatReplyPath(chat), { maxBytes: CHAT_REPLY_BYTES }));
+    if (value === null) return null;
+    keys(value, ['format', 'version', 'call', 'response']); replyCall(value.call);
+    if (value.format !== 'cuefluent-chat-command-reply' || value.version !== 1 || typeof value.response !== 'object' ||
+        value.response === null || Array.isArray(value.response)) fail('INVALID_INTAKE_METADATA');
+    return canonicalJSON(value.call) === canonicalJSON(call) ? value.response : null;
+  });
+}
+export async function recordChatCommandReply(capability, selection, call, response, { now, signal } = {}) {
+  const chat = await selected(selection), value = { format: 'cuefluent-chat-command-reply', version: 1, call: replyCall(call), response };
+  if (Buffer.byteLength(canonicalJSON(value) + '\n') > CHAT_REPLY_BYTES) return;
+  return bounded(now, async () => {
+    const store = await openWorkflowIntake(capability);
+    return withIntakeLockWaiting(store, async tx => {
+      const snapshot = await intakeSnapshot(store, 'state', chatReplyPath(chat), { maxBytes: CHAT_REPLY_BYTES });
+      await replaceIntakeJSON(tx, chatReplyPath(chat), value, snapshot.hash);
+    }, { signal });
+  });
+}
+
 // The position is stored with the anchor the read that reached it took, and
 // only while the transcript still holds that anchor: bytes rewritten since that
 // read never vouch for it.

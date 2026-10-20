@@ -1138,6 +1138,48 @@ test('typed capture commands in a safety-stopped Manual chat also say its captur
   }
 });
 
+test('a redelivered capture command answers with its first reply and acts once', async t => {
+  // Sends the same native call again: its call ID and turn, with no new turn.
+  const redeliver = async (h, parent, rpc, sessionId) => {
+    const beforeCall = h.beforeCall, unitId = parent.controls.at(-1);
+    h.beforeCall = async () => { h.nativeIdentity = { client: 'codex', sessionId, unitId }; };
+    h.callId = `call_${rpc.id}`;
+    try { return await h.call(rpc.name, {}); } finally { h.beforeCall = beforeCall; h.callId = undefined; }
+  };
+  await t.test('capture in a Manual chat', async t => {
+    const { f, h, parent, head } = await manualCaptureChat(t);
+    const first = await parent.work('Decision: ship on Friday.'), second = await parent.work('Owner: Dana.');
+    const rpc = await h.call('capture_turns', {}); rpc.name = 'capture_turns';
+    assert.equal(body(rpc).capture, 'captured'); assert.equal(body(rpc).turns, 2); await parent.finish(rpc);
+    const again = await redeliver(h, parent, rpc, f.identity.sessionId);
+    assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
+    assert(await head(first)); assert(await head(second));
+  });
+  await t.test('resume chat in an Automatic chat', async t => {
+    const { f, h, parent } = await nativeIngressFixture(t);
+    await parent.work('Captured automatically.');
+    await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    const paused = await h.call('pause_capture', {}); assert.equal(body(paused).capture, 'paused'); await parent.finish(paused);
+    const rpc = await h.call('resume_capture', {}); rpc.name = 'resume_capture';
+    assert.equal(body(rpc).capture, 'resumed'); await parent.finish(rpc);
+    const again = await redeliver(h, parent, rpc, f.identity.sessionId);
+    assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
+  });
+  // The pause starts the chat's binding after its own call.
+  await t.test('pause chat in an Automatic chat is refused once paused', async t => {
+    const { f, h, parent } = await nativeIngressFixture(t);
+    await parent.work('Captured automatically.');
+    await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    const rpc = await h.call('pause_capture', {}); rpc.name = 'pause_capture';
+    assert.equal(body(rpc).capture, 'paused'); await parent.finish(rpc);
+    const store = await openWorkflowIntake(f.capability), identity = { client: 'codex', sessionId: f.identity.sessionId };
+    const before = await readSelection(store, identity);
+    const again = await redeliver(h, parent, rpc, f.identity.sessionId);
+    assert.equal(again.error?.data?.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED', JSON.stringify(again));
+    assert.equal((await readSelection(store, identity)).hash, before.hash);
+  });
+});
+
 test('a failed typed command whose turn could not be left out says so in its refusal', async t => {
   const { h, parent, store, identity, typed } = await manualCaptureChat(t);
   await typed('capture_turns', 'nothing-new');

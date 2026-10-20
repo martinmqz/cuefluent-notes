@@ -15,7 +15,7 @@ import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingSh
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
-import { captureChatTurns, controlChatCapture, excludeChatTurn } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, readChatCommandReply, recordChatCommandReply } from './capture-controls.mjs';
 import { readReaderBlock } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
@@ -729,6 +729,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     signal?.throwIfAborted();
     if (!source.nativeSkill || !source.unitId) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     const { capability } = selected(source);
+    // A redelivered call answers with the reply it already gave; the command
+    // does not act again.
+    const call = { unitId: source.unitId, callId: source.callId, tool, argsHash: source.argsHash };
+    const replay = await withStorageProbes(() => readChatCommandReply(capability, source.selection, call));
+    if (replay) return replay;
     const automatic = await automaticCapture(capability, source);
     const store = await withStorageProbes(() => openWorkflowIntake(capability));
     const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
@@ -753,7 +758,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     } else if (!paused) outcome = { capture: 'already-active' };
     else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' })); outcome = { capture: 'resumed' }; }
     signal?.throwIfAborted();
-    return { ...await currentView(source), ...outcome };
+    const response = { ...await currentView(source), ...outcome };
+    // Housekeeping: without the kept reply a redelivery acts again.
+    try { await withStorageProbes(() => recordChatCommandReply(capability, source.selection, call, response, { signal })); } catch { /* acts again */ }
+    return response;
   }
   // Whether the worker stopped Automatic capture of this chat, as status
   // reports it.
