@@ -1185,6 +1185,16 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
       await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
       await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'synthetic_unknown', payload: { type: 'synthetic' } }) + '\n');
     }],
+    // Evidence after a finished turn's terminal record, at the next native ordinal.
+    EVIDENCE_AFTER_CODEX_TERMINAL: [/its transcript has a turn with records after the turn ended\./, async parent => {
+      const ended = await parent.work('Decision: ship on Friday.');
+      await parent.resume({});
+      const text = await fs.readFile(parent.source.path, 'utf8'), last = text.lastIndexOf('\n', text.length - 2) + 1;
+      const { timestamp, ordinal } = JSON.parse(text.slice(last));
+      await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
+      await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'event_msg', payload: { type: 'item_completed',
+        thread_id: parent.source.sessionId, turn_id: ended, item: { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: 'Late evidence.' }] } } }) + '\n');
+    }],
     // A finished turn whose terminal record is too large to anchor.
     SOURCE_ANCHOR_LIMIT: [/its transcript has a turn whose last record is too large for Cuefluent Notes to track\./,
       parent => parent.work('Long final answer.', { last: 'x'.repeat(70 * 1024) })],

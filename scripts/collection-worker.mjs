@@ -172,13 +172,15 @@ const CLAUDE_FROZEN_BLOCKS = Object.freeze(['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE
   'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
   'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW']);
 // Reader blocks no later pass can get past, in either client: a record the
-// reader stops at, or a turn it can never read. Automatic capture of that
-// chat has stopped until the cause is reviewed.
+// reader stops at, or a turn it can never read or publish, such as one whose
+// records break the turn's own order. Automatic capture of that chat has
+// stopped until the cause is reviewed.
 export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUPPORTED_SESSION_OWNERSHIP',
   'UNSUPPORTED_CODEX_RECORD', 'UNSUPPORTED_CODEX_ORDER', 'UNSUPPORTED_CODEX_HISTORY', 'UNSUPPORTED_CODEX_CONTENT',
   'UNSUPPORTED_CODEX_TOOL_OUTPUT', 'UNSUPPORTED_CODEX_ITEM', 'UNSUPPORTED_CODEX_ROLE', 'UNSUPPORTED_CODEX_RESPONSE',
   'AMBIGUOUS_CODEX_ATTRIBUTION', 'CONFLICTING_CODEX_MIRROR', 'CONFLICTING_CODEX_CALL', 'CODEX_ROLLBACK_REQUIRES_REVIEW',
-  'SESSION_UNIT_LIMIT', 'SOURCE_ANCHOR_LIMIT']);
+  'SESSION_UNIT_LIMIT', 'SOURCE_ANCHOR_LIMIT', 'EVIDENCE_AFTER_CODEX_TERMINAL', 'DUPLICATE_CODEX_START',
+  'EVIDENCE_BEFORE_CODEX_START', 'CONFLICTING_CODEX_TERMINAL']);
 
 // The reader block a visit of a chat last ended on, kept per chat: a later
 // pass that does not visit the chat cannot erase it the way it rebuilds the
