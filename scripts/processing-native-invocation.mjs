@@ -13,7 +13,7 @@ import { verifyCodexHeader, codexRegistrationHeader, codexSkillSelection, codexM
 import { claudeRegistrationHeader, isClaudeHumanRow } from './claude-reader.mjs';
 import { readContinuesLink, readContinuedLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
 import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, findClaudeSkillArguments, claudeProcessingCommandKind, processingControlAction,
-  processingControlText, processingControlMatches, processingControlSuggestions, SKILL_NAME } from './processing-control-proof.mjs';
+  processingControlText, processingControlMatches, processingControlSuggestions, SKILL_NAME, CAPTURE_TOOLS } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, fail, object, isNativeId, keys, hash, integer } from './workflow-values.mjs';
 
 const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
@@ -133,7 +133,9 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   const store = await settle(() => openWorkflowIntake(capability));
   const identity = { client: context.client, sessionId: context.sessionId };
   const selected = await settle(() => readSelection(store, identity));
-  if (selected.state?.safetyStop) throw new UnavailableNativeSource();
+  // A safety stop binds only the typed capture commands, which report it and
+  // capture nothing; every other control refuses before reading the source.
+  if (selected.state?.safetyStop && !CAPTURE_TOOLS.includes(invocation.tool)) throw new UnavailableNativeSource();
   // A verified continuation of a registered root session: its background kind
   // is accepted, its re-homed prefix is never read, and it shares the
   // predecessor's chat lineage. Unverified or changed links bind nothing.

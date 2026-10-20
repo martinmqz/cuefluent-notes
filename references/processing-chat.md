@@ -92,7 +92,8 @@ ending in a record too large to anchor) is left out, and the reply says so; it
 never blocks the chat's later turns. Turns already left out stay out. In a chat
 Automatic capture covers it captures nothing and says so, and in a chat whose
 Automatic capture has stopped it says that capture cannot take its turns
-either; in a paused chat it works as in Manual mode. `pause chat` and `resume chat` are the
+either (after a safety stop, `pause chat` and `resume chat` say so too); in a
+paused chat it works as in Manual mode. `pause chat` and `resume chat` are the
 [pause and resume controls](session-workflow.md) at the command turn, for a chat
 Automatic capture covers; elsewhere they say there is nothing to pause or
 resume. Only the person's typed command acts: a call the model makes on its own

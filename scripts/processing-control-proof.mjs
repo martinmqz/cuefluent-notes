@@ -204,6 +204,8 @@ export function processingControlAction(tool, args = {}) {
   return { processing_resume: 'process resume', processing_cancel: 'process cancel',
     capture_turns: 'capture', pause_capture: 'pause chat', resume_capture: 'resume chat' }[name] ?? null;
 }
+// Typed chat capture commands; each carries no fields of its own.
+export const CAPTURE_TOOLS = Object.freeze(['capture_turns', 'pause_capture', 'resume_capture']);
 // The table and the tool mapping must agree; a known word is never a control.
 for (const form of GRAMMAR) {
   const text = form.words.map(word => word === CODE ? 'k2mn9p' : word).join(' ');

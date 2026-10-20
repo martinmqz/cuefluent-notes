@@ -1148,6 +1148,22 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
   assert.equal(reply.capture, 'stopped', reply.statusText);
 });
 
+test('typed capture commands in a safety-stopped chat say capture stopped and change nothing', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  await parent.work('Captured automatically.');
+  await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const selected = await readSelection(parent.store, identity);
+  await withIntakeLock(parent.store, tx => replaceIntakeJSON(tx, `sessions/codex/${identity.sessionId}.json`,
+    { ...selected.state, safetyStop: { reason: 'capacity', unitId: randomUUID() } }, selected.hash));
+  const stopped = await readSelection(parent.store, identity);
+  for (const tool of ['capture_turns', 'pause_capture', 'resume_capture']) {
+    const rpc = await h.call(tool, {});
+    assert.equal(body(rpc)?.capture, 'stopped', JSON.stringify(rpc.error ?? body(rpc)));
+    await parent.finish(rpc);
+  }
+  assert.equal((await readSelection(parent.store, identity)).hash, stopped.hash);
+});
+
 test('typed capture, pause chat and resume chat follow Automatic capture of the chat', async t => {
   const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
   const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, hash, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
 import { DISPLAY_CONTROLS, displayEscape, displayScalar } from './file-io.mjs';
 import { REVIEW_CODE, REVIEW_COMMANDS, REVIEW_DECISIONS, REVIEW_CODE_PLACEHOLDER, REVIEW_CODE_EXCLUDED, PROCESSING_HELP, reviewControl,
-  isProcessingControlSuggestion } from './processing-control-proof.mjs';
+  isProcessingControlSuggestion, CAPTURE_TOOLS } from './processing-control-proof.mjs';
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
@@ -412,8 +412,7 @@ export function processingControlRefusalText(code, { client, stage, tool }) {
   }
   return `Cuefluent: Nothing was applied${tool === 'processing_review' ? ' and nothing was saved' : ''}: ${Object.hasOwn(REFUSALS, code) ? REFUSALS[code]() : unconfirmed(command)}`;
 }
-// Typed chat capture commands; each carries no fields of its own.
-export const CAPTURE_TOOLS = Object.freeze(['capture_turns', 'pause_capture', 'resume_capture']);
+export { CAPTURE_TOOLS };
 const uuidSchema = { type: 'string', pattern: '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' };
 const retrySchema = { ...uuidSchema, description: 'Opaque token returned for native verification. End the current exec, then repeat the same tool and arguments with this token. Never invent one.' };
 const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
