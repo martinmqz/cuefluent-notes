@@ -92,7 +92,8 @@ are waiting, and typing `capture` again first finishes the chat's latest capture
 if unfinished; a command that captures turns that way stops there, and the next
 one reads further. That capture may be one selected another way, such as through
 the CLI, which can hold up to 100 turns: it is finished whole. A turn whose records break the transcript's rules keeps its window
-waiting, as it keeps Automatic capture waiting, so no later window passes it. An
+waiting, as it keeps Automatic capture waiting, so no later window passes it;
+the reply names why and does not say more turns are waiting. An
 earlier capture or pause that the transcript no longer matches (cut back or
 rewritten in place) is not trusted: capture starts from an earlier point the
 transcript still matches. Before moving past the latest window or the turns a

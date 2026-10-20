@@ -711,7 +711,7 @@ async function storedTurns(capability, chat, unitIds, now) {
   });
 }
 async function runChatScope(capability, chat, scope, { observeRead, now, fresh, signal, deadline }) {
-  let saved = 0, failure = null, finished = false;
+  let saved = 0, failure = null, finished = false, held;
   // A pass reads the selection and runs the scope: two bounded operations.
   for (let pass = 0; pass < CHAT_RUN_PASSES && !finished && timeFor(deadline, 2); pass++) {
     signal?.throwIfAborted();
@@ -727,12 +727,13 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
     // chat's later turns, but a turn whose records break the transcript's
     // rules, or a reader block, keeps the window waiting, as it keeps
     // Automatic capture waiting: a later window never passes it. Only the
-    // pass limit continues here.
-    finished = run.drained === true || (!run.incomplete && run.pending !== 'WORKER_PASS_LIMIT' &&
-      !(run.holds ?? [run.pending]).some(code => WINDOW_HOLDS.has(code)));
-    if (!finished && !run.saved) break;
+    // pass limit continues here. A run that ends on such a hold alone and
+    // captures nothing is `held`: no later capture gets past it.
+    const stalled = !run.incomplete && run.pending !== 'WORKER_PASS_LIMIT', holds = (run.holds ?? [run.pending]).filter(code => WINDOW_HOLDS.has(code));
+    finished = run.drained === true || (stalled && !holds.length);
+    if (!finished && !run.saved) { if (stalled) held = holds[0]; break; }
   }
-  if (!failure) return { saved, finished };
+  if (!failure) return { saved, finished, ...(held ? { held } : {}) };
   if (!RUN_BUDGET_CODES.has(failure.code)) throw failure;
   if (fresh && timeFor(deadline, 1)) {
     try { saved = Math.max(saved, await storedTurns(capability, chat, scope.unitIds, now)); } catch { /* keep the finished runs' count */ }
@@ -764,7 +765,8 @@ async function scopeDrained(capability, chat, state, scope, now) {
  * window would start after (the latest-ending one the transcript still holds,
  * of either kind) runs first while unfinished; when it captures turns or stays
  * unfinished it is the command's one window, and a new one is read only after.
- * The command turn is never part of a window. The command ends within 50 s
+ * The command turn is never part of a window. A window that stays waiting on
+ * a record the reader holds names it as `held`. The command ends within 50 s
  * and stops on cancellation, keeping what it captured. */
 export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows, captureMs = CHAT_CAPTURE_MS } = {}) {
   const chat = await selected(selection); nativeId(commandUnitId); hash(source.fileIdentity);
@@ -787,6 +789,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
     // command's one window; a new one waits for the next command.
     const rerun = await runChatScope(capability, chat, last, { ...options, fresh: false });
     turns += rerun.saved;
+    if (rerun.held) return { turns, more: false, leftOut: 0, held: rerun.held };
     if (!rerun.finished || turns) return { turns, more: true, leftOut: 0 };
   }
   // A command turn takes one window: another call of the same typed command,
@@ -823,6 +826,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   await selectExplicitCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: fresh.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds }, { observeRead, now });
   const run = await runChatScope(capability, chat, { id: operationId, unitIds: window.unitIds }, { ...options, fresh: true });
+  if (run.held) return { turns: turns + run.saved, more: false, leftOut, held: run.held };
   return { turns: turns + run.saved, more: window.more || !run.finished, leftOut };
 }
 

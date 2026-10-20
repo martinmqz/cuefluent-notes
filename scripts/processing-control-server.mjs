@@ -69,9 +69,12 @@ const REVIEW_OUTCOMES = Object.freeze({
 // `more` says earlier finished turns are still waiting for another capture;
 // `leftOut` counts turns too large to capture, now left out.
 const tooLarge = leftOut => leftOut ? ` ${counted(leftOut, 'turn')} too large to capture ${leftOut === 1 ? 'was' : 'were'} left out.` : '';
+// `reason` names the record a typed capture stopped at, which every later
+// capture of the chat stops at too.
+const stoppedAt = (cmd, reason) => ` Capture stopped at a record of this chat: ${COLLECTION_STOPS[reason]}, so typing ${cmd('capture')} cannot capture its later turns.`;
 const CAPTURE_OUTCOMES = Object.freeze({
-  captured: (cmd, turns, more, leftOut) => `Captured ${counted(turns, 'turn')} of this chat.${tooLarge(leftOut)}${more
-    ? ` More finished turns are waiting; type ${cmd('capture')} again to capture them.` : ''} Type ${cmd('process')} to draft notes from captured turns.`,
+  captured: (cmd, turns, more, leftOut, reason) => `Captured ${counted(turns, 'turn')} of this chat.${tooLarge(leftOut)}${more
+    ? ` More finished turns are waiting; type ${cmd('capture')} again to capture them.` : reason ? stoppedAt(cmd, reason) : ''} Type ${cmd('process')} to draft notes from captured turns.`,
   'nothing-new': (cmd, turns, more, leftOut) => (more
     ? `Nothing was captured this time; type ${cmd('capture')} again to continue with this chat's later turns.`
     : 'Nothing new to capture: every finished turn of this chat is already captured or left out.') + tooLarge(leftOut),
@@ -79,9 +82,9 @@ const CAPTURE_OUTCOMES = Object.freeze({
   // Automatic capture of this chat stopped (a safety stop or a record the
   // reader cannot pass): a typed capture cannot take its turns either.
   stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either. Type ${cmd('status --verbose')} to see where things stand.`,
-  // A typed capture stopped at a record it cannot read, which every later
-  // capture of the chat reaches too: the reply names why.
-  blocked: (cmd, turns, more, leftOut, reason) => `Capture stopped at a record of this chat: ${COLLECTION_STOPS[reason]}, so typing ${cmd('capture')} cannot capture its later turns.`,
+  // A typed capture stopped at a record it cannot read or pass, which every
+  // later capture of the chat reaches too: the reply names why.
+  blocked: (cmd, turns, more, leftOut, reason) => `${stoppedAt(cmd, reason).trim()}${tooLarge(leftOut)}`,
   // A safety stop, in either capture mode: the chat's capture record is full,
   // and only these capture commands still bind in the chat, so the reply names
   // no other command.
@@ -678,11 +681,15 @@ export function processingControlStatusView(value, args) {
     if (value.verbose !== undefined) result.verbose = true;
     if (value.capture !== undefined) {
       choice(value.capture, Object.keys(CAPTURE_OUTCOMES));
-      if ((value.capture === 'blocked') !== (value.reason !== undefined) || (value.reason !== undefined && !Object.hasOwn(COLLECTION_STOPS, value.reason))) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      // A reason comes with every stopped capture and with turns captured
+      // before one, never with more turns waiting.
+      if ((value.capture === 'blocked' && value.reason === undefined) || (value.reason !== undefined &&
+          (!['blocked', 'captured'].includes(value.capture) || value.more === true || !Object.hasOwn(COLLECTION_STOPS, value.reason)))) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
       if (value.reason !== undefined) result.reason = value.reason;
       const counts = value.capture === 'captured' || value.capture === 'nothing-new';
       if (result.commandPrefix === undefined || (value.capture === 'captured') !== (value.turns !== undefined) ||
-          (!counts && (value.more !== undefined || value.leftOut !== undefined)) || (value.more !== undefined && typeof value.more !== 'boolean')) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+          (!counts && (value.more !== undefined || (value.leftOut !== undefined && value.capture !== 'blocked'))) ||
+          (value.more !== undefined && typeof value.more !== 'boolean')) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
       if (value.leftOut !== undefined) { integer(value.leftOut); if (value.leftOut > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); if (value.leftOut) result.leftOut = value.leftOut; }
       if (value.turns !== undefined) { integer(value.turns); if (value.turns < 1 || value.turns > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); result.turns = value.turns; }
       if (value.more !== undefined) result.more = value.more;

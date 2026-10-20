@@ -1097,7 +1097,7 @@ test('a typed capture stopped by a record it cannot read says why and leaves its
   }
 });
 
-test('a window with a turn the reader holds for its records keeps waiting, never passed by a later window', async t => {
+test('a window with a turn the reader holds for its records keeps waiting, never passed by a later window, and says so', async t => {
   const { f, h, parent, store, identity, head } = await manualCaptureChat(t);
   const first = await parent.work('Decision: ship on Friday.');
   // Evidence after that turn's terminal record, at the next native ordinal:
@@ -1109,9 +1109,13 @@ test('a window with a turn the reader holds for its records keeps waiting, never
   await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'event_msg', payload: { type: 'item_completed',
     thread_id: f.identity.sessionId, turn_id: first, item: { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: 'Late evidence.' }] } } }) + '\n');
   await parent.work('Owner: Dana.');
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // The window waits on the held turn, and each reply says that typing
+  // `capture` again cannot pass it, never that it continues.
+  for (const capture of ['captured', 'blocked']) {
     const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
-    assert.equal(reply.more, true, reply.statusText);
+    assert.deepEqual([reply.capture, reply.reason, reply.more], [capture, 'EVIDENCE_AFTER_CODEX_TERMINAL', capture === 'captured' ? false : undefined], reply.statusText);
+    assert.match(reply.statusText, /Capture stopped at a record of this chat: its transcript has a turn with records after the turn ended, so typing \$cuefluent-notes capture cannot capture its later turns\./);
+    assert.doesNotMatch(reply.statusText, /again/);
   }
   assert.equal(await head(first), null);
   assert.equal((await readSelection(store, identity)).state.explicitScopes.length, 1);

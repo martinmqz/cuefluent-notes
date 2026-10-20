@@ -687,7 +687,10 @@ test('plain status lists drafts as code and path; status --verbose adds every de
   // A capture stopped at a record names the reason, which only that reply carries.
   const blocked = processingControlStatusView({ ...base, capture: 'blocked', reason: 'INVALID_SESSION_RECORD' }, { collectionId: 'example' });
   assert.equal(blocked.reason, 'INVALID_SESSION_RECORD'); assert(!blocked.statusText.includes('INVALID_SESSION'));
-  for (const value of [{ capture: 'blocked' }, { capture: 'blocked', reason: 'SOURCE_BOUNDARY_PENDING' }, { capture: 'stopped', reason: 'INVALID_SESSION_RECORD' }]) {
+  const after = processingControlStatusView({ ...base, capture: 'captured', turns: 1, more: false, reason: 'EVIDENCE_AFTER_CODEX_TERMINAL' }, { collectionId: 'example' });
+  assert.match(after.statusText, /^Cuefluent: Captured 1 turn of this chat\. Capture stopped at a record of this chat: .+, so typing \/cuefluent-notes capture cannot capture its later turns\. Type /);
+  for (const value of [{ capture: 'blocked' }, { capture: 'blocked', reason: 'SOURCE_BOUNDARY_PENDING' }, { capture: 'stopped', reason: 'INVALID_SESSION_RECORD' },
+    { capture: 'captured', turns: 1, more: true, reason: 'INVALID_SESSION_RECORD' }, { capture: 'nothing-new', reason: 'INVALID_SESSION_RECORD' }]) {
     assert.throws(() => processingControlStatusView({ ...base, ...value }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
   }
   // Revisions belong to the verbose reply only, and the verbose reply stays bounded.

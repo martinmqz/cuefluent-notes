@@ -765,8 +765,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         try { captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal })); }
         catch (error) { if (!READER_BLOCK_CODES.includes(error.code) || !COLLECTION_STOP_CODES.includes(error.code)) throw error; outcome = { capture: 'blocked', reason: error.code }; }
         if (captured) {
-          const left = captured.leftOut ? { leftOut: captured.leftOut } : {};
-          outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more, ...left } : { capture: 'nothing-new', more: captured.more, ...left };
+          const left = captured.leftOut ? { leftOut: captured.leftOut } : {}, held = captured.held ? { reason: captured.held } : {};
+          outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more, ...left, ...held }
+            : captured.held ? { capture: 'blocked', ...held, ...left } : { capture: 'nothing-new', more: captured.more, ...left };
         }
       }
     } else if (!automatic) outcome = { capture: 'not-automatic' };
