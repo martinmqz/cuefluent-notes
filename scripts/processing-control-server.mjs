@@ -79,9 +79,10 @@ const CAPTURE_OUTCOMES = Object.freeze({
     ? `Nothing was captured this time; type ${cmd('capture')} again to continue with this chat's later turns.`
     : 'Nothing new to capture: every finished turn of this chat is already captured or left out.') + tooLarge(leftOut),
   automatic: cmd => `Automatic capture already covers this chat, so there is nothing to capture by hand. To stop it for this chat, type ${cmd('pause chat')}.`,
-  // Automatic capture of this chat stopped (a safety stop or a record the
-  // reader cannot pass): a typed capture cannot take its turns either.
-  stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either. Type ${cmd('status --verbose')} to see where things stand.`,
+  // Automatic capture of this chat stopped at a record or a fault its reader
+  // cannot pass. Paused, the chat is captured by hand, whose own windows get
+  // past what they do not meet and say why where they meet it.
+  stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured. To capture them by hand, type ${cmd('pause chat')}, then ${cmd('capture')}. Type ${cmd('status --verbose')} to see where things stand.`,
   // A typed capture stopped at a record it cannot read or pass, which every
   // later capture of the chat reaches too: the reply names why.
   blocked: (cmd, turns, more, leftOut, reason) => `${stoppedAt(cmd, reason).trim()}${tooLarge(leftOut)}`,

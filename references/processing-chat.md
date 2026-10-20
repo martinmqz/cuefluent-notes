@@ -116,11 +116,13 @@ capture waits for review: `capture` and `resume chat` refuse with
 chat `capture` works by hand and `resume chat` restarts Automatic capture under
 the current settings. In a chat
 Automatic capture covers it captures nothing and says so, and in a chat whose
-Automatic capture has stopped it says that capture cannot take its turns
-either; in a paused chat it works as in Manual mode, except that the turns of an
-earlier pause that `resume chat` ended stay out, as Automatic capture left them. A record capture cannot
-read stops each later capture of the chat at the same place, and the reply names
-why instead of failing. After a safety stop, which
+Automatic capture has stopped it says so and that `pause chat`, then `capture`,
+take its later turns by hand. In a paused chat it works as in Manual mode,
+except that the turns of an earlier pause that `resume chat` ended stay out, as
+Automatic capture left them. A record capture cannot read stops each later
+capture of the chat at the same place, and the reply names why instead of
+failing; a stop in Automatic capture's own saved progress never reaches a typed
+capture. After a safety stop, which
 a full capture record causes, `capture`, `pause chat` and `resume chat` say the
 record is full in either capture mode, and other commands, `status` included,
 no longer bind in that chat. `pause chat` and `resume chat` are the

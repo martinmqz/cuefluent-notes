@@ -1335,7 +1335,8 @@ test('a chat whose Automatic capture stopped is not told capture covers it', asy
       diagnostics: [{ ...identity, code }], boundaryExcluded: [], updatedAt: new Date().toISOString() });
     const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
     assert.equal(reply.capture, 'stopped');
-    assert.match(reply.statusText, /^Cuefluent: Automatic capture has stopped for this chat, so its later turns are not captured/);
+    // It names the way to capture them by hand, never that typing capture cannot help.
+    assert.match(reply.statusText, /^Cuefluent: Automatic capture has stopped for this chat, so its later turns are not captured\. To capture them by hand, type \$cuefluent-notes pause chat, then \$cuefluent-notes capture\./);
   });
 });
 
