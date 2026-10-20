@@ -166,6 +166,13 @@ async function claudeContinuation(transaction, store, source, link, authorize, o
   return from || into ? { from, into } : null;
 }
 
+// Reader blocks no later pass can get past: Automatic capture of that chat
+// has stopped until the cause is reviewed.
+export const READER_BLOCK_CODES = Object.freeze(['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
+  'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
+  'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
+  'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW']);
+
 // `link` carries the registration and policy for creating a session link; its
 // `attempted` flag is shared by all scopes of one registration visit.
 export async function processScope(transaction, store, selection, scopeId, authorize, observeRead, link = null) {
@@ -284,10 +291,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
         ...(scope?.upper ? { ceiling: scope.upper.eofByte } : {}) });
       if (linked) { link.successor = linked.to.sessionId; continue; }
     }
-    const frozenBlock = !result.blocked || ['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
-      'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
-      'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
-      'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW'].includes(result.blocked.code);
+    const frozenBlock = !result.blocked || READER_BLOCK_CODES.includes(result.blocked.code);
     if (suspensionBinding && result.diagnostics.automaticCeilingReached && frozenBlock &&
         result.pending.every(item => item.reason === 'anchor-unresolved')) {
       const unresolved = result.blocked?.code ?? result.pending[0]?.reason ?? plan.heldReason ?? pending;

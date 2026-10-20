@@ -251,7 +251,10 @@ const timeFor = (deadline, steps) => performance.now() + steps * CHAT_STEP_MS <=
 // an exclusion becomes a safety stop that denies every turn of the chat, which
 // only a real opt-out may cause.
 const HOUSEKEEPING_EXCLUSIONS = 2048, HOUSEKEEPING_BYTES = MAX_SELECTION_BYTES / 2;
-const deniedUnits = state => new Set(state ? [...state.exclusions, ...state.intervals.map(item => item.upper?.unitId).filter(Boolean)] : []);
+// Excluded turns, pause turns and the boundary turn each Automatic interval
+// leaves out by design.
+const deniedUnits = state => new Set(state ? [...state.exclusions,
+  ...state.intervals.flatMap(item => [item.upper?.unitId, item.lower.unitId]).filter(Boolean)] : []);
 
 /** Leave one turn of the chat out of captured turns: a typed command's own turn
  * or a turn too large to capture. An opt-out needs no capture consent and is
@@ -338,11 +341,17 @@ async function chatStart(store, chat, state, floor, source) {
   if (cursor) later(cursor.offset, cursor.startsMidRecord);
   for (const scope of state?.explicitScopes ?? []) later((scope.end ?? scope.start).endByte);
   for (const interval of state ? currentIntervals(state) : []) {
-    if (interval.upper) later(interval.upper.eofByte, interval.upper.startsMidRecord);
-    else {
-      const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
-      later(cursor?.offset ?? interval.lower.eofByte, cursor ? false : interval.lower.startsMidRecord);
+    if (interval.upper) { later(interval.upper.eofByte, interval.upper.startsMidRecord); continue; }
+    // The worker's progress counts only while its anchor still matches the
+    // transcript; otherwise capture starts where Automatic capture began.
+    const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
+    let verified = false;
+    if (cursor) {
+      try { await verifySourceCursor(source, cursor); verified = true; }
+      catch (error) { if (!['SOURCE_CHANGED', 'SOURCE_ANCHOR_CONFLICT', 'SOURCE_IDENTITY_MISMATCH'].includes(error.code)) throw error; }
     }
+    if (verified) later(cursor.offset);
+    else later(interval.lower.eofByte, interval.lower.startsMidRecord);
   }
   return start;
 }

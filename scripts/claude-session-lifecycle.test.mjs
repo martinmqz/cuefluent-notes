@@ -10,7 +10,7 @@ import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { collectionIngress, registrationFloorPath } from './collection-ingress.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock } from './intake-io.mjs';
 import { schedulerPath } from './collection-scheduler.mjs';
-import { readSelection, readCaptureHead, controlSelection } from './intake-store.mjs';
+import { readSelection, readCaptureHead, controlSelection, readReaderProgress } from './intake-store.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
 import { captureChatTurns, excludeChatTurn } from './capture-controls.mjs';
@@ -360,6 +360,38 @@ test('a capture short on time still records the turns it left out, so the next o
   await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
   assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 2, more: false, leftOut: 0 });
   assert.equal((await A.head(P1)).head, null); assert((await A.head(P2)).head); assert((await A.head(P3)).head);
+});
+
+test('capture does not trust Automatic progress once the transcript changed under it', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, C1] = Array.from({ length: 4 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const state = (await A.selection()).state, interval = state.intervals.at(-1);
+  const { cursor } = await readReaderProgress(f.store, { client: 'claude', sessionId: A.sessionId }, interval.id, state.source.fileIdentity, { metadataOnly: true });
+  // The project switches to Manual; then bytes under the worker's progress change in place.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  const handle = await fs.open(A.file, 'r+'), at = cursor.anchor.startByte;
+  try {
+    const anchored = Buffer.alloc(cursor.anchor.endByte - cursor.anchor.startByte);
+    await handle.read(anchored, 0, anchored.length, cursor.anchor.startByte);
+    const text = anchored.toString('utf8'), index = text.indexOf('Recorded.');
+    assert(index >= 0, text.slice(0, 200));
+    await handle.write(Buffer.from('X'), 0, 1, at + Buffer.byteLength(text.slice(0, index)));
+  } finally { await handle.close(); }
+  await A.hook('UserPromptSubmit', C1);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call, f.capability), reads = [];
+  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { observeRead: read => reads.push(read) });
+  // It read from where Automatic capture began, not from the stale progress.
+  assert(reads.some(read => read.purpose === 'range' && read.offset < cursor.offset), JSON.stringify(reads.slice(0, 3)));
+  // The boundary turn Automatic capture left out stays out.
+  assert.equal((await A.head(P2)).head, null);
 });
 
 // A session the CLI moved into a background session: the origin ends with

@@ -78,7 +78,7 @@ const CAPTURE_OUTCOMES = Object.freeze({
   automatic: cmd => `Automatic capture already covers this chat, so there is nothing to capture by hand. To stop it for this chat, type ${cmd('pause chat')}.`,
   // Automatic capture of this chat stopped (a safety stop or a record the
   // reader cannot pass): a typed capture cannot take its turns either.
-  stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either. Type ${cmd('status')} for the reason.`,
+  stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either. Type ${cmd('status --verbose')} to see where things stand.`,
   paused: cmd => `Automatic capture is paused for this chat from this turn on; turns captured before it are kept. To restart it, type ${cmd('resume chat')}.`,
   'already-paused': cmd => `Automatic capture is already paused for this chat. To restart it, type ${cmd('resume chat')}.`,
   resumed: () => 'Automatic capture is on again for this chat; turns after this one are captured.',

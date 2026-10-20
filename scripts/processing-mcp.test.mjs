@@ -1110,13 +1110,16 @@ test('capture never takes turns Automatic capture took, after the project switch
 });
 
 test('a chat whose Automatic capture stopped is not told capture covers it', async t => {
-  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
-  await parent.work('Captured automatically.'); await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
-  await publishIngressMetadata(parent.store, collectionStatusPath, { status: 'pending', saved: 0, pending: ['UNSUPPORTED_SESSION_OWNERSHIP'],
-    diagnostics: [{ ...identity, code: 'UNSUPPORTED_SESSION_OWNERSHIP' }], boundaryExcluded: [], updatedAt: new Date().toISOString() });
-  const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
-  assert.equal(reply.capture, 'stopped');
-  assert.match(reply.statusText, /^Cuefluent: Automatic capture has stopped for this chat, so its later turns are not captured/);
+  // A stop status reports, and a reader block no later pass gets past.
+  for (const code of ['UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CLAUDE_RECORD']) await t.test(code, async t => {
+    const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+    await parent.work('Captured automatically.'); await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    await publishIngressMetadata(parent.store, collectionStatusPath, { status: 'pending', saved: 0, pending: [code],
+      diagnostics: [{ ...identity, code }], boundaryExcluded: [], updatedAt: new Date().toISOString() });
+    const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+    assert.equal(reply.capture, 'stopped');
+    assert.match(reply.statusText, /^Cuefluent: Automatic capture has stopped for this chat, so its later turns are not captured/);
+  });
 });
 
 test('typed capture, pause chat and resume chat follow Automatic capture of the chat', async t => {
