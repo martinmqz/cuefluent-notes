@@ -10,7 +10,7 @@ import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
 import { readCaptureHead, readReaderProgress, readSelection } from './intake-store.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
-import { captureChatTurns, controlChatCapture } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, typedCaptureDeadline } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
 const row = (type, payload) => JSON.stringify({ timestamp: '2026-09-24T00:00:00.000Z', type, payload }) + '\n';
@@ -362,6 +362,19 @@ test('typed capture and its pause wait for an intake lock another pass holds bri
   assert.equal(result.state.paused, true);
   // The window's selection and run and the pause each waited once.
   assert(attempts >= 6 && attempts % 2 === 0, `${attempts} lock attempts`);
+});
+
+test('a typed capture ends by the deadline of the command that started it', async t => {
+  const f = await fixture(t), C = randomUUID();
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  // A command that started 15 s ago has no time left to read and record a window.
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0, deadline: typedCaptureDeadline(performance.now() - 15_000) }),
+    { turns: 0, more: true, leftOut: 0 });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {

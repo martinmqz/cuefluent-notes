@@ -729,9 +729,9 @@ test('a capture whose read ran long still selects its window, so the next captur
     return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
   };
   const first = await bind(C1), slow = slowReads(t);
-  // The read takes 32 of the command's 50 seconds: enough left to select the
-  // window, not to run it.
-  slow.state.jump = 32_000;
+  // The read takes 22 of the 40 seconds a capture keeps of its command's 50:
+  // enough left to select the window, not to run it.
+  slow.state.jump = 22_000;
   assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
   assert.deepEqual((await A.selection()).state.explicitScopes.map(scope => scope.unitIds), [[P1, P2]]);
   slow.state.skew = slow.state.jump = 0;
@@ -760,7 +760,7 @@ test('a window rewritten in place after it was selected is selected again as a n
   };
   // The first capture selects the window but runs out of time to run it.
   const first = await bind(C1), slow = slowReads(t);
-  slow.state.jump = 32_000;
+  slow.state.jump = 22_000;
   assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
   slow.state.skew = slow.state.jump = 0;
   await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
@@ -796,8 +796,9 @@ test('a capture records the turns it left out before it moves past them', async 
     await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
     return result;
   };
-  // The reads take 45 of the command's 50 seconds: no time is left to record
-  // the long turn as left out, so the scan position stays where it was.
+  // The reads take 45 seconds, past the 40 a capture keeps of its command's
+  // 50: no time is left to record the long turn as left out, so the scan
+  // position stays where it was.
   slow.state.jump = 45_000;
   assert.deepEqual(await capture(C1), { turns: 0, more: true, leftOut: 0 });
   assert(!(await A.selection()).state?.exclusions.includes(P1));
@@ -1530,7 +1531,7 @@ test('a window selected but never run is run, not passed on turns another captur
   };
   // The first capture selects its window but runs out of time to run it.
   const first = await bind(C1), slow = slowReads(t);
-  slow.state.jump = 32_000;
+  slow.state.jump = 22_000;
   assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
   slow.state.skew = slow.state.jump = 0;
   await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
@@ -1586,7 +1587,7 @@ test('a window re-chosen after a change only inside it is a new window, not the 
   };
   // The first capture selects the window but runs out of time to run it.
   const first = await bind(C1), slow = slowReads(t);
-  slow.state.jump = 32_000;
+  slow.state.jump = 22_000;
   assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
   slow.state.skew = slow.state.jump = 0;
   await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });

@@ -292,11 +292,16 @@ export async function runSelectedCapture(capability, request, { observeRead = ()
 // A window's turns are published within one bounded operation, so it stays small.
 const CHAT_WINDOW_BYTES = 8 * 1024 * 1024, CHAT_WINDOW_UNITS = 10, CHAT_ANCHOR_BYTES = 64 * 1024, CHAT_RUN_PASSES = 6;
 // How far past an uncapturable turn a capture looks for the next one. One
-// command ends within 50 s, inside a host's tool timeout: each step is one
-// bounded operation of at most 10 s, started only while it can still finish
-// in time.
-const CHAT_SCAN_WINDOWS = 8, CHAT_CAPTURE_MS = 50_000, CHAT_STEP_MS = 10_000;
+// command ends within 50 s of when it started, inside a host's tool timeout:
+// each step is one bounded operation of at most 10 s, started only while it
+// can still finish in time, and the capture keeps one step for the command's
+// own small bookkeeping writes after it (leaving its turn out and keeping its
+// reply).
+const CHAT_SCAN_WINDOWS = 8, CHAT_COMMAND_MS = 50_000, CHAT_STEP_MS = 10_000, CHAT_AFTER_STEPS = 1;
 const timeFor = (deadline, steps) => performance.now() + steps * CHAT_STEP_MS <= deadline;
+/** The deadline of a typed capture whose command started at `started`
+ * (`performance.now()`). */
+export const typedCaptureDeadline = started => started + CHAT_COMMAND_MS - CHAT_AFTER_STEPS * CHAT_STEP_MS;
 // Housekeeping exclusions stop well short of selection capacity: at capacity
 // an exclusion becomes a safety stop that denies every turn of the chat, which
 // only a real opt-out may cause.
@@ -789,12 +794,14 @@ async function scopeDrained(capability, chat, state, scope, now) {
  * of either kind) runs first while unfinished; when it captures turns or stays
  * unfinished it is the command's one window, and a new one is read only after.
  * The command turn is never part of a window. A window that stays waiting on
- * a record the reader holds names it as `held`. The command ends within 50 s
- * and stops on cancellation, keeping what it captured. */
-export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows, captureMs = CHAT_CAPTURE_MS } = {}) {
+ * a record the reader holds names it as `held`. The capture ends by
+ * `deadline`, by default as for a command started now, and stops on
+ * cancellation, keeping what it captured. */
+export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows,
+  deadline = typedCaptureDeadline(performance.now()) } = {}) {
   const chat = await selected(selection); nativeId(commandUnitId); hash(source.fileIdentity);
   keys(floor, ['eofByte', 'startsMidRecord']); integer(floor.eofByte);
-  const deadline = performance.now() + captureMs, options = { observeRead, now, signal, deadline };
+  const options = { observeRead, now, signal, deadline };
   let turns = 0;
   signal?.throwIfAborted();
   const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
@@ -837,9 +844,10 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   if (window.resumeAt) await advanceChatCursor(capability, chat, source, window.resumeAt, { now, signal });
   if (!window.unitIds.length) return { turns, more: window.more, leftOut };
   signal?.throwIfAborted();
-  // The window is selected now and runs while a run still fits; otherwise the
-  // next capture runs it first.
-  if (!timeFor(deadline, 1)) return { turns, more: true, leftOut };
+  // The window is selected now (after reading the selection again when turns
+  // were left out) and runs while a run still fits; otherwise the next
+  // capture runs it first.
+  if (!timeFor(deadline, window.leftOut.length ? 2 : 1)) return { turns, more: true, leftOut };
   // The window's identity covers the hash of all its bytes, so a window
   // rewritten in place over the same turns and offsets, even only inside, is a
   // new window, never the earlier one replayed.

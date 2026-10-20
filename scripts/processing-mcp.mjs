@@ -15,7 +15,7 @@ import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingSh
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
-import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, typedCaptureDeadline } from './capture-controls.mjs';
 import { readReaderBlock, clearReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
@@ -731,6 +731,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // act, and only these keep the command turn's bookkeeping.
   const reserving = new WeakSet();
   async function requestCapture({ source, tool, signal }) {
+    // The command's time runs from here, so its capture and the steps around
+    // it end within it.
+    const started = performance.now();
     signal?.throwIfAborted();
     if (!source.nativeSkill || !source.unitId) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     const { capability } = selected(source);
@@ -771,7 +774,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         let captured = null;
         // A record the reader cannot read stops every capture of the chat at
         // the same place: the reply names why rather than failing uncertain.
-        try { captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal })); }
+        try { captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal, deadline: typedCaptureDeadline(started) })); }
         catch (error) { if (!READER_BLOCK_CODES.includes(error.code) || !COLLECTION_STOP_CODES.includes(error.code)) throw error; outcome = { capture: 'blocked', reason: error.code }; }
         if (captured) {
           const left = captured.leftOut ? { leftOut: captured.leftOut } : {}, held = captured.held ? { reason: captured.held } : {};

@@ -88,7 +88,8 @@ none, so there it works only in a chat already selected by explicit capture. A
 chat continued from another (Claude `/bg`) starts after the history it
 re-homed. One command takes a bounded window (at most 10 turns or 8 MiB of
 transcript; a read that reaches its record limit ends there) and publishes what
-it can within its operation budget, ending within about 50 seconds; another call
+it can within its operation budget; the whole command, with its own checks and
+bookkeeping, ends within about 50 seconds of starting; another call
 of the same typed command takes no second window. The reply says when more turns
 are waiting, and typing `capture` again first finishes the chat's latest capture,
 if unfinished; a command that captures turns that way stops there, and the next
