@@ -372,36 +372,51 @@ async function recordTailAnchor(source, record) {
   } finally { await handle.close(); }
 }
 // The reply a typed capture command gave, kept once for its exact native call,
-// as dispatch receipts are: a redelivered call answers with it instead of
-// acting again, whatever commands came after it. A later delivery never
-// replaces it. The bound is a dispatch receipt's, above any reply the
-// transport can deliver; a reply that cannot be kept fails the command.
-const CHAT_REPLY_BYTES = 32 * 1024;
+// as dispatch receipts are. The call is reserved under the intake lock before
+// it acts, so only one delivery acts, even in another server process: any
+// other delivery answers with the kept reply, or, while the call has none, is
+// refused without acting. A later delivery never replaces the reply. The bound
+// is a dispatch receipt's, above any reply the transport can deliver; a reply
+// that cannot be kept fails the command.
+const CHAT_REPLY_BYTES = 32 * 1024, CHAT_REPLY_FORMAT = 'cuefluent-chat-command-reply';
 const chatReplyPath = (chat, call) => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}/replies/${digest(canonicalJSON(call)).slice(0, 24)}.json`;
 const replyCall = call => { keys(call, ['unitId', 'callId', 'tool', 'argsHash']); nativeId(call.unitId);
   for (const field of ['callId', 'tool']) if (typeof call[field] !== 'string' || !call[field] || call[field].length > 256) fail('INVALID_INTAKE_METADATA');
   hash(call.argsHash); return call; };
-export async function readChatCommandReply(capability, selection, call, { now } = {}) {
-  const chat = await selected(selection); replyCall(call);
-  return bounded(now, async () => {
-    const store = await openWorkflowIntake(capability);
-    const value = intakeJSON(await intakeSnapshot(store, 'state', chatReplyPath(chat, call), { maxBytes: CHAT_REPLY_BYTES }));
-    if (value === null) return null;
-    keys(value, ['format', 'version', 'call', 'response']); replyCall(value.call);
-    if (value.format !== 'cuefluent-chat-command-reply' || value.version !== 1 || typeof value.response !== 'object' ||
-        value.response === null || Array.isArray(value.response)) fail('INVALID_INTAKE_METADATA');
-    return canonicalJSON(value.call) === canonicalJSON(call) ? value.response : null;
-  });
+// The call's kept reply, null while it is only reserved, or undefined.
+function keptReply(snapshot, call) {
+  const value = intakeJSON(snapshot);
+  if (value === null) return undefined;
+  keys(value, ['format', 'version', 'call', 'response']); replyCall(value.call);
+  if (value.format !== CHAT_REPLY_FORMAT || value.version !== 1 || canonicalJSON(value.call) !== canonicalJSON(call) ||
+      (value.response !== null && (typeof value.response !== 'object' || Array.isArray(value.response)))) fail('INVALID_INTAKE_METADATA');
+  return value.response;
 }
-export async function recordChatCommandReply(capability, selection, call, response, { now, signal } = {}) {
-  const chat = await selected(selection), value = { format: 'cuefluent-chat-command-reply', version: 1, call: replyCall(call), response };
-  if (Buffer.byteLength(canonicalJSON(value) + '\n') > CHAT_REPLY_BYTES) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
+/** Reserves a typed capture command's call before it acts: `acting` only for
+ * the delivery that reserved it; any other gets the kept reply, or null. */
+export async function reserveChatCommand(capability, selection, call, { now, signal } = {}) {
+  const chat = await selected(selection), name = chatReplyPath(chat, replyCall(call));
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
-      const name = chatReplyPath(chat, call);
-      if ((await intakeSnapshot(store, 'state', name, { maxBytes: CHAT_REPLY_BYTES })).bytes !== null) return;
-      await replaceIntakeJSON(tx, name, value, null);
+      const kept = keptReply(await intakeSnapshot(store, 'state', name, { maxBytes: CHAT_REPLY_BYTES }), call);
+      if (kept !== undefined) return { acting: false, reply: kept };
+      await replaceIntakeJSON(tx, name, { format: CHAT_REPLY_FORMAT, version: 1, call, response: null }, null);
+      return { acting: true };
+    }, { signal });
+  });
+}
+/** Keeps the reply of the delivery that reserved the call. */
+export async function recordChatCommandReply(capability, selection, call, response, { now, signal } = {}) {
+  const chat = await selected(selection), value = { format: CHAT_REPLY_FORMAT, version: 1, call: replyCall(call), response };
+  if (Buffer.byteLength(canonicalJSON(value) + '\n') > CHAT_REPLY_BYTES) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
+  const name = chatReplyPath(chat, call);
+  return bounded(now, async () => {
+    const store = await openWorkflowIntake(capability);
+    return withIntakeLockWaiting(store, async tx => {
+      const snapshot = await intakeSnapshot(store, 'state', name, { maxBytes: CHAT_REPLY_BYTES });
+      if (keptReply(snapshot, call) !== null) fail('INVALID_INTAKE_METADATA');
+      await replaceIntakeJSON(tx, name, value, snapshot.hash);
     }, { signal });
   });
 }

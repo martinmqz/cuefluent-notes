@@ -1166,15 +1166,25 @@ test('a redelivered capture command answers with its first reply and acts once',
     assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
     assert(await head(third));
   });
-  await t.test('capture whose reply cannot be kept', async t => {
-    const { h, parent, head } = await manualCaptureChat(t), first = await parent.work('Decision: ship on Friday.');
-    const mkdir = fs.mkdir;
-    fs.mkdir = async (dir, ...args) => { if (String(dir).split(path.sep).includes('replies')) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return mkdir(dir, ...args); };
-    let rpc; try { rpc = await h.call('capture_turns', {}); } finally { fs.mkdir = mkdir; }
+  await t.test('capture whose reply cannot be kept, and its redelivery', async t => {
+    const { f, h, parent, head } = await manualCaptureChat(t), first = await parent.work('Decision: ship on Friday.');
+    // The call's reservation is kept; writing its reply fails.
+    const rename = fs.rename;
+    fs.rename = async (from, to) => {
+      if (String(to).split(path.sep).includes('replies') && JSON.parse(await fs.readFile(from, 'utf8')).response !== null) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return rename(from, to);
+    };
+    let rpc; try { rpc = await h.call('capture_turns', {}); rpc.name = 'capture_turns'; } finally { fs.rename = rename; }
     // The turn was captured, but no reply claims it without a kept reply.
     assert.equal(rpc.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(rpc));
     assert.match(rpc.error.message, /not certain whether anything changed/);
     assert(await head(first));
+    // Its redelivery, like a duplicate delivered while the first acts, finds
+    // the call reserved without a reply: it is refused and does not act.
+    const later = await parent.work('Owner: Dana.');
+    const again = await redeliver(h, parent, rpc, f.identity.sessionId);
+    assert.equal(again.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(again));
+    assert.equal(await head(later), null);
   });
   await t.test('resume chat in an Automatic chat', async t => {
     const { f, h, parent } = await nativeIngressFixture(t);

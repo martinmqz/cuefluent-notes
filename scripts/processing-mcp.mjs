@@ -15,7 +15,7 @@ import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingSh
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
-import { captureChatTurns, controlChatCapture, excludeChatTurn, readChatCommandReply, recordChatCommandReply } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply } from './capture-controls.mjs';
 import { readReaderBlock } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
@@ -730,10 +730,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (!source.nativeSkill || !source.unitId) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
     const { capability } = selected(source);
     // A redelivered call answers with the reply it already gave; the command
-    // does not act again.
+    // does not act again. A delivery that finds its call reserved without a
+    // reply (another delivery is acting, or could not keep its reply) cannot
+    // tell the outcome, so it is refused as uncertain without acting.
     const call = { unitId: source.unitId, callId: source.callId, tool, argsHash: source.argsHash };
-    const replay = await withStorageProbes(() => readChatCommandReply(capability, source.selection, call));
-    if (replay) return replay;
+    const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal }));
+    if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
     const automatic = await automaticCapture(capability, source);
     const store = await withStorageProbes(() => openWorkflowIntake(capability));
     const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
