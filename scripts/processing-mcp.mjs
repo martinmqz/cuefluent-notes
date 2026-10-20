@@ -15,7 +15,7 @@ import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingSh
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
-import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, holdsTypedCapture } from './capture-controls.mjs';
 import { readReaderBlock } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
@@ -538,7 +538,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     try {
       await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect'));
       const store = await withStorageProbes(() => openWorkflowIntake(capability));
-      const block = await withStorageProbes(() => readReaderBlock(store, { client, sessionId: source.selection.sessionId }));
+      // A marker that cannot be read leaves the latest pass's report to say it.
+      let block = null;
+      try { block = await withStorageProbes(() => readReaderBlock(store, { client, sessionId: source.selection.sessionId })); } catch { /* the notice below */ }
       if (block) return { collection: { state: 'stopped', code: block } };
       const notice = intakeJSON(await intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 }));
       const found = Array.isArray(notice?.diagnostics) ? notice.diagnostics.find(item => item?.client === source.selection.client &&
@@ -750,8 +752,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     // mode, and there is nothing to pause or resume.
     if (state?.safetyStop) outcome = { capture: 'full' };
     else if (tool === 'capture_turns') {
-      // A chat Automatic capture covers but has stopped is not covered.
-      if (automatic && !paused) outcome = { capture: await automaticStopped(capability, source) ? 'stopped' : 'automatic' };
+      // A chat Automatic capture covers but has stopped is not covered. A
+      // paused chat is captured by hand, unless Automatic capture stopped on a
+      // record that a typed capture cannot read past either.
+      const stop = automatic ? (await collectionStop(capability, source)).collection?.code : undefined;
+      if (automatic && !paused) outcome = { capture: stop ? 'stopped' : 'automatic' };
+      else if (stop && holdsTypedCapture(stop)) outcome = { capture: 'stopped' };
       else {
         const captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal }));
         const left = captured.leftOut ? { leftOut: captured.leftOut } : {};
@@ -783,11 +789,6 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     try { await withStorageProbes(() => recordChatCommandReply(capability, source.selection, call, response, { signal })); }
     catch { signal?.throwIfAborted(); fail('PROCESSING_CONTROL_FAILED'); }
     return response;
-  }
-  // Whether the worker stopped Automatic capture of this chat, as status
-  // reports it.
-  async function automaticStopped(capability, source) {
-    return Boolean((await collectionStop(capability, source)).collection);
   }
   // A typed command that failed leaves its own turn out under the same rule
   // as one that succeeded, so a later capture never takes it. Housekeeping:

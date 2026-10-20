@@ -1368,6 +1368,44 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
   });
 });
 
+test('a paused chat keeps a reader stop that typed capture cannot pass, and passes one it can', async t => {
+  const cases = {
+    // Bytes that are no transcript record: typed capture would read them too.
+    INVALID_SESSION_RECORD: [{ capture: 'stopped' }, async parent => {
+      await fs.appendFile(parent.source.path, 'not a transcript record\n');
+      await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+    }],
+    // A turn too large to anchor: typed capture leaves it out and goes on.
+    SOURCE_ANCHOR_LIMIT: [{ capture: 'nothing-new', leftOut: 1 }, parent => parent.work('Long final answer.', { last: 'x'.repeat(70 * 1024) })],
+  };
+  for (const [code, [expected, block]] of Object.entries(cases)) await t.test(code, async t => {
+    const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+    const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    await parent.work('Captured automatically.'); await run();
+    await block(parent);
+    assert((await run()).pending.includes(code));
+    const paused = await h.call('pause_capture', {}); assert.equal(body(paused).capture, 'paused'); await parent.finish(paused);
+    assert.equal(await readReaderBlock(parent.store, identity), code);
+    const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+    assert.deepEqual({ capture: reply.capture, ...(expected.leftOut ? { leftOut: reply.leftOut } : {}) }, expected, reply.statusText);
+  });
+});
+
+test('a reader stop marker that cannot be read leaves the latest pass to report the stop', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await parent.work('Captured automatically.'); await run();
+  await fs.appendFile(parent.source.path, 'not a transcript record\n');
+  await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+  assert((await run()).pending.includes('INVALID_SESSION_RECORD'));
+  await fs.writeFile(path.join(f.collection.intakeStateDir, 'reader-blocks', 'codex', `${identity.sessionId}.json`), '{not json');
+  await assert.rejects(readReaderBlock(parent.store, identity));
+  const status = await h.call('processing_status', {}), shown = body(status); await parent.finish(status);
+  assert.deepEqual(shown.collection, { state: 'stopped', code: 'INVALID_SESSION_RECORD' });
+  const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+  assert.equal(reply.capture, 'stopped', reply.statusText);
+});
+
 test('a chat whose header turns unsupported keeps that reader block, and typed commands there stay unverified', async t => {
   const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
   const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });

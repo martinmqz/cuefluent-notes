@@ -623,6 +623,8 @@ const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'P
 const WINDOW_HOLDS = new Set(READER_BLOCK_CODES.filter(code => !['SOURCE_ANCHOR_LIMIT', 'UNSUPPORTED_CLAUDE_READER',
   'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'UNSUPPORTED_CAPTURE_SCHEMA',
   'INVALID_CAPTURE_READER', 'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH', 'CAPTURE_HEAD_CONFLICT'].includes(code)));
+/** Whether a reader stop keeps a typed capture's window waiting too. */
+export const holdsTypedCapture = code => WINDOW_HOLDS.has(code);
 async function storedTurns(capability, chat, unitIds, now) {
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
