@@ -379,7 +379,10 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       // A turn that fills this whole read is larger than a window: leave it
       // out and read on. Otherwise only excluded turns came first: start the
       // next read at the cut turn, which may fit.
-      if (!before.length && cut.record.startByte === start.eofByte) { leftOut.push(cut.unitId); start = { eofByte: limit, startsMidRecord: true }; }
+      if (!before.length && cut.record.startByte === start.eofByte) {
+        if (!denied.has(cut.unitId)) leftOut.push(cut.unitId);
+        start = { eofByte: limit, startsMidRecord: true };
+      }
       else start = { eofByte: cut.record.startByte, startsMidRecord: false };
       continue;
     }
@@ -458,10 +461,10 @@ async function scopeDrained(capability, chat, state, scope, now) {
  * capture could not finish runs first; a new window is read only once it has.
  * The command turn is never part of a window. The command ends within 50 s
  * and stops on cancellation, keeping what it captured. */
-export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows } = {}) {
+export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows, captureMs = CHAT_CAPTURE_MS } = {}) {
   const chat = await selected(selection); nativeId(commandUnitId); hash(source.fileIdentity);
   keys(floor, ['eofByte', 'startsMidRecord']); integer(floor.eofByte);
-  const deadline = performance.now() + CHAT_CAPTURE_MS, options = { observeRead, now, signal, deadline };
+  const deadline = performance.now() + captureMs, options = { observeRead, now, signal, deadline };
   let turns = 0;
   signal?.throwIfAborted();
   const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
@@ -472,18 +475,21 @@ export async function captureChatTurns(capability, { selection, source, floor, c
     if (!rerun.finished) return { turns, more: true, leftOut: 0 };
   }
   signal?.throwIfAborted();
-  // Reading a window, selecting it and one run of it must all fit.
-  if (!timeFor(deadline, 4)) return { turns, more: true, leftOut: 0 };
+  // A window is read only when its progress can still be recorded after it:
+  // the read is one bounded operation, so recording always has its turn, and
+  // a slow read never leaves the next capture to start over.
+  if (!timeFor(deadline, 2)) return { turns, more: true, leftOut: 0 };
   const window = await bounded(now, () => chatWindow(capability, { chat, source, floor, commandUnitId, observeRead, scanWindows }));
+  if (window.resumeAt) await advanceChatCursor(capability, chat, source.fileIdentity, window.resumeAt, { now, signal });
   // A turn too large to capture is left out once, so later captures pass it.
   let leftOut = 0;
   for (const unitId of window.leftOut) {
-    if (!timeFor(deadline, 4)) return { turns, more: true, leftOut };
+    if (!timeFor(deadline, 1)) return { turns, more: true, leftOut };
     if ((await excludeChatTurn(capability, { selection: chat, source, unitId }, { now, signal })).excluded) leftOut++;
   }
-  if (window.resumeAt && timeFor(deadline, 1)) await advanceChatCursor(capability, chat, source.fileIdentity, window.resumeAt, { now, signal });
   if (!window.unitIds.length) return { turns, more: window.more, leftOut };
   signal?.throwIfAborted();
+  // Selecting the window and one run of it must still fit.
   if (!timeFor(deadline, 3)) return { turns, more: true, leftOut };
   const operationId = digestId('cuefluent-chat-capture-v1', { client: chat.client, sessionId: chat.sessionId,
     unitIds: window.unitIds, readRange: window.readRange });

@@ -314,6 +314,26 @@ test('a turn larger than one capture can read is passed over later captures, nev
   assert((await A.head(P1)).head); assert.equal((await A.head(P2)).head, null); assert((await A.head(P3)).head);
 });
 
+test('a capture short on time still records the turns it left out, so the next one passes them', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, P3, C1, C2] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
+    A.prompt('After the long reply.', P2), A.reply('Noted.'), A.prompt('Next decision.', P3), A.reply('Noted.')]);
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // Time for the read and its bookkeeping, not for selecting and running a window.
+  const first = await bind(C1);
+  assert.deepEqual(await captureChatTurns(f.capability, first, { captureMs: 25_000 }), { turns: 0, more: true, leftOut: 1 });
+  assert((await A.selection()).state.exclusions.includes(P1));
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 2, more: false, leftOut: 0 });
+  assert.equal((await A.head(P1)).head, null); assert((await A.head(P2)).head); assert((await A.head(P3)).head);
+});
+
 // A session the CLI moved into a background session: the origin ends with
 // `continued-in`, the successor re-homes every root record under its own ID
 // with sessionKind "bg" (Claude CLI's background-session stamp).
