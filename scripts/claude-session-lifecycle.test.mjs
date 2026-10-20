@@ -293,6 +293,27 @@ test('capture never rereads a finished window and stops on cancellation before r
   assert.equal((await A.selection()).hash, before.hash); assert.deepEqual(late, []);
 });
 
+test('a turn larger than one capture can read is passed over later captures, never restarted', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, P3, C1, C2, C3] = Array.from({ length: 6 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // P2's reply is longer than one 8 MiB read; each capture here may read only one.
+  await A.append([A.prompt('Before the long reply.', P1), A.reply('Noted.'), A.prompt('Paste the whole log.', P2),
+    ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))), A.prompt('After the long reply.', P3), A.reply('Noted.')]);
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call), chat = { selection: bound.selection, source: bound.source };
+    const result = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId }, { scanWindows: 1 });
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return result;
+  };
+  assert.deepEqual(await capture(C1), { turns: 1, more: true, leftOut: 0 });
+  // This capture's one read ends inside P2: P2 is left out and the next one resumes there.
+  assert.deepEqual(await capture(C2), { turns: 0, more: true, leftOut: 1 });
+  assert.deepEqual(await capture(C3), { turns: 1, more: false, leftOut: 0 });
+  assert((await A.head(P1)).head); assert.equal((await A.head(P2)).head, null); assert((await A.head(P3)).head);
+});
+
 // A session the CLI moved into a background session: the origin ends with
 // `continued-in`, the successor re-homes every root record under its own ID
 // with sessionKind "bg" (Claude CLI's background-session stamp).

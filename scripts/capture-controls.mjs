@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { assertWorkflowStorage, workflowCollectionGrant } from './workflow-storage.mjs';
-import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, withIntakeLock, withIntakeLockWaiting } from './intake-io.mjs';
+import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, withIntakeLock, withIntakeLockWaiting, intakeSnapshot, intakeJSON, replaceIntakeJSON } from './intake-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { canonicalWorkflowProject, validateWorkflowPlacement } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
@@ -278,12 +278,39 @@ export async function excludeChatTurn(capability, { selection, source, unitId },
   });
 }
 
+// How far typed captures have read past turns they left out, for this exact
+// transcript file: a turn too large for one command's scans is passed over
+// several commands, never restarted. It only moves forward.
+const chatCursorPath = chat => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}.json`;
+async function readChatCursor(store, chat, sourceIdentity) {
+  const snapshot = await intakeSnapshot(store, 'state', chatCursorPath(chat), { maxBytes: 4096 }), value = intakeJSON(snapshot);
+  if (value !== null) {
+    keys(value, ['format', 'version', 'sourceIdentity', 'offset', 'startsMidRecord']); hash(value.sourceIdentity); integer(value.offset);
+    if (value.format !== 'cuefluent-chat-capture-cursor' || value.version !== 1 || typeof value.startsMidRecord !== 'boolean') fail('INVALID_INTAKE_METADATA');
+  }
+  return { snapshot, cursor: value?.sourceIdentity === sourceIdentity ? value : null };
+}
+async function advanceChatCursor(capability, chat, sourceIdentity, position, { now, signal }) {
+  return bounded(now, async () => {
+    const store = await openWorkflowIntake(capability);
+    return withIntakeLockWaiting(store, async tx => {
+      const { snapshot, cursor } = await readChatCursor(store, chat, sourceIdentity);
+      if (cursor && cursor.offset >= position.eofByte) return;
+      await replaceIntakeJSON(tx, chatCursorPath(chat), { format: 'cuefluent-chat-capture-cursor', version: 1, sourceIdentity,
+        offset: position.eofByte, startsMidRecord: position.startsMidRecord }, snapshot.hash);
+    }, { signal });
+  });
+}
+
 // Where the next window may start: past the chat's own start (`floor`), its
-// last typed or explicit capture, and whatever Automatic capture already
-// covered (the worker's progress, or its pause), so no turn is captured twice.
-async function chatStart(store, chat, state, floor) {
+// last typed or explicit capture, how far captures read past turns they left
+// out, and whatever Automatic capture already covered (the worker's progress,
+// or its pause), so no turn is captured twice.
+async function chatStart(store, chat, state, floor, sourceIdentity) {
   let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
   const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
+  const { cursor } = await readChatCursor(store, chat, sourceIdentity);
+  if (cursor) later(cursor.offset, cursor.startsMidRecord);
   for (const scope of state?.explicitScopes ?? []) later((scope.end ?? scope.start).endByte);
   for (const interval of state ? currentIntervals(state) : []) {
     if (interval.upper) later(interval.upper.eofByte, interval.upper.startsMidRecord);
@@ -313,15 +340,15 @@ async function scanChat(chat, source, start, endByte, observeRead) {
 // captured within those limits (larger than a window, or ending in a record too
 // large to anchor) is reported in `leftOut` and passed, so it never blocks the
 // chat's later turns.
-async function chatWindow(capability, { chat, source, floor, commandUnitId, observeRead }) {
+async function chatWindow(capability, { chat, source, floor, commandUnitId, observeRead, scanWindows = CHAT_SCAN_WINDOWS }) {
   await assertWorkflowStorage(capability, chat, 'explicitCollect');
   const store = await openWorkflowIntake(capability), current = await readSelection(store, identityOf(chat));
   if (current.state?.safetyStop) fail('SELECTION_CAPACITY_EXCEEDED');
   if (current.state && current.state.source.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null), eof = observed.boundary.eofByte;
   const denied = deniedUnits(current.state), leftOut = [];
-  let start = await chatStart(store, chat, current.state, floor);
-  for (let scan = 0; scan < CHAT_SCAN_WINDOWS; scan++) {
+  let start = await chatStart(store, chat, current.state, floor, observed.source.fileIdentity);
+  for (let scan = 0; scan < scanWindows; scan++) {
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
     if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };
     const { anchors, records } = await scanChat(chat, observed.source, start, limit, observeRead);
@@ -371,7 +398,8 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     leftOut.push(units[0].unitId);
     start = { eofByte: units[1]?.record.startByte ?? stop, startsMidRecord: false };
   }
-  return { current, unitIds: [], more: true, leftOut };
+  // Out of reads inside left-out or excluded turns: the next capture resumes here.
+  return { current, unitIds: [], more: true, leftOut, resumeAt: start };
 }
 
 // Bounded runs of a chat's capture scope, each publishing a few turns, while
@@ -430,7 +458,7 @@ async function scopeDrained(capability, chat, state, scope, now) {
  * capture could not finish runs first; a new window is read only once it has.
  * The command turn is never part of a window. The command ends within 50 s
  * and stops on cancellation, keeping what it captured. */
-export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal } = {}) {
+export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows } = {}) {
   const chat = await selected(selection); nativeId(commandUnitId); hash(source.fileIdentity);
   keys(floor, ['eofByte', 'startsMidRecord']); integer(floor.eofByte);
   const deadline = performance.now() + CHAT_CAPTURE_MS, options = { observeRead, now, signal, deadline };
@@ -446,13 +474,14 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   signal?.throwIfAborted();
   // Reading a window, selecting it and one run of it must all fit.
   if (!timeFor(deadline, 4)) return { turns, more: true, leftOut: 0 };
-  const window = await bounded(now, () => chatWindow(capability, { chat, source, floor, commandUnitId, observeRead }));
+  const window = await bounded(now, () => chatWindow(capability, { chat, source, floor, commandUnitId, observeRead, scanWindows }));
   // A turn too large to capture is left out once, so later captures pass it.
   let leftOut = 0;
   for (const unitId of window.leftOut) {
     if (!timeFor(deadline, 4)) return { turns, more: true, leftOut };
     if ((await excludeChatTurn(capability, { selection: chat, source, unitId }, { now, signal })).excluded) leftOut++;
   }
+  if (window.resumeAt && timeFor(deadline, 1)) await advanceChatCursor(capability, chat, source.fileIdentity, window.resumeAt, { now, signal });
   if (!window.unitIds.length) return { turns, more: window.more, leftOut };
   signal?.throwIfAborted();
   if (!timeFor(deadline, 3)) return { turns, more: true, leftOut };
