@@ -1568,6 +1568,28 @@ test('resume chat ends a stop of the stretch before the pause at once', async t 
   await call('capture_turns', 'automatic');
 });
 
+test('typed capture and resume chat do not say Automatic capture covers a chat whose capture settings changed', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await parent.work('Captured automatically.'); await run();
+  // Capture settings saved again (as Automatic, then Manual, then Automatic):
+  // the chat's capture needs review, and the worker refuses it until then.
+  f.config.routes[0].collection.generation = randomUUID();
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  assert((await run()).diagnostics.some(item => item.sessionId === identity.sessionId && item.code === 'REGISTRATION_REQUIRES_REVIEW'));
+  for (const tool of ['capture_turns', 'resume_capture']) {
+    const rpc = await h.call(tool, {});
+    assert.equal(rpc.error?.data?.code, 'REGISTRATION_REQUIRES_REVIEW', `${tool}: ${JSON.stringify(rpc)}`);
+  }
+  // A pause still applies, and resume chat then grants the chat again.
+  for (const [tool, expected] of [['pause_capture', 'paused'], ['resume_capture', 'resumed']]) {
+    const rpc = await h.call(tool, {}); assert.equal(body(rpc).capture, expected, JSON.stringify(rpc)); await parent.finish(rpc);
+  }
+  const later = await parent.work('Captured again.'), after = await run();
+  assert(!after.diagnostics.some(item => item.sessionId === identity.sessionId), JSON.stringify(after.diagnostics));
+  assert((await readCaptureHead(parent.store, { ...identity, unitId: later })).head);
+});
+
 test('typed capture takes a turn rewritten into the paused stretch after the pause record', async t => {
   // With no progress, as when a read stopped short of the pause's end, and
   // with progress past it whose own anchor still holds.

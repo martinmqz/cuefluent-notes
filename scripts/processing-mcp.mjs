@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { workflowConfigPath, readWorkflowSnapshot } from './workflow-config.mjs';
-import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
+import { verifyWorkflowStorage, assertWorkflowStorage, workflowCollectionGrant } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { openWorkflowIntake, withIntakeLockWaiting, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readSelection, selectionPath } from './intake-store.mjs';
@@ -750,6 +750,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
     const paused = state?.paused === true;
     const chat = { selection: source.selection, source: source.source };
+    // A chat whose capture settings changed since Automatic capture was
+    // granted for it waits for review, and the worker refuses it until then:
+    // neither capture nor resume chat says Automatic capture covers it. Paused,
+    // it is captured by hand and resume chat grants it again under the current
+    // settings; a pause, an opt-out, always applies.
+    if (automatic && !paused && !state?.safetyStop && tool !== 'pause_capture' && await grantChanged(capability, source, store, state)) fail('REGISTRATION_REQUIRES_REVIEW');
     let outcome;
     // After a safety stop nothing of the chat is captured, in either capture
     // mode, and there is nothing to pause or resume.
@@ -822,6 +828,13 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (source.selectionHash === null && automatic) return true;
       return (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }))).excluded;
     } catch { return false; }
+  }
+  // Whether the grant the chat's Automatic capture was given, kept with its
+  // selection or else its registration, is no longer the current settings'.
+  async function grantChanged(capability, source, store, state) {
+    const granted = state?.currentGrantHash ?? (await withStorageProbes(() => readRegistration(store, { client, sessionId: source.selection.sessionId },
+      { mismatchCode: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' }))).registration?.grantHash;
+    return granted != null && granted !== await withStorageProbes(() => workflowCollectionGrant(capability, source.selection));
   }
   async function automaticCapture(capability, source) {
     try { await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect')); return true; }

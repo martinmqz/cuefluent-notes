@@ -109,7 +109,12 @@ its turns were captured before. A turn that cannot be captured within those limi
 in Codex ending in a record too large to anchor) is left out, and the reply says so; it
 never blocks the chat's later turns. A Claude turn ending in such a record is
 captured whole once a later record follows it, so when it is the last turn before
-`capture`, the next `capture` takes it. Turns already left out stay out. In a chat
+`capture`, the next `capture` takes it. Turns already left out stay out. When
+the capture settings changed since Automatic capture began for a chat, its
+capture waits for review: `capture` and `resume chat` refuse with
+`REGISTRATION_REQUIRES_REVIEW`, `pause chat` still applies, and in the paused
+chat `capture` works by hand and `resume chat` restarts Automatic capture under
+the current settings. In a chat
 Automatic capture covers it captures nothing and says so, and in a chat whose
 Automatic capture has stopped it says that capture cannot take its turns
 either; in a paused chat it works as in Manual mode, except that the turns of an
