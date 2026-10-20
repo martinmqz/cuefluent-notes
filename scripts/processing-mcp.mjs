@@ -793,17 +793,16 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     signal?.throwIfAborted();
     let response = { ...view, ...outcome };
     // The command leaves out its own turn, so a later capture skips it, before
-    // its reply is kept: a redelivery then replays whether that worked. An
-    // unarmed Automatic chat has no selection to add an exclusion to: its first
-    // prompt is the boundary the worker excludes. When the exclusion fails, or
+    // its reply is kept: a redelivery then replays whether that worked. In an
+    // Automatic chat the worker has not armed yet, the command may precede
+    // where its hook froze the session's start, so the worker's boundary does
+    // not cover it: it is left out the same way. When the exclusion fails, or
     // the selection has no room for it, the turn stays capturable and the reply
     // says so in its diagnostics.
-    if (source.selectionHash !== null || !automatic) {
-      let excluded = false;
-      try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal }))).excluded; }
-      catch { /* reported below */ }
-      if (!excluded) response = { ...response, diagnostics: [...new Set([...response.diagnostics ?? [], 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
-    }
+    let excluded = false;
+    try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal }))).excluded; }
+    catch { /* reported below */ }
+    if (!excluded) response = { ...response, diagnostics: [...new Set([...response.diagnostics ?? [], 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
     // The command has acted. Without its kept reply a redelivery would act
     // again, so no reply is given unless it is kept: the outcome is reported
     // as not certain, and status shows it.
@@ -825,7 +824,6 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       const { capability } = selected(source);
       const automatic = await automaticCapture(capability, source);
       if (!(CAPTURE_TOOLS.includes(invocation.tool) || source.captureActive === false || !automatic)) return true;
-      if (source.selectionHash === null && automatic) return true;
       return (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }))).excluded;
     } catch { return false; }
   }

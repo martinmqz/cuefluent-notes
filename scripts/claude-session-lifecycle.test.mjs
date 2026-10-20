@@ -257,6 +257,35 @@ test('pause chat as the first prompt of a new Automatic chat leaves later typed 
   for (const unitId of [P1, P2]) assert.equal((await A.head(unitId)).head, null);
 });
 
+test('a typed command before the frozen session start is left out and its chat still binds and arms', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, P4, P5, P6] = Array.from({ length: 6 }, () => randomUUID());
+  const typed = async (control, promptId) => {
+    const call = A.call(control); await A.append([...A.control(control, promptId)]); await A.hook('UserPromptSubmit', promptId);
+    await A.append([call]); return { call, bound: await A.resolve(call) };
+  };
+  // `capture` as the first prompt precedes the floor its hook froze, so the
+  // worker's boundary is a later prompt: the command leaves its own turn out.
+  const first = await typed('capture', P1);
+  assert.equal(first.bound.unitId, P1); assert.equal(first.bound.selectionHash, null);
+  assert.equal((await excludeChatTurn(f.capability, { selection: first.bound.selection, source: first.bound.source, unitId: P1 })).excluded, true);
+  // A redelivery still binds to it before the worker arms the chat.
+  assert.equal((await A.resolve(first.call)).unitId, P1);
+  await A.append([A.reply('Automatic capture already covers this chat.'), A.prompt('Opening context.', P2), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.prompt('Decision: ship on Friday.', P3), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P3); await f.run();
+  assert((await A.head(P3)).head);
+  // Paused, a typed capture reads the chat from its start and never takes the first command.
+  const pause = await typed('pause chat', P4);
+  await controlChatCapture(f.capability, { selection: pause.bound.selection, source: pause.bound.source, unitId: P4, operation: 'pause' });
+  await A.append([A.reply('Paused.'), A.prompt('Decision: taken by hand.', P5), A.reply('Noted.')]);
+  const capture = await typed('capture', P6);
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: capture.bound.selection, source: capture.bound.source, floor: capture.bound.captureFloor,
+    commandUnitId: P6 }), { turns: 1, more: false, leftOut: 0 });
+  assert((await A.head(P5)).head);
+  for (const unitId of [P1, P2, P4]) assert.equal((await A.head(unitId)).head, null, unitId);
+});
+
 test('a processing-only route also verifies a first-prompt control before its hook boundary', async t => {
   const f = await claudeFixture(t, { collect: false }), A = f.session(), P1 = randomUUID();
   await A.append([...A.control('review', P1), A.snapshot()]);

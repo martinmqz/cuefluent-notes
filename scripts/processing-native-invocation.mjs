@@ -180,17 +180,18 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
       pinned.push({ name, hash: snapshot.hash });
       // No collection, so no capture to exclude: a typed control on either side of the boundary binds.
       registered = { unitId: null, preFloorControlsOnly: false };
-    } else if (context.client === 'claude' && (selected.state === null || (selected.state.paused && !intervals.length))) {
-      // Only a session with no selection state at all, or one that `pause chat`
-      // paused before the worker armed it; an exclusion-only or retired
-      // selection keeps its existing refusal, also as a fallback candidate.
+    } else if (context.client === 'claude' && (selected.state === null || (!selected.state.intervals.length && !selected.state.active))) {
+      // Only a session the worker has not armed: with no selection state at
+      // all, or one holding only what typed commands recorded before arming
+      // (their own turns left out, or a pause); a retired selection keeps its
+      // existing refusal, also as a fallback candidate.
       const found = await settle(() => registeredSource(capability, store, identity, sessionKinds), MissingRegistrationFloor);
       source = found.source; floor = found.floor; pinned.push(...found.records);
       // Collection is on but not armed: a later typed control needs the armed
       // selection, whose exclusion receipt keeps it out of captured evidence.
       // A chat paused before arming is never armed while paused and takes a
       // typed control's exclusion, so any typed control binds.
-      registered = { unitId: found.unitId, preFloorControlsOnly: selected.state === null };
+      registered = { unitId: found.unitId, preFloorControlsOnly: selected.state?.paused !== true };
     } else throw new MissingNativeInvocation();
   }
   const selection = { client: context.client, sessionId: context.sessionId, cwd: source.projectRoot, unitId: null };

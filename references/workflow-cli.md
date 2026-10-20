@@ -249,7 +249,11 @@ excluded boundary, so collection starts with the prompt after that. With
 collection on, a typed control that is itself that first prompt after the floor
 binds before the selection is armed (it can never be collected), provided the
 bounded read still reaches the floor; any later typed control, or one past a
-longer unarmed tail, binds only once the selection is armed.
+longer unarmed tail, binds only once the selection is armed. A typed `capture`,
+`pause chat` or `resume chat` before arming leaves its own turn out, since a
+first prompt precedes the floor and the worker's boundary does not cover it;
+that selection still binds and arms as before, and one paused before arming
+binds every typed control.
 Omitted collection selection must resolve uniquely from bounded registration
 metadata; no new source is discovered. The optional `selection` must match the
 verified caller; it is not the default evidence boundary. Evidence `scope` is
