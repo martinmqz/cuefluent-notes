@@ -377,6 +377,26 @@ test('a typed capture ends by the deadline of the command that started it', asyn
   assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
 });
 
+test('a turn that starts exactly where a window-sized read ends is captured', async t => {
+  const f = await fixture(t), X = randomUUID(), T = randomUUID(), C = randomUUID();
+  // A turn larger than a window that ends exactly 8 MiB after turn B, so the
+  // next turn starts exactly where the read past it stops.
+  const head = row('event_msg', { type: 'task_started', turn_id: X }) + row('event_msg', { type: 'user_message', message: 'Write a long report.' });
+  const tail = row('event_msg', { type: 'task_complete', turn_id: X }), fillers = Array.from({ length: 7 }, () => row('event_msg', { type: 'agent_message', message: 'x'.repeat(1024 * 1024) }));
+  const used = Buffer.byteLength(head + fillers.join('') + tail), pad = row('event_msg', { type: 'agent_message', message: '' });
+  const last = row('event_msg', { type: 'agent_message', message: 'y'.repeat(8 * 1024 * 1024 - used - Buffer.byteLength(pad)) });
+  const long = head + fillers.join('') + last + tail;
+  assert.equal(Buffer.byteLength(long), 8 * 1024 * 1024);
+  await fs.appendFile(f.sourcePath, long + turn(T, 'Decision: at the boundary.') +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: true, leftOut: 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 1, more: false, leftOut: 1 });
+  assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: T })).head);
+});
+
 test('each capture control enforces its budget and preserves selection for retry', async t => {
   const f = await fixture(t, { enabled: true });
   const expiredClock = () => { let ticks = 0; return { now: () => ticks++ === 0 ? 0 : 10000 }; };

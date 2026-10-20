@@ -600,7 +600,10 @@ async function scanChat(chat, source, start, endByte, observeRead, continuation 
   // A turn's own last record, where the reader knows it (Codex owns records by
   // turn); otherwise a turn runs to the next turn's start.
   const unitEnds = new Map((inspected.unitEnds ?? []).map(item => [item.unitId, item.record]));
-  return { anchors, records: inspected.recordAnchors, end: limited ? inspected.blocked.offset : endByte, tooLarge, unitEnds };
+  // Whether a record runs past the read's end, so a read from there starts
+  // inside it; a read that ends exactly between records does not.
+  const straddles = !limited && inspected.diagnostics.pendingTail === true && !inspected.recordAnchors.some(record => record.endByte === endByte);
+  return { anchors, records: inspected.recordAnchors, end: limited ? inspected.blocked.offset : endByte, tooLarge, unitEnds, straddles };
 }
 
 // The next window of the chat's finished turns: at most 10 turns or 8 MiB, up
@@ -631,7 +634,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     // it read that ends there (its last bytes, when it is too large whole).
     const limitAnchor = limit < eof ? await chatCursorAnchor(observed.source, limit) : null;
     const scanned = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
-    const { anchors, records, end, tooLarge, unitEnds } = scanned;
+    const { anchors, records, end, tooLarge, unitEnds, straddles } = scanned;
     const at = async (eofByte, startsMidRecord) => {
       const record = eofByte === limit ? null : records.find(item => item.endByte === eofByte);
       const anchor = eofByte === limit ? limitAnchor : !record ? null : record.endByte - record.startByte <= CHAT_ANCHOR_BYTES
@@ -666,14 +669,14 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       if (!cut) {
         if (anchors.length || end >= eof) return { current, unitIds: [], more: false, leftOut };
         // Still inside a turn larger than a window: read on from here.
-        start = await at(end, end === limit); continue;
+        start = await at(end, end === limit && straddles); continue;
       }
       // A turn that fills this whole read is larger than a window: leave it
       // out and read on. Otherwise only excluded turns came first: start the
       // next read at the cut turn, which may fit.
       if (!before.length && cut.record.startByte === start.eofByte) {
         if (!skipped(cut)) leftOut.push(cut.unitId);
-        start = await at(end, end === limit);
+        start = await at(end, end === limit && straddles);
       }
       else start = await at(cut.record.startByte, false);
       continue;
