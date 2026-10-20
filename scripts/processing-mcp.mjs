@@ -742,6 +742,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal }));
     if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
     reserving.add(source);
+    // The reply's status is read before the command acts: a status that
+    // cannot be read refuses with nothing applied, never after acting.
+    const view = await currentView(source);
     const automatic = await automaticCapture(capability, source);
     const store = await withStorageProbes(() => openWorkflowIntake(capability));
     const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
@@ -782,7 +785,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       try { await withStorageProbes(async () => clearReaderBlock(await openWorkflowIntake(capability), { client, sessionId: source.selection.sessionId })); } catch { /* the next visit */ }
     }
     signal?.throwIfAborted();
-    let response = { ...await currentView(source), ...outcome };
+    let response = { ...view, ...outcome };
     // The command leaves out its own turn, so a later capture skips it, before
     // its reply is kept: a redelivery then replays whether that worked. An
     // unarmed Automatic chat has no selection to add an exclusion to: its first

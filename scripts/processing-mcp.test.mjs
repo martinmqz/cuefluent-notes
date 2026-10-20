@@ -1097,6 +1097,22 @@ test('a typed capture stopped by a record it cannot read says why and leaves its
   }
 });
 
+test('a typed capture whose reply cannot be built refuses before it captures anything', async t => {
+  const { h, parent, head } = await manualCaptureChat(t);
+  const decision = await parent.work('Decision: ship on Friday.');
+  // The chat's processing status cannot be read, as with a Claude sign-in
+  // setting that is not valid.
+  h.beforeStatus = () => { throw Object.assign(new Error('synthetic'), { code: 'PROCESSING_CLIENT_AUTHENTICATION_INVALID' }); };
+  const rpc = await h.call('capture_turns', {});
+  assert.equal(rpc.error?.data?.code, 'PROCESSING_CLIENT_AUTHENTICATION_INVALID', JSON.stringify(rpc));
+  assert.equal(await head(decision), null);
+  // Typed again with a readable status, the capture takes the turn.
+  delete h.beforeStatus;
+  const retry = await h.call('capture_turns', {}); await parent.finish(retry);
+  assert.equal(body(retry).turns, 1, body(retry).statusText);
+  assert(await head(decision));
+});
+
 test('a window with a turn the reader holds for its records keeps waiting, never passed by a later window, and says so', async t => {
   const { f, h, parent, store, identity, head } = await manualCaptureChat(t);
   const first = await parent.work('Decision: ship on Friday.');

@@ -86,6 +86,7 @@ export async function harness(t, f, overrides = {}) {
       let closed = false;
       return { ...controller, async run(args) { const job = controller.run(args); h.jobs.push(job); return job; },
         async stop(args) { await h.beforeStop?.(); return controller.stop(args); },
+        async status(args) { await h.beforeStatus?.(); return controller.status(args); },
         async finishReview(args) {
           h.finishReviewCalls = (h.finishReviewCalls ?? 0) + 1;
           await h.beforeFinishReview?.();
