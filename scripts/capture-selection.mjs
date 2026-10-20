@@ -96,7 +96,8 @@ export function validateSelectionState(value) {
   if (open !== Number(value.active) || (value.active && (!currentInterval(value, value.intervals.at(-1)) || value.intervals.at(-1)?.upper !== null))) fail('INVALID_SELECTION');
   list(value.exclusions, 4096).forEach(nativeId); unique(value.exclusions);
   list(value.explicitScopes, 4096).forEach(item => {
-    keys(item, ['id', 'kind', 'unitIds', 'start', 'end']); nativeId(item.id); choice(item.kind, ['current', 'historical']);
+    keys(item, ['id', 'kind', 'unitIds', 'start', 'end'], ['contentHash']); nativeId(item.id); choice(item.kind, ['current', 'historical']);
+    if (item.contentHash !== undefined) hash(item.contentHash);
     list(item.unitIds, 4096, { empty: false }).forEach(nativeId); unique(item.unitIds);
     record(item.start);
     if (item.end !== null) { record(item.end); if (item.end.endByte < item.start.endByte) fail('INVALID_SELECTION'); }
@@ -169,7 +170,8 @@ export function applySelectionControl(state, request, trustedBoundary, { grantHa
     nativeId(request.unitId);
     addExclusion(next, request.unitId);
   } else {
-    keys(request.scope, ['unitIds', 'start', 'end']);
+    keys(request.scope, ['unitIds', 'start', 'end'], ['contentHash']);
+    if (request.scope.contentHash !== undefined) hash(request.scope.contentHash);
     list(request.scope.unitIds, 4096, { empty: false }).forEach(nativeId);
     if (request.scope.unitIds.some(unit => deniedUnit(state, unit))) fail('EXCLUDED_CAPTURE_REQUEST');
     if (request.operation === 'capture-current' && (request.scope.unitIds.length !== 1 || request.scope.unitIds[0] !== request.unitId)) fail('SELECTION_IDENTITY_MISMATCH');

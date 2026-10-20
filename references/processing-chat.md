@@ -95,7 +95,11 @@ the CLI, which can hold up to 100 turns: it is finished whole. A turn whose reco
 waiting, as it keeps Automatic capture waiting, so no later window passes it. An
 earlier capture or pause that the transcript no longer matches (cut back or
 rewritten in place) is not trusted: capture starts from an earlier point the
-transcript still matches. A turn that cannot be captured within those limits (larger than a window, or
+transcript still matches. Before moving past the latest window or the turns a
+capture last passed as left out, capture checks every byte of that stretch
+against a hash kept when it was passed; a stretch Automatic capture covered is
+checked at the records at its ends. A window chosen but never run is run
+before a later window, even when its turns were captured before. A turn that cannot be captured within those limits (larger than a window, or
 ending in a record too large to anchor) is left out, and the reply says so; it
 never blocks the chat's later turns. Turns already left out stay out. In a chat
 Automatic capture covers it captures nothing and says so, and in a chat whose

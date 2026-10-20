@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { assertWorkflowStorage, workflowCollectionGrant } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, withIntakeLock, withIntakeLockWaiting, intakeSnapshot, intakeJSON, replaceIntakeJSON } from './intake-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
@@ -196,7 +196,10 @@ async function deriveExplicitScope(capability, request, selection, observeRead) 
   anchors.sort((a, b) => a.record.startByte - b.record.startByte);
   const end = inspected.recordAnchors.at(-1);
   if (!end || end.endByte !== request.readRange.endByte || end.endByte - end.startByte > 64 * 1024) fail('SOURCE_ANCHOR_LIMIT');
-  return { source: observed.source, scope: { unitIds: request.unitIds, start: anchors[0].record, end } };
+  // The hash of every byte the scope covers: a later capture moves past it
+  // only while the transcript still holds exactly these bytes.
+  const contentHash = await stretchHash(observed.source, anchors[0].record.startByte, end.endByte);
+  return { source: observed.source, scope: { unitIds: request.unitIds, start: anchors[0].record, end, contentHash } };
 }
 
 /** Preview reads only the explicitly authorized byte window of the named source. */
@@ -319,18 +322,43 @@ export async function excludeChatTurn(capability, { selection, source, unitId },
 const CHAT_CURSOR_ANCHOR_BYTES = 4096;
 const SOURCE_CONFLICTS = ['SOURCE_CHANGED', 'SOURCE_ANCHOR_CONFLICT', 'SOURCE_IDENTITY_MISMATCH'];
 const chatCursorPath = chat => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}.json`;
-async function readChatCursor(store, chat, source) {
+// The position counts with the hash of the stretch it moved past (`from` up
+// to it), and, where `stretch` asks, only while those bytes are unchanged.
+async function readChatCursor(store, chat, source, { stretch = false } = {}) {
   const snapshot = await intakeSnapshot(store, 'state', chatCursorPath(chat), { maxBytes: 4096 }), value = intakeJSON(snapshot);
   if (value === null) return { snapshot, cursor: null };
-  keys(value, ['format', 'version', 'sourceIdentity', 'offset', 'startsMidRecord', 'anchor']); hash(value.sourceIdentity); integer(value.offset);
-  if (value.format !== 'cuefluent-chat-capture-cursor' || value.version !== 1 || typeof value.startsMidRecord !== 'boolean') fail('INVALID_INTAKE_METADATA');
+  keys(value, ['format', 'version', 'sourceIdentity', 'offset', 'startsMidRecord', 'anchor', 'from', 'contentHash']); hash(value.sourceIdentity); integer(value.offset);
+  integer(value.from); hash(value.contentHash);
+  if (value.format !== 'cuefluent-chat-capture-cursor' || value.version !== 1 || typeof value.startsMidRecord !== 'boolean' || value.from > value.offset) fail('INVALID_INTAKE_METADATA');
   if (value.sourceIdentity !== source.fileIdentity) return { snapshot, cursor: null };
   try { await verifySourceCursor(source, { sourceIdentity: value.sourceIdentity, offset: value.offset, anchor: value.anchor }); }
   catch (error) {
     if (SOURCE_CONFLICTS.includes(error.code)) return { snapshot, cursor: null };
     throw error;
   }
+  if (stretch && !await stretchHolds(source, value.from, value.offset, value.contentHash)) return { snapshot, cursor: null };
   return { snapshot, cursor: value };
+}
+// The hash of the transcript's bytes from `from` to `to`, read as they are
+// now. Capture moves past a stretch only while its bytes still hash as they
+// did when it was first passed; end anchors alone vouch for nothing between.
+const STRETCH_READ_BYTES = 1024 * 1024;
+async function stretchHash(source, from, to) {
+  const { handle, stat } = await openGuarded(source.path, { singleLink: true });
+  try {
+    if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(to)) fail('SOURCE_CHANGED');
+    const hasher = createHash('sha256'), buffer = Buffer.alloc(Math.max(1, Math.min(STRETCH_READ_BYTES, to - from)));
+    for (let offset = from; offset < to;) {
+      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, to - offset), offset);
+      if (!bytesRead) fail('SOURCE_CHANGED');
+      hasher.update(buffer.subarray(0, bytesRead)); offset += bytesRead;
+    }
+    return hasher.digest('hex');
+  } finally { await handle.close(); }
+}
+async function stretchHolds(source, from, to, expected) {
+  try { return await stretchHash(source, from, to) === expected; }
+  catch (error) { if (SOURCE_CONFLICTS.includes(error.code)) return false; throw error; }
 }
 // The hash of up to 4 KiB of transcript bytes ending at `offset`, read from
 // the verified file.
@@ -361,6 +389,13 @@ async function holds(source, offset, record = null) {
 }
 // The record an explicit capture ends with.
 const scopeEnd = scope => scope.end ?? scope.start;
+// An earlier capture counts while the transcript still holds its last record
+// and, where its selection kept one, the hash of every byte it covers.
+async function scopeHolds(source, scope) {
+  const end = scopeEnd(scope);
+  if (!await holds(source, end.endByte, end)) return false;
+  return scope.contentHash === undefined || stretchHolds(source, scope.start.startByte, end.endByte, scope.contentHash);
+}
 // After a record too large to anchor whole, the anchor is the hash of its last
 // bytes, read again and accepted only while the whole record still hashes as
 // the scan read it: still bound to that read.
@@ -435,13 +470,19 @@ async function advanceChatCursor(capability, chat, source, position, { now, sign
   if (position.eofByte <= 0 || !position.anchor) return;
   return bounded(now, async () => {
     if (!await holds(source, position.eofByte, position.anchor)) return;
+    let contentHash;
+    try { contentHash = await stretchHash(source, position.from, position.eofByte); }
+    catch (error) { if (SOURCE_CONFLICTS.includes(error.code)) return; throw error; }
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
-      const { snapshot, cursor } = await readChatCursor(store, chat, source);
+      // A stored position whose stretch no longer holds is replaced, so a
+      // capture that reads that stretch again can store where it got to.
+      const { snapshot, cursor } = await readChatCursor(store, chat, source, { stretch: true });
       if (cursor && cursor.offset >= position.eofByte) return;
       await replaceIntakeJSON(tx, chatCursorPath(chat), { format: 'cuefluent-chat-capture-cursor', version: 1, sourceIdentity: source.fileIdentity,
         offset: position.eofByte, startsMidRecord: position.startsMidRecord,
-        anchor: { startByte: position.anchor.startByte, endByte: position.anchor.endByte, hash: position.anchor.hash } }, snapshot.hash);
+        anchor: { startByte: position.anchor.startByte, endByte: position.anchor.endByte, hash: position.anchor.hash },
+        from: position.from, contentHash }, snapshot.hash);
     }, { signal });
   });
 }
@@ -455,13 +496,13 @@ async function advanceChatCursor(capability, chat, source, position, { now, sign
 async function chatStart(store, chat, state, floor, source) {
   let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
   const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
-  const { cursor } = await readChatCursor(store, chat, source);
+  const { cursor } = await readChatCursor(store, chat, source, { stretch: true });
   if (cursor) later(cursor.offset, cursor.startsMidRecord);
-  // Latest first: the first capture whose end still holds is the one that counts.
-  const ends = (state?.explicitScopes ?? []).map(scopeEnd).sort((a, b) => b.endByte - a.endByte);
-  for (const end of ends) {
-    if (end.endByte <= start.eofByte) break;
-    if (await holds(source, end.endByte, end)) { later(end.endByte); break; }
+  // Latest first: the first capture that still holds is the one that counts.
+  const scopes = [...(state?.explicitScopes ?? [])].sort((a, b) => scopeEnd(b).endByte - scopeEnd(a).endByte);
+  for (const scope of scopes) {
+    if (scopeEnd(scope).endByte <= start.eofByte) break;
+    if (await scopeHolds(source, scope)) { later(scopeEnd(scope).endByte); break; }
   }
   const covered = [];
   for (const interval of state ? currentIntervals(state) : []) {
@@ -530,6 +571,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
   const denied = deniedUnits(current.state), leftOut = [];
   let { start, covered } = await chatStart(store, chat, current.state, floor, observed.source);
+  const from = start.eofByte;
   // Turns Automatic capture covered are skipped like excluded turns; a read
   // never starts inside such a stretch.
   const coveredAt = offset => covered.some(range => offset >= range.from && offset < range.to.eofByte);
@@ -603,7 +645,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     start = await at(units[1]?.record.startByte ?? stop, false);
   }
   // Out of reads inside left-out or excluded turns: the next capture resumes here.
-  return { current, unitIds: [], more: true, leftOut, resumeAt: start };
+  return { current, unitIds: [], more: true, leftOut, resumeAt: { ...start, from } };
 }
 
 // Bounded runs of a chat's capture scope, each publishing a few turns, while
@@ -664,14 +706,17 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
   return { saved, finished: false };
 }
 // Whether a capture scope needs no further run: the reader read it to its
-// end, or every turn in it is captured or left out. A finished window is never
-// read again by a later capture.
+// end, or every turn in it is left out, or, once its own run has made
+// progress, every turn in it is captured or left out. A finished window is
+// never read again by a later capture. Turns captured before it ran, from an
+// earlier read of other bytes, never finish a scope that has not run.
 async function scopeDrained(capability, chat, state, scope, now) {
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
     const { cursor } = await readReaderProgress(store, identityOf(chat), scope.id, state.source.fileIdentity, { metadataOnly: true });
     if (cursor?.offset === scopeEnd(scope).endByte) return true;
     const denied = deniedUnits(state);
+    if (!cursor) return scope.unitIds.every(unitId => denied.has(unitId));
     for (const unitId of scope.unitIds) {
       if (!denied.has(unitId) && !(await readCaptureHead(store, { ...identityOf(chat), unitId }, { metadataOnly: true })).head) return false;
     }
@@ -699,7 +744,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   for (const scope of [...previous.state?.explicitScopes ?? []].sort((a, b) => scopeEnd(b).endByte - scopeEnd(a).endByte)) {
     signal?.throwIfAborted();
     if (!timeFor(deadline, 2)) return { turns, more: true, leftOut: 0 };
-    if (await bounded(now, () => holds(source, scopeEnd(scope).endByte, scopeEnd(scope)))) { last = scope; break; }
+    if (await bounded(now, () => scopeHolds(source, scope))) { last = scope; break; }
   }
   signal?.throwIfAborted();
   if (last && !await scopeDrained(capability, chat, previous.state, last, now)) {
