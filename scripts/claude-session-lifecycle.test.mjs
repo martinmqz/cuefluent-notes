@@ -1516,3 +1516,33 @@ test('a capture moves past turns it left out only while every byte it passed is 
   await captureChatTurns(f.capability, await bind(C2), { scanWindows: 1 });
   assert.match((await A.head(Z)).capture.evidence[0].text, /Kept out/);
 });
+
+test('a window re-chosen after a change only inside it is a new window, not the earlier one again', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [C1, C2] = [randomUUID(), randomUUID()], prompts = Array.from({ length: 12 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // Twelve turns: each window takes ten and ends where the eleventh begins.
+  await A.append(prompts.flatMap((promptId, index) => [A.prompt(`Decision ${index}.`, promptId), A.reply('Noted.')]));
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // The first capture selects the window but runs out of time to run it.
+  const first = await bind(C1), slow = slowReads(t);
+  slow.state.jump = 32_000;
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
+  slow.state.skew = slow.state.jump = 0;
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [selected] = (await A.selection()).state.explicitScopes;
+  // A record inside it changes in place: same turns, offsets, first and last records.
+  const text = await fs.readFile(A.file), at = text.indexOf('Decision 4.');
+  assert(at > selected.start.endByte && at < selected.end.startByte);
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('Z'), 0, 1, at + 'Decision '.length); } finally { await handle.close(); }
+  // The same window is chosen again, as a new one with its own identity, and captured.
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2), { now: slow.clock }), { turns: 10, more: true, leftOut: 0 });
+  const scopes = (await A.selection()).state.explicitScopes;
+  assert.equal(scopes.length, 2); assert.notEqual(scopes[1].id, selected.id); assert.notEqual(scopes[1].contentHash, selected.contentHash);
+  assert.deepEqual([scopes[1].unitIds, scopes[1].start, scopes[1].end], [selected.unitIds, selected.start, selected.end]);
+});

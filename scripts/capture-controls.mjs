@@ -170,7 +170,7 @@ export async function restrictCapture({ configPath, expectedConfigHash, collecti
 
 async function explicitRequest(request) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], ['bounds']);
-  if (request.bounds !== undefined) { keys(request.bounds, ['start', 'end']); hash(request.bounds.start); hash(request.bounds.end); }
+  if (request.bounds !== undefined) { keys(request.bounds, ['start', 'end', 'content']); hash(request.bounds.start); hash(request.bounds.end); hash(request.bounds.content); }
   const selection = await selected(request.selection);
   nativeId(request.operationId); oldHash(request.expectedSelectionHash); choice(request.kind, ['current', 'historical']);
   list(request.unitIds, 100, { empty: false }).forEach(nativeId); unique(request.unitIds);
@@ -228,9 +228,10 @@ export async function selectExplicitCapture(capability, request, { observeRead =
       if (current.hash !== request.expectedSelectionHash) fail('STALE_SELECTION');
       const { source, scope } = await deriveExplicitScope(capability, request, selection, observeRead);
       // A window chosen from an earlier read names the hashes of its first and
-      // last records; this read must find the same bytes there, or the scope
-      // would be published under an identity that describes other bytes.
-      if (request.bounds && (scope.start.hash !== request.bounds.start || scope.end.hash !== request.bounds.end)) fail('SOURCE_ANCHOR_CONFLICT');
+      // last records and of all its bytes; this read must find the same bytes,
+      // or the scope would be published under an identity that describes others.
+      if (request.bounds && (scope.start.hash !== request.bounds.start || scope.end.hash !== request.bounds.end ||
+          scope.contentHash !== request.bounds.content)) fail('SOURCE_ANCHOR_CONFLICT');
       const authorize = async () => { await assertWorkflowStorage(capability, selection, 'explicitCollect'); return true; };
       return controlSelection(tx, { source, expectedHash: current.hash, authorize, callerRequestHash: digest(canonicalJSON(request)),
         request: { id: request.operationId, client: selection.client, sessionId: selection.sessionId,
@@ -638,7 +639,8 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       if (closing && closing.endByte > units[0].record.startByte && closing.endByte - closing.startByte <= CHAT_ANCHOR_BYTES) {
         return { current, unitIds: units.slice(0, count).map(item => item.unitId),
           readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte },
-          bounds: { start: units[0].record.hash, end: closing.hash }, more: more || count < units.length, leftOut };
+          bounds: { start: units[0].record.hash, end: closing.hash, content: await stretchHash(observed.source, units[0].record.startByte, closing.endByte) },
+          more: more || count < units.length, leftOut };
       }
     }
     leftOut.push(units[0].unitId);
@@ -779,9 +781,9 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   // The window is selected now and runs while a run still fits; otherwise the
   // next capture runs it first.
   if (!timeFor(deadline, 1)) return { turns, more: true, leftOut };
-  // The window's identity covers the bytes of its first and last records, so a
-  // window rewritten in place over the same turns and offsets is a new window,
-  // never the earlier one replayed.
+  // The window's identity covers the hash of all its bytes, so a window
+  // rewritten in place over the same turns and offsets, even only inside, is a
+  // new window, never the earlier one replayed.
   const operationId = digestId('cuefluent-chat-capture-v1', { client: chat.client, sessionId: chat.sessionId,
     unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds });
   const fresh = window.leftOut.length ? await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat))) : window.current;

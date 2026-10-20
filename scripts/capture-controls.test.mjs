@@ -245,7 +245,7 @@ test('one-time capture with collection disabled reads the selected window and pu
 test('an explicit capture chosen from an earlier read refuses a window whose records changed since', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   // The window's first record is the selected turn's first; its last ends the read.
-  const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)) };
+  const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
   // The last record is rewritten in place, at the same offsets.
   await fs.writeFile(f.sourcePath, text.slice(0, -lines.at(-1).length) + lines.at(-1).replace('00:00:00.000Z', '00:00:01.000Z'));
   await assert.rejects(selectExplicitCapture(f.capability, { ...f.request, bounds }), { code: 'SOURCE_ANCHOR_CONFLICT' });
