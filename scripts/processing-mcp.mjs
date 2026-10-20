@@ -16,7 +16,7 @@ import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn } from './capture-controls.mjs';
-import { READER_BLOCK_CODES } from './collection-worker.mjs';
+import { READER_BLOCK_CODES, readReaderBlock } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -748,16 +748,29 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     signal?.throwIfAborted();
     return { ...await currentView(source), ...outcome };
   }
-  // Whether the worker's latest pass stopped Automatic capture of this chat:
-  // a stop it reports in status, or a reader block no later pass gets past.
+  // Whether the worker stopped Automatic capture of this chat: a stop status
+  // reports, or a reader block no later pass gets past, kept for this chat or
+  // in the latest pass's notice.
   async function automaticStopped(capability, source) {
     if ((await collectionStop(capability, source)).collection) return true;
     try {
       const store = await withStorageProbes(() => openWorkflowIntake(capability));
+      if (await withStorageProbes(() => readReaderBlock(store, { client, sessionId: source.selection.sessionId }))) return true;
       const notice = intakeJSON(await withStorageProbes(() => intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 })));
       return Array.isArray(notice?.diagnostics) && notice.diagnostics.some(item => item?.client === source.selection.client &&
         item.sessionId === source.selection.sessionId && READER_BLOCK_CODES.includes(item.code));
     } catch { return false; }
+  }
+  // A typed command that failed leaves its own turn out under the same rule
+  // as one that succeeded, so a later capture never takes it. Housekeeping:
+  // the refusal stands whatever happens here.
+  async function afterFailure({ source, invocation }) {
+    if (!source?.nativeSkill || !source.unitId || !owners.has(source)) return;
+    const { capability } = selected(source);
+    const automatic = await automaticCapture(capability, source);
+    if (!(CAPTURE_TOOLS.includes(invocation.tool) || source.captureActive === false || !automatic)) return;
+    if (source.selectionHash === null && automatic) return;
+    await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }));
   }
   async function automaticCapture(capability, source) {
     try { await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect')); return true; }
@@ -887,7 +900,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix });
     await runProcessingControlServer({ client, input, output, env, resolveSource, unboundStatus, getStatus: exactOnly(getStatus),
       requestProcessing: exactOnly(requestProcessing), requestResume: exactOnly(requestResume), requestCancel: exactOnly(requestCancel),
-      requestReview: exactOnly(requestReview), requestCapture: exactOnly(requestCapture), beforeResponse, afterResponse, afterDelivery });
+      requestReview: exactOnly(requestReview), requestCapture: exactOnly(requestCapture), beforeResponse, afterResponse, afterDelivery, afterFailure });
   } finally {
     // No automatic dispatch retry, cancellation, claim cleanup or new source read.
     for (const job of jobs.values()) job.rejectDispatch(Object.assign(new Error('PROCESSING_CONTROL_FAILED'), { code: 'PROCESSING_CONTROL_FAILED' }));

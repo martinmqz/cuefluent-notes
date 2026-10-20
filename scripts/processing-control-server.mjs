@@ -683,7 +683,7 @@ export function processingControlStatusView(value, args) {
  * skill/control provenance for a dispatch. Its opaque result is never accepted
  * from JSON or returned to the model. No transcript discovery exists here. */
 export async function runProcessingControlServer({ client, input = process.stdin, output = process.stdout,
-  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, requestCapture, beforeResponse, afterResponse, afterDelivery,
+  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, requestCapture, beforeResponse, afterResponse, afterDelivery, afterFailure,
   unboundStatus } = {}) {
   choice(client, CLIENTS);
   if ([resolveSource, getStatus, requestProcessing].some(value => typeof value !== 'function')) fail('PROCESSING_CONTROL_INVALID_REQUEST');
@@ -746,7 +746,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     const commitResponse = () => { signal.throwIfAborted(); request.complete = true; };
     // A tool call is checked and bound to its native source first; only then
     // does its action start. Other methods are protocol traffic.
-    let stage = null;
+    let stage = null, acting = null;
     try {
       if (request.cancelled) fail('PROCESSING_REVIEW_INTERRUPTED');
       let result, afterCommit = null, delivered = null;
@@ -814,7 +814,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
           try { id(collectionId); } catch { fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); }
           if (source.collectionId !== undefined && source.collectionId !== collectionId) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
           const resolvedArgs = Object.freeze({ ...args, collectionId });
-          stage = 'action';
+          stage = 'action'; acting = { source, invocation };
           let elicited = 0, selectedForm = false;
           const elicit = async proposal => {
             const selecting = proposal.choices !== undefined;
@@ -909,6 +909,8 @@ export async function runProcessingControlServer({ client, input = process.stdin
       if (delivered) { try { await delivered(); } catch { /* reply already written */ } }
     } catch (error) {
       request.complete = true;
+      // A command whose action failed still gets its bookkeeping.
+      if (acting && typeof afterFailure === 'function') { try { await afterFailure(acting); } catch { /* the refusal stands */ } }
       if (request.cancelled) return;
       // Claude may have rejected an unrelated registered source during /clear
       // fallback, so an ownership or identity failure there is not attributed

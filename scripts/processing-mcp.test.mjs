@@ -1081,6 +1081,18 @@ test('typed status in a chat with no housekeeping room keeps its turn capturable
   assert(!after.exclusions.includes(parent.controls.at(-1)));
 });
 
+test('a typed capture that fails still leaves its own turn out of later captures', async t => {
+  const { h, parent, store, identity } = await manualCaptureChat(t);
+  await parent.work('Decision: ship on Friday.');
+  // A record the reader cannot read stops the capture; enough later bytes keep
+  // the command's own binding read past it.
+  await fs.appendFile(parent.source.path, 'not a transcript record\n');
+  await parent.work('Later turn.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+  const rpc = await h.call('capture_turns', {});
+  assert.equal(rpc.error.code, -32600, JSON.stringify(rpc));
+  assert((await readSelection(store, identity)).state.exclusions.includes(parent.controls.at(-1)));
+});
+
 test('a capture command the person did not type applies nothing', async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   for (const tool of ['capture_turns', 'pause_capture', 'resume_capture']) {
@@ -1120,6 +1132,20 @@ test('a chat whose Automatic capture stopped is not told capture covers it', asy
     assert.equal(reply.capture, 'stopped');
     assert.match(reply.statusText, /^Cuefluent: Automatic capture has stopped for this chat, so its later turns are not captured/);
   });
+});
+
+test('a reader block is kept per chat, so a later pass that skips the chat cannot hide it', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await parent.work('Captured automatically.'); await run();
+  await fs.appendFile(parent.source.path, 'not a transcript record\n');
+  await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+  assert((await run()).pending.includes('INVALID_SESSION_RECORD'));
+  // A later pass that does not visit this chat rebuilds the notice without it.
+  await publishIngressMetadata(parent.store, collectionStatusPath, { status: 'idle', saved: 0, pending: [], diagnostics: [],
+    boundaryExcluded: [], updatedAt: new Date(Date.now() + 1000).toISOString() });
+  const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+  assert.equal(reply.capture, 'stopped', reply.statusText);
 });
 
 test('typed capture, pause chat and resume chat follow Automatic capture of the chat', async t => {

@@ -173,6 +173,22 @@ export const READER_BLOCK_CODES = Object.freeze(['UNSUPPORTED_CLAUDE_RECORD', 'C
   'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
   'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW']);
 
+// The reader block a visit of a chat last ended on, kept per chat: a later
+// pass that does not visit the chat cannot erase it the way it rebuilds the
+// collection-wide status notice. A visit that ends without one clears it.
+export const readerBlockPath = identity => `reader-blocks/${identity.client}/${nativeId(identity.sessionId)}.json`;
+async function recordReaderBlock(store, identity, code) {
+  const next = READER_BLOCK_CODES.includes(code) ? code : null, name = readerBlockPath(identity);
+  const previous = intakeJSON(await intakeSnapshot(store, 'state', name, { maxBytes: 4096 }));
+  if ((previous?.code ?? null) === next) return;
+  await publishIngressMetadata(store, name, { version: 1, code: next });
+}
+/** The reader block this chat's last visit ended on, if any. */
+export async function readReaderBlock(store, identity) {
+  const value = intakeJSON(await intakeSnapshot(store, 'state', readerBlockPath(identity), { maxBytes: 4096 }));
+  return value !== null && READER_BLOCK_CODES.includes(value.code) ? value.code : null;
+}
+
 // `link` carries the registration and policy for creating a session link; its
 // `attempted` flag is shared by all scopes of one registration visit.
 export async function processScope(transaction, store, selection, scopeId, authorize, observeRead, link = null) {
@@ -486,6 +502,7 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           const result = await runRegistration(capability, registration, registered.hash, route, grantHash, observeRead, snapshot.config,
             { awaitSource: Boolean(trigger) && job.file === registrationPath(trigger) });
           output.saved += result.saved;
+          try { await recordReaderBlock(store, job, result.pending); } catch { /* the notice still reports this pass */ }
           if (result.pending) {
             output.pending.push(result.pending);
             if (!passStopCodes.has(result.pending)) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: result.pending });
@@ -497,6 +514,7 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           }
         } catch (error) {
           output.pending.push(error.code ?? 'COLLECTION_FAILED');
+          if (READER_BLOCK_CODES.includes(error.code)) try { await recordReaderBlock(store, job, error.code); } catch { /* reported below */ }
           if (passStopCodes.has(error.code)) break;
           output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: error.code ?? 'COLLECTION_FAILED' });
         }
