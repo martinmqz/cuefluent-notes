@@ -451,11 +451,13 @@ test('workflow preserves required checks and gates short-path smokes on provenan
   const jobs = workflow.jobs;
   assert.deepEqual(jobs.reproducibility.needs, ['scope', 'test', 'client-smoke']);
   // Draft pull requests skip every job, except publication's package-update PR;
-  // the gate still runs after any failure of the others.
+  // the gate still runs after any failure of the others, but not in a
+  // cancelled run, and only a first attempt cancels a pull request's run.
   const ready = "(github.event_name != 'pull_request' || !github.event.pull_request.draft || startsWith(github.head_ref, 'chore/publish-'))";
   assert.deepEqual(workflow.on.pull_request.types, ['opened', 'synchronize', 'reopened', 'ready_for_review', 'converted_to_draft']);
   assert.equal(jobs.scope.if, '${{ ' + ready + ' }}');
-  assert.equal(jobs.reproducibility.if, '${{ always() && ' + ready + ' }}');
+  assert.equal(jobs.reproducibility.if, '${{ !cancelled() && ' + ready + ' }}');
+  assert.equal(workflow.concurrency['cancel-in-progress'], "${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}");
   assert.equal(jobs.guidance.if, "${{ !startsWith(github.ref, 'refs/tags/') && " + ready + ' }}');
   assert.ok(jobs.reproducibility.steps.some(step => step.run === 'node scripts/marketplace-ci.mjs gate' && step.env.CI_NEEDS === '${{ toJSON(needs) }}'));
   assert.equal(jobs.test.needs, 'scope'); assert.equal(jobs['client-smoke'].needs, 'scope');

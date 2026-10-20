@@ -178,11 +178,17 @@ npm dependencies. On the full path it still compares all native build artifacts;
 only tag runs may omit client registration, as defined below. Required check names
 and protected-main settings stay the same. A failed or cancelled selection cannot
 satisfy the required check. Published assets are neither rebuilt nor replaced by
-the shorter path. Draft pull requests skip every Checks job, so their required
-matrix checks do not exist until the pull request is marked ready for review,
-which runs them; the draft package-update PR from publication still runs. A newer
-push to a pull request, or converting it back to draft, cancels its running
-checks.
+the shorter path. On the full path the required `test (macos-14)` and
+`test (windows-2025)` checks each run half of the source suite; the other half
+runs as `test (macos-14, 2/2)` and `test (windows-2025, 2/2)`, which are not
+required checks themselves but which `reproducibility` requires. Draft pull
+requests skip every Checks job, so their required matrix checks do not exist and
+their other checks, `reproducibility` included, report as skipped until the pull
+request is marked ready for review, which runs them; a draft cannot be merged. The
+draft package-update PR from publication still runs, so marking it ready runs its
+checks a second time. A newer push to a pull request, or converting it back to
+draft, cancels its running checks; a re-run of an earlier run waits for them
+instead, and a cancelled run does not run `reproducibility`.
 
 The `client-smoke` job skips tag refs. On the full path it checks disposable
 client registration using separately built packages and, when present, the
