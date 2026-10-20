@@ -343,6 +343,7 @@ const COLLECTION_STOPS = Object.freeze({
   CODEX_ROLLBACK_REQUIRES_REVIEW: 'its transcript rolls back turns that were already recorded',
   SESSION_UNIT_LIMIT: 'its transcript has more turns in one stretch than Cuefluent Notes reads',
   SOURCE_ANCHOR_LIMIT: 'its transcript has a turn whose last record is too large for Cuefluent Notes to track',
+  CAPTURE_SIZE_LIMIT: 'its transcript has a turn with more records than one capture can hold',
   EVIDENCE_AFTER_CODEX_TERMINAL: 'its transcript has a turn with records after the turn ended',
   DUPLICATE_CODEX_START: 'its transcript starts the same turn twice',
   EVIDENCE_BEFORE_CODEX_START: 'its transcript has a turn with records before the turn started',
