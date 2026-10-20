@@ -1391,7 +1391,7 @@ test('a paused chat keeps a reader stop that typed capture cannot pass, and pass
   });
 });
 
-test('a reader stop marker that cannot be read leaves the latest pass to report the stop', async t => {
+test('a reader stop marker that cannot be read leaves the latest pass to report the stop, and the next visit repairs it', async t => {
   const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
   const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
   await parent.work('Captured automatically.'); await run();
@@ -1404,6 +1404,14 @@ test('a reader stop marker that cannot be read leaves the latest pass to report 
   assert.deepEqual(shown.collection, { state: 'stopped', code: 'INVALID_SESSION_RECORD' });
   const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
   assert.equal(reply.capture, 'stopped', reply.statusText);
+  // The next visit that ends on the same stop replaces the marker, so the stop
+  // outlasts a later pass that skips the chat and rebuilds the notice.
+  assert((await run()).pending.includes('INVALID_SESSION_RECORD'));
+  assert.equal(await readReaderBlock(parent.store, identity), 'INVALID_SESSION_RECORD');
+  await publishIngressMetadata(parent.store, collectionStatusPath, { status: 'idle', saved: 0, pending: [], diagnostics: [],
+    boundaryExcluded: [], updatedAt: new Date(Date.now() + 1000).toISOString() });
+  const later = await h.call('processing_status', {}); await parent.finish(later);
+  assert.deepEqual(body(later).collection, { state: 'stopped', code: 'INVALID_SESSION_RECORD' });
 });
 
 test('a chat whose header turns unsupported keeps that reader block, and typed commands there stay unverified', async t => {

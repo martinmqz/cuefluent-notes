@@ -199,12 +199,14 @@ export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUP
 // The reader block a visit of a chat last ended on, kept per chat: a later
 // pass that does not visit the chat cannot erase it the way it rebuilds the
 // collection-wide status notice. A visit that ends without one clears it. The
-// visit keeps it under its own intake lock, so visits replace it in order.
+// visit keeps it under its own intake lock, so visits replace it in order. The
+// marker is the visit's own record, so one that cannot be read is replaced.
 export const readerBlockPath = identity => `reader-blocks/${identity.client}/${nativeId(identity.sessionId)}.json`;
 async function recordReaderBlock(store, identity, code) {
   const next = READER_BLOCK_CODES.includes(code) ? code : null, name = readerBlockPath(identity);
-  const previous = intakeJSON(await intakeSnapshot(store, 'state', name, { maxBytes: 4096 }));
-  if ((previous?.code ?? null) === next) return;
+  let previous;
+  try { previous = intakeJSON(await intakeSnapshot(store, 'state', name, { maxBytes: 4096 })); } catch { previous = undefined; }
+  if (previous !== undefined && (previous?.code ?? null) === next) return;
   await publishIngressMetadata(store, name, { version: 1, code: next });
 }
 /** The reader block a scope's result holds a turn on, if any: any of its hold
