@@ -39,12 +39,12 @@ test('MCP admission returns while native processing is pending, and shutdown wai
   const admitted = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(admitted.status, 'busy'); assert.notEqual(admitted.requestId, requestId);
   assert.equal(admitted.statusDetail, 'accepted');
-  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder.');
+  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder or file.');
   h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'busy'); assert.equal(status.chat.sessionId, admitted.chat.sessionId);
   assert.equal(status.statusDetail, 'processing');
-  assert.match(status.statusText, /^Cuefluent: Processing is in progress\. Scope: all projects of this notes folder\. Inventory/);
+  assert.match(status.statusText, /^Cuefluent: Processing is in progress\. Scope: all projects of this notes folder or file\. Inventory/);
   const duplicate = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(duplicate.status, 'busy'); assert.deepEqual(duplicate.diagnostics, ['PROCESSING_CHAT_BUSY']);
   assert.equal(duplicate.requestId, admitted.requestId);
@@ -75,7 +75,7 @@ test('status exposes unfinished evidence, incompatible source scope and conflict
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'idle');
   assert.equal(status.statusDetail, 'unfinished');
-  assert.match(status.statusText, /^Cuefluent: Processing stopped with unfinished work\. Scope: all projects of this notes folder\. Inventory/);
+  assert.match(status.statusText, /^Cuefluent: Processing stopped with unfinished work\. Scope: all projects of this notes folder or file\. Inventory/);
   assert.equal(status.nextAction, 'resume');
   assert.equal(h.dispatches, 1);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), before);
@@ -364,7 +364,7 @@ test('verified native skill admission writes its exact parent control receipt be
   const receipt = JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
   assert.equal(receipt.dispatch.callId, 'call_1'); assert.equal(receipt.dispatch.unitId, f.identity.unitId);
   assert.equal(receipt.dispatch.argsHash, digest(canonicalJSON(args))); assert.equal(receipt.dispatch.resultHash, digest(canonicalJSON(row.result)));
-  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder.');
+  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder or file.');
   assert.equal(receipt.dispatch.sourcePath, f.source.path);
   gate.resolve();
 });

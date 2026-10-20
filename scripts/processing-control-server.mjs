@@ -264,7 +264,7 @@ function helpText({ commandPrefix: command, statusDetail }) {
 }
 const counted = (value, one, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
 // How a reply names each processing scope; the field keeps its internal name.
-const SCOPE_TEXT = Object.freeze({ collection: 'all projects of this notes folder', repo: 'this repository', chat: 'this chat' });
+const SCOPE_TEXT = Object.freeze({ collection: 'all projects of this notes folder or file', repo: 'this repository', chat: 'this chat' });
 // Every detail the plain reply leaves out, for `status --verbose`.
 function verboseText(result) {
   const counts = (label, value, names) => `${label}${value.incomplete ? ' (partial)' : ''}: ${names.map(([key, one, many = one]) => counted(value[key], one, many)).join(', ')}.`;

@@ -111,7 +111,7 @@ applies only to the draft your last typed `review` showed. A draft or destinatio
 that changed after your review is refused and nothing is saved. `help` lists
 every action, also before setup.
 Plain `process` drafts from the pending captured turns of every project and client
-saving to this notes folder. One request takes at most 100 of them, so a backlog
+saving to this notes folder or file. One request takes at most 100 of them, so a backlog
 can need another `process` later; use
 `process repo` or `process chat` to narrow it, `process resume` for saved
 unfinished work, `status` for progress, and `process cancel` to stop owned work
