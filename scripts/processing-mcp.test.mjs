@@ -1006,19 +1006,19 @@ test('typed capture in a Manual chat captures every finished turn since the last
 
 test('a long chat is captured in order across typed captures, in bounded windows', async t => {
   const { h, parent, head, typed } = await manualCaptureChat(t), turns = [];
-  for (let index = 0; index < 26; index++) turns.push(await parent.work(`Synthetic note ${index}.`));
-  // One window holds at most 25 turns, and a run that outlasts its budget
+  for (let index = 0; index < 12; index++) turns.push(await parent.work(`Synthetic note ${index}.`));
+  // One window holds at most 10 turns, and a run that outlasts its budget
   // keeps what it published; typing capture again continues in order.
   const first = await typed('capture_turns', 'captured');
-  assert.equal(first.more, true); assert(first.turns <= 25);
+  assert.equal(first.more, true); assert(first.turns <= 10);
   assert.match(first.statusText, /More finished turns are waiting; type \$cuefluent-notes capture again/);
-  assert.equal(await head(turns[25]), null);
+  assert.equal(await head(turns[11]), null);
   let total = first.turns, reply = first;
   for (let attempt = 0; reply.more && attempt < 12; attempt++) {
     const rpc = await h.call('capture_turns', {}); reply = body(rpc); await parent.finish(rpc);
     total += reply.turns ?? 0;
   }
-  assert.equal(reply.more, false); assert.equal(total, 26);
+  assert.equal(reply.more, false); assert.equal(total, 12);
   for (const unitId of turns) assert(await head(unitId), unitId);
 });
 

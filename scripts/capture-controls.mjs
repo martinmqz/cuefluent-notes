@@ -239,7 +239,7 @@ export async function runSelectedCapture(capability, request, { observeRead = ()
 // Typed chat commands. A verified binding names the chat, its command turn and
 // the floor it may be read from; the model supplies no unit, range or source.
 // A window's turns are published within one bounded operation, so it stays small.
-const CHAT_WINDOW_BYTES = 8 * 1024 * 1024, CHAT_WINDOW_UNITS = 25, CHAT_ANCHOR_BYTES = 64 * 1024, CHAT_RUN_PASSES = 6;
+const CHAT_WINDOW_BYTES = 8 * 1024 * 1024, CHAT_WINDOW_UNITS = 10, CHAT_ANCHOR_BYTES = 64 * 1024, CHAT_RUN_PASSES = 6;
 const deniedUnits = state => new Set(state ? [...state.exclusions, ...state.intervals.map(item => item.upper?.unitId).filter(Boolean)] : []);
 // Where the last typed or explicit capture of this chat ended, if any.
 const capturedThrough = state => state?.explicitScopes.length
@@ -308,35 +308,42 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
 
 // Bounded runs of a chat's capture scope, each publishing a few turns, while
 // they make progress. Publication keeps every turn it finished; when runs or a
-// budget run out, the rest of the scope waits for the next capture. Counted
-// from the stored captures, not the runs. A
-// privacy probe started near the deadline gets only the time left and fails
-// as a probe; after progress that is the budget too, while a real probe
-// failure makes no progress and is reported.
-const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET']);
-async function runChatScope(capability, chat, scope, { observeRead, now }) {
-  const captured = () => bounded(now, async () => {
+// budget run out, the rest of the scope waits for the next capture. Finished
+// runs count their own turns. Only after a run is cut short are the scope's
+// stored captures read, to count what that run kept; a scope another capture
+// started counts finished runs only. A privacy probe started near the deadline
+// gets only the time left and fails as a probe: after progress that is the
+// budget too, while a real probe failure makes no progress and is reported.
+const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'PRIVACY_PROBE_FAILED']);
+async function storedTurns(capability, chat, unitIds, now) {
+  return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
     let count = 0;
-    for (const unitId of scope.unitIds) if ((await readCaptureHead(store, { ...identityOf(chat), unitId }, { metadataOnly: true })).head) count++;
-    return { store, count };
+    for (const unitId of unitIds) if ((await readCaptureHead(store, { ...identityOf(chat), unitId }, { metadataOnly: true })).head) count++;
+    return count;
   });
-  const before = await captured();
-  let failure = null, finished = false;
+}
+async function runChatScope(capability, chat, scope, { observeRead, now, fresh }) {
+  let saved = 0, failure = null, finished = false;
   for (let pass = 0; pass < CHAT_RUN_PASSES && !finished; pass++) {
     let run;
     try {
-      const current = await bounded(now, () => readSelection(before.store, identityOf(chat)));
+      const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
       run = await runSelectedCapture(capability, { selection: chat, scopeId: scope.id, expectedSelectionHash: current.hash, unitIds: scope.unitIds }, { observeRead, now });
     } catch (error) { failure = error; break; }
+    saved += run.saved;
     // A turn held for another reason (no terminal record yet) does not hold
     // up the chat's later turns; only the pass limit continues here.
     finished = run.drained === true || (!run.incomplete && run.pending !== 'WORKER_PASS_LIMIT');
     if (!finished && !run.saved) break;
   }
-  const saved = (await captured()).count - before.count;
-  if (failure && !RUN_BUDGET_CODES.has(failure.code) && !(failure.code === 'PRIVACY_PROBE_FAILED' && saved > 0)) throw failure;
-  return { saved, finished };
+  if (!failure) return { saved, finished };
+  if (!RUN_BUDGET_CODES.has(failure.code)) throw failure;
+  if (fresh) {
+    try { saved = Math.max(saved, await storedTurns(capability, chat, scope.unitIds, now)); } catch { /* keep the finished runs' count */ }
+  }
+  if (failure.code === 'PRIVACY_PROBE_FAILED' && !saved) throw failure;
+  return { saved, finished: false };
 }
 
 /** `capture`: this chat's finished turns since its last capture, oldest first,
@@ -350,7 +357,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
   const last = previous.state?.explicitScopes.filter(scope => scope.kind === 'historical').at(-1);
   if (last) {
-    const rerun = await runChatScope(capability, chat, last, { observeRead, now });
+    const rerun = await runChatScope(capability, chat, last, { observeRead, now, fresh: false });
     turns += rerun.saved;
     if (!rerun.finished) return { turns, more: true };
   }
@@ -360,7 +367,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
     unitIds: window.unitIds, readRange: window.readRange });
   await selectExplicitCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: window.current.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange }, { observeRead, now });
-  const run = await runChatScope(capability, chat, { id: operationId, unitIds: window.unitIds }, { observeRead, now });
+  const run = await runChatScope(capability, chat, { id: operationId, unitIds: window.unitIds }, { observeRead, now, fresh: true });
   return { turns: turns + run.saved, more: window.more || !run.finished };
 }
 

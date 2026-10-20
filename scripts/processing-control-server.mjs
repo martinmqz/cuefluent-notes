@@ -306,6 +306,7 @@ const COLLECTION_STOPS = Object.freeze({
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));
+export const PROCESSING_CAPTURE_OUTCOMES = Object.freeze(Object.keys(CAPTURE_OUTCOMES));
 export const PROCESSING_REVIEW_OUTCOMES = Object.freeze(Object.keys(REVIEW_OUTCOMES));
 // Which review fields each outcome carries: a draft with its folder, a draft
 // code with or without its note path, or either ('?' marks an optional

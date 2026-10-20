@@ -79,7 +79,7 @@ nearest exact commands to type. That text stays evidence, as described under
 
 `capture` captures the chat it is typed in: every finished turn since that
 chat's last capture, or since the hooks recorded where its session started,
-oldest first. One command takes a bounded window (at most 25 turns or 8 MiB of
+oldest first. One command takes a bounded window (at most 10 turns or 8 MiB of
 transcript) and publishes what it can within its operation budget; the reply
 says when more turns are waiting, and typing `capture` again finishes that
 window before reading further. Turns already left out stay out. In a chat

@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Writable } from 'node:stream';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { runProcessingControlServer, processingControlStatusView, processingControlRefusalText, reviewPathLink,
-  PROCESSING_STATUS_DETAILS, PROCESSING_REVIEW_OUTCOMES, PROCESSING_REFUSAL_CODES, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
+  PROCESSING_STATUS_DETAILS, PROCESSING_REVIEW_OUTCOMES, PROCESSING_REFUSAL_CODES, PROCESSING_CAPTURE_OUTCOMES, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
 import { collectionHookOutput } from './collection-hooks.mjs';
 import { PROCESSING_SCOPES } from './workflow-values.mjs';
 import MarkdownIt from 'markdown-it';
@@ -1309,6 +1309,11 @@ test('replies people read never say collection', () => {
       assert(shown, code); texts.push(shown.statusText);
     }
     texts.push(view({ ...base, status: 'missing', help: true }).statusText);
+    for (const capture of PROCESSING_CAPTURE_OUTCOMES) {
+      const counts = capture === 'captured' ? { turns: 2, more: true } : capture === 'nothing-new' ? { more: true } : {};
+      const shown = view({ ...base, status: 'idle', capture, ...counts });
+      assert(shown, capture); texts.push(shown.statusText);
+    }
   }
   for (const code of PROCESSING_REFUSAL_CODES) for (const client of ['claude', 'codex']) for (const stage of ['binding', 'action']) {
     for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) texts.push(processingControlRefusalText(code, { client, stage, tool }));
