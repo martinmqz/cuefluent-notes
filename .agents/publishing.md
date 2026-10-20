@@ -292,9 +292,9 @@ Use the existing product wording:
 
 - Name: **Cuefluent Notes**.
 - Short description: **Capture and organize your knowledge for fast recall—right on cue.**
-- Details: **Collect selected parts of Codex and Claude sessions as private evidence,
-  then turn reviewed sources into clear, searchable Markdown. Capture decisions,
-  meeting summaries, tasks and knowledge-base notes with independent collection
+- Details: **Capture selected parts of Codex and Claude sessions as private evidence,
+  then turn reviewed sources into clear, searchable Markdown. Keep decisions,
+  meeting summaries, tasks and knowledge-base notes with independent capture
   and processing controls. Direct saves are also supported.**
 - Category: **Productivity**.
 - Starter prompts: **Set up Cuefluent Notes for this project.**;

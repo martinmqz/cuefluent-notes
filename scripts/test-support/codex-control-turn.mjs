@@ -51,7 +51,7 @@ export function codexControlTurn({ sessionId, unitId, skillPath, control = 'revi
     response({ type: 'message', id: 'msg-user', role: 'user', content: [{ type: 'input_text', text }] }, ['user.text'],
       { client_authored: false, user_input_order: 0 }),
     item({ type: 'UserMessage', id: 'user-message', client_id: 'synthetic-client', content }),
-    response({ type: 'message', id: 'msg-hook', role: 'developer', content: [{ type: 'input_text', text: 'Cuefluent Notes: collection status queued.' }] },
+    response({ type: 'message', id: 'msg-hook', role: 'developer', content: [{ type: 'input_text', text: 'Cuefluent Notes: capture status queued.' }] },
       ['hooks.additional_context']),
     ...(form === 'menu' ? [response({ type: 'message', id: 'msg-selection', role: 'user', content: [{ type: 'input_text',
       text: `<skill>\n<name>cuefluent-notes:cuefluent-notes</name>\n<path>${skillPath}</path>\nSYNTHETIC SKILL INSTRUCTIONS\n</skill>` }] },

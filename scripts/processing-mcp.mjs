@@ -14,7 +14,7 @@ import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessin
 import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingShortcut, beginProcessingShortcutControl, readProcessingShortcutControl, finishProcessingShortcutControl } from './processing-shortcuts.mjs';
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
-import { runProcessingControlServer, processingControlStatusView, reviewNotePath, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -314,7 +314,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       fail('PROCESSING_REVIEW_SUPERSEDED');
     }
     replayed.set(source, receipt);
-    return receipt.response;
+    return replayedView(receipt.response);
   }
   async function acknowledgeFinishedReview(controller, capability, status, { persist = true } = {}) {
     if (status.state !== 'awaiting-review') return status;
@@ -552,7 +552,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       target = matches[0];
     } else if (elicit && coded.length > 1) {
       const chosen = await elicit({ choices: coded.map(({ item }, index) => ({ operationId: item.operationId,
-        label: `Draft ${index + 1}: ${item.inputCount} captures; ${item.createdAt}` })) });
+        label: `Draft ${index + 1}: ${item.inputCount} captured ${item.inputCount === 1 ? 'turn' : 'turns'}; ${item.createdAt}` })) });
       if (chosen.action !== 'accept') return { response: { ...viewOf(status), status: 'awaiting-review', statusDetail: 'draft-ready', nextAction: 'review', review: 'declined' } };
       target = coded.find(entry => entry.item.operationId === chosen.content.operationId);
       if (!target) fail('PROCESSING_REVIEW_INTERRUPTED');

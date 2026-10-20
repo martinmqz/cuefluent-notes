@@ -35,18 +35,18 @@ claude plugin install cuefluent-notes@cuefluent --scope user
 For a **fresh installation or a setup with only legacy capture settings**, start
 a fresh session, review hooks and the bundled `cuefluent_control` MCP server
 registration and permissions, then say **Set up Cuefluent Notes**. Choose
-collection and processing separately: collection starts off and processing
-starts Manual. Legacy settings are preserved without import. Use the
+the capture mode and the processing mode separately; both start Manual. Legacy settings are preserved without import. Use the
 [settings inspection guidance](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#existing-settings)
 to distinguish them from a recognized workflow configuration; a failed status
 check is not a reason to start over.
 
 ## Updating
 
-For recognized `cuefluent-workflow` settings with collections and routes,
+For recognized `cuefluent-workflow` settings,
 preserve settings, paths, captures and active operations. Do not rerun setup
 unless the selected release requires it. Before replacing packages, stop
-collection entrypoints and processing, close affected sessions, and let workers
+capture entrypoints (hooks and capture commands) and processing, close affected
+sessions, and let workers
 and processing clients finish. Update every client plugin/helper sharing the
 store to the same released version before resuming. Check the release notes for
 storage compatibility and downgrade boundaries; a patch does not necessarily
@@ -58,7 +58,7 @@ Review hook or MCP registration and permission changes when prompted. Both hook 
 manual packages contain `.mcp.json`, which registers `cuefluent_control`; the
 client may start it when loading the plugin. An explicit processing request uses
 its native CLI authentication and model resolution. Processing-enabled routes may
-register source metadata even with collection off; the explicit handoff can
+register source metadata even with capture mode Manual; the explicit handoff can
 inspect bounded source content to verify the native call. See
 [processing chat prerequisites and privacy](plugins/cuefluent-notes/skills/cuefluent-notes/references/processing-chat.md).
 
@@ -74,8 +74,8 @@ Prefer the reusable processing chat: type `$cuefluent-notes process` in Codex
 in Claude. Invoke the same skill with `review` to
 write the exact proposal to a private review folder, then type `save <code>` or
 `skip <code>` to decide; `help` lists every action.
-This remains an explicit request in every mode, including Automatic.
-The restricted session disables inherited collection hooks; formal controls use
+This remains an explicit request in every processing mode.
+The restricted session disables inherited capture hooks; formal controls use
 verified native identities. Mixed work and corrections remain eligible evidence.
 If the native tool or binding is unavailable, leave the work pending and report
 the limitation; without a review form, review through the folder and typed

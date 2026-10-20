@@ -369,7 +369,8 @@ test('native sessions started in a route subdirectory retain their own verified 
     assert(again.boundaryExcluded.some(item => item.client === client && item.unitId === A));
     const { collectionHookOutput } = await import('./collection-hooks.mjs');
     const notice = collectionHookOutput({ status: 'queued', notice: again, selection: { client, sessionId: S, unitId: B } }, 'UserPromptSubmit');
-    assert.match(notice.hookSpecificOutput.additionalContext, /Initial boundary prompt .* was excluded/);
+    // Shown on later prompts too, so it never says the current turn is uncaptured.
+    assert.match(notice.hookSpecificOutput.additionalContext, /Initial boundary prompt .* was excluded; later eligible full turns can be captured\./);
   }
 });
 
@@ -1196,5 +1197,5 @@ test('a whole-pass budget stop stays visible to sessions the worker did not reac
   assert(!result.diagnostics.some(item => item.code === 'WORKER_READ_BUDGET'));
   const text = collectionHookOutput({ status: 'queued', notice: result,
     selection: { client: 'codex', sessionId: randomUUID(), unitId: B } }, 'UserPromptSubmit').hookSpecificOutput.additionalContext;
-  assert.match(text, /Collection-wide diagnostic: WORKER_READ_BUDGET/);
+  assert.match(text, /Diagnostic for all captured sessions: WORKER_READ_BUDGET/);
 });

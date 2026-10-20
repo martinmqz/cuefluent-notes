@@ -585,8 +585,8 @@ folder in its header; a proposal too large for the form is reviewed through the
 folder and typed decisions instead. When several proposals are pending, it first asks you to
 choose one in a native selector; selecting a draft is not approval. Read the full
 preview in the scrollable **Proposed changes** field, then advance to **Proposal
-action**. Choose **Save exact proposal**, **Skip these captures without saving**,
-**Cancel operation; keep captures pending** or **Later; keep proposal pending**. No
+action**. Choose **Save exact proposal**, **Skip these captured turns without saving**,
+**Cancel operation; keep captured turns pending** or **Later; keep proposal pending**. No
 action is selected by default. The host's own **Skip** or dismiss control is not the
 proposal's Skip action; it leaves the proposal pending. A host response is distinct
 from a model tool argument; it does not establish that a person physically clicked

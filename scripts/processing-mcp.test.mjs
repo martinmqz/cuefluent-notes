@@ -39,12 +39,12 @@ test('MCP admission returns while native processing is pending, and shutdown wai
   const admitted = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(admitted.status, 'busy'); assert.notEqual(admitted.requestId, requestId);
   assert.equal(admitted.statusDetail, 'accepted');
-  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted. Scope: collection.');
+  assert.equal(admitted.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder or file.');
   h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'busy'); assert.equal(status.chat.sessionId, admitted.chat.sessionId);
   assert.equal(status.statusDetail, 'processing');
-  assert.match(status.statusText, /^Cuefluent: Processing is in progress\. Scope: collection\. Inventory/);
+  assert.match(status.statusText, /^Cuefluent: Processing is in progress\. Scope: all projects of this notes folder or file\. Inventory/);
   const duplicate = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId }));
   assert.equal(duplicate.status, 'busy'); assert.deepEqual(duplicate.diagnostics, ['PROCESSING_CHAT_BUSY']);
   assert.equal(duplicate.requestId, admitted.requestId);
@@ -75,7 +75,7 @@ test('status exposes unfinished evidence, incompatible source scope and conflict
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.status, 'idle');
   assert.equal(status.statusDetail, 'unfinished');
-  assert.match(status.statusText, /^Cuefluent: Processing stopped with unfinished work\. Scope: collection\. Inventory/);
+  assert.match(status.statusText, /^Cuefluent: Processing stopped with unfinished work\. Scope: all projects of this notes folder or file\. Inventory/);
   assert.equal(status.nextAction, 'resume');
   assert.equal(h.dispatches, 1);
   assert.deepEqual(await inspectProcessing(f.capability, f.operationId), before);
@@ -120,7 +120,7 @@ test('a completed unchanged operation is inactive without implying saved notes o
   await h.call('process_selected_captures', { collectionId: f.collection.id }); await closed;
   const status = body(await h.call('processing_status', { collectionId: f.collection.id }));
   assert.equal(status.statusDetail, 'selection-complete'); assert.equal(status.nextAction, 'none');
-  assert.match(status.statusText, /^Cuefluent: Selected captures have been handled\./);
+  assert.match(status.statusText, /^Cuefluent: The selected captured turns have been handled\./);
   assert.equal(status.inventory.pending, 0);
   assert.equal(h.dispatches, 1); assert.deepEqual(await fs.readdir(f.collection.notes.notesDir), []);
 });
@@ -221,6 +221,27 @@ test('legacy status receipts replay unchanged after clearer status details are i
   assert.equal(await fs.readFile(file, 'utf8'), bytes);
 });
 
+test('a receipt written with earlier reply wording replays byte-for-byte, never re-rendered', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
+  await h.call('process_selected_captures', args); await closed;
+  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
+  const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
+  // The same reply as an earlier release worded it, recorded consistently.
+  const earlier = receipt.dispatch.response;
+  assert.equal(earlier.statusDetail, 'accepted'); assert.equal(earlier.scope, 'collection');
+  earlier.statusText = 'Cuefluent: Processing request accepted. Scope: collection.';
+  const result = { content: [{ type: 'text', text: canonicalJSON(earlier) }], isError: false };
+  receipt.dispatch.statusText = earlier.statusText;
+  receipt.dispatch.resultHash = digest(canonicalJSON(result));
+  const bytes = canonicalJSON(receipt) + '\n';
+  await fs.writeFile(file, bytes);
+  h.callId = 'call_1';
+  assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
+  assert.equal(h.dispatches, 1);
+  assert.equal(await fs.readFile(file, 'utf8'), bytes);
+});
+
 test('formal replay rejects a changed stored response without changing its receipt or dispatching', async t => {
   const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
   const args = { collectionId: f.collection.id }, closed = h.whenClosed();
@@ -283,17 +304,17 @@ test('a status reply says when automatic collection stopped for this exact chat'
   await notice([own('CLAUDE_HISTORY_REQUIRES_REVIEW'), { client: 'claude', sessionId: randomUUID(), code: 'UNSUPPORTED_SESSION_OWNERSHIP' }]);
   const stopped = body(await h.call('processing_status', {}));
   assert.deepEqual(stopped.collection, { state: 'stopped', code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' });
-  assert(stopped.statusText.includes('\n\nCollection has stopped for this chat: its transcript has a record Cuefluent Notes does not read past, ' +
-    'for example a Remote Control connection in Claude Desktop or a session moved elsewhere. Captures made before that point are kept; later turns of this chat are not collected.'));
+  assert(stopped.statusText.includes('\n\nAutomatic capture has stopped for this chat: its transcript has a record Cuefluent Notes does not read past, ' +
+    'for example a Remote Control connection in Claude Desktop or a session moved elsewhere. Turns captured before that point are kept; later turns of this chat are not captured.'));
   assert(!/[A-Z]{3,}_[A-Z_]+/.test(stopped.statusText));
   h.nativeSkill = true; h.typedControl = 'status --verbose';
-  assert(body(await h.call('processing_status', {})).statusText.includes('\n- Collection: stopped for this chat (CLAUDE_HISTORY_REQUIRES_REVIEW).'));
+  assert(body(await h.call('processing_status', {})).statusText.includes('\n- Automatic capture: stopped for this chat (CLAUDE_HISTORY_REQUIRES_REVIEW).'));
   h.nativeSkill = false; delete h.typedControl;
   // Another chat's stop, a boundary still pending or no record says nothing.
   for (const diagnostics of [[{ client: 'claude', sessionId: randomUUID(), code: 'CLAUDE_HISTORY_REQUIRES_REVIEW' }], [own('SOURCE_BOUNDARY_PENDING')]]) {
     await notice(diagnostics);
     const quiet = body(await h.call('processing_status', {}));
-    assert.equal(quiet.collection, undefined); assert(!quiet.statusText.includes('Collection has stopped'));
+    assert.equal(quiet.collection, undefined); assert(!quiet.statusText.includes('Automatic capture has stopped'));
   }
   // The help list and a review reply never carry it.
   await notice([own('UNSUPPORTED_SESSION_OWNERSHIP')]);
@@ -343,7 +364,7 @@ test('verified native skill admission writes its exact parent control receipt be
   const receipt = JSON.parse(await fs.readFile(path.join(directory, files[0]), 'utf8'));
   assert.equal(receipt.dispatch.callId, 'call_1'); assert.equal(receipt.dispatch.unitId, f.identity.unitId);
   assert.equal(receipt.dispatch.argsHash, digest(canonicalJSON(args))); assert.equal(receipt.dispatch.resultHash, digest(canonicalJSON(row.result)));
-  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted. Scope: collection.');
+  assert.equal(receipt.dispatch.statusText, 'Cuefluent: Processing request accepted. Scope: all projects of this notes folder or file.');
   assert.equal(receipt.dispatch.sourcePath, f.source.path);
   gate.resolve();
 });
@@ -1329,6 +1350,9 @@ test('review selects one exact collection proposal before presenting its content
   const selector = await choose;
   const choices = selector.params.requestedSchema.properties.operationId.oneOf;
   assert.equal(choices.length, 2); assert(choices.some(item => item.const === b.operationId));
+  // The picker names each draft by its captured turns, never in internal words.
+  for (const item of choices) assert.match(item.title, /^Draft [12]: \d+ captured turns?; /);
+  assert.doesNotMatch(JSON.stringify(selector.params), /collect|captures/i);
   const preview = h.nextForm(); h.answer(selector, { action: 'accept', content: { operationId: b.operationId } });
   const form = await preview;
   assert(form.params.requestedSchema.properties.changes.default.includes((await inspectProcessing(b.capability, b.operationId)).proposalHash));

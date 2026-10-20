@@ -70,9 +70,11 @@ test('Claude review writes the exact proposal to a private review folder and rep
   for (const expected of [`draft ${code}`, 'Create "meetings/rollout.md"', `Proposed: proposed.md (${Buffer.byteLength(content)} bytes)`,
     `claude session ${f.identity.sessionId}, turn ${f.identity.unitId}`, '1 of 1 retained evidence pages inspected',
     `${claude} save ${code} (Codex: ${codex} save ${code})`, `${claude} skip ${code}`, `${claude} review cancel ${code}`,
-    'To keep the draft pending, type nothing.', `Operation: ${f.operationId}`, `Claim hash: ${p.claimHash}`, `Proposal hash: ${p.proposalHash}`]) {
+    'To keep the draft pending, type nothing.', `Operation: ${f.operationId}`, `Claim hash: ${p.claimHash}`, `Proposal hash: ${p.proposalHash}`,
+    'Skip these captured turns without saving', 'Cancel the draft; its captured turns stay pending']) {
     assert(summary.includes(expected), expected);
   }
+  assert.doesNotMatch(summary, /collect|captures/i);
   assert(!summary.includes('Keep the rollout paused'), 'note content stays in proposed.md');
   assert(!summary.includes('later') && !summary.includes('review save'), 'only current command spellings');
   // The folder and the proposed copy open with one click.
@@ -716,7 +718,7 @@ test('help works before setup: with no configuration a status request lists the 
       const lines = reply.statusText.split('\n');
       assert.equal(lines[0], `Cuefluent: This chat has no verified Cuefluent Notes source yet. To set up Cuefluent Notes, type ${prefix} setup. Type one of these yourself, exactly as written${
         client === 'codex' ? '; for the first word, type $ and choose cuefluent-notes from the list' : ''}:`);
-      assert(lines.includes(`- ${prefix} setup: choose collection and processing settings.`));
+      assert(lines.includes(`- ${prefix} setup: choose the capture and processing modes.`));
       assert(lines.includes(`- ${prefix} help: show this list.`));
       assertPlainReply(reply, f);
     }
@@ -744,7 +746,7 @@ test('help, the bare skill, status and status --verbose reply in the client spel
     const help = await status('help', { help: true });
     assert.equal(help.help, true); assert.equal(help.commandPrefix, prefix);
     assert.equal(help.statusText.split('\n')[0], `Cuefluent: Type one of these yourself, exactly as written${client === 'codex' ? '; for the first word, type $ and choose cuefluent-notes from the list' : ''}:`);
-    assert(help.statusText.includes(`\n- ${prefix} process: draft notes from pending captures (also: process repo, process chat, process resume, process cancel).`));
+    assert(help.statusText.includes(`\n- ${prefix} process: draft notes from captured turns (also: process repo, process chat, process resume, process cancel).`));
     assertPlainReply(help, f);
     if (client === 'codex') assert.equal(await receiptCount(), 1);
     // The skill typed alone gets the same list; it is no control, so no receipt.

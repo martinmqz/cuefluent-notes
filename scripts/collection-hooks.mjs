@@ -22,8 +22,8 @@ export function collectionHookOutput(result, event) {
   const reason = typeof candidate === 'string' && /^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(candidate) ? candidate : null;
   const excluded = result.notice?.boundaryExcluded?.find(item => item?.client === identity?.client && item?.sessionId === identity?.sessionId);
   const boundary = typeof excluded?.unitId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(excluded.unitId) ? excluded.unitId : null;
-  const text = `Cuefluent Notes: ${blocked ? 'intake busy or blocked; retry after the current operation finishes. Inspect workflow status if it persists' : `collection status ${result.status}`}.
-Use explicit session selection for capture controls; this client transport has no verified current-turn binding. Processing remains independent and must use an explicit command until live prompt delivery is verified.${reason ? ` ${own ? 'Session diagnostic' : 'Collection-wide diagnostic'}: ${reason}.` : ''}${boundary ? ` Initial boundary prompt ${boundary} was excluded; collection begins with subsequent full turns.` : ''}${identity ? ` Native identity data: ${JSON.stringify(identity)}.` : ''}`;
+  const text = `Cuefluent Notes: ${blocked ? 'intake busy or blocked; retry after the current operation finishes. Inspect workflow status if it persists' : `capture status ${result.status}`}.
+Use explicit session selection for capture controls; this client transport has no verified current-turn binding. Processing remains independent and must use an explicit command until live prompt delivery is verified.${reason ? ` ${own ? 'Session diagnostic' : 'Diagnostic for all captured sessions'}: ${reason}.` : ''}${boundary ? ` Initial boundary prompt ${boundary} was excluded; later eligible full turns can be captured.` : ''}${identity ? ` Native identity data: ${JSON.stringify(identity)}.` : ''}`;
   return { hookSpecificOutput: { hookEventName: event, additionalContext: text } };
 }
 

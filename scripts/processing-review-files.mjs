@@ -194,8 +194,8 @@ function summaryText(preview, code, names) {
     '', 'Decide by typing these commands yourself. A decision counts only in a chat where you typed the review command for this draft:',
     `- Show it in that chat, if you have not typed this there yet: ${commandLine(`review ${code}`)}`,
     `- Save this exact proposal: ${commandLine(`save ${code}`)}`,
-    `- Skip these captures without saving: ${commandLine(`skip ${code}`)}`,
-    `- Cancel the draft; its captures stay pending: ${commandLine(`review cancel ${code}`)}`,
+    `- Skip these captured turns without saving: ${commandLine(`skip ${code}`)}`,
+    `- Cancel the draft; its captured turns stay pending: ${commandLine(`review cancel ${code}`)}`,
     'To keep the draft pending, type nothing.',
     '', 'Exact revision', `Operation: ${preview.operationId}`, `Claim hash: ${preview.claimHash}`, `Proposal hash: ${preview.proposalHash}`, '');
   return lines.join('\n');

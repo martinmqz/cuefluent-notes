@@ -31,17 +31,17 @@ const STATUS_DETAILS = Object.freeze({
   unfinished: { states: ['idle'], text: () => 'Processing stopped with unfinished work.' },
   inactive: { states: ['idle'], text: () => 'No processing run is active.' },
   missing: { states: ['missing'], text: () => 'No processing session has been started.' },
-  'selection-limit': { states: ['blocked'], text: cmd => `The saved selection reached its continuation limit. Cancel it with ${cmd('process cancel')}, then use ${cmd('process')} for remaining captures.` },
+  'selection-limit': { states: ['blocked'], text: cmd => `The saved selection reached its continuation limit. Cancel it with ${cmd('process cancel')}, then use ${cmd('process')} for the remaining captured turns.` },
   blocked: { states: ['blocked'], text: () => 'Processing needs attention.' },
   completed: { states: ['completed'], text: () => 'Processing operation completed.' },
-  'selection-complete': { states: ['missing', 'idle', 'completed'], text: () => 'Selected captures have been handled.' },
-  pending: { states: ['missing', 'idle'], text: cmd => `Pending captures are available. Use ${cmd('process')} to draft notes.` },
-  'inventory-incomplete': { states: ['missing', 'idle'], text: cmd => `The bounded inventory is incomplete. Use ${cmd('process')} to continue through pending captures.` },
-  'nothing-pending': { states: ['missing', 'idle', 'completed'], text: () => 'No pending captures in the selected scope.' },
+  'selection-complete': { states: ['missing', 'idle', 'completed'], text: () => 'The selected captured turns have been handled.' },
+  pending: { states: ['missing', 'idle'], text: cmd => `Captured turns are waiting. Use ${cmd('process')} to draft notes.` },
+  'inventory-incomplete': { states: ['missing', 'idle'], text: cmd => `The bounded inventory is incomplete. Use ${cmd('process')} to continue through the waiting captured turns.` },
+  'nothing-pending': { states: ['missing', 'idle', 'completed'], text: () => 'No captured turns are waiting in the selected scope.' },
   'nothing-to-resume': { states: ['missing', 'idle', 'completed'], text: () => 'No unfinished processing selection to resume.' },
   discovery: { states: ['missing', 'idle'], text: cmd => `Inventory paused; ${cmd('process resume')} continues from its saved position.` },
-  continuation: { states: ['idle'], text: cmd => `Selected evidence remains. Use ${cmd('process resume')} to continue.` },
-  cancelled: { states: ['idle', 'completed', 'missing'], text: () => 'Processing cancelled; unhandled captures remain pending.' },
+  continuation: { states: ['idle'], text: cmd => `Selected captured turns remain. Use ${cmd('process resume')} to continue.` },
+  cancelled: { states: ['idle', 'completed', 'missing'], text: () => 'Processing cancelled; unhandled captured turns remain pending.' },
   // No verified source binding (for example before setup); only the command list.
   unbound: { states: ['missing'], text: cmd => `This chat has no verified Cuefluent Notes source yet. To set up Cuefluent Notes, type ${cmd('setup')}.` },
 });
@@ -50,8 +50,8 @@ const STATUS_DETAILS = Object.freeze({
 // Texts take the named draft ("draft k2mn9p ("notes/a.md")") when one is known.
 const REVIEW_OUTCOMES = Object.freeze({
   saved: { pending: false, text: name => name ? `Review completed: the exact reviewed proposal of ${name} was saved.` : 'Review completed: the exact reviewed proposal was saved.' },
-  skipped: { pending: false, text: name => name ? `Review completed: the captures of ${name} were skipped without saving.` : 'Review completed: these captures were skipped without saving.' },
-  cancelled: { pending: false, text: name => `Review completed: the operation${name ? ` for ${name}` : ''} was cancelled; its captures remain pending.` },
+  skipped: { pending: false, text: name => name ? `Review completed: the captured turns of ${name} were skipped without saving.` : 'Review completed: these captured turns were skipped without saving.' },
+  cancelled: { pending: false, text: name => `Review completed: the operation${name ? ` for ${name}` : ''} was cancelled; its captured turns remain pending.` },
   deferred: { pending: true, text: name => `Review deferred with Later. ${capital(name ?? 'the draft')} remains pending; nothing was saved.` },
   declined: { pending: true, text: name => `Review not completed: the client declined or closed the review form, which may not have been displayed. ${capital(name ?? 'the draft')} remains pending; nothing was saved.` },
   'display-altered': { pending: true, text: name => `Review not completed: the form did not return its preview unchanged (it may have been empty, shortened or edited), so the complete proposal may not have been readable. Nothing was saved, skipped or cancelled; ${name ?? 'the draft'} remains pending.` },
@@ -263,6 +263,8 @@ function helpText({ commandPrefix: command, statusDetail }) {
     ...PROCESSING_HELP.map(item => `- ${command} ${item.word}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
 }
 const counted = (value, one, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
+// How a reply names each processing scope; the field keeps its internal name.
+const SCOPE_TEXT = Object.freeze({ collection: 'all projects of this notes folder or file', repo: 'this repository', chat: 'this chat' });
 // Every detail the plain reply leaves out, for `status --verbose`.
 function verboseText(result) {
   const counts = (label, value, names) => `${label}${value.incomplete ? ' (partial)' : ''}: ${names.map(([key, one, many = one]) => counted(value[key], one, many)).join(', ')}.`;
@@ -270,12 +272,12 @@ function verboseText(result) {
     `Diagnostics: ${result.diagnostics.length ? result.diagnostics.join(', ') : 'none'}.`];
   if (result.requestId !== null) lines.push(`Request: ${result.requestId}.`);
   if (result.chat) lines.push(`Processing chat: ${result.chat.client} session ${result.chat.sessionId}.`);
-  if (result.scope) lines.push(`Scope: ${result.scope}.`);
+  if (result.scope) lines.push(`Scope: ${SCOPE_TEXT[result.scope]}.`);
   if (result.inventory) lines.push(counts('Inventory', result.inventory, [['pending', 'pending'], ['claimed', 'claimed'], ['blockedByClaim', 'blocked by a claim'],
     ['inspected', 'inspected'], ['handled', 'handled'], ['unfinishedOperations', 'unfinished operation', 'unfinished operations'], ['awaitingReview', 'awaiting review']]));
   if (result.progress) lines.push(counts('Progress', result.progress, [['selected', 'selected'], ['unattempted', 'unattempted'], ['handled', 'handled'],
     ['unavailable', 'unavailable'], ['cancelled', 'cancelled'], ['unfinishedOperations', 'unfinished operation', 'unfinished operations'], ['awaitingReview', 'awaiting review']]));
-  if (result.collection) lines.push(`Collection: stopped for this chat (${result.collection.code}).`);
+  if (result.collection) lines.push(`Automatic capture: stopped for this chat (${result.collection.code}).`);
   const blocks = [result.statusText, lines.map(line => `- ${line}`).join('\n')];
   if (result.drafts?.length) blocks.push(['Drafts awaiting review:', '', ...result.drafts.map(item =>
     `- ${listingLine(item)}: operation ${item.operationId}; proposal ${item.proposalHash}; claim ${item.claimHash}`)].join('\n'));
@@ -285,9 +287,11 @@ function verboseText(result) {
 // status callback reports only these codes.
 const COLLECTION_STOPS = Object.freeze({
   CLAUDE_HISTORY_REQUIRES_REVIEW: 'its transcript has a record Cuefluent Notes does not read past, for example a Remote Control connection in Claude Desktop or a session moved elsewhere',
-  UNSUPPORTED_SESSION_OWNERSHIP: 'its transcript belongs to a background, agent or forked session that is not linked to a collected chat',
+  UNSUPPORTED_SESSION_OWNERSHIP: 'its transcript belongs to a background, agent or forked session that is not linked to a captured chat',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
+export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));
+export const PROCESSING_REVIEW_OUTCOMES = Object.freeze(Object.keys(REVIEW_OUTCOMES));
 // Which review fields each outcome carries: a draft with its folder, a draft
 // code with or without its note path, or either ('?' marks an optional
 // draft); a listing of drafts.
@@ -335,7 +339,7 @@ const codexSourceErrors = new Set(['UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED
 const STORAGE_REFUSALS = ['UNSAFE_INTAKE_PATH', 'UNSAFE_PRIVATE_STORAGE', 'STORAGE_NOT_PRIVATE', 'INTAKE_ROOT_CHANGED', 'PRIVATE_STORAGE_CHANGED'];
 const REFUSALS = Object.freeze({
   PROCESSING_CONTROL_REGISTRATION_UNVERIFIED: () => 'Cuefluent Notes has registered this chat but cannot confirm commands in it yet. Type the command again.',
-  REGISTRATION_REQUIRES_REVIEW: () => 'this chat\'s collection registration no longer matches the current collection settings; it needs review in the setup workflow before commands work here.',
+  REGISTRATION_REQUIRES_REVIEW: () => 'this chat was registered under capture settings that have since changed; it needs review in the setup workflow before commands work here.',
   PROCESSING_CONTROL_SELECTION_MISMATCH: () => 'the tool call did not match the command that was typed.',
   PROCESSING_CONTROL_INVALID_REQUEST: () => 'the tool call was not valid.',
   PROCESSING_CONTROL_METHOD_UNSUPPORTED: () => 'this tool is not part of Cuefluent Notes.',
@@ -373,6 +377,7 @@ const ACTION_REFUSALS = Object.freeze({
 const REVIEW_ACTION_REFUSALS = new Set(['INTAKE_BLOCKED']);
 // A review call can carry a decision, so its refusal says outright that
 // nothing was saved.
+export const PROCESSING_REFUSAL_CODES = Object.freeze([...Object.keys(REFUSALS), ...Object.keys(ACTION_REFUSALS)]);
 export function processingControlRefusalText(code, { client, stage, tool }) {
   const command = REVIEW_COMMANDS[client];
   if (stage === 'action' && Object.hasOwn(ACTION_REFUSALS, code) && (!REVIEW_ACTION_REFUSALS.has(code) || tool === 'processing_review')) {
@@ -487,6 +492,15 @@ function argumentsFor(name, args, client) {
   }
 }
 
+// A reply replayed from its receipt is returned as stored: the receipt store
+// checked it against the text and result hash recorded with it, so re-rendering
+// it in later wording would break that hash. Marked by the controller only.
+const REPLAYED_VIEWS = new WeakSet();
+export function replayedView(view) {
+  if (!object(view) || typeof view.statusText !== 'string') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+  REPLAYED_VIEWS.add(view); return view;
+}
+
 /** Project a callback result without copying callback prose, evidence, proposals,
  * private paths or future implementation fields into a captured source chat.
  * Visible text never carries hashes, identifiers or diagnostic codes, with two
@@ -594,13 +608,13 @@ export function processingControlStatusView(value, args) {
     // A reply of its own carries only its own text: no counts, scope or listing.
     if (result.verbose && !ownReply) result.statusText = verboseText(result);
     else if (!ownReply) {
-      if (result.scope) result.statusText += ` Scope: ${result.scope}.`;
+      if (result.scope) result.statusText += ` Scope: ${SCOPE_TEXT[result.scope]}.`;
       if (result.inventory) {
         const { incomplete, pending, claimed, awaitingReview } = result.inventory;
         result.statusText += ` Inventory${incomplete ? ' (partial)' : ''}: ${pending} pending, ${claimed} claimed, ${counted(awaitingReview, 'draft')} awaiting review.`;
       }
       if (result.collection) {
-        result.statusText += `\n\nCollection has stopped for this chat: ${COLLECTION_STOPS[result.collection.code]}. Captures made before that point are kept; later turns of this chat are not collected.`;
+        result.statusText += `\n\nAutomatic capture has stopped for this chat: ${COLLECTION_STOPS[result.collection.code]}. Turns captured before that point are kept; later turns of this chat are not captured.`;
       }
       if (result.drafts?.length && !reviewReply) result.statusText += `\n\n${listing('Drafts awaiting review:', result.drafts)}\n\nRead one with ${cmd(`review ${REVIEW_CODE_PLACEHOLDER}`)}.`;
       // Codes stay in the fields; the plain reply says where to see them. A
@@ -791,9 +805,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
                   description: 'Read the full preview, then go to the next field. If this field is empty, collapsed or incomplete, read the proposal in the review folder instead and choose Later or close this form; Save, Skip and Cancel need the complete preview here. For corrections, choose Later and provide them in your work chat; do not edit this preview.',
                   default: proposal.message },
                 decision: { type: 'string', title: 'Proposal action',
-                  description: 'Save writes the exact proposal. Skip handles these captures without saving. Cancel releases the operation and keeps captures pending. Later keeps the proposal pending.',
+                  description: 'Save writes the exact proposal. Skip handles these captured turns without saving. Cancel releases the operation and keeps its captured turns pending. Later keeps the proposal pending.',
                   enum: ['save', 'skip', 'cancel', 'later'],
-                  enumNames: ['Save exact proposal', 'Skip these captures without saving', 'Cancel operation; keep captures pending', 'Later; keep proposal pending'] }
+                  enumNames: ['Save exact proposal', 'Skip these captured turns without saving', 'Cancel operation; keep captured turns pending', 'Later; keep proposal pending'] }
               }, required: ['decision'] } } };
             if (Buffer.byteLength(canonicalJSON(message)) + 1 > FORM_BYTES) fail('PROCESSING_REVIEW_TOO_LARGE');
             let resolve, reject;
@@ -824,7 +838,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
             response = await action({ source, context, ...resolvedArgs, signal });
           }
           signal.throwIfAborted();
-          const view = processingControlStatusView(response, resolvedArgs);
+          const view = REPLAYED_VIEWS.has(response) ? response : processingControlStatusView(response, resolvedArgs);
           result = { content: [{ type: 'text', text: canonicalJSON(view) }], isError: false };
           const replacement = await beforeResponse?.({ source, context, invocation, view, result: structuredClone(result), signal, commitResponse });
           // A trusted controller may report unproven exclusion or preserve a

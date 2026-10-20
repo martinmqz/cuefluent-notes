@@ -1,6 +1,6 @@
 ---
 name: cuefluent-notes
-description: Capture and organize knowledge for fast recall in Cuefluent. Use for setup and status, bounded collection from explicitly selected Codex or Claude sessions, processing captured evidence into searchable Markdown, and direct saves, updates, summaries, documentation, meetings, and knowledge-base notes. Collection and Markdown processing have independent consent; ordinary Markdown editing enables neither.
+description: Capture and organize knowledge for fast recall in Cuefluent. Use for setup and status, bounded capture from explicitly selected Codex or Claude sessions, processing captured evidence into searchable Markdown, and direct saves, updates, summaries, documentation, meetings, and knowledge-base notes. Capture and Markdown processing have independent consent; ordinary Markdown editing enables neither.
 ---
 
 # Cuefluent Notes
@@ -35,6 +35,21 @@ prohibition. A collection-only stop does not silently change the separate
 processing preference. Resolve ambiguous restrictions before affected writes.
 Do not discover sessions, expand a selection, or enable either process merely
 to make a requested operation succeed.
+
+### Words people see
+
+Settings, codes, tool fields and the references keep their internal names. When
+talking to people, use these words and never say “collection”:
+
+| Internal name | Say |
+| --- | --- |
+| collection enabled or disabled (route `collection`) | capture mode: Automatic or Manual |
+| collection selection `project` or `sessions` | every session of the route's clients in the project folder (a narrower excluded folder stays out), or listed sessions |
+| a capture, captured evidence | a captured turn; together, captured sessions |
+| a collection (`collections`, `collectionId`) | the notes folder or file, with its projects |
+| collection worker, paused or stopped collection | capturing; automatic capture paused or stopped |
+
+“Capture” is the action, so name the setting “capture mode”, not “capture”.
 
 ### Formal processing controls
 
@@ -135,10 +150,10 @@ save questions through the unverified transport. An explicit processing request
 works now in every processing mode. Report this limitation when explaining whether
 processing runs automatically; saving an Automatic preference is not proof that
 live automatic processing is active.
-When setup or a mode change saves Automatic, give the
-[Automatic confirmation](references/setup.md#confirm-automatic): processing captured
-evidence still needs an explicit request, and each affected route's collection
-setting and session selection are reported separately.
+Setup does not offer Automatic processing. When the user explicitly asks and it is
+saved, give the [Automatic processing confirmation](references/setup.md#confirm-automatic-processing):
+processing captured turns still needs an explicit request, and each affected
+route's capture mode and session selection are reported separately.
 
 Future collection preserves the registered EOF and never imports earlier history.
 Without a proven boundary at that floor, the first later full native unit establishes
