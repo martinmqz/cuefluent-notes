@@ -412,6 +412,47 @@ test('capture does not trust where Automatic capture began once the transcript w
   assert.match((await A.head(P4)).capture.evidence[0].text, /ship on Monday/);
 });
 
+test('a typed resume leaves out its own turn, not the first turn after it', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, X1, X2, P4] = Array.from({ length: 6 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const typed = async (promptId, operation) => {
+    await A.hook('UserPromptSubmit', promptId);
+    const call = A.call('status'); await A.append([...A.control('status', promptId), call]);
+    const bound = await A.resolve(call);
+    await controlChatCapture(f.capability, { selection: bound.selection, source: bound.source, unitId: promptId, operation });
+    await A.append([A.reply(`Capture ${operation}d.`)]); await f.run();
+  };
+  await typed(X1, 'pause'); await typed(X2, 'resume');
+  assert.equal((await A.selection()).state.intervals.at(-1).lower.unitId, X2);
+  await A.append([A.prompt('Decision after the resume', P4), A.reply('Noted.')]); await A.hook('UserPromptSubmit', P4);
+  await f.run();
+  assert.deepEqual((await A.head(P4)).capture.evidence.map(item => item.text), ['Decision after the resume']);
+  for (const unitId of [X1, X2]) assert.equal((await A.head(unitId)).head, null);
+});
+
+test('typed capture in a background continuation takes its own turns, never the re-homed history', async t => {
+  const { f, B, P: [P1, P2, P3] } = await continued(t);
+  await f.run(); await f.run();
+  // Capture mode Manual.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  const [Q1, C1] = [randomUUID(), randomUUID()];
+  await B.append([B.prompt('Synthetic decision after the move', Q1), B.reply('Noted.')]);
+  await B.hook('UserPromptSubmit', C1);
+  const call = B.call('capture'); await B.append([...B.control('capture', C1), call]);
+  const bound = await B.resolve(call, f.capability);
+  assert.equal(bound.unitId, C1); assert(bound.captureFloor.eofByte > 0);
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }),
+    { turns: 1, more: false, leftOut: 0 });
+  assert.deepEqual((await B.head(Q1)).capture.evidence.map(item => item.text), ['Synthetic decision after the move']);
+  for (const unitId of [P1, P2, P3]) assert.equal((await B.head(unitId)).head, null);
+});
+
 test('capture finishes the latest unfinished capture of either kind before reading further', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
   const [P1, C1, C2] = Array.from({ length: 3 }, () => randomUUID());
@@ -430,7 +471,7 @@ test('capture finishes the latest unfinished capture of either kind before readi
     expectedSourceIdentity: first.source.fileIdentity, expectedSelectionHash: (await A.selection()).hash,
     operationId: randomUUID(), kind: 'current', unitIds: [P1], readRange: { fromByte: size, endByte: end } });
   await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
-  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 1, more: false, leftOut: 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 1, more: true, leftOut: 0 });
   assert.match((await A.head(P1)).capture.evidence[0].text, /ship on Friday/);
 });
 
@@ -480,7 +521,7 @@ function slowReads(t) {
 
 test('a capture whose read ran long still selects its window, so the next capture runs it first', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
-  const [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
+  const [P1, P2, P3, C1, C2, C3] = Array.from({ length: 6 }, () => randomUUID());
   await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
   await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Owner: Dana.', P2), A.reply('Noted.')]);
   const bind = async promptId => {
@@ -496,8 +537,15 @@ test('a capture whose read ran long still selects its window, so the next captur
   assert.deepEqual((await A.selection()).state.explicitScopes.map(scope => scope.unitIds), [[P1, P2]]);
   slow.state.skew = slow.state.jump = 0;
   await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
-  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2), { now: slow.clock }), { turns: 2, more: false, leftOut: 0 });
-  assert((await A.head(P1)).head); assert((await A.head(P2)).head);
+  // Finishing that window is the next command's one window, even with a
+  // later turn waiting; the command after it takes that turn.
+  await A.append([A.reply('Captured.'), A.prompt('Correction: ship on Monday.', P3), A.reply('Noted.')]);
+  const second = await bind(C2);
+  assert.deepEqual(await captureChatTurns(f.capability, second, { now: slow.clock }), { turns: 2, more: true, leftOut: 0 });
+  assert((await A.head(P1)).head); assert((await A.head(P2)).head); assert.equal((await A.head(P3)).head, null);
+  await excludeChatTurn(f.capability, { selection: second.selection, source: second.source, unitId: C2 });
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C3), { now: slow.clock }), { turns: 1, more: false, leftOut: 0 });
+  assert.match((await A.head(P3)).capture.evidence[0].text, /ship on Monday/);
 });
 
 test('a capture records the turns it left out before it moves past them', async t => {

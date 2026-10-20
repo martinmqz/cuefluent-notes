@@ -4,13 +4,14 @@ import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, with
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { canonicalWorkflowProject, validateWorkflowPlacement } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
+import { readContinuesLink, readContinuedLink, continuationTarget, continuationOrigin } from './claude-continuation.mjs';
 import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom, readCaptureHead, readReaderProgress, verifySourceCursor } from './intake-store.mjs';
 import { openGuarded } from './file-io.mjs';
 import { inspectSourceBoundary, newSelectionState, currentIntervals, stableSourceIdentity, MAX_SELECTION_BYTES } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.mjs';
 import { snapshotSourceMetadata } from './collection-ingress.mjs';
-import { processScope } from './collection-worker.mjs';
+import { processScope, READER_BLOCK_CODES } from './collection-worker.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { withWorkflowBudget } from './workflow-budget.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
@@ -29,14 +30,25 @@ async function replayControl(current, request, store) {
     ? await selectionPendingWarning(store, request.selection) : null;
   return { ...current, ...(pendingWarning ? { pendingWarning } : {}) };
 }
-async function sourceBoundary(selection, sourcePath, expectedSourceIdentity, unitId) {
+async function sourceBoundary(selection, sourcePath, expectedSourceIdentity, unitId, continuation = null) {
   hash(expectedSourceIdentity);
   const source = { client: selection.client, sessionId: selection.sessionId, projectRoot: selection.cwd, path: sourcePath };
-  const observed = await inspectSourceBoundary(source, { currentUnitId: unitId,
-    verifyHeader: selection.client === 'codex' ? codexRegistrationHeader(source) : claudeRegistrationHeader(source) });
+  const observed = await inspectSourceBoundary(source, { currentUnitId: unitId, verifyHeader: selection.client === 'codex'
+    ? codexRegistrationHeader(source) : claudeRegistrationHeader(source, { sessionKinds: continuation?.from?.sessionKinds ?? [] }) });
   if (observed.status !== 'registered') fail('SOURCE_BOUNDARY_PENDING');
   if (observed.source.fileIdentity !== expectedSourceIdentity) fail('SOURCE_CHANGED');
   return observed;
+}
+
+// A Claude chat continued from another (`/bg`) or into one, as its verified
+// links record it, the way the worker reads it: the successor's session kind
+// is accepted and its re-homed prefix is checked, never read as its own.
+async function chatContinuation(store, selection, sourcePath, fileIdentity, observeRead = () => {}) {
+  if (selection.client !== 'claude') return null;
+  const source = { client: selection.client, sessionId: selection.sessionId, projectRoot: selection.cwd, path: sourcePath, fileIdentity };
+  const from = await continuationTarget(await readContinuesLink(store, selection.sessionId), source, null, { observeRead });
+  const into = continuationOrigin(await readContinuedLink(store, selection.sessionId), source, null);
+  return from || into ? { from, into } : null;
 }
 
 /** Explicit inspection of one named source. No transcript content or filesystem writes. */
@@ -79,7 +91,7 @@ async function selectionHeadroom(store, selection, state, scopeId) {
 
 /** Future start/resume freezes EOF. With no verified current native anchor the
  * first subsequent full native unit establishes (and is excluded by) the floor. */
-export async function controlCapture(capability, request, { now } = {}) {
+export async function controlCapture(capability, request, { now, resumeAt = null } = {}) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation']);
   const selection = await selected(request.selection), { operationId, operation, expectedSelectionHash } = request;
   nativeId(operationId); oldHash(expectedSelectionHash); choice(operation, ['start', 'resume', 'pause', 'exclude']);
@@ -95,12 +107,20 @@ export async function controlCapture(capability, request, { now } = {}) {
       if (!restrictive && current.state?.lastRequest?.id === operationId && current.state.currentGrantHash !== grantHash) fail('COLLECTION_GRANT_REQUIRES_REVIEW');
       const replay = await replayControl(current, request, store); if (replay) return replay;
       if (current.hash !== expectedSelectionHash) fail('STALE_SELECTION');
+      const continuation = await chatContinuation(store, selection, request.sourcePath, request.expectedSourceIdentity);
       const observed = await sourceBoundary(selection, request.sourcePath, request.expectedSourceIdentity,
-        restrictive ? selection.unitId : null);
+        restrictive ? selection.unitId : null, continuation);
+      // A typed resume starts the new interval at its own command turn, so
+      // that turn, not the next one, is the boundary left out.
+      let boundary = observed.boundary;
+      if (resumeAt !== null) {
+        if (operation !== 'resume' || resumeAt.eofByte > boundary.eofByte) fail('SOURCE_CHANGED');
+        boundary = { ...boundary, eofByte: resumeAt.eofByte, startsMidRecord: false, unitId: resumeAt.unitId };
+      }
       const authorize = async () => { await assertWorkflowStorage(capability, selection, authority); return true; };
-      return controlSelection(tx, { source: observed.source, boundary: observed.boundary, expectedHash: current.hash, authorize, grantHash,
+      return controlSelection(tx, { source: observed.source, boundary, expectedHash: current.hash, authorize, grantHash,
         callerRequestHash: digest(canonicalJSON(request)),
-        request: { id: operationId, client: selection.client, sessionId: selection.sessionId, unitId: observed.boundary.unitId,
+        request: { id: operationId, client: selection.client, sessionId: selection.sessionId, unitId: boundary.unitId,
           expectedRevision: current.state?.revision ?? 0, operation } });
     });
   });
@@ -158,14 +178,15 @@ async function explicitRequest(request) {
 }
 async function deriveExplicitScope(capability, request, selection, observeRead) {
   await assertWorkflowStorage(capability, selection, 'explicitCollect');
-  const observed = await sourceBoundary(selection, request.sourcePath, request.expectedSourceIdentity, null);
+  const continuation = await chatContinuation(await openWorkflowIntake(capability), selection, request.sourcePath, request.expectedSourceIdentity, observeRead);
+  const observed = await sourceBoundary(selection, request.sourcePath, request.expectedSourceIdentity, null, continuation);
   if (request.readRange.endByte > observed.boundary.eofByte) fail('SOURCE_RANGE_UNAVAILABLE');
   // This window is explicit read authorization, never a serialized native proof.
   // Both native IDs and record anchors come from the same production readers.
   const state = newSelectionState(observed.source), scopeId = randomUUID();
   state.active = true; state.intervals = [{ id: scopeId, lower: { ...observed.boundary,
     eofByte: request.readRange.fromByte, startsMidRecord: false, unitId: null }, upper: null }];
-  const inspected = await reader(selection.client)({ state, scopeId, endByte: request.readRange.endByte, observeRead });
+  const inspected = await reader(selection.client)({ state, scopeId, endByte: request.readRange.endByte, observeRead, continuation });
   if (inspected.blocked || inspected.diagnostics.limited || inspected.diagnostics.pendingTail) fail(inspected.blocked?.code ?? 'INCOMPLETE_EXPLICIT_RANGE');
   const anchors = request.unitIds.map(unitId => inspected.nativeAnchors.find(item => item.unitId === unitId));
   if (anchors.some(item => !item)) fail('NATIVE_BOUNDARY_UNAVAILABLE');
@@ -389,11 +410,11 @@ async function chatStart(store, chat, state, floor, source) {
 
 // One bounded read of the source from `start`: its turns, in order, and its
 // records. Reads only the explicitly authorized window of the verified source.
-async function scanChat(chat, source, start, endByte, observeRead) {
+async function scanChat(chat, source, start, endByte, observeRead, continuation = null) {
   const state = newSelectionState(source), scopeId = randomUUID();
   state.active = true; state.intervals = [{ id: scopeId, upper: null,
     lower: { sourceIdentity: source.fileIdentity, eofByte: start.eofByte, startsMidRecord: start.startsMidRecord, unitId: null, record: null } }];
-  const inspected = await reader(chat.client)({ state, scopeId, endByte, observeRead });
+  const inspected = await reader(chat.client)({ state, scopeId, endByte, observeRead, continuation });
   if (inspected.blocked) fail(inspected.blocked.code ?? 'INCOMPLETE_EXPLICIT_RANGE');
   const anchors = [...new Map(inspected.nativeAnchors.map(item => [item.unitId, item])).values()]
     .filter(item => item.record.startByte >= start.eofByte).sort((a, b) => a.record.startByte - b.record.startByte);
@@ -410,13 +431,14 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   const store = await openWorkflowIntake(capability), current = await readSelection(store, identityOf(chat));
   if (current.state?.safetyStop) fail('SELECTION_CAPACITY_EXCEEDED');
   if (current.state && current.state.source.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
-  const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null), eof = observed.boundary.eofByte;
+  const continuation = await chatContinuation(store, chat, source.path, source.fileIdentity, observeRead);
+  const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
   const denied = deniedUnits(current.state), leftOut = [];
   let start = await chatStart(store, chat, current.state, floor, observed.source);
   for (let scan = 0; scan < scanWindows; scan++) {
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
     if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };
-    const { anchors, records } = await scanChat(chat, observed.source, start, limit, observeRead);
+    const { anchors, records } = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
     // The command turn bounds the window. A window cut short by its size limit
     // ends before its last turn, which may continue past it.
     const command = anchors.find(item => item.unitId === commandUnitId);
@@ -480,6 +502,8 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
 // after progress that is the budget too, while a real probe failure makes no
 // progress and is reported.
 const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'PRIVACY_PROBE_FAILED']);
+const WINDOW_HOLDS = new Set([...READER_BLOCK_CODES, 'EVIDENCE_AFTER_CODEX_TERMINAL', 'DUPLICATE_CODEX_START',
+  'EVIDENCE_BEFORE_CODEX_START', 'CONFLICTING_CODEX_TERMINAL', 'CODEX_ROLLBACK_REQUIRES_REVIEW']);
 async function storedTurns(capability, chat, unitIds, now) {
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
@@ -499,9 +523,13 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
       run = await runSelectedCapture(capability, { selection: chat, scopeId: scope.id, expectedSelectionHash: current.hash, unitIds: scope.unitIds }, { observeRead, now });
     } catch (error) { failure = error; break; }
     saved += run.saved;
-    // A turn held for another reason (no terminal record yet) does not hold
-    // up the chat's later turns; only the pass limit continues here.
-    finished = run.drained === true || (!run.incomplete && run.pending !== 'WORKER_PASS_LIMIT');
+    // A turn held for want of its terminal record does not hold up the
+    // chat's later turns, but a turn whose records break the transcript's
+    // rules, or a reader block, keeps the window waiting, as it keeps
+    // Automatic capture waiting: a later window never passes it. Only the
+    // pass limit continues here.
+    finished = run.drained === true || (!run.incomplete && run.pending !== 'WORKER_PASS_LIMIT' &&
+      !(run.holds ?? [run.pending]).some(code => WINDOW_HOLDS.has(code)));
     if (!finished && !run.saved) break;
   }
   if (!failure) return { saved, finished };
@@ -512,20 +540,27 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
   if (failure.code === 'PRIVACY_PROBE_FAILED' && !saved) throw failure;
   return { saved, finished: false };
 }
-// Whether the reader has read a capture scope to its end: a finished window
-// needs no further run, so a later capture never reads it again.
+// Whether a capture scope needs no further run: the reader read it to its
+// end, or every turn in it is captured or left out. A finished window is never
+// read again by a later capture.
 async function scopeDrained(capability, chat, state, scope, now) {
   return bounded(now, async () => {
-    const { cursor } = await readReaderProgress(await openWorkflowIntake(capability), identityOf(chat), scope.id, state.source.fileIdentity, { metadataOnly: true });
-    return cursor?.offset === scopeEnd(scope).endByte;
+    const store = await openWorkflowIntake(capability);
+    const { cursor } = await readReaderProgress(store, identityOf(chat), scope.id, state.source.fileIdentity, { metadataOnly: true });
+    if (cursor?.offset === scopeEnd(scope).endByte) return true;
+    const denied = deniedUnits(state);
+    for (const unitId of scope.unitIds) {
+      if (!denied.has(unitId) && !(await readCaptureHead(store, { ...identityOf(chat), unitId }, { metadataOnly: true })).head) return false;
+    }
+    return true;
   });
 }
 
 /** `capture`: this chat's finished turns since its last capture, or since it
  * started, oldest first, as one explicit scope per window. The capture a new
  * window would start after (the latest-ending one the transcript still holds,
- * of either kind) runs first while unfinished; a new window is read only once
- * it has.
+ * of either kind) runs first while unfinished; when it captures turns or stays
+ * unfinished it is the command's one window, and a new one is read only after.
  * The command turn is never part of a window. The command ends within 50 s
  * and stops on cancellation, keeping what it captured. */
 export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows, captureMs = CHAT_CAPTURE_MS } = {}) {
@@ -540,9 +575,11 @@ export async function captureChatTurns(capability, { selection, source, floor, c
     if (await bounded(now, () => holds(source, scopeEnd(scope).endByte, scopeEnd(scope)))) { last = scope; break; }
   }
   if (last && !await scopeDrained(capability, chat, previous.state, last, now)) {
+    // A window that captures turns now, or stays unfinished, is this
+    // command's one window; a new one waits for the next command.
     const rerun = await runChatScope(capability, chat, last, { ...options, fresh: false });
     turns += rerun.saved;
-    if (!rerun.finished) return { turns, more: true, leftOut: 0 };
+    if (!rerun.finished || turns) return { turns, more: true, leftOut: 0 };
   }
   signal?.throwIfAborted();
   // A window is read only when what it finds can still be recorded after it:
@@ -581,7 +618,21 @@ export async function controlChatCapture(capability, { selection, source, unitId
   choice(operation, ['pause', 'resume']);
   const chat = await selected({ ...selection, unitId });
   const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
+  const resumeAt = operation === 'resume' ? { eofByte: await bounded(now, () => commandStart(capability, chat, source, unitId)), unitId } : null;
   return controlCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: current.hash, operation,
-    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now });
+    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt });
+}
+// Where the command turn starts, read from the end of the transcript, where
+// the command was just typed. A command turn not found there refuses.
+const CHAT_COMMAND_BYTES = 2 * 1024 * 1024;
+async function commandStart(capability, chat, source, unitId) {
+  await assertWorkflowStorage(capability, chat, 'collect');
+  const continuation = await chatContinuation(await openWorkflowIntake(capability), chat, source.path, source.fileIdentity);
+  const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
+  const from = Math.max(0, eof - CHAT_COMMAND_BYTES);
+  const { anchors } = await scanChat(chat, observed.source, { eofByte: from, startsMidRecord: from > 0 }, eof, () => {}, continuation);
+  const own = anchors.find(item => item.unitId === unitId);
+  if (!own) fail('NATIVE_BOUNDARY_UNAVAILABLE');
+  return own.record.startByte;
 }

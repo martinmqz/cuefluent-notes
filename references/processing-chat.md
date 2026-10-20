@@ -84,10 +84,12 @@ starts after the history it re-homed. One command takes a bounded window (at
 most 10 turns or 8 MiB of transcript) and publishes what it can within its
 operation budget, ending within about 50 seconds; the reply says when more turns are
 waiting, and typing `capture` again first finishes the chat's latest capture, if
-unfinished, before reading further. An earlier capture or pause that the transcript
-no longer matches (cut back or rewritten in place) is not trusted: capture starts
-from an earlier point the transcript still matches.
-A turn that cannot be captured within those limits (larger than a window, or
+unfinished; a command that captures turns that way stops there, and the next one
+reads further. A turn whose records break the transcript's rules keeps its window
+waiting, as it keeps Automatic capture waiting, so no later window passes it. An
+earlier capture or pause that the transcript no longer matches (cut back or
+rewritten in place) is not trusted: capture starts from an earlier point the
+transcript still matches. A turn that cannot be captured within those limits (larger than a window, or
 ending in a record too large to anchor) is left out, and the reply says so; it
 never blocks the chat's later turns. Turns already left out stay out. In a chat
 Automatic capture covers it captures nothing and says so, and in a chat whose

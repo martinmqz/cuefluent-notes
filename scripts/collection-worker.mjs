@@ -315,7 +315,9 @@ export async function processScope(transaction, store, selection, scopeId, autho
       return suspend(unresolved ? 'unresolved-boundary' : result.diagnostics.pendingTail ? 'partial-tail' : 'pause-boundary',
         unresolved ?? (result.diagnostics.pendingTail ? 'CLAUDE_PAUSED_PARTIAL_TAIL' : null));
     }
+    // `holds` names every reason a unit of the scope was held, not only the first.
     return { saved, pending: result.blocked?.code ?? result.pending[0]?.reason ?? plan.heldReason ?? pending,
+      holds: [...new Set([result.blocked?.code, ...result.pending.map(item => item.reason)].filter(Boolean))],
       incomplete: result.diagnostics.pendingTail || result.diagnostics.limited };
   }
   return { saved, pending: 'WORKER_PASS_LIMIT', incomplete: true };

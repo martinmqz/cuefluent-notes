@@ -1094,6 +1094,26 @@ test('a typed capture that fails still leaves its own turn out of later captures
   assert((await readSelection(store, identity)).state.exclusions.includes(parent.controls.at(-1)));
 });
 
+test('a window with a turn the reader holds for its records keeps waiting, never passed by a later window', async t => {
+  const { f, h, parent, store, identity, head } = await manualCaptureChat(t);
+  const first = await parent.work('Decision: ship on Friday.');
+  // Evidence after that turn's terminal record, at the next native ordinal:
+  // the reader holds the turn.
+  await parent.resume({});
+  const text = await fs.readFile(parent.source.path, 'utf8'), last = text.lastIndexOf('\n', text.length - 2) + 1;
+  const { timestamp, ordinal } = JSON.parse(text.slice(last));
+  await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
+  await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'event_msg', payload: { type: 'item_completed',
+    thread_id: f.identity.sessionId, turn_id: first, item: { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: 'Late evidence.' }] } } }) + '\n');
+  await parent.work('Owner: Dana.');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+    assert.equal(reply.more, true, reply.statusText);
+  }
+  assert.equal(await head(first), null);
+  assert.equal((await readSelection(store, identity)).state.explicitScopes.length, 1);
+});
+
 test('a failed typed command whose turn could not be left out says so in its refusal', async t => {
   const { h, parent, store, identity, typed } = await manualCaptureChat(t);
   await typed('capture_turns', 'nothing-new');
