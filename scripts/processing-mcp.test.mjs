@@ -1171,6 +1171,16 @@ test('a chat whose Automatic capture stopped is not told capture covers it', asy
   });
 });
 
+// A native event for an ended Codex turn, at the next native ordinal.
+async function lateEvidence(parent, unitId) {
+  await parent.resume({});
+  const text = await fs.readFile(parent.source.path, 'utf8'), last = text.lastIndexOf('\n', text.length - 2) + 1;
+  const { timestamp, ordinal } = JSON.parse(text.slice(last));
+  await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
+  await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'event_msg', payload: { type: 'item_completed',
+    thread_id: parent.source.sessionId, turn_id: unitId, item: { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: 'Late evidence.' }] } } }) + '\n');
+}
+
 test('a reader block is kept per chat, so a later pass that skips the chat cannot hide it', async t => {
   // Every reader block a visit can end on has a plain reason in status.
   for (const code of READER_BLOCK_CODES) assert(COLLECTION_STOP_CODES.includes(code), code);
@@ -1186,15 +1196,11 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
       await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'synthetic_unknown', payload: { type: 'synthetic' } }) + '\n');
     }],
     // Evidence after a finished turn's terminal record, at the next native ordinal.
-    EVIDENCE_AFTER_CODEX_TERMINAL: [/its transcript has a turn with records after the turn ended\./, async parent => {
-      const ended = await parent.work('Decision: ship on Friday.');
-      await parent.resume({});
-      const text = await fs.readFile(parent.source.path, 'utf8'), last = text.lastIndexOf('\n', text.length - 2) + 1;
-      const { timestamp, ordinal } = JSON.parse(text.slice(last));
-      await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
-      await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'event_msg', payload: { type: 'item_completed',
-        thread_id: parent.source.sessionId, turn_id: ended, item: { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: 'Late evidence.' }] } } }) + '\n');
-    }],
+    EVIDENCE_AFTER_CODEX_TERMINAL: [/its transcript has a turn with records after the turn ended\./,
+      async parent => lateEvidence(parent, await parent.work('Decision: ship on Friday.'))],
+    // The same for a turn Automatic capture already captured.
+    LATE_NATIVE_EVIDENCE_REQUIRES_REVIEW: [/its transcript has a new record for a turn that was already captured\./,
+      (parent, captured) => lateEvidence(parent, captured)],
     // A finished turn whose terminal record is too large to anchor.
     SOURCE_ANCHOR_LIMIT: [/its transcript has a turn whose last record is too large for Cuefluent Notes to track\./,
       parent => parent.work('Long final answer.', { last: 'x'.repeat(70 * 1024) })],
@@ -1202,8 +1208,8 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
   for (const [code, [reason, block]] of Object.entries(cases)) await t.test(code, async t => {
     const { f, h, parent } = await nativeIngressFixture(t);
     const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
-    await parent.work('Captured automatically.'); await run();
-    await block(parent);
+    const captured = await parent.work('Captured automatically.'); await run();
+    await block(parent, captured);
     await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
     assert((await run()).pending.includes(code));
     // A later pass that does not visit this chat rebuilds the notice without it.

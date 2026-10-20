@@ -337,6 +337,7 @@ const COLLECTION_STOPS = Object.freeze({
   DUPLICATE_CODEX_START: 'its transcript starts the same turn twice',
   EVIDENCE_BEFORE_CODEX_START: 'its transcript has a turn with records before the turn started',
   CONFLICTING_CODEX_TERMINAL: 'its transcript ends the same turn in two different ways',
+  LATE_NATIVE_EVIDENCE_REQUIRES_REVIEW: 'its transcript has a new record for a turn that was already captured',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));
