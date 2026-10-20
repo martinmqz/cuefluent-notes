@@ -314,6 +314,34 @@ test('a turn larger than one capture can read is passed over later captures, nev
   assert((await A.head(P1)).head); assert.equal((await A.head(P2)).head, null); assert((await A.head(P3)).head);
 });
 
+test('a stored scan position is dropped when the transcript changed under it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, C1, C2, C3] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
+    A.prompt('After the long reply.', P2), A.reply('Noted.')]);
+  const reads = [];
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call), chat = { selection: bound.selection, source: bound.source };
+    reads.length = 0;
+    // Two reads per capture: up to the long turn, then into it.
+    const result = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId }, { scanWindows: 2, observeRead: read => reads.push(read) });
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return result;
+  };
+  assert.deepEqual(await capture(C1), { turns: 0, more: true, leftOut: 1 });
+  const saved = JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir, 'chat-capture', 'claude', `${A.sessionId}.json`), 'utf8'));
+  // Rewrite one byte just before the saved position, in place: same file, other contents.
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('#'), 0, 1, saved.offset - 10); } finally { await handle.close(); }
+  // The position is not trusted: this capture reads from the chat's start again.
+  assert.deepEqual(await capture(C2), { turns: 0, more: true, leftOut: 0 });
+  assert(reads.some(read => read.purpose === 'range' && read.offset < saved.offset), JSON.stringify(reads.slice(0, 3)));
+  assert.deepEqual(await capture(C3), { turns: 1, more: false, leftOut: 0 });
+  assert((await A.head(P2)).head);
+});
+
 test('a capture short on time still records the turns it left out, so the next one passes them', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
   const [P1, P2, P3, C1, C2] = Array.from({ length: 5 }, () => randomUUID());

@@ -4,8 +4,9 @@ import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, with
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { canonicalWorkflowProject, validateWorkflowPlacement } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
-import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom, readCaptureHead, readReaderProgress } from './intake-store.mjs';
-import { inspectSourceBoundary, newSelectionState, currentIntervals, MAX_SELECTION_BYTES } from './capture-selection.mjs';
+import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom, readCaptureHead, readReaderProgress, verifySourceCursor } from './intake-store.mjs';
+import { openGuarded } from './file-io.mjs';
+import { inspectSourceBoundary, newSelectionState, currentIntervals, stableSourceIdentity, MAX_SELECTION_BYTES } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.mjs';
 import { snapshotSourceMetadata } from './collection-ingress.mjs';
@@ -280,24 +281,48 @@ export async function excludeChatTurn(capability, { selection, source, unitId },
 
 // How far typed captures have read past turns they left out, for this exact
 // transcript file: a turn too large for one command's scans is passed over
-// several commands, never restarted. It only moves forward.
+// several commands, never restarted. It only moves forward, and carries the
+// hash of the bytes just before it: a transcript truncated or rewritten in
+// place under the same file identity drops it, so the next capture reads
+// again instead of trusting an offset into other contents.
+const CHAT_CURSOR_ANCHOR_BYTES = 4096;
 const chatCursorPath = chat => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}.json`;
-async function readChatCursor(store, chat, sourceIdentity) {
+async function readChatCursor(store, chat, source) {
   const snapshot = await intakeSnapshot(store, 'state', chatCursorPath(chat), { maxBytes: 4096 }), value = intakeJSON(snapshot);
-  if (value !== null) {
-    keys(value, ['format', 'version', 'sourceIdentity', 'offset', 'startsMidRecord']); hash(value.sourceIdentity); integer(value.offset);
-    if (value.format !== 'cuefluent-chat-capture-cursor' || value.version !== 1 || typeof value.startsMidRecord !== 'boolean') fail('INVALID_INTAKE_METADATA');
+  if (value === null) return { snapshot, cursor: null };
+  keys(value, ['format', 'version', 'sourceIdentity', 'offset', 'startsMidRecord', 'anchor']); hash(value.sourceIdentity); integer(value.offset);
+  if (value.format !== 'cuefluent-chat-capture-cursor' || value.version !== 1 || typeof value.startsMidRecord !== 'boolean') fail('INVALID_INTAKE_METADATA');
+  if (value.sourceIdentity !== source.fileIdentity) return { snapshot, cursor: null };
+  try { await verifySourceCursor(source, { sourceIdentity: value.sourceIdentity, offset: value.offset, anchor: value.anchor }); }
+  catch (error) {
+    if (['SOURCE_CHANGED', 'SOURCE_ANCHOR_CONFLICT', 'SOURCE_IDENTITY_MISMATCH'].includes(error.code)) return { snapshot, cursor: null };
+    throw error;
   }
-  return { snapshot, cursor: value?.sourceIdentity === sourceIdentity ? value : null };
+  return { snapshot, cursor: value };
 }
-async function advanceChatCursor(capability, chat, sourceIdentity, position, { now, signal }) {
+// The hash of up to 4 KiB of transcript bytes ending at `offset`, read from
+// the verified file.
+async function chatCursorAnchor(source, offset) {
+  const { handle, stat } = await openGuarded(source.path, { singleLink: true });
+  try {
+    if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(offset)) fail('SOURCE_CHANGED');
+    const startByte = Math.max(0, offset - CHAT_CURSOR_ANCHOR_BYTES), bytes = Buffer.alloc(offset - startByte);
+    for (let read = 0; read < bytes.length;) {
+      const result = await handle.read(bytes, read, bytes.length - read, startByte + read);
+      if (!result.bytesRead) fail('SOURCE_CHANGED'); read += result.bytesRead;
+    }
+    return { startByte, endByte: offset, hash: digest(bytes) };
+  } finally { await handle.close(); }
+}
+async function advanceChatCursor(capability, chat, source, position, { now, signal }) {
+  if (position.eofByte <= 0) return;
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
-      const { snapshot, cursor } = await readChatCursor(store, chat, sourceIdentity);
+      const { snapshot, cursor } = await readChatCursor(store, chat, source);
       if (cursor && cursor.offset >= position.eofByte) return;
-      await replaceIntakeJSON(tx, chatCursorPath(chat), { format: 'cuefluent-chat-capture-cursor', version: 1, sourceIdentity,
-        offset: position.eofByte, startsMidRecord: position.startsMidRecord }, snapshot.hash);
+      await replaceIntakeJSON(tx, chatCursorPath(chat), { format: 'cuefluent-chat-capture-cursor', version: 1, sourceIdentity: source.fileIdentity,
+        offset: position.eofByte, startsMidRecord: position.startsMidRecord, anchor: await chatCursorAnchor(source, position.eofByte) }, snapshot.hash);
     }, { signal });
   });
 }
@@ -306,10 +331,10 @@ async function advanceChatCursor(capability, chat, sourceIdentity, position, { n
 // last typed or explicit capture, how far captures read past turns they left
 // out, and whatever Automatic capture already covered (the worker's progress,
 // or its pause), so no turn is captured twice.
-async function chatStart(store, chat, state, floor, sourceIdentity) {
+async function chatStart(store, chat, state, floor, source) {
   let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
   const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
-  const { cursor } = await readChatCursor(store, chat, sourceIdentity);
+  const { cursor } = await readChatCursor(store, chat, source);
   if (cursor) later(cursor.offset, cursor.startsMidRecord);
   for (const scope of state?.explicitScopes ?? []) later((scope.end ?? scope.start).endByte);
   for (const interval of state ? currentIntervals(state) : []) {
@@ -347,7 +372,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   if (current.state && current.state.source.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null), eof = observed.boundary.eofByte;
   const denied = deniedUnits(current.state), leftOut = [];
-  let start = await chatStart(store, chat, current.state, floor, observed.source.fileIdentity);
+  let start = await chatStart(store, chat, current.state, floor, observed.source);
   for (let scan = 0; scan < scanWindows; scan++) {
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
     if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };
@@ -480,7 +505,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   // a slow read never leaves the next capture to start over.
   if (!timeFor(deadline, 2)) return { turns, more: true, leftOut: 0 };
   const window = await bounded(now, () => chatWindow(capability, { chat, source, floor, commandUnitId, observeRead, scanWindows }));
-  if (window.resumeAt) await advanceChatCursor(capability, chat, source.fileIdentity, window.resumeAt, { now, signal });
+  if (window.resumeAt) await advanceChatCursor(capability, chat, source, window.resumeAt, { now, signal });
   // A turn too large to capture is left out once, so later captures pass it.
   let leftOut = 0;
   for (const unitId of window.leftOut) {
