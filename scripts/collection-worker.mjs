@@ -337,7 +337,8 @@ async function runRegistration(capability, registration, registrationHash, route
     let result;
     try { result = await visitChat(transaction, link); }
     catch (error) { if (READER_BLOCK_CODES.includes(error.code)) await keepBlock(error.code); throw error; }
-    await keepBlock(result.pending);
+    // Any scope's reader block counts, not only the first reason one reported.
+    await keepBlock(result.readerBlock !== undefined ? result.readerBlock : result.pending);
     return result;
   });
   const visitChat = async (transaction, link) => {
@@ -367,11 +368,12 @@ async function runRegistration(capability, registration, registrationHash, route
     // The native source cwd is distinct from the broader configured route root.
     // Keep the excluded initial boundary visible on later visits as well.
     boundaryExcluded ??= currentIntervals(selection.state)[0]?.lower.unitId ?? null;
-    let saved = 0, pending = null, incomplete = false, drained = true, suspended = true;
+    let saved = 0, pending = null, readerBlock = null, incomplete = false, drained = true, suspended = true;
     for (const scope of [...currentIntervals(selection.state), ...selection.state.explicitScopes]) {
       await authorize();
       const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link);
       saved += result.saved; pending ??= result.pending; incomplete ||= Boolean(result.incomplete);
+      if (!readerBlock && READER_BLOCK_CODES.includes(result.pending)) readerBlock = result.pending;
       drained &&= result.drained === true; suspended &&= result.suspended === true || result.drained === true;
       selection = await readSelection(store, identity);
     }
@@ -394,7 +396,7 @@ async function runRegistration(capability, registration, registrationHash, route
       await publishIngressMetadata(store, suspendedPath(identity), { version: READER_SUSPENSION_VERSION,
         readerRulesRevision: CLAUDE_READER_RULES_REVISION, selectionHash: selection.hash });
     }
-    return { saved, pending: pending ?? (selection.state.paused ? 'COLLECTION_PAUSED' : null), incomplete, boundaryExcluded };
+    return { saved, pending: pending ?? (selection.state.paused ? 'COLLECTION_PAUSED' : null), readerBlock, incomplete, boundaryExcluded };
   };
   for (let attempt = 0; ; attempt++) {
     const link = { registration, config, attempted: false, successor: null };
