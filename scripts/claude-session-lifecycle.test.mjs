@@ -1551,3 +1551,16 @@ test('a window re-chosen after a change only inside it is a new window, not the 
   assert.equal(scopes.length, 2); assert.notEqual(scopes[1].id, selected.id); assert.notEqual(scopes[1].contentHash, selected.contentHash);
   assert.deepEqual([scopes[1].unitIds, scopes[1].start, scopes[1].end], [selected.unitIds, selected.start, selected.end]);
 });
+
+test('a turn before one whose last record is too large to anchor is captured, not left out with it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // Nothing but the long turn lies between the small turn and the command.
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Write the report.', P2), A.reply('r'.repeat(70 * 1024))]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }),
+    { turns: 1, more: false, leftOut: 1 });
+  assert((await A.head(P1)).head); assert.equal((await A.head(P2)).head, null);
+  assert.deepEqual((await A.selection()).state.exclusions, [P2]);
+});

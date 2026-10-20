@@ -10,6 +10,7 @@ import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
 import { readCaptureHead, readReaderProgress, readSelection } from './intake-store.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
+import { captureChatTurns } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
 const row = (type, payload) => JSON.stringify({ timestamp: '2026-09-24T00:00:00.000Z', type, payload }) + '\n';
@@ -285,6 +286,20 @@ test('a chat window refuses a turn in its bytes that is not its own, left out or
   assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
   const chosen = await selectExplicitCapture(f.capability, { ...f.request, kind: 'historical', unitIds: [A, B], bounds });
   assert.deepEqual(chosen.state.explicitScopes.map(scope => scope.unitIds), [[A, B]]);
+});
+
+test('a Codex turn before one whose last record is too large to anchor is captured, not left out with it', async t => {
+  const f = await fixture(t), BIG = randomUUID(), C = randomUUID();
+  // Nothing but the long turn lies between turn B and the command, still in progress.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: BIG }) + row('event_msg', { type: 'user_message', message: 'Write the report.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: BIG, last_agent_message: 'r'.repeat(70 * 1024) }) +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: false, leftOut: 1 });
+  for (const unitId of [A, B]) assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head);
+  assert.deepEqual((await readSelection(f.store, { client: 'codex', sessionId: S })).state.exclusions, [BIG]);
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {

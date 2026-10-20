@@ -578,7 +578,10 @@ async function scanChat(chat, source, start, endByte, observeRead, continuation 
     .sort((a, b) => a.record.startByte - b.record.startByte);
   // The turns the reader holds because their own terminal record is too large to anchor.
   const tooLarge = new Set(inspected.pending.filter(item => item.reason === 'SOURCE_ANCHOR_LIMIT').map(item => item.unitId));
-  return { anchors, records: inspected.recordAnchors, end: limited ? inspected.blocked.offset : endByte, tooLarge };
+  // A turn's own last record, where the reader knows it (Codex owns records by
+  // turn); otherwise a turn runs to the next turn's start.
+  const unitEnds = new Map((inspected.unitEnds ?? []).map(item => [item.unitId, item.record]));
+  return { anchors, records: inspected.recordAnchors, end: limited ? inspected.blocked.offset : endByte, tooLarge, unitEnds };
 }
 
 // The next window of the chat's finished turns: at most 10 turns or 8 MiB, up
@@ -609,7 +612,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     // it read that ends there (its last bytes, when it is too large whole).
     const limitAnchor = limit < eof ? await chatCursorAnchor(observed.source, limit) : null;
     const scanned = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
-    const { anchors, records, end, tooLarge } = scanned;
+    const { anchors, records, end, tooLarge, unitEnds } = scanned;
     const at = async (eofByte, startsMidRecord) => {
       const record = eofByte === limit ? null : records.find(item => item.endByte === eofByte);
       const anchor = eofByte === limit ? limitAnchor : !record ? null : record.endByte - record.startByte <= CHAT_ANCHOR_BYTES
@@ -627,6 +630,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     // whether that record is the last before the next turn or the reader
     // finds it behind later metadata.
     const lastRecord = item => {
+      if (unitEnds.has(item.unitId)) return unitEnds.get(item.unitId);
       const next = anchors.find(other => other.record.startByte > item.record.startByte)?.record.startByte ?? stop;
       return records.filter(record => record.endByte <= next).at(-1);
     };
@@ -653,13 +657,19 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       continue;
     }
     if (units.length > CHAT_WINDOW_UNITS) { stop = units[CHAT_WINDOW_UNITS].record.startByte; units.length = CHAT_WINDOW_UNITS; more = true; }
-    // The scope ends with the last complete record before its stop. Drop
-    // trailing turns until that record can anchor the end; a first turn that
-    // cannot is left out and the window starts after it.
+    // The scope ends with a complete record that can anchor it, from the end of
+    // its own turns up to its stop (the next chosen turn, or the command): the
+    // latest such record. A larger record of a turn it passes (left out,
+    // excluded or captured) never costs it its own turns. Drop trailing turns
+    // until such a record exists; a first turn that has none is left out and
+    // the window starts after it.
+    const fits = (record, until) => record.endByte > units[0].record.startByte && record.endByte <= until && record.endByte - record.startByte <= CHAT_ANCHOR_BYTES;
     for (let count = units.length; count > 0; count--) {
       const until = count < units.length ? units[count].record.startByte : stop;
-      const closing = records.filter(record => record.endByte <= until).at(-1);
-      if (closing && closing.endByte > units[0].record.startByte && closing.endByte - closing.startByte <= CHAT_ANCHOR_BYTES) {
+      const own = Math.max(...units.slice(0, count).map(item => lastRecord(item)?.endByte ?? Infinity));
+      const closing = records.filter(record => record.endByte >= own && fits(record, until)).at(-1) ??
+        [records.filter(record => record.endByte <= until).at(-1)].find(record => record && fits(record, until));
+      if (closing) {
         return { current, unitIds: units.slice(0, count).map(item => item.unitId),
           readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte },
           bounds: { start: units[0].record.hash, end: closing.hash, content: await stretchHash(observed.source, units[0].record.startByte, closing.endByte) },

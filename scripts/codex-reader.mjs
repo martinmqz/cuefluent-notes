@@ -764,8 +764,13 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
     candidates.push({ capture, proof, scopeId });
     } catch (error) { pending.push({ unitId: unit.id, reason: error.code ?? 'UNSUPPORTED_CODEX_UNIT' }); }
   }
+  // Each turn's own last record, for a turn read whole: Codex turns are owned
+  // by their ID, so another turn's records can follow or interleave with them.
+  const readable = record => !blocked || record.endByte <= blocked.offset;
+  const unitEnds = [...units.values()].filter(unit => unit.records.every(readable))
+    .map(unit => ({ unitId: unit.id, record: anchor(unit.records.reduce((last, record) => record.endByte > last.endByte ? record : last)) }));
   return { candidates, pending, noEvidence, processingControls, unanchoredUnits: [...unanchoredUnits], blocked, anchorUpdates, selection, from, frames, eligibility, scopeId,
-    nativeAnchors: anchors, cursorAnchors: scan.records.map(record => record.tailAnchor),
+    nativeAnchors: anchors, unitEnds, cursorAnchors: scan.records.map(record => record.tailAnchor),
     recordAnchors: scan.records.filter(record => record.id && (!blocked || record.endByte <= blocked.offset)).map(anchor),
     diagnostics: { pendingTail: scan.pendingTail, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd } };
 }
