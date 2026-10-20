@@ -87,16 +87,17 @@ jobs:
       - run: npm run check:guidance
   test:
     needs: scope
-    # Windows runs its suite as two parallel halves. The first keeps the
-    # required check name and builds the release preview; the second is gated
-    # through `reproducibility`, which needs every leg of this job.
+    # macOS and Windows run their suites as two parallel halves. The first
+    # keeps the required check name and builds the release preview; the second
+    # is gated through `reproducibility`, which needs every leg of this job.
     name: test (${{ matrix.os }}${{ matrix.shard == '2/2' && ', 2/2' || '' }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-24.04, shard: '' }
-          - { os: macos-14, shard: '' }
+          - { os: macos-14, shard: '1/2' }
+          - { os: macos-14, shard: '2/2' }
           - { os: windows-2025, shard: '1/2' }
           - { os: windows-2025, shard: '2/2' }
     # Required contexts always test on their named platform. The package path
@@ -132,6 +133,7 @@ jobs:
         run: npm test
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
+          CUEFLUENT_TEST_SHARD: ${{ matrix.shard }}
       # Raise Node's default on small runners without lowering it on larger ones.
       # Files are isolated; tests inside a file remain sequential for fault injection.
       - name: Run Windows tests

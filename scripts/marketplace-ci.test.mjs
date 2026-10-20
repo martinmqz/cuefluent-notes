@@ -455,14 +455,13 @@ test('workflow preserves required checks and gates short-path smokes on provenan
   assert.equal(jobs.test.needs, 'scope'); assert.equal(jobs['client-smoke'].needs, 'scope');
   assert.equal(jobs.test.if, undefined, 'Required matrix context names must exist on both paths.');
   assert.equal(jobs.test.name, "test (${{ matrix.os }}${{ matrix.shard == '2/2' && ', 2/2' || '' }})");
-  // Windows runs as two halves; the first keeps the required context name.
+  // macOS and Windows run as two halves; the first keeps the required context name.
   const legs = jobs.test.strategy.matrix.include;
-  assert.deepEqual(legs, [{ os: 'ubuntu-24.04', shard: '' }, { os: 'macos-14', shard: '' },
+  assert.deepEqual(legs, [{ os: 'ubuntu-24.04', shard: '' }, { os: 'macos-14', shard: '1/2' }, { os: 'macos-14', shard: '2/2' },
     { os: 'windows-2025', shard: '1/2' }, { os: 'windows-2025', shard: '2/2' }]);
   assert.deepEqual(legs.map(leg => `test (${leg.os}${leg.shard === '2/2' ? ', 2/2' : ''})`),
-    ['test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'test (windows-2025, 2/2)']);
-  const windowsTests = jobs.test.steps.find(step => step.name === 'Run Windows tests');
-  assert.equal(windowsTests.env.CUEFLUENT_TEST_SHARD, '${{ matrix.shard }}');
+    ['test (ubuntu-24.04)', 'test (macos-14)', 'test (macos-14, 2/2)', 'test (windows-2025)', 'test (windows-2025, 2/2)']);
+  for (const name of ['Run tests', 'Run Windows tests']) assert.equal(jobs.test.steps.find(step => step.name === name).env.CUEFLUENT_TEST_SHARD, '${{ matrix.shard }}');
   // Only the first half builds and uploads the Windows release preview.
   for (const step of jobs.test.steps.filter(step => step.uses?.startsWith('actions/upload-artifact@') || step.run === 'npm run release:build')) {
     assert.match(step.if, / && matrix.shard != '2\/2'$/);
