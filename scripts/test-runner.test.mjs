@@ -46,3 +46,44 @@ for (const statuses of [[1, 0], [0, 7], [2, 7], [null, 0], ['spawn-error', 0], [
     assert.deepEqual(calls[1].args.slice(0, 2), ['--test', '--test-concurrency=4']);
     assert.deepEqual(calls.flatMap(call => call.args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file))), names);
   });
+
+// CI can split the suite across parallel jobs. Each shard is a disjoint part;
+// together they run every file once, balanced by file size.
+test('test shards run every file exactly once, balanced by size, and refuse invalid specs', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-test-shards-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.copyFile(new URL('./test.mjs', import.meta.url), path.join(root, 'test.mjs'));
+  await fs.mkdir(path.join(root, 'test-support'));
+  await fs.writeFile(path.join(root, 'test-support', 'isolated-settings.mjs'), '// No settings in this orchestration-only fixture.\n');
+  const sizes = { 'a.test.mjs': 900, 'b.test.mjs': 500, 'c.test.mjs': 400, 'd.test.mjs': 300, 'e.test.mjs': 300, 'f.test.mjs': 100 };
+  await Promise.all(Object.entries(sizes).map(([name, size]) => fs.writeFile(path.join(root, name), '/'.repeat(size))));
+  await fs.writeFile(path.join(root, 'preload.mjs'), `
+    import childProcess from 'node:child_process';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { writeFileSync } from 'node:fs';
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    const calls = [];
+    childProcess.spawnSync = (command, args) => { calls.push(args); writeFileSync(process.env.CALLS_FILE, JSON.stringify(calls)); return { status: 0 }; };
+    syncBuiltinESMExports();
+  `);
+  const run = spec => {
+    const calls = path.join(root, `calls-${spec.replace('/', '-')}.json`);
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(root, 'preload.mjs')).href, path.join(root, 'test.mjs')],
+      { encoding: 'utf8', env: { ...process.env, CUEFLUENT_TEST_SHARD: spec, CALLS_FILE: calls } });
+    return { result, calls };
+  };
+  const shards = [];
+  for (const spec of ['1/2', '2/2']) {
+    const { result, calls } = run(spec);
+    assert.equal(result.status, 0, result.stderr);
+    shards.push(JSON.parse(await fs.readFile(calls, 'utf8')).flatMap(args => args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file))));
+  }
+  assert.deepEqual([...shards.flat()].sort(), Object.keys(sizes));
+  assert.equal(new Set(shards.flat()).size, Object.keys(sizes).length);
+  const load = shard => shard.reduce((sum, name) => sum + sizes[name], 0);
+  assert.deepEqual(shards.map(load), [1300, 1200]);
+  for (const spec of ['0/2', '3/2', '1/0', '2', 'a/b', '1/2/3']) {
+    const { result } = run(spec);
+    assert.notEqual(result.status, 0, spec); assert.match(result.stderr, /Invalid CUEFLUENT_TEST_SHARD/);
+  }
+});

@@ -6,8 +6,25 @@ import { spawnSync } from 'node:child_process';
 
 // Expand test files in Node, independently of PowerShell/cmd/POSIX glob rules.
 const directory = path.dirname(fileURLToPath(import.meta.url));
-const files = (await fs.readdir(directory)).filter(file => file.endsWith('.test.mjs')).sort();
-if (!files.length) throw new Error('No test files found.');
+const all = (await fs.readdir(directory)).filter(file => file.endsWith('.test.mjs')).sort();
+if (!all.length) throw new Error('No test files found.');
+// CI can run the suite as parallel jobs: CUEFLUENT_TEST_SHARD=i/n runs the i-th
+// of n disjoint shards. Files are balanced by size, largest first, with ties
+// broken by name, so jobs of one checkout run every file in exactly one shard.
+async function shardOf(files, spec) {
+  if (!spec) return files;
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(spec);
+  if (!match || Number(match[1]) > Number(match[2])) throw new Error(`Invalid CUEFLUENT_TEST_SHARD: ${spec}`);
+  const [index, count] = [Number(match[1]), Number(match[2])];
+  const sizes = new Map(await Promise.all(files.map(async file => [file, (await fs.stat(path.join(directory, file))).size])));
+  const loads = Array(count).fill(0), owners = new Map();
+  for (const file of [...files].sort((a, b) => sizes.get(b) - sizes.get(a) || (a < b ? -1 : 1))) {
+    const shard = loads.indexOf(Math.min(...loads));
+    loads[shard] += sizes.get(file); owners.set(file, shard + 1);
+  }
+  return files.filter(file => owners.get(file) === index);
+}
+const files = await shardOf(all, process.env.CUEFLUENT_TEST_SHARD);
 // Real-clock hook/worker checks must not compete with filesystem stress fixtures
 // on Windows. Preserve their production deadlines and run every test once.
 const timed = new Set(['collection-hooks.test.mjs', 'collection-package.test.mjs', 'windows-discovery.test.mjs', 'windows-acl-probe.test.mjs']);

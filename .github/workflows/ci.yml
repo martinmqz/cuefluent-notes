@@ -87,11 +87,18 @@ jobs:
       - run: npm run check:guidance
   test:
     needs: scope
-    name: test (${{ matrix.os }})
+    # Windows runs its suite as two parallel halves. The first keeps the
+    # required check name and builds the release preview; the second is gated
+    # through `reproducibility`, which needs every leg of this job.
+    name: test (${{ matrix.os }}${{ matrix.shard == '2/2' && ', 2/2' || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2025]
+        include:
+          - { os: ubuntu-24.04, shard: '' }
+          - { os: macos-14, shard: '' }
+          - { os: windows-2025, shard: '1/2' }
+          - { os: windows-2025, shard: '2/2' }
     # Required contexts always test on their named platform. The package path
     # checks committed files there without repeating the full source suite.
     runs-on: ${{ matrix.os }}
@@ -110,14 +117,14 @@ jobs:
         run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release(),parallelism:require('os').availableParallelism()})"
       - run: npm ci --ignore-scripts
       - name: Test committed marketplace packages on the native platform
-        if: needs.scope.outputs.mode == 'packages'
+        if: needs.scope.outputs.mode == 'packages' && matrix.shard != '2/2'
         run: node --test scripts/published-marketplace.test.mjs
       - name: Verify Windows privacy probe before the full suite
-        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.shard != '2/2'
         timeout-minutes: 2
         run: node scripts/windows-probe-smoke.mjs
       - name: Verify private storage under a real standard-user token
-        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.shard != '2/2'
         shell: powershell
         run: ./scripts/test-windows-standard-user.ps1
       - name: Run tests
@@ -135,12 +142,13 @@ jobs:
           npm test -- --test-concurrency=$testConcurrency
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
+          CUEFLUENT_TEST_SHARD: ${{ matrix.shard }}
       - run: npm run check:examples
-        if: needs.scope.outputs.mode == 'full'
+        if: needs.scope.outputs.mode == 'full' && matrix.shard != '2/2'
       - run: npm run release:build
-        if: needs.scope.outputs.mode == 'full'
+        if: needs.scope.outputs.mode == 'full' && matrix.shard != '2/2'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: needs.scope.outputs.mode == 'full'
+        if: needs.scope.outputs.mode == 'full' && matrix.shard != '2/2'
         with:
           name: release-preview-${{ matrix.os }}
           path: dist/release/artifacts/
