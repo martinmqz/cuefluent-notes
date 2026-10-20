@@ -355,6 +355,11 @@ const COLLECTION_STOPS = Object.freeze({
   INVALID_READER_SUSPENSION: 'its saved pause state is not valid',
   READER_CHECKPOINT_REQUIRED: 'its saved reading position has lost the progress it depends on',
   INVALID_INTAKE_CURSOR: 'its saved reading position does not fit its transcript',
+  UNSUPPORTED_CODEX_READER: 'a turn of it was captured by a reader this version of Cuefluent Notes does not support',
+  CAPTURE_REVISION_CONFLICT: 'a turn of it was captured under a different transcript or client version',
+  CAPTURE_REVISION_SCOPE_CONFLICT: 'a turn of it was captured from outside the stretch now selected',
+  CAPTURE_BASELINE_REQUIRED: 'a turn of it has earlier records that no capture covers',
+  SOURCE_IDENTITY_MISMATCH: 'its transcript no longer matches the chat it was selected for',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));

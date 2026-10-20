@@ -552,10 +552,11 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
 // after progress that is the budget too, while a real probe failure makes no
 // progress and is reported.
 const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'PRIVACY_PROBE_FAILED']);
-// Every reader block keeps a window waiting, except two that stop Automatic
+// Every reader block keeps a window waiting, except those that stop Automatic
 // capture but that a typed capture passes: a turn too large to anchor, which it
-// leaves out, and a turn already captured by a newer reader version.
-const WINDOW_HOLDS = new Set(READER_BLOCK_CODES.filter(code => !['SOURCE_ANCHOR_LIMIT', 'UNSUPPORTED_CLAUDE_READER'].includes(code)));
+// leaves out, and a turn already captured under another reader or revision.
+const WINDOW_HOLDS = new Set(READER_BLOCK_CODES.filter(code => !['SOURCE_ANCHOR_LIMIT', 'UNSUPPORTED_CLAUDE_READER',
+  'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT'].includes(code)));
 async function storedTurns(capability, chat, unitIds, now) {
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);

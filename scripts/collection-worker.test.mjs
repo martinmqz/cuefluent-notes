@@ -1213,6 +1213,10 @@ test('a scope result is a reader block when any turn is held on one, not only th
   // So does saved reader state that no longer fits its scope.
   for (const code of ['READER_CHECKPOINT_CONFLICT', 'READER_CHECKPOINT_IDENTITY_MISMATCH', 'READER_ALLOCATION_INCONSISTENT',
     'INVALID_READER_PROGRESS', 'INVALID_READER_SUSPENSION', 'READER_CHECKPOINT_REQUIRED', 'INVALID_INTAKE_CURSOR']) assert.equal(readerBlockOf({ pending: code }), code);
+  // So is a turn whose earlier capture conflicts with the current reader or transcript.
+  for (const code of ['UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED', 'SOURCE_IDENTITY_MISMATCH']) {
+    assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', code] }), code);
+  }
   // A turn captured by a newer reader version is held on every pass.
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_READER'] }), 'UNSUPPORTED_CLAUDE_READER');
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted'] }), null);
