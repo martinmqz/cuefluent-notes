@@ -551,6 +551,32 @@ test('a read cut short by its record limit still captures the turns it finished'
   for (const promptId of prompts.slice(0, 10)) assert((await A.head(promptId)).head);
 });
 
+test('capture does not count turns as covered once where Automatic capture began was rewritten', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, C1] = Array.from({ length: 4 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const lower = (await A.selection()).state.intervals.at(-1).lower;
+  assert.equal(lower.unitId, P2); assert.notEqual(lower.record, null);
+  // Capture mode Manual; then the record where Automatic capture began changes
+  // in place, while the worker's progress after it still matches.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  const text = await fs.readFile(A.file), at = text.indexOf('Boundary prompt', lower.record.startByte);
+  assert(at > 0 && at < lower.record.endByte);
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('X'), 0, 1, at); } finally { await handle.close(); }
+  await A.hook('UserPromptSubmit', C1);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call, f.capability);
+  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId });
+  // The turns after it are read again rather than skipped as covered.
+  assert((await A.selection()).state.explicitScopes.at(-1).unitIds.includes(P3));
+});
+
 test('turns before Automatic capture began, which it never covered, stay capturable', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
   const [P1, G, K, B, D, C1, C2] = Array.from({ length: 7 }, () => randomUUID());
