@@ -5,7 +5,7 @@ import path from 'node:path';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { collectionIngress, snapshotSourceMetadata, registrationPath, READER_SUSPENSION_VERSION } from './collection-ingress.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
-import { readerBlockOf } from './collection-worker.mjs';
+import { readerBlockOf, readReaderBlock } from './collection-worker.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock, openWorkflowIntake } from './intake-io.mjs';
 import { readSelection, readCaptureHead, controlSelection, publishCapture, inspectPendingPublication, recoverPendingPublication } from './intake-store.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint, CODEX_READER_VERSION } from './codex-reader.mjs';
@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { withWorkflowBudget, consumeWorkflowBytes, workflowTimeout } from './workflow-budget.mjs';
 import { collectionHookOutput } from './collection-hooks.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
-import { createCapture, serializeCapture } from './capture-contract.mjs';
+import { createCapture, serializeCapture, captureRelativePath } from './capture-contract.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -1181,6 +1181,30 @@ test('a temporary head read failure is retried inside the frozen Claude pause wi
   assert.match(JSON.stringify(head.capture.evidence), /Additional human evidence/);
 });
 
+test('a turn whose capture head no longer matches its saved capture stops Automatic capture of the chat', async t => {
+  const f = await fixture(t), identity = { client: 'claude', sessionId: S }; let previous = null;
+  const message = (type, text, promptId) => {
+    const value = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version: '2.1.280',
+      isSidechain: false, cwd: f.project, message: { role: type, content: text }, ...(promptId ? { promptId } : {}) };
+    previous = value.uuid; return JSON.stringify(value) + '\n';
+  };
+  await fs.writeFile(f.source, message('system', '')); await collectionIngress('claude', { ...f.payload, prompt_id: A }, f.options);
+  await fs.appendFile(f.source, message('user', 'Boundary', A) + message('user', 'Initial human evidence', B));
+  assert.equal((await f.run()).saved, 1);
+  // The saved capture the head names is changed on disk.
+  const { head } = await readCaptureHead(f.store, { ...identity, unitId: B }, { metadataOnly: true });
+  const raw = path.join(f.collection.rawDir, captureRelativePath(head.identity, head.evidenceHash));
+  const headFile = path.join(f.collection.intakeStateDir, 'heads/claude', S, `${B}.json`);
+  await fs.writeFile(raw, canonicalJSON({ ...JSON.parse(await fs.readFile(raw, 'utf8')), capturedAt: '2026-05-01T00:00:00.000Z' }) + '\n');
+  const before = [await fs.readFile(headFile), await fs.readFile(raw)];
+  // The turn goes on, so the next pass reads its saved capture to extend it.
+  await fs.appendFile(f.source, message('user', 'Additional human evidence', B));
+  assert((await f.run()).pending.includes('CAPTURE_HEAD_CONFLICT'));
+  assert.equal(await readReaderBlock(f.store, identity), 'CAPTURE_HEAD_CONFLICT');
+  // Nothing reads past or rewrites the conflict.
+  assert.deepEqual([await fs.readFile(headFile), await fs.readFile(raw)], before);
+});
+
 test('workers that encounter a live lock or offline maintenance preserve the existing notice', async t => {
   const f = await fixture(t), { collectionStatusPath, publishIngressMetadata } = await import('./collection-ingress.mjs');
   await collectionIngress('codex', f.payload, f.options);
@@ -1218,7 +1242,7 @@ test('a scope result is a reader block when any turn is held on one, not only th
     assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', code] }), code);
   }
   // So is saved capture state that is malformed.
-  for (const code of ['INVALID_CAPTURE_HEAD', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+  for (const code of ['INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
     'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']) assert.equal(readerBlockOf({ pending: code }), code);
   // A turn captured by a newer reader version is held on every pass.
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_READER'] }), 'UNSUPPORTED_CLAUDE_READER');

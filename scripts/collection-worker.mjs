@@ -191,8 +191,9 @@ export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUP
   // with the current transcript, is held on every pass.
   'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
   'SOURCE_IDENTITY_MISMATCH',
-  // Saved capture state that is malformed fails every visit that reads it.
-  'INVALID_CAPTURE_HEAD', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+  // Saved capture state that is malformed, or a head whose saved capture is
+  // missing or changed, fails every visit that reads it.
+  'INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
   'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']);
 
 // The reader block a visit of a chat last ended on, kept per chat: a later
