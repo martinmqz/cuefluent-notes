@@ -612,6 +612,27 @@ test('turns before Automatic capture began, which it never covered, stay captura
   assert.deepEqual((await A.head(D)).head, automatic);
 });
 
+test('a scan position after a record too large to anchor whole is stored', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [X, Y, C1] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // A turn already left out whose last record is over 64 KiB, then a turn
+  // larger than a window.
+  await A.append([A.prompt('An earlier command.', X), A.reply('x'.repeat(100 * 1024)),
+    A.prompt('Paste the whole log.', Y), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024)))]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  await excludeChatTurn(f.capability, { selection: bound.selection, source: bound.source, unitId: X });
+  // One read: only the excluded turn comes before the long one, so the next
+  // read starts at the long turn, right after the large record.
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { scanWindows: 1 }), { turns: 0, more: true, leftOut: 0 });
+  const text = await fs.readFile(A.file, 'utf8');
+  const turnStart = Buffer.byteLength(text.slice(0, text.lastIndexOf('\n', text.indexOf(`"promptId":"${Y}"`)) + 1));
+  const saved = JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir, 'chat-capture', 'claude', `${A.sessionId}.json`), 'utf8'));
+  assert.equal(saved.offset, turnStart); assert.equal(saved.anchor.endByte, turnStart);
+  assert(saved.anchor.endByte - saved.anchor.startByte <= 4096);
+});
+
 test('a scan position is not stored when the transcript changed after the read that reached it', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1] = Array.from({ length: 3 }, () => randomUUID());
   await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
