@@ -278,6 +278,9 @@ export async function runSelectedCapture(capability, request, { observeRead = ()
       if (!request.unitIds && current.state.currentGrantHash !== await workflowCollectionGrant(capability, selection)) fail('COLLECTION_GRANT_REQUIRES_REVIEW');
       const scope = (request.unitIds ? current.state.explicitScopes : currentIntervals(current.state)).find(item => item.id === request.scopeId);
       if (!scope || (request.unitIds && canonicalJSON(scope.unitIds) !== canonicalJSON(request.unitIds))) fail('CAPTURE_NOT_SELECTED');
+      // A window runs only on the bytes it was chosen from: as each run
+      // starts, every byte it covers still hashes as when it was selected.
+      if (scope.contentHash !== undefined && await stretchHash(current.state.source, scope.start.startByte, scopeEnd(scope).endByte) !== scope.contentHash) fail('SOURCE_CHANGED');
       await recoverPendingPublication(tx, { authorize });
       const result = await processScope(tx, store, current, request.scopeId, authorize, observeRead);
       return { ...result, ...(await readSelection(store, identityOf(selection))) };

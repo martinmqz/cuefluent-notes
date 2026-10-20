@@ -278,6 +278,23 @@ test('an explicit capture refuses a window whose bytes changed after the reader 
   assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
 });
 
+test('a selected window refuses to run once a byte it covers changed, even with its records and offsets kept', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B] };
+  const chosen = await selectExplicitCapture(f.capability, request);
+  const args = { selection: f.selection, scopeId: request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A, B] };
+  // Inside the window, between its first and last records, one byte changes in place.
+  const at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  assert(at > Buffer.byteLength(lines[0] + lines[1]) && at < Buffer.byteLength(text) - Buffer.byteLength(lines.at(-1)));
+  const handle = openSync(f.sourcePath, 'r+');
+  try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+  await assert.rejects(runSelectedCapture(f.capability, args), { code: 'SOURCE_CHANGED' });
+  for (const unitId of [A, B]) assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head, null);
+  // With the bytes it was chosen from, the window runs.
+  await fs.writeFile(f.sourcePath, text);
+  assert.equal((await runSelectedCapture(f.capability, args)).saved, 2);
+});
+
 test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };

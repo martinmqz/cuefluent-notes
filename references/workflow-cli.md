@@ -65,7 +65,7 @@ request UUID; it does not substitute for native source identity.
 | `capture-control` | `{selection, sourcePath, expectedSourceIdentity, expectedSelectionHash, operationId, operation}` with start/resume/pause/exclude |
 | `capture-preview` | `{selection, sourcePath, expectedSourceIdentity, expectedSelectionHash, operationId, kind, unitIds, readRange}` |
 | `capture-select` | Same as preview; durably selects one bounded scope without enabling collection |
-| `capture-run` | `{selection, scopeId, expectedSelectionHash, unitIds?}`; runs exactly one inspected scope |
+| `capture-run` | `{selection, scopeId, expectedSelectionHash, unitIds?}`; runs exactly one inspected scope, refusing with `SOURCE_CHANGED` once a byte it was selected from changed |
 
 Use `capture-status` to obtain source file identity and the existing selection hash
 (null for absent selection). `capture-control` start/resume requires ongoing collection
