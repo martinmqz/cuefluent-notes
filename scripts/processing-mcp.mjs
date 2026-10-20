@@ -725,6 +725,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // A typed chat capture command. Whether Automatic capture covers this chat
   // is policy (its route and session list) plus the chat's own pause. Only the
   // person's typed command acts; a model's own call is refused before acting.
+  // Sources of capture-command deliveries refused because another delivery
+  // reserved their call.
+  const unowned = new WeakSet();
   async function requestCapture({ source, tool, signal }) {
     signal?.throwIfAborted();
     if (!source.nativeSkill || !source.unitId) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
@@ -735,7 +738,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     // tell the outcome, so it is refused as uncertain without acting.
     const call = { unitId: source.unitId, callId: source.callId, tool, argsHash: source.argsHash };
     const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal }));
-    if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
+    if (!reserved.acting) { if (reserved.reply) return reserved.reply; unowned.add(source); fail('PROCESSING_CONTROL_FAILED'); }
     const automatic = await automaticCapture(capability, source);
     const store = await withStorageProbes(() => openWorkflowIntake(capability));
     const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
@@ -760,7 +763,19 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     } else if (!paused) outcome = { capture: 'already-active' };
     else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' })); outcome = { capture: 'resumed' }; }
     signal?.throwIfAborted();
-    const response = { ...await currentView(source), ...outcome };
+    let response = { ...await currentView(source), ...outcome };
+    // The command leaves out its own turn, so a later capture skips it, before
+    // its reply is kept: a redelivery then replays whether that worked. An
+    // unarmed Automatic chat has no selection to add an exclusion to: its first
+    // prompt is the boundary the worker excludes. When the exclusion fails, or
+    // the selection has no room for it, the turn stays capturable and the reply
+    // says so in its diagnostics.
+    if (source.selectionHash !== null || !automatic) {
+      let excluded = false;
+      try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal }))).excluded; }
+      catch { /* reported below */ }
+      if (!excluded) response = { ...response, diagnostics: [...new Set([...response.diagnostics ?? [], 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+    }
     // The command has acted. Without its kept reply a redelivery would act
     // again, so no reply is given unless it is kept: the outcome is reported
     // as not certain, and status shows it.
@@ -779,6 +794,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // left out as it should be, so a refusal can say when it may not be.
   async function afterFailure({ source, invocation }) {
     if (!source?.nativeSkill || !source.unitId || !owners.has(source)) return true;
+    // A capture command refused because another delivery reserved its call
+    // changes nothing: that delivery owns the turn's bookkeeping, and an
+    // exclusion here would change the selection it is using.
+    if (unowned.has(source)) return false;
     try {
       const { capability } = selected(source);
       const automatic = await automaticCapture(capability, source);
@@ -816,9 +835,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         // separate call; redelivery cannot rewrite immutable proof or dispatch.
         return;
       }
-      // A typed command with no receipt to exclude it (in a chat Automatic
-      // capture does not cover, or a chat capture command, which records none)
-      // leaves out its own turn by an exclusion, so a later capture skips it.
+      // A chat capture command left out its own turn before its reply was
+      // kept, so its reply, first or replayed, already says whether it did.
+      if (CAPTURE_TOOLS.includes(invocation.tool)) { await release(); return; }
+      // Any other typed command with no receipt to exclude it (in a chat
+      // Automatic capture does not cover) leaves out its own turn by an
+      // exclusion, so a later capture skips it.
       // An unarmed Automatic chat has no selection to add one to: its first
       // prompt is the boundary the worker excludes. It cannot undo the command:
       // when it fails, or the selection has no room for it, the turn stays
@@ -833,7 +855,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         await release(processingControlStatusView(replacement, { collectionId: source.collectionId }));
         return replacement;
       };
-      if (CAPTURE_TOOLS.includes(invocation.tool) || !typed || source.captureActive === false) {
+      if (!typed || source.captureActive === false) {
         if (typed && (source.selectionHash !== null || !await automaticCapture(capability, source))) return leaveOut();
         await release();
         return;

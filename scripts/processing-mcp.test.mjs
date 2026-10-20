@@ -1186,6 +1186,48 @@ test('a redelivered capture command answers with its first reply and acts once',
     assert.equal(again.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(again));
     assert.equal(await head(later), null);
   });
+  // Fills the selection to its housekeeping limit, so a command's turn cannot
+  // be left out; the returned function makes room again.
+  const crowd = async ({ store, identity }) => {
+    const name = `sessions/codex/${identity.sessionId}.json`, current = await readSelection(store, identity);
+    const extra = new Set(Array.from({ length: 2048 }, () => randomUUID()));
+    await withIntakeLock(store, tx => replaceIntakeJSON(tx, name, { ...current.state, exclusions: [...current.state.exclusions, ...extra] }, current.hash));
+    return async () => {
+      const now = await readSelection(store, identity);
+      await withIntakeLock(store, tx => replaceIntakeJSON(tx, name, { ...now.state, exclusions: now.state.exclusions.filter(unit => !extra.has(unit)) }, now.hash));
+    };
+  };
+  await t.test('capture whose turn could not be left out', async t => {
+    const chat = await manualCaptureChat(t), { f, h, parent } = chat;
+    await chat.typed('capture_turns', 'nothing-new');
+    const room = await crowd(chat);
+    const rpc = await h.call('capture_turns', {}); rpc.name = 'capture_turns';
+    assert(body(rpc).diagnostics.includes('PROCESSING_EXCLUSION_UNVERIFIED'), JSON.stringify(rpc)); await parent.finish(rpc);
+    // With room again, the redelivery still answers as the first delivery did.
+    await room();
+    const again = await redeliver(h, parent, rpc, f.identity.sessionId);
+    assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
+  });
+  await t.test('a delivery refused for a reserved call leaves its turn alone', async t => {
+    const chat = await manualCaptureChat(t), { f, h, parent, store, identity } = chat;
+    await chat.typed('capture_turns', 'nothing-new');
+    const room = await crowd(chat), rename = fs.rename;
+    // The first delivery acts, but can neither leave out its turn nor keep its reply.
+    fs.rename = async (from, to) => {
+      if (String(to).split(path.sep).includes('replies') && JSON.parse(await fs.readFile(from, 'utf8')).response !== null) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      return rename(from, to);
+    };
+    let rpc; try { rpc = await h.call('capture_turns', {}); rpc.name = 'capture_turns'; } finally { fs.rename = rename; }
+    assert.equal(rpc.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(rpc));
+    // With room again, a duplicate finds the call reserved without a reply, as
+    // it would while the first delivery acts: it changes nothing.
+    await room();
+    const unitId = parent.controls.at(-1), before = await readSelection(store, identity);
+    const again = await redeliver(h, parent, rpc, f.identity.sessionId);
+    assert.equal(again.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(again));
+    const after = await readSelection(store, identity);
+    assert.equal(after.hash, before.hash); assert(!after.state.exclusions.includes(unitId));
+  });
   await t.test('resume chat in an Automatic chat', async t => {
     const { f, h, parent } = await nativeIngressFixture(t);
     await parent.work('Captured automatically.');
