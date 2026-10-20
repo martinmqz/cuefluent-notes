@@ -281,9 +281,10 @@ helpers, runtime dependencies and license notices. Packaged helpers require
 Node 22+, with no npm install or development checkout at runtime. See
 [package layout and installation](references/distribution.md#package-layout).
 
-Choose one variant per client. Manual packages register no hooks; hook-enabled
-packages provide automatic capture that still requires separate consent and
-client trust. Both variants use the same plugin identity.
+Choose one variant per client. Manual packages register no hooks, so they record
+no session start for typed commands such as `capture` to verify their chat;
+hook-enabled packages do, and provide automatic capture that still requires
+separate consent and client trust. Both variants use the same plugin identity.
 
 Repository maintainers can use the
 [build and publishing guide](https://github.com/martinmqz/cuefluent-notes/blob/main/.agents/publishing.md).

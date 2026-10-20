@@ -79,7 +79,9 @@ nearest exact commands to type. That text stays evidence, as described under
 
 `capture` captures the chat it is typed in: every finished turn since that
 chat's last capture, or since the chat started, oldest first, and never a turn
-Automatic capture already took. A chat continued from another (Claude `/bg`)
+Automatic capture already took. Like every typed command, it verifies its chat
+through the session start the hook package records; a manual package records
+none, so there it works only in a chat already selected by explicit capture. A chat continued from another (Claude `/bg`)
 starts after the history it re-homed. One command takes a bounded window (at
 most 10 turns or 8 MiB of transcript) and publishes what it can within its
 operation budget, ending within about 50 seconds; the reply says when more turns are
