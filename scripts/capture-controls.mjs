@@ -354,15 +354,20 @@ async function holds(source, offset, record = null) {
 }
 // The record an explicit capture ends with.
 const scopeEnd = scope => scope.end ?? scope.start;
+// The position is stored with the anchor the read that reached it took, and
+// only while the transcript still holds that anchor: bytes rewritten since that
+// read never vouch for it.
 async function advanceChatCursor(capability, chat, source, position, { now, signal }) {
-  if (position.eofByte <= 0) return;
+  if (position.eofByte <= 0 || !position.anchor) return;
   return bounded(now, async () => {
+    if (!await holds(source, position.eofByte, position.anchor)) return;
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
       const { snapshot, cursor } = await readChatCursor(store, chat, source);
       if (cursor && cursor.offset >= position.eofByte) return;
       await replaceIntakeJSON(tx, chatCursorPath(chat), { format: 'cuefluent-chat-capture-cursor', version: 1, sourceIdentity: source.fileIdentity,
-        offset: position.eofByte, startsMidRecord: position.startsMidRecord, anchor: await chatCursorAnchor(source, position.eofByte) }, snapshot.hash);
+        offset: position.eofByte, startsMidRecord: position.startsMidRecord,
+        anchor: { startByte: position.anchor.startByte, endByte: position.anchor.endByte, hash: position.anchor.hash } }, snapshot.hash);
     }, { signal });
   });
 }
@@ -438,7 +443,15 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   for (let scan = 0; scan < scanWindows; scan++) {
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
     if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };
+    // Where a later read may resume, with an anchor taken from this read: the
+    // bytes before its limit, hashed just before it reads them, or the record
+    // it read that ends there.
+    const limitAnchor = limit < eof ? await chatCursorAnchor(observed.source, limit) : null;
     const { anchors, records } = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
+    const at = (eofByte, startsMidRecord) => {
+      const record = records.find(item => item.endByte === eofByte && item.endByte - item.startByte <= CHAT_ANCHOR_BYTES);
+      return { eofByte, startsMidRecord, anchor: eofByte === limit ? limitAnchor : record ? { startByte: record.startByte, endByte: record.endByte, hash: record.hash } : null };
+    };
     // The command turn bounds the window. A window cut short by its size limit
     // ends before its last turn, which may continue past it.
     const command = anchors.find(item => item.unitId === commandUnitId);
@@ -461,16 +474,16 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       if (!cut) {
         if (anchors.length || limit >= eof) return { current, unitIds: [], more: false, leftOut };
         // Still inside a turn larger than a window: read on from here.
-        start = { eofByte: limit, startsMidRecord: true }; continue;
+        start = at(limit, true); continue;
       }
       // A turn that fills this whole read is larger than a window: leave it
       // out and read on. Otherwise only excluded turns came first: start the
       // next read at the cut turn, which may fit.
       if (!before.length && cut.record.startByte === start.eofByte) {
         if (!denied.has(cut.unitId)) leftOut.push(cut.unitId);
-        start = { eofByte: limit, startsMidRecord: true };
+        start = at(limit, true);
       }
-      else start = { eofByte: cut.record.startByte, startsMidRecord: false };
+      else start = at(cut.record.startByte, false);
       continue;
     }
     if (units.length > CHAT_WINDOW_UNITS) { stop = units[CHAT_WINDOW_UNITS].record.startByte; units.length = CHAT_WINDOW_UNITS; more = true; }
@@ -486,7 +499,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       }
     }
     leftOut.push(units[0].unitId);
-    start = { eofByte: units[1]?.record.startByte ?? stop, startsMidRecord: false };
+    start = at(units[1]?.record.startByte ?? stop, false);
   }
   // Out of reads inside left-out or excluded turns: the next capture resumes here.
   return { current, unitIds: [], more: true, leftOut, resumeAt: start };

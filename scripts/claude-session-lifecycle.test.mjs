@@ -1,7 +1,7 @@
 import test from './test-support/storage-test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
@@ -518,6 +518,35 @@ function slowReads(t) {
   t.mock.method(performance, 'now', () => clock() + state.skew);
   return { clock, state, observeRead: () => { state.skew = state.jump; } };
 }
+
+test('a scan position is not stored when the transcript changed after the read that reached it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
+    A.prompt('After the long reply.', P2), A.reply('Noted.')]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  // The second read starts at the long turn and stops 8 MiB into it. After
+  // the reads, while the long turn is left out, one byte just before where the
+  // second read stopped changes in place.
+  const text = await fs.readFile(A.file, 'utf8');
+  const turnStart = Buffer.byteLength(text.slice(0, text.lastIndexOf('\n', text.indexOf(`"promptId":"${P1}"`)) + 1));
+  const rename = fs.rename, selectionDir = path.join('sessions', 'claude');
+  let rewrites = 0;
+  t.mock.method(fs, 'rename', async (from, to, ...rest) => {
+    const result = await rename.call(fs, from, to, ...rest);
+    if (String(to).includes(selectionDir) && rewrites++ === 0) {
+      const handle = openSync(A.file, 'r+');
+      try { writeSync(handle, Buffer.from('x'), 0, 1, turnStart + 8 * 1024 * 1024 - 10); } finally { closeSync(handle); }
+    }
+    return result;
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { scanWindows: 2 }), { turns: 0, more: true, leftOut: 1 });
+  assert.equal(rewrites, 1);
+  // Its position would vouch for bytes that read never saw: it is not stored.
+  await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'chat-capture', 'claude', `${A.sessionId}.json`)), { code: 'ENOENT' });
+});
 
 test('a capture whose read ran long still selects its window, so the next capture runs it first', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
