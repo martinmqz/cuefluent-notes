@@ -1140,8 +1140,8 @@ test('typed capture commands in a safety-stopped Manual chat also say its captur
 
 test('a redelivered capture command answers with its first reply and acts once', async t => {
   // Sends the same native call again: its call ID and turn, with no new turn.
-  const redeliver = async (h, parent, rpc, sessionId) => {
-    const beforeCall = h.beforeCall, unitId = parent.controls.at(-1);
+  const redeliver = async (h, parent, rpc, sessionId, unitId = parent.controls.at(-1)) => {
+    const beforeCall = h.beforeCall;
     h.beforeCall = async () => { h.nativeIdentity = { client: 'codex', sessionId, unitId }; };
     h.callId = `call_${rpc.id}`;
     try { return await h.call(rpc.name, {}); } finally { h.beforeCall = beforeCall; h.callId = undefined; }
@@ -1154,6 +1154,17 @@ test('a redelivered capture command answers with its first reply and acts once',
     const again = await redeliver(h, parent, rpc, f.identity.sessionId);
     assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
     assert(await head(first)); assert(await head(second));
+  });
+  await t.test('capture in a Manual chat, after a later capture', async t => {
+    const { f, h, parent, head } = await manualCaptureChat(t);
+    await parent.work('Decision: ship on Friday.');
+    const rpc = await h.call('capture_turns', {}); rpc.name = 'capture_turns';
+    assert.equal(body(rpc).turns, 1); await parent.finish(rpc);
+    const unitId = parent.controls.at(-1), third = await parent.work('Owner: Dana.');
+    const later = await h.call('capture_turns', {}); assert.equal(body(later).turns, 1); await parent.finish(later);
+    const again = await redeliver(h, parent, rpc, f.identity.sessionId, unitId);
+    assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
+    assert(await head(third));
   });
   await t.test('resume chat in an Automatic chat', async t => {
     const { f, h, parent } = await nativeIngressFixture(t);

@@ -371,11 +371,12 @@ async function recordTailAnchor(source, record) {
     return { startByte: record.endByte - tail.length, endByte: record.endByte, hash: digest(tail) };
   } finally { await handle.close(); }
 }
-// The reply a typed capture command gave, kept per chat for its exact native
-// call: a redelivered call answers with it instead of acting again. Only the
-// latest command's reply is kept; one too large to keep is not.
+// The reply a typed capture command gave, kept once for its exact native call,
+// as dispatch receipts are: a redelivered call answers with it instead of
+// acting again, whatever commands came after it. A later delivery never
+// replaces it; a reply too large to keep is not kept.
 const CHAT_REPLY_BYTES = 16384;
-const chatReplyPath = chat => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}.reply.json`;
+const chatReplyPath = (chat, call) => `chat-capture/${chat.client}/${nativeId(chat.sessionId)}/replies/${digest(canonicalJSON(call)).slice(0, 24)}.json`;
 const replyCall = call => { keys(call, ['unitId', 'callId', 'tool', 'argsHash']); nativeId(call.unitId);
   for (const field of ['callId', 'tool']) if (typeof call[field] !== 'string' || !call[field] || call[field].length > 256) fail('INVALID_INTAKE_METADATA');
   hash(call.argsHash); return call; };
@@ -383,7 +384,7 @@ export async function readChatCommandReply(capability, selection, call, { now } 
   const chat = await selected(selection); replyCall(call);
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
-    const value = intakeJSON(await intakeSnapshot(store, 'state', chatReplyPath(chat), { maxBytes: CHAT_REPLY_BYTES }));
+    const value = intakeJSON(await intakeSnapshot(store, 'state', chatReplyPath(chat, call), { maxBytes: CHAT_REPLY_BYTES }));
     if (value === null) return null;
     keys(value, ['format', 'version', 'call', 'response']); replyCall(value.call);
     if (value.format !== 'cuefluent-chat-command-reply' || value.version !== 1 || typeof value.response !== 'object' ||
@@ -397,8 +398,9 @@ export async function recordChatCommandReply(capability, selection, call, respon
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
-      const snapshot = await intakeSnapshot(store, 'state', chatReplyPath(chat), { maxBytes: CHAT_REPLY_BYTES });
-      await replaceIntakeJSON(tx, chatReplyPath(chat), value, snapshot.hash);
+      const name = chatReplyPath(chat, call);
+      if ((await intakeSnapshot(store, 'state', name, { maxBytes: CHAT_REPLY_BYTES })).bytes !== null) return;
+      await replaceIntakeJSON(tx, name, value, null);
     }, { signal });
   });
 }
