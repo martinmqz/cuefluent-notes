@@ -10,7 +10,7 @@ import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
 import { readCaptureHead, readReaderProgress, readSelection } from './intake-store.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
-import { captureChatTurns, controlChatCapture, typedCaptureDeadline } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, typedCaptureDeadline } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
 const row = (type, payload) => JSON.stringify({ timestamp: '2026-09-24T00:00:00.000Z', type, payload }) + '\n';
@@ -395,6 +395,25 @@ test('a turn that starts exactly where a window-sized read ends is captured', as
   assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: true, leftOut: 0 });
   assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 1, more: false, leftOut: 1 });
   assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: T })).head);
+});
+
+test('a turn left out without room to record it does not stop the window around it', async t => {
+  const f = await fixture(t), BIG = randomUUID(), D = randomUUID(), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  // A turn too large to anchor between turn B and turn D, in a chat whose
+  // selection has no housekeeping room left to record it as left out.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: BIG }) + row('event_msg', { type: 'user_message', message: 'Write the report.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: BIG, last_agent_message: 'r'.repeat(70 * 1024) }) + turn(D, 'Owner: Dana.') +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, chat = { ...f.selection, unitId: null };
+  await excludeChatTurn(f.capability, { selection: chat, source, unitId: randomUUID() });
+  const current = await readSelection(f.store, identity);
+  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, `sessions/codex/${S}.json`,
+    { ...current.state, exclusions: [...current.state.exclusions, ...Array.from({ length: 2047 }, () => randomUUID())] }, current.hash));
+  const command = { selection: chat, source, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 3, more: false, leftOut: 1 });
+  for (const unitId of [A, B, D]) assert((await readCaptureHead(f.store, { ...identity, unitId })).head, unitId);
+  assert.equal((await readCaptureHead(f.store, { ...identity, unitId: BIG })).head, null);
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {

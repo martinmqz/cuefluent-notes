@@ -175,7 +175,10 @@ export async function restrictCapture({ configPath, expectedConfigHash, collecti
 
 async function explicitRequest(request) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], ['bounds']);
-  if (request.bounds !== undefined) { keys(request.bounds, ['start', 'end', 'content']); hash(request.bounds.start); hash(request.bounds.end); hash(request.bounds.content); }
+  if (request.bounds !== undefined) {
+    keys(request.bounds, ['start', 'end', 'content'], ['leftOut']); hash(request.bounds.start); hash(request.bounds.end); hash(request.bounds.content);
+    if (request.bounds.leftOut !== undefined) { list(request.bounds.leftOut, 2048, { empty: false }).forEach(nativeId); unique(request.bounds.leftOut); }
+  }
   const selection = await selected(request.selection);
   nativeId(request.operationId); oldHash(request.expectedSelectionHash); choice(request.kind, ['current', 'historical']);
   list(request.unitIds, 100, { empty: false }).forEach(nativeId); unique(request.unitIds);
@@ -243,10 +246,12 @@ export async function selectExplicitCapture(capability, request, { observeRead =
       if (request.bounds && (scope.start.hash !== request.bounds.start || scope.end.hash !== request.bounds.end ||
           scope.contentHash !== request.bounds.content)) fail('SOURCE_ANCHOR_CONFLICT');
       // Every other turn in a chat window's bytes was left out or captured
-      // when it was chosen; one that is neither came from other bytes.
+      // when it was chosen, including a turn the window left out when the
+      // selection had no room to record it; one that is neither came from
+      // other bytes.
       if (request.bounds) {
-        const withheld = withheldTurns(current.state), taken = await capturedUnits(store, selection);
-        if (turns.some(item => !request.unitIds.includes(item.unitId) && !withheld(item) && !taken.has(item.unitId))) fail('SOURCE_ANCHOR_CONFLICT');
+        const withheld = withheldTurns(current.state), taken = await capturedUnits(store, selection), passed = new Set(request.bounds.leftOut ?? []);
+        if (turns.some(item => !request.unitIds.includes(item.unitId) && !withheld(item) && !taken.has(item.unitId) && !passed.has(item.unitId))) fail('SOURCE_ANCHOR_CONFLICT');
       }
       const authorize = async () => { await assertWorkflowStorage(capability, selection, 'explicitCollect'); return true; };
       return controlSelection(tx, { source, expectedHash: current.hash, authorize, callerRequestHash: digest(canonicalJSON(request)),
@@ -697,7 +702,8 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       if (closing) {
         return { current, unitIds: units.slice(0, count).map(item => item.unitId),
           readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte },
-          bounds: { start: units[0].record.hash, end: closing.hash, content: await stretchHash(observed.source, units[0].record.startByte, closing.endByte) },
+          bounds: { start: units[0].record.hash, end: closing.hash, content: await stretchHash(observed.source, units[0].record.startByte, closing.endByte),
+            ...(leftOut.length ? { leftOut: [...leftOut] } : {}) },
           more: more || count < units.length, leftOut };
       }
     }
