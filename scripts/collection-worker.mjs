@@ -218,6 +218,8 @@ export function readerBlockOf(result) {
     (READER_BLOCK_CODES.includes(result.pending) ? result.pending : null);
 }
 /** The reader block this chat's last visit ended on, if any. */
+/** `resume chat` starts a new stretch, which no block of an earlier one stops. */
+export const clearReaderBlock = (store, identity) => recordReaderBlock(store, identity, null);
 export async function readReaderBlock(store, identity) {
   const value = intakeJSON(await intakeSnapshot(store, 'state', readerBlockPath(identity), { maxBytes: 4096 }));
   return value !== null && READER_BLOCK_CODES.includes(value.code) ? value.code : null;
@@ -404,11 +406,15 @@ async function runRegistration(capability, registration, registrationHash, route
     // Keep the excluded initial boundary visible on later visits as well.
     boundaryExcluded ??= currentIntervals(selection.state)[0]?.lower.unitId ?? null;
     let saved = 0, pending = null, readerBlock = null, incomplete = false, drained = true, suspended = true;
+    // Only the latest interval, the stretch Automatic capture extends, can stop
+    // it: a block in an earlier pause's stretch or in a typed or CLI capture
+    // leaves later turns to Automatic capture.
+    const latest = currentIntervals(selection.state).at(-1)?.id;
     for (const scope of [...currentIntervals(selection.state), ...selection.state.explicitScopes]) {
       await authorize();
       const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link);
       saved += result.saved; pending ??= result.pending; incomplete ||= Boolean(result.incomplete);
-      readerBlock ??= readerBlockOf(result);
+      if (scope.id === latest) readerBlock ??= readerBlockOf(result);
       drained &&= result.drained === true; suspended &&= result.suspended === true || result.drained === true;
       selection = await readSelection(store, identity);
     }
@@ -550,7 +556,10 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           output.saved += result.saved;
           if (result.pending) {
             output.pending.push(result.pending);
-            if (!passStopCodes.has(result.pending)) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: result.pending });
+            // A reader block names this chat's stop only where it stops
+            // Automatic capture, as the chat's kept marker does.
+            const code = result.readerBlock !== undefined && READER_BLOCK_CODES.includes(result.pending) ? result.readerBlock : result.pending;
+            if (code && !passStopCodes.has(code)) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code });
           }
           if (result.boundaryExcluded) output.boundaryExcluded.push({ client: registration.client, sessionId: registration.sessionId, unitId: result.boundaryExcluded });
           if (result.linked) {

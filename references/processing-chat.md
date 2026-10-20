@@ -56,7 +56,9 @@ scope, counts and each draft's exact revision. The review folder's `summary.txt`
 also records the revision. A status reply also says when automatic collection has
 stopped for this chat, as its last collection visit or the latest pass reported
 it, for example at a Claude Desktop Remote Control record (see
-[capture prevention](#capture-prevention-and-limits)).
+[capture prevention](#capture-prevention-and-limits)). Only a stop in the stretch
+Automatic capture is extending counts: one in the stretch before a pause, or in a
+typed capture, does not, and `resume chat` ends the earlier stretch's stop at once.
 
 A refused or failed control answers with a plain sentence the assistant returns
 as its reply. A refusal before the requested action started says that nothing was

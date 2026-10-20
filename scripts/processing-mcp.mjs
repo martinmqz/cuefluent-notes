@@ -16,7 +16,7 @@ import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, holdsTypedCapture } from './capture-controls.mjs';
-import { readReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
+import { readReaderBlock, clearReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -775,7 +775,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       if (paused) outcome = { capture: 'already-paused' };
       else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'pause' })); outcome = { capture: 'paused' }; }
     } else if (!paused) outcome = { capture: 'already-active' };
-    else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' })); outcome = { capture: 'resumed' }; }
+    else {
+      await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' })); outcome = { capture: 'resumed' };
+      // The stop kept for the earlier stretch no longer applies; the next
+      // visit records any stop of the new one. Display only.
+      try { await withStorageProbes(async () => clearReaderBlock(await openWorkflowIntake(capability), { client, sessionId: source.selection.sessionId })); } catch { /* the next visit */ }
+    }
     signal?.throwIfAborted();
     let response = { ...await currentView(source), ...outcome };
     // The command leaves out its own turn, so a later capture skips it, before

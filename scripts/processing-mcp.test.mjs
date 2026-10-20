@@ -1500,6 +1500,58 @@ test('typed capture never takes a turn from an earlier pause that resume chat cl
   await typed('capture_turns', 'nothing-new'); assert.equal(await head(opted), null);
 });
 
+test('a stop met by a typed capture while paused does not outlive resume chat', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const head = async unitId => (await readCaptureHead(parent.store, { ...identity, unitId })).head;
+  const typed = async (tool, expected) => {
+    const rpc = await h.call(tool, {}), reply = body(rpc);
+    assert.equal(reply.capture, expected, reply.statusText); await parent.finish(rpc); await run(); return reply;
+  };
+  await parent.work('Captured automatically.'); await run();
+  await typed('pause_capture', 'paused');
+  // A paused turn with evidence after its terminal record: the typed window holds on it.
+  const held = await parent.work('Decision: held.');
+  await parent.resume({});
+  const text = await fs.readFile(parent.source.path, 'utf8'), last = text.lastIndexOf('\n', text.length - 2) + 1;
+  const { timestamp, ordinal } = JSON.parse(text.slice(last));
+  await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
+  await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'event_msg', payload: { type: 'item_completed',
+    thread_id: identity.sessionId, turn_id: held, item: { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: 'Late evidence.' }] } } }) + '\n');
+  await typed('capture_turns', 'blocked');
+  await typed('resume_capture', 'resumed');
+  const resumed = await parent.work('Captured again.'); await run();
+  assert(await head(resumed));
+  // Automatic capture goes on, and status and capture say so.
+  assert.equal(await readReaderBlock(parent.store, identity), null);
+  await typed('capture_turns', 'automatic');
+  const status = body(await h.call('processing_status', {}));
+  assert.doesNotMatch(status.statusText, /stopped/, status.statusText);
+});
+
+test('resume chat ends a stop of the stretch before the pause at once', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const call = async (tool, expected) => { const rpc = await h.call(tool, {}); assert.equal(body(rpc).capture, expected, body(rpc).statusText); await parent.finish(rpc); };
+  // A turn with evidence after its terminal record stops Automatic capture.
+  const held = await parent.work('Decision: held.');
+  await parent.resume({});
+  const text = await fs.readFile(parent.source.path, 'utf8'), last = text.lastIndexOf('\n', text.length - 2) + 1;
+  const { timestamp, ordinal } = JSON.parse(text.slice(last));
+  await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
+  await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'event_msg', payload: { type: 'item_completed',
+    thread_id: identity.sessionId, turn_id: held, item: { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: 'Late evidence.' }] } } }) + '\n');
+  await run();
+  assert.equal(await readReaderBlock(parent.store, identity), 'EVIDENCE_AFTER_CODEX_TERMINAL');
+  await call('pause_capture', 'paused'); await run();
+  await call('resume_capture', 'resumed');
+  assert.equal(await readReaderBlock(parent.store, identity), null);
+  const later = await parent.work('Captured after the resume.'); await run();
+  assert((await readCaptureHead(parent.store, { ...identity, unitId: later })).head);
+  assert.equal(await readReaderBlock(parent.store, identity), null);
+  await call('capture_turns', 'automatic');
+});
+
 test('typed capture takes a turn rewritten into the paused stretch after the pause record', async t => {
   // With no progress, as when a read stopped short of the pause's end, and
   // with progress past it whose own anchor still holds.
