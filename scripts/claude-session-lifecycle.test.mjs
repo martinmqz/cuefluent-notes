@@ -28,6 +28,8 @@ const CONTROLS = {
   'status --verbose': { tool: 'processing_status', arguments: { verbose: true } },
   'save k2mn9p': { tool: 'processing_review', arguments: { decision: 'save', draft: 'k2mn9p' } },
   capture: { tool: 'capture_turns', arguments: {} },
+  'pause chat': { tool: 'pause_capture', arguments: {} },
+  'resume chat': { tool: 'resume_capture', arguments: {} },
 };
 
 async function claudeFixture(t, { collect = true, processing = 'prompted' } = {}) {
@@ -233,6 +235,26 @@ test('stale, replaced or out-of-scope registrations and later or older prompts n
     const bound = await A.resolve(call);
     assert.equal(bound.nativeSkill, false); assert.equal(bound.typedControl, undefined); assert.equal(bound.unitId, null);
   });
+});
+
+test('pause chat as the first prompt of a new Automatic chat leaves later typed commands able to bind', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+  const typed = async (control, promptId) => {
+    const call = A.call(control); await A.append([...A.control(control, promptId)]); await A.hook('UserPromptSubmit', promptId);
+    await A.append([call]); return A.resolve(call);
+  };
+  // The pause is applied before the worker has armed the chat.
+  const pause = await typed('pause chat', P1);
+  assert.equal(pause.unitId, P1); assert.equal(pause.typedControl, 'pause chat');
+  await controlChatCapture(f.capability, { selection: pause.selection, source: pause.source, unitId: P1, operation: 'pause' });
+  await f.run(); await A.append([A.reply('Paused.')]);
+  const resume = await typed('resume chat', P2);
+  assert.equal(resume.unitId, P2); assert.equal(resume.typedControl, 'resume chat');
+  await controlChatCapture(f.capability, { selection: resume.selection, source: resume.source, unitId: P2, operation: 'resume' });
+  await A.append([A.reply('Resumed.'), A.prompt('Decision: ship on Friday.', P3), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P3); await f.run();
+  assert((await A.head(P3)).head);
+  for (const unitId of [P1, P2]) assert.equal((await A.head(unitId)).head, null);
 });
 
 test('a processing-only route also verifies a first-prompt control before its hook boundary', async t => {
