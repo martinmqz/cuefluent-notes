@@ -274,10 +274,13 @@ all helpers sharing a collection on the same release, including both clients
 when used; a worker can process registrations from either client.
 
 The release after v0.15.1 publishes new Codex captures with reader version 5,
-which knows the `capture`, `pause chat` and `resume chat` actions. Helpers
-through v0.15.1 do not know version 5 and fail when they re-read a turn captured
-with it. Upgrade every helper sharing the collection together; downgrading after
-version 5 captures exist is unsupported.
+which knows the `capture`, `pause chat` and `resume chat` actions. It also
+records a content hash with every explicit capture, typed or through the CLI, in
+either client. Helpers through v0.15.1 know neither: they fail when they re-read
+a turn captured with version 5, and fail on every read of a chat's capture state
+once that chat has such a capture, including status and collection visits.
+Upgrade every helper sharing the collection together; downgrading after either
+exists is unsupported.
 Version 1-4 captures keep their own rules and replay unchanged.
 
 v0.15.1 adds retained-draft transfer state and the shared writer's
