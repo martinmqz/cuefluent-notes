@@ -318,17 +318,21 @@ async function chatCursorAnchor(source, offset) {
     return { startByte, endByte: offset, hash: digest(bytes) };
   } finally { await handle.close(); }
 }
-// Whether the transcript still holds a stored record: the same bytes, ending at
-// the same offset. One truncated or rewritten in place under the same file
-// identity may not, and progress that ends with that record no longer counts.
-async function holdsRecord(source, record) {
-  if (record.endByte - record.startByte > CHAT_ANCHOR_BYTES) return false;
+// Whether the transcript still reaches `offset` and holds a stored record (if
+// any): the same bytes at the same place. One truncated or rewritten in place
+// under the same file identity may not, and progress stored there no longer
+// counts.
+async function holds(source, offset, record = null) {
+  if (record && record.endByte - record.startByte > CHAT_ANCHOR_BYTES) return false;
+  const at = (end, anchor) => verifySourceCursor(source, { sourceIdentity: source.fileIdentity, offset: end, anchor });
   try {
-    await verifySourceCursor(source, { sourceIdentity: source.fileIdentity, offset: record.endByte,
-      anchor: { startByte: record.startByte, endByte: record.endByte, hash: record.hash } });
+    if (record) await at(record.endByte, { startByte: record.startByte, endByte: record.endByte, hash: record.hash });
+    if (!record || offset !== record.endByte) await at(offset, null);
     return true;
   } catch (error) { if (SOURCE_CONFLICTS.includes(error.code)) return false; throw error; }
 }
+// The record an explicit capture ends with.
+const scopeEnd = scope => scope.end ?? scope.start;
 async function advanceChatCursor(capability, chat, source, position, { now, signal }) {
   if (position.eofByte <= 0) return;
   return bounded(now, async () => {
@@ -343,32 +347,39 @@ async function advanceChatCursor(capability, chat, source, position, { now, sign
 }
 
 // Where the next window may start: past the chat's own start (`floor`), its
-// last typed or explicit capture whose end the transcript still holds, how far
-// captures read past turns they left out, and whatever Automatic capture
-// already covered (the worker's progress, or its pause), so no turn is
-// captured twice.
+// last typed or explicit capture, how far captures read past turns they left
+// out, and whatever Automatic capture already covered (the worker's progress,
+// or its pause), so no turn is captured twice. Each counts only while the
+// transcript still holds it.
 async function chatStart(store, chat, state, floor, source) {
   let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
   const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
   const { cursor } = await readChatCursor(store, chat, source);
   if (cursor) later(cursor.offset, cursor.startsMidRecord);
   // Latest first: the first capture whose end still holds is the one that counts.
-  const ends = (state?.explicitScopes ?? []).map(scope => scope.end ?? scope.start).sort((a, b) => b.endByte - a.endByte);
+  const ends = (state?.explicitScopes ?? []).map(scopeEnd).sort((a, b) => b.endByte - a.endByte);
   for (const end of ends) {
     if (end.endByte <= start.eofByte) break;
-    if (await holdsRecord(source, end)) { later(end.endByte); break; }
+    if (await holds(source, end.endByte, end)) { later(end.endByte); break; }
   }
   for (const interval of state ? currentIntervals(state) : []) {
-    if (interval.upper) { later(interval.upper.eofByte, interval.upper.startsMidRecord); continue; }
-    // The worker's progress counts only while its anchor still matches the
-    // transcript; otherwise capture starts where Automatic capture began.
+    // The worker's progress counts while its anchor still matches. A pause
+    // stores only where the transcript ended, and its pause turn's record once
+    // the reader anchors it. It counts while the transcript still reaches that
+    // end and holds the record and the progress before it, or, before the
+    // record is anchored, once the verified progress has reached it. Otherwise
+    // capture starts at the verified progress, or where Automatic capture began.
     const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
     let verified = false;
     if (cursor) {
       try { await verifySourceCursor(source, cursor); verified = true; }
       catch (error) { if (!SOURCE_CONFLICTS.includes(error.code)) throw error; }
     }
-    if (verified) later(cursor.offset);
+    const { upper } = interval;
+    const paused = upper && (upper.record ? (!cursor || verified) && await holds(source, upper.eofByte, upper.record)
+      : verified && cursor.offset >= upper.eofByte);
+    if (paused) later(upper.eofByte, upper.startsMidRecord);
+    else if (verified) later(cursor.offset);
     else later(interval.lower.eofByte, interval.lower.startsMidRecord);
   }
   return start;
@@ -504,14 +515,15 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
 async function scopeDrained(capability, chat, state, scope, now) {
   return bounded(now, async () => {
     const { cursor } = await readReaderProgress(await openWorkflowIntake(capability), identityOf(chat), scope.id, state.source.fileIdentity, { metadataOnly: true });
-    return cursor?.offset === scope.end.endByte;
+    return cursor?.offset === scopeEnd(scope).endByte;
   });
 }
 
 /** `capture`: this chat's finished turns since its last capture, or since it
- * started, oldest first, as one explicit scope per window. A window a previous
- * capture could not finish runs first, while the transcript still holds its
- * end; a new window is read only once it has.
+ * started, oldest first, as one explicit scope per window. The capture a new
+ * window would start after (the latest-ending one the transcript still holds,
+ * of either kind) runs first while unfinished; a new window is read only once
+ * it has.
  * The command turn is never part of a window. The command ends within 50 s
  * and stops on cancellation, keeping what it captured. */
 export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows, captureMs = CHAT_CAPTURE_MS } = {}) {
@@ -521,8 +533,11 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   let turns = 0;
   signal?.throwIfAborted();
   const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
-  const last = previous.state?.explicitScopes.filter(scope => scope.kind === 'historical').at(-1);
-  if (last && !await scopeDrained(capability, chat, previous.state, last, now) && await bounded(now, () => holdsRecord(source, last.end))) {
+  let last = null;
+  for (const scope of [...previous.state?.explicitScopes ?? []].sort((a, b) => scopeEnd(b).endByte - scopeEnd(a).endByte)) {
+    if (await bounded(now, () => holds(source, scopeEnd(scope).endByte, scopeEnd(scope)))) { last = scope; break; }
+  }
+  if (last && !await scopeDrained(capability, chat, previous.state, last, now)) {
     const rerun = await runChatScope(capability, chat, last, { ...options, fresh: false });
     turns += rerun.saved;
     if (!rerun.finished) return { turns, more: true, leftOut: 0 };

@@ -13,7 +13,7 @@ import { schedulerPath } from './collection-scheduler.mjs';
 import { readSelection, readCaptureHead, controlSelection, readReaderProgress } from './intake-store.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
-import { captureChatTurns, excludeChatTurn, selectExplicitCapture } from './capture-controls.mjs';
+import { captureChatTurns, excludeChatTurn, selectExplicitCapture, controlChatCapture } from './capture-controls.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { digest } from './workflow-values.mjs';
 
@@ -382,6 +382,64 @@ test('capture does not trust where an earlier capture ended once the transcript 
     assert.equal((await A.head(P1)).head, null);
     assert.match((await A.head(P2)).capture.evidence[0].text, /ship on Monday/);
   });
+});
+
+test('capture finishes the latest unfinished capture of either kind before reading further', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, C1, C2] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  const size = (await fs.stat(A.file)).size;
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+  const end = (await fs.stat(A.file)).size;
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // A capture of the current turn selected by another route, never run.
+  const first = await bind(C1);
+  await selectExplicitCapture(f.capability, { selection: { ...first.selection, unitId: P1 }, sourcePath: first.source.path,
+    expectedSourceIdentity: first.source.fileIdentity, expectedSelectionHash: (await A.selection()).hash,
+    operationId: randomUUID(), kind: 'current', unitIds: [P1], readRange: { fromByte: size, endByte: end } });
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 1, more: false, leftOut: 0 });
+  assert.match((await A.head(P1)).capture.evidence[0].text, /ship on Friday/);
+});
+
+test('capture does not trust a pause once the transcript was cut back and regrown', async t => {
+  const paused = async (t, { anchored }) => {
+    const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, X1, P4, C1] = Array.from({ length: 6 }, () => randomUUID());
+    await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+    await A.hook('UserPromptSubmit', P1); await f.run();
+    await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+    await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+    assert.equal((await f.run()).saved, 1);
+    const size = (await fs.stat(A.file)).size;
+    // The chat is paused at a typed command; the worker may read up to the
+    // pause and anchor its turn.
+    await A.hook('UserPromptSubmit', X1);
+    const pause = A.call('status'); await A.append([...A.control('status', X1), pause]);
+    const bound = await A.resolve(pause);
+    await controlChatCapture(f.capability, { selection: bound.selection, source: bound.source, unitId: X1, operation: 'pause' });
+    if (anchored) await f.run();
+    const upper = (await A.selection()).state.intervals.at(-1).upper;
+    assert.equal(upper.unitId, X1); assert.equal(upper.record !== null, anchored);
+    // Cut back in place to before the pause, then grown past it and past the
+    // binding window, which never reads from before a stale floor.
+    await fs.truncate(A.file, size);
+    await A.append([A.prompt('Replacement: ship on Monday.', P4),
+      ...Array.from({ length: 3 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))), A.reply('Noted.')]);
+    assert((await fs.stat(A.file)).size > upper.eofByte);
+    await A.hook('UserPromptSubmit', C1);
+    const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+    const command = await A.resolve(call);
+    await captureChatTurns(f.capability, { selection: command.selection, source: command.source, floor: command.captureFloor, commandUnitId: command.unitId });
+    assert.match((await A.head(P4)).capture.evidence[0].text, /ship on Monday/);
+    // The boundary turn Automatic capture left out stays out.
+    assert.equal((await A.head(P2)).head, null);
+  };
+  await t.test('before the worker anchored the pause', t => paused(t, { anchored: false }));
+  await t.test('after the worker anchored the pause', t => paused(t, { anchored: true }));
 });
 
 test('a capture short on time still records the turns it left out, so the next one passes them', async t => {
