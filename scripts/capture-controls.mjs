@@ -22,6 +22,9 @@ import { keys, nativeId, isNativeId, hash, integer, list, unique, choice, canoni
 const identityOf = ({ client, sessionId }) => ({ client, sessionId });
 const oldHash = value => { if (value !== null) hash(value); };
 const bounded = (now, run) => withWorkflowBudget({ now }, () => withStorageProbes(run));
+// A typed command's steps wait briefly for an intake lock another pass holds,
+// as its own bookkeeping does; a CLI step refuses at once as busy.
+const intakeLock = wait => wait ? withIntakeLockWaiting : withIntakeLock;
 const reader = client => client === 'codex' ? readCodexSelection : readClaudeSelection;
 // Public retries bind the original request, including its inspected hash. They
 // reuse the saved effect without deriving another EOF or rereading evidence.
@@ -93,7 +96,7 @@ async function selectionHeadroom(store, selection, state, scopeId) {
 
 /** Future start/resume freezes EOF. With no verified current native anchor the
  * first subsequent full native unit establishes (and is excluded by) the floor. */
-export async function controlCapture(capability, request, { now, resumeAt = null } = {}) {
+export async function controlCapture(capability, request, { now, resumeAt = null, waitForLock = false } = {}) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation']);
   const selection = await selected(request.selection), { operationId, operation, expectedSelectionHash } = request;
   nativeId(operationId); oldHash(expectedSelectionHash); choice(operation, ['start', 'resume', 'pause', 'exclude']);
@@ -102,7 +105,7 @@ export async function controlCapture(capability, request, { now, resumeAt = null
     const restrictive = ['pause', 'exclude'].includes(operation), authority = restrictive ? 'maintenance' : 'collect';
     await assertWorkflowStorage(capability, selection, authority);
     const store = await openWorkflowIntake(capability, selection, authority);
-    return withIntakeLock(store, async tx => {
+    return intakeLock(waitForLock)(store, async tx => {
       const current = await readSelection(store, identityOf(selection));
       await assertWorkflowStorage(capability, selection, authority);
       const grantHash = restrictive ? undefined : await workflowCollectionGrant(capability, selection);
@@ -224,11 +227,11 @@ export async function previewExplicitCapture(capability, request, { observeRead 
 
 /** Persist one bounded selection without enabling ongoing collection. Run it
  * separately so a worker budget failure leaves a reviewable, retryable scope. */
-export async function selectExplicitCapture(capability, request, { observeRead = () => {}, now } = {}) {
+export async function selectExplicitCapture(capability, request, { observeRead = () => {}, now, waitForLock = false } = {}) {
   const selection = await explicitRequest(request);
   return bounded(now, async () => {
     const store = await openExplicitCaptureIntake(capability, selection, { scopeId: request.operationId, unitIds: request.unitIds });
-    return withIntakeLock(store, async tx => {
+    return intakeLock(waitForLock)(store, async tx => {
       const current = await readSelection(store, identityOf(selection));
       await assertWorkflowStorage(capability, selection, 'explicitCollect');
       const replay = await replayControl(current, request, store); if (replay) return replay;
@@ -255,7 +258,7 @@ export async function selectExplicitCapture(capability, request, { observeRead =
 }
 
 /** A run names one inspected scope; explicit scopes never sweep future intervals. */
-export async function runSelectedCapture(capability, request, { observeRead = () => {}, now } = {}) {
+export async function runSelectedCapture(capability, request, { observeRead = () => {}, now, waitForLock = false } = {}) {
   keys(request, ['selection', 'scopeId', 'expectedSelectionHash'], ['unitIds']);
   const selection = await selected(request.selection); nativeId(request.scopeId); hash(request.expectedSelectionHash);
   if (request.unitIds !== undefined) { list(request.unitIds, 100, { empty: false }).forEach(nativeId); unique(request.unitIds); }
@@ -268,7 +271,7 @@ export async function runSelectedCapture(capability, request, { observeRead = ()
     await authorize();
     const store = request.unitIds ? await openExplicitCaptureIntake(capability, selection, { scopeId: request.scopeId, unitIds: request.unitIds })
       : await openWorkflowIntake(capability, selection, 'collect');
-    return withIntakeLock(store, async tx => {
+    return intakeLock(waitForLock)(store, async tx => {
       const current = await readSelection(store, identityOf(selection));
       if (!current.state || current.hash !== request.expectedSelectionHash) fail('STALE_SELECTION');
       if (current.state.source.projectRoot !== selection.cwd) fail('SOURCE_IDENTITY_MISMATCH');
@@ -720,7 +723,7 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
       const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
       // The run takes no signal: a cancellation during the read stops it here.
       signal?.throwIfAborted();
-      run = await runSelectedCapture(capability, { selection: chat, scopeId: scope.id, expectedSelectionHash: current.hash, unitIds: scope.unitIds }, { observeRead, now });
+      run = await runSelectedCapture(capability, { selection: chat, scopeId: scope.id, expectedSelectionHash: current.hash, unitIds: scope.unitIds }, { observeRead, now, waitForLock: true });
     } catch (error) { failure = error; break; }
     saved += run.saved;
     // A turn held for want of its terminal record does not hold up the
@@ -824,7 +827,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
     unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds });
   const fresh = window.leftOut.length ? await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat))) : window.current;
   await selectExplicitCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
-    expectedSelectionHash: fresh.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds }, { observeRead, now });
+    expectedSelectionHash: fresh.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds }, { observeRead, now, waitForLock: true });
   const run = await runChatScope(capability, chat, { id: operationId, unitIds: window.unitIds }, { ...options, fresh: true });
   if (run.held) return { turns: turns + run.saved, more: false, leftOut, held: run.held };
   return { turns: turns + run.saved, more: window.more || !run.finished, leftOut };
@@ -839,7 +842,7 @@ export async function controlChatCapture(capability, { selection, source, unitId
   const resumeAt = operation === 'resume' ? { ...await bounded(now, () => commandStart(capability, chat, source, unitId)), unitId } : null;
   return controlCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: current.hash, operation,
-    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt });
+    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt, waitForLock: true });
 }
 // Where the command turn starts, read from the end of the transcript, where
 // the command was just typed, with the record that starts it as read there. A

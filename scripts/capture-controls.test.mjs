@@ -10,7 +10,7 @@ import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
 import { readCaptureHead, readReaderProgress, readSelection } from './intake-store.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
-import { captureChatTurns } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
 const row = (type, payload) => JSON.stringify({ timestamp: '2026-09-24T00:00:00.000Z', type, payload }) + '\n';
@@ -300,6 +300,29 @@ test('a Codex turn before one whose last record is too large to anchor is captur
   assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: false, leftOut: 1 });
   for (const unitId of [A, B]) assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head);
   assert.deepEqual((await readSelection(f.store, { client: 'codex', sessionId: S })).state.exclusions, [BIG]);
+});
+
+test('typed capture and its pause wait for an intake lock another pass holds briefly', async t => {
+  const f = await fixture(t), C = randomUUID(), P = randomUUID();
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity };
+  // Each lock is held by another pass at the first attempt to take it.
+  const mkdir = fs.mkdir; let attempts = 0;
+  t.mock.method(fs, 'mkdir', async (target, ...rest) => {
+    if (String(target).endsWith('.intake-lock') && attempts++ % 2 === 0) throw Object.assign(new Error('held'), { code: 'EEXIST' });
+    return mkdir.call(fs, target, ...rest);
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: { ...f.selection, unitId: null }, source,
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C }, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_complete', turn_id: C }) +
+    row('event_msg', { type: 'task_started', turn_id: P }) + row('event_msg', { type: 'user_message', message: 'pause chat' }));
+  const paused = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const result = await controlChatCapture(f.capability, { selection: f.selection, source: { path: f.sourcePath, fileIdentity: paused.source.fileIdentity },
+    unitId: P, operation: 'pause' }, { now: () => 0 });
+  assert.equal(result.state.paused, true);
+  // The window's selection and run and the pause each waited once.
+  assert(attempts >= 6 && attempts % 2 === 0, `${attempts} lock attempts`);
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {

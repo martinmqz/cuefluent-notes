@@ -267,7 +267,10 @@ tell does not leave out its turn either; its refusal reports
 `PROCESSING_CONTROL_FAILED` too, after acting. The kept reply says whether the
 command left out its own turn. A `pause chat` that paused Automatic capture is
 the exception: the chat's binding then starts after that call, so its
-redelivery is refused before acting and the pause stays. The returned `requestId` is the
+redelivery is refused before acting and the pause stays. Each step of these
+commands waits up to two seconds for the collection lock before refusing with
+`INTAKE_BLOCKED`; the `capture-control`, `capture-select` and `capture-run`
+helpers refuse at once. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
 
