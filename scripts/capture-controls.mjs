@@ -208,7 +208,7 @@ async function deriveExplicitScope(capability, request, selection, observeRead) 
   // only while the transcript still holds exactly these bytes.
   const after = await stretchHashes(observed.source, request.readRange.fromByte, request.readRange.endByte, anchors[0].record.startByte, end.endByte);
   if (after.outer !== read) fail('SOURCE_CHANGED');
-  const turns = inspected.nativeAnchors.filter(item => item.record.startByte >= anchors[0].record.startByte && item.record.startByte < end.endByte).map(item => item.unitId);
+  const turns = inspected.nativeAnchors.filter(item => item.record.startByte >= anchors[0].record.startByte && item.record.startByte < end.endByte);
   return { source: observed.source, turns, scope: { unitIds: request.unitIds, start: anchors[0].record, end, contentHash: after.inner } };
 }
 
@@ -245,8 +245,8 @@ export async function selectExplicitCapture(capability, request, { observeRead =
       // Every other turn in a chat window's bytes was left out or captured
       // when it was chosen; one that is neither came from other bytes.
       if (request.bounds) {
-        const denied = deniedUnits(current.state), taken = await capturedUnits(store, selection);
-        if (turns.some(unitId => !request.unitIds.includes(unitId) && !denied.has(unitId) && !taken.has(unitId))) fail('SOURCE_ANCHOR_CONFLICT');
+        const withheld = withheldTurns(current.state), taken = await capturedUnits(store, selection);
+        if (turns.some(item => !request.unitIds.includes(item.unitId) && !withheld(item) && !taken.has(item.unitId))) fail('SOURCE_ANCHOR_CONFLICT');
       }
       const authorize = async () => { await assertWorkflowStorage(capability, selection, 'explicitCollect'); return true; };
       return controlSelection(tx, { source, expectedHash: current.hash, authorize, callerRequestHash: digest(canonicalJSON(request)),
@@ -305,6 +305,15 @@ const HOUSEKEEPING_EXCLUSIONS = 2048, HOUSEKEEPING_BYTES = MAX_SELECTION_BYTES /
 // leaves out by design.
 const deniedUnits = state => new Set(state ? [...state.exclusions,
   ...state.intervals.flatMap(item => [item.upper?.unitId, item.lower.unitId]).filter(Boolean)] : []);
+// Which turns no capture takes: those `deniedUnits` names, and every turn that
+// starts in an earlier pause a later resume closed, from the pause's end to
+// where Automatic capture began again. Only the current pause stays open to a
+// typed capture.
+function withheldTurns(state) {
+  const denied = deniedUnits(state), intervals = [...state?.intervals ?? []].sort((a, b) => a.lower.eofByte - b.lower.eofByte);
+  const gaps = intervals.slice(0, -1).flatMap((item, index) => item.upper ? [[item.upper.eofByte, intervals[index + 1].lower.eofByte]] : []);
+  return item => denied.has(item.unitId) || gaps.some(([from, to]) => item.record.startByte >= from && item.record.startByte < to);
+}
 
 /** Leave one turn of the chat out of captured turns: a typed command's own turn
  * or a turn too large to capture. An opt-out needs no capture consent and is
@@ -601,14 +610,14 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   if (current.state && current.state.source.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
   const continuation = await chatContinuation(store, chat, source.path, source.fileIdentity, observeRead);
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
-  const denied = deniedUnits(current.state), leftOut = [];
+  const withheld = withheldTurns(current.state), leftOut = [];
   let { start } = await chatStart(store, chat, current.state, floor, observed.source);
   const from = start.eofByte;
   // A turn already captured (by Automatic capture or an earlier capture,
   // including one since pruned) is skipped like an excluded turn. Whether a
   // turn was captured is read from its capture, never from where it lies.
   const taken = await capturedUnits(store, chat);
-  const skipped = item => denied.has(item.unitId) || taken.has(item.unitId);
+  const skipped = item => withheld(item) || taken.has(item.unitId);
   for (let scan = 0; scan < scanWindows; scan++) {
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
     if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };

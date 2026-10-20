@@ -1479,6 +1479,27 @@ test('typed capture, pause chat and resume chat follow Automatic capture of the 
   for (const unitId of parent.controls) assert.equal(await head(unitId), null, unitId);
 });
 
+test('typed capture never takes a turn from an earlier pause that resume chat closed', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const head = async unitId => (await readCaptureHead(parent.store, { ...identity, unitId })).head;
+  const typed = async (tool, expected) => {
+    const rpc = await h.call(tool, {}), reply = body(rpc);
+    assert.equal(reply.capture, expected, reply.statusText); await parent.finish(rpc); await run(); return reply;
+  };
+  await parent.work('Captured automatically.'); await run();
+  await typed('pause_capture', 'paused');
+  const opted = await parent.work('Private: kept out by the pause.'); await run();
+  await typed('resume_capture', 'resumed');
+  const resumed = await parent.work('Captured again.'); await run(); assert(await head(resumed));
+  await typed('pause_capture', 'paused');
+  const later = await parent.work('Decision: taken while paused again.');
+  // Only the turn of the current pause is captured; the first pause's turn stays out.
+  assert.equal((await typed('capture_turns', 'captured')).turns, 1);
+  assert(await head(later)); assert.equal(await head(opted), null);
+  await typed('capture_turns', 'nothing-new'); assert.equal(await head(opted), null);
+});
+
 test('typed capture takes a turn rewritten into the paused stretch after the pause record', async t => {
   // With no progress, as when a read stopped short of the pause's end, and
   // with progress past it whose own anchor still holds.
