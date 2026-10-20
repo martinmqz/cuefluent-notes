@@ -295,6 +295,28 @@ test('a selected window refuses to run once a byte it covers changed, even with 
   assert.equal((await runSelectedCapture(f.capability, args)).saved, 2);
 });
 
+test('a selected window rewritten just before its reader opens the transcript publishes nothing', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8');
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B] };
+  const chosen = await selectExplicitCapture(f.capability, request);
+  const args = { selection: f.selection, scopeId: request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A, B] };
+  // One byte inside the window changes in place as the reader opens the
+  // transcript, after any check made through another handle.
+  const at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (!rewrites && String(file) === f.sourcePath && new Error().stack.includes('readSessionRange')) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return open.call(fs, file, ...rest);
+  });
+  await assert.rejects(runSelectedCapture(f.capability, args), { code: 'SOURCE_CHANGED' });
+  assert.equal(rewrites, 1);
+  for (const unitId of [A, B]) assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head, null);
+});
+
 test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };

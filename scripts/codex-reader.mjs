@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { readSessionRange, readSessionHeader } from './session-jsonl.mjs';
+import { readSessionRange, readSessionHeader, chosenStretch } from './session-jsonl.mjs';
 import { evidenceCollector } from './capture-evidence.mjs';
 import { createCapture, validateCapture, clientVersion } from './capture-contract.mjs';
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
@@ -564,7 +564,7 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
   if (from.sourceIdentity !== source.fileIdentity || from.offset < floor) fail('INVALID_INTAKE_CURSOR');
   if (cursor) await verifySourceCursor(source, cursor);
   const checkBudget = () => { checkWorkflowBudget(); if (now() >= deadline) fail('SESSION_READ_BUDGET'); };
-  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now,
+  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, stretch: chosenStretch(scope),
     ...(scope.end ? { endByte: scope.end.endByte } : {}),
     startsMidRecord: from.offset === floor && Boolean(scope.lower?.startsMidRecord), verifyHeader: verifyCodexHeader });
   let selection = structuredClone(state), previousOrdinal = -1, blocked = scan.blocked;

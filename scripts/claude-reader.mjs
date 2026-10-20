@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { absolutePath } from './workflow-paths.mjs';
 import { validateReaderCheckpoint, MAX_READER_CHECKPOINT_BYTES, checkpointPageBuilder } from './reader-checkpoint.mjs';
-import { readSessionRange, decodeSessionRecord } from './session-jsonl.mjs';
+import { readSessionRange, decodeSessionRecord, chosenStretch } from './session-jsonl.mjs';
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
@@ -219,7 +219,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   const pager = checkpointPageBuilder(carry);
   let checkpointBytes = Buffer.byteLength(canonicalJSON(carry));
   const checkBudget = () => { checkWorkflowBudget(); if (now() >= deadline) fail('SESSION_READ_BUDGET'); };
-  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, readHeader: readClaudeHeader,
+  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, readHeader: readClaudeHeader, stretch: chosenStretch(scope),
     verifyHeader: (row, source) => verifyClaudeIdentity(row, source, { header: true, sessionKinds }), ...(stops.length ? { endByte: Math.min(...stops) } : {}),
     startsMidRecord: from.offset === floor && Boolean(scope.lower?.startsMidRecord) });
   let continuedIn = null, terminal = false;

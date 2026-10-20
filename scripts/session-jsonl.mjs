@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { openGuarded, sameFileIdentity } from './file-io.mjs';
 import { stableSourceIdentity, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
 import { integer, digest, fail } from './workflow-values.mjs';
@@ -25,9 +26,16 @@ export async function readSessionHeader({ readHeader, size }) {
 /** Read one fixed snapshot with positional I/O. Caller supplies an authorized floor.
  * Header reads are bounded independently; no discovery or historical prefix scan.
  */
+/** The bytes an explicit capture was chosen from, when its selection kept their hash. */
+export const chosenStretch = scope => scope.contentHash === undefined ? null
+  : { from: scope.start.startByte, to: (scope.end ?? scope.start).endByte, hash: scope.contentHash };
+/** `stretch` ({from, to, hash}) names bytes chosen by their hash. They are
+ * hashed through this read's own handle before any record is read, and the
+ * checks after the read refuse a file written in place since it was opened, so
+ * the records read come from the bytes that hashed. */
 export async function readSessionRange({ source, from, endByte, startsMidRecord = false,
   verifyHeader, readHeader = readSessionHeader, maxBytes = SESSION_READ_LIMIT, maxRecords = 16384, deadline = Infinity,
-  observeRead = () => {}, now = Date.now }) {
+  observeRead = () => {}, now = Date.now, stretch = null }) {
   integer(from); integer(maxBytes); integer(maxRecords);
   if (maxBytes < 1 || maxBytes > SESSION_READ_LIMIT || maxRecords < 1 || maxRecords > 16384 ||
       (deadline !== Infinity && !Number.isFinite(deadline))) fail('INVALID_READER_LIMIT');
@@ -49,6 +57,16 @@ export async function readSessionRange({ source, from, endByte, startsMidRecord 
       if (purpose === 'range') bytesRead += result.bytesRead;
       return bytes;
     };
+    if (stretch) {
+      integer(stretch.from); integer(stretch.to);
+      if (stretch.to < stretch.from || stretch.to > snapshotEnd) fail('SOURCE_CHANGED');
+      const hasher = createHash('sha256');
+      for (let at = stretch.from; at < stretch.to;) {
+        const length = Math.min(1024 * 1024, stretch.to - at);
+        hasher.update(await read(at, length, 'stretch')); at += length;
+      }
+      if (hasher.digest('hex') !== stretch.hash) fail('SOURCE_CHANGED');
+    }
     const metadata = await verifyHeader(await readHeader({ size: stop, readHeader: (offset, length) => {
       if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1 || offset + length > Math.min(stop, SOURCE_HEADER_BYTES)) fail('SESSION_HEADER_LIMIT');
       return read(offset, length, 'header');
