@@ -19,7 +19,7 @@ import { resolveProcessingInvocation } from './processing-native-invocation.mjs'
 import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
 import { collectionIngress, registrationPath, publishIngressMetadata, collectionStatusPath } from './collection-ingress.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
-import { processScope, READER_BLOCK_CODES } from './collection-worker.mjs';
+import { processScope, READER_BLOCK_CODES, readReaderBlock } from './collection-worker.mjs';
 import { COLLECTION_STOP_CODES } from './processing-control-server.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { storageFixture } from './test-support/storage-fixture.mjs';
@@ -1233,6 +1233,20 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
     assert.deepEqual(shown.collection, { state: 'stopped', code });
     assert.match(shown.statusText, reason);
   });
+});
+
+test('a chat whose header turns unsupported keeps that reader block, and typed commands there stay unverified', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await parent.work('Captured automatically.'); await run();
+  // The header record changes in place to a kind the reader does not support.
+  const text = await fs.readFile(parent.source.path, 'utf8'), handle = await fs.open(parent.source.path, 'r+');
+  try { await handle.write(Buffer.from('session_metx'), 0, 12, Buffer.byteLength(text.slice(0, text.indexOf('session_meta')))); } finally { await handle.close(); }
+  await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+  assert((await run()).pending.includes('UNSUPPORTED_CODEX_HEADER'));
+  assert.equal(await readReaderBlock(parent.store, identity), 'UNSUPPORTED_CODEX_HEADER');
+  // The same header check binds typed commands, so they refuse as unverified.
+  assert.equal((await h.call('capture_turns', {})).error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
 });
 
 test('typed capture commands in a safety-stopped chat say capture stopped and change nothing', async t => {
