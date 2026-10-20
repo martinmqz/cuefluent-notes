@@ -1174,21 +1174,35 @@ test('a chat whose Automatic capture stopped is not told capture covers it', asy
 test('a reader block is kept per chat, so a later pass that skips the chat cannot hide it', async t => {
   // Every reader block a visit can end on has a plain reason in status.
   for (const code of READER_BLOCK_CODES) assert(COLLECTION_STOP_CODES.includes(code), code);
-  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
-  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
-  await parent.work('Captured automatically.'); await run();
-  await fs.appendFile(parent.source.path, 'not a transcript record\n');
-  await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
-  assert((await run()).pending.includes('INVALID_SESSION_RECORD'));
-  // A later pass that does not visit this chat rebuilds the notice without it.
-  await publishIngressMetadata(parent.store, collectionStatusPath, { status: 'idle', saved: 0, pending: [], diagnostics: [],
-    boundaryExcluded: [], updatedAt: new Date(Date.now() + 1000).toISOString() });
-  const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
-  assert.equal(reply.capture, 'stopped', reply.statusText);
-  // Status, which that reply points to, says so and why.
-  const status = await h.call('processing_status', {}), shown = body(status); await parent.finish(status);
-  assert.deepEqual(shown.collection, { state: 'stopped', code: 'INVALID_SESSION_RECORD' });
-  assert.match(shown.statusText, /Automatic capture has stopped for this chat: its transcript has a record that is not valid./);
+  const cases = {
+    // Bytes that are no transcript record at all.
+    INVALID_SESSION_RECORD: [/its transcript has a record that is not valid\./, async parent => fs.appendFile(parent.source.path, 'not a transcript record\n')],
+    // A well-formed record of a kind the Codex reader does not read, at the next native ordinal.
+    UNSUPPORTED_CODEX_RECORD: [/its transcript has a record Cuefluent Notes cannot read\./, async parent => {
+      await parent.resume({});
+      const text = await fs.readFile(parent.source.path, 'utf8'), last = text.lastIndexOf('\n', text.length - 2) + 1;
+      const { timestamp, ordinal } = JSON.parse(text.slice(last));
+      await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
+      await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'synthetic_unknown', payload: { type: 'synthetic' } }) + '\n');
+    }],
+  };
+  for (const [code, [reason, block]] of Object.entries(cases)) await t.test(code, async t => {
+    const { f, h, parent } = await nativeIngressFixture(t);
+    const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    await parent.work('Captured automatically.'); await run();
+    await block(parent);
+    await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+    assert((await run()).pending.includes(code));
+    // A later pass that does not visit this chat rebuilds the notice without it.
+    await publishIngressMetadata(parent.store, collectionStatusPath, { status: 'idle', saved: 0, pending: [], diagnostics: [],
+      boundaryExcluded: [], updatedAt: new Date(Date.now() + 1000).toISOString() });
+    const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+    assert.equal(reply.capture, 'stopped', reply.statusText);
+    // Status, which that reply points to, says so and why.
+    const status = await h.call('processing_status', {}), shown = body(status); await parent.finish(status);
+    assert.deepEqual(shown.collection, { state: 'stopped', code });
+    assert.match(shown.statusText, reason);
+  });
 });
 
 test('typed capture commands in a safety-stopped chat say capture stopped and change nothing', async t => {

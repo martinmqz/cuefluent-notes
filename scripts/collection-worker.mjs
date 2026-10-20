@@ -166,12 +166,19 @@ async function claudeContinuation(transaction, store, source, link, authorize, o
   return from || into ? { from, into } : null;
 }
 
-// Reader blocks no later pass can get past: Automatic capture of that chat
-// has stopped until the cause is reviewed.
-export const READER_BLOCK_CODES = Object.freeze(['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
+// Claude reader blocks a paused interval may be suspended at.
+const CLAUDE_FROZEN_BLOCKS = Object.freeze(['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
   'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
   'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
   'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW']);
+// Reader blocks no later pass can get past, in either client: a record the
+// reader stops at, or a turn it can never read. Automatic capture of that
+// chat has stopped until the cause is reviewed.
+export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUPPORTED_SESSION_OWNERSHIP',
+  'UNSUPPORTED_CODEX_RECORD', 'UNSUPPORTED_CODEX_ORDER', 'UNSUPPORTED_CODEX_HISTORY', 'UNSUPPORTED_CODEX_CONTENT',
+  'UNSUPPORTED_CODEX_TOOL_OUTPUT', 'UNSUPPORTED_CODEX_ITEM', 'UNSUPPORTED_CODEX_ROLE', 'UNSUPPORTED_CODEX_RESPONSE',
+  'AMBIGUOUS_CODEX_ATTRIBUTION', 'CONFLICTING_CODEX_MIRROR', 'CONFLICTING_CODEX_CALL', 'CODEX_ROLLBACK_REQUIRES_REVIEW',
+  'SESSION_UNIT_LIMIT']);
 
 // The reader block a visit of a chat last ended on, kept per chat: a later
 // pass that does not visit the chat cannot erase it the way it rebuilds the
@@ -314,7 +321,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
         ...(scope?.upper ? { ceiling: scope.upper.eofByte } : {}) });
       if (linked) { link.successor = linked.to.sessionId; continue; }
     }
-    const frozenBlock = !result.blocked || READER_BLOCK_CODES.includes(result.blocked.code);
+    const frozenBlock = !result.blocked || CLAUDE_FROZEN_BLOCKS.includes(result.blocked.code);
     if (suspensionBinding && result.diagnostics.automaticCeilingReached && frozenBlock &&
         result.pending.every(item => item.reason === 'anchor-unresolved')) {
       const unresolved = result.blocked?.code ?? result.pending[0]?.reason ?? plan.heldReason ?? pending;

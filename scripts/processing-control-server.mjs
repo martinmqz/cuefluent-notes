@@ -319,6 +319,19 @@ const COLLECTION_STOPS = Object.freeze({
   SESSION_RECORD_LIMIT: 'its transcript has more records in one stretch than Cuefluent Notes reads',
   READER_CHECKPOINT_CAPACITY: 'its saved reading progress grew past what Cuefluent Notes keeps',
   INVALID_WORKFLOW: 'its capture settings or saved progress are not valid',
+  UNSUPPORTED_CODEX_RECORD: 'its transcript has a record Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_ORDER: 'its transcript has records out of their recorded order',
+  UNSUPPORTED_CODEX_HISTORY: 'its transcript uses a history format Cuefluent Notes does not support',
+  UNSUPPORTED_CODEX_CONTENT: 'its transcript has content Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_TOOL_OUTPUT: 'its transcript has tool output Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_ITEM: 'its transcript has an item Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_ROLE: 'its transcript has a message role Cuefluent Notes does not support',
+  UNSUPPORTED_CODEX_RESPONSE: 'its transcript has a response Cuefluent Notes cannot read',
+  AMBIGUOUS_CODEX_ATTRIBUTION: 'its transcript has records that cannot be tied to a single turn',
+  CONFLICTING_CODEX_MIRROR: 'its transcript has two different copies of the same item',
+  CONFLICTING_CODEX_CALL: 'its transcript reuses one tool call for two different calls',
+  CODEX_ROLLBACK_REQUIRES_REVIEW: 'its transcript rolls back turns that were already recorded',
+  SESSION_UNIT_LIMIT: 'its transcript has more turns in one stretch than Cuefluent Notes reads',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));
