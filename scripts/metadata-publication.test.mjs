@@ -164,12 +164,14 @@ test('a state replacement waits out another reader\'s brief open and refuses a l
   let closed = holdFor(100);
   await replace(2); await closed;
   assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), { version: 2 });
-  closed = holdFor(2000);
+  // A long open lasts until the replacement has given up, however slowly
+  // the runner reaches it: the bounded retry cannot outwait it.
+  const held = await fs.open(target, 'r');
   try {
     if (process.platform === 'win32') {
       await assert.rejects(replace(3), { code: 'EPERM' });
       assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), { version: 2 });
     } else await replace(3);
-  } finally { await closed; }
+  } finally { await held.close(); }
   assert.deepEqual(await fs.readdir(stages), []);
 });
