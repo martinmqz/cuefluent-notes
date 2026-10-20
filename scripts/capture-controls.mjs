@@ -167,7 +167,8 @@ export async function restrictCapture({ configPath, expectedConfigHash, collecti
 }
 
 async function explicitRequest(request) {
-  keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange']);
+  keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], ['bounds']);
+  if (request.bounds !== undefined) { keys(request.bounds, ['start', 'end']); hash(request.bounds.start); hash(request.bounds.end); }
   const selection = await selected(request.selection);
   nativeId(request.operationId); oldHash(request.expectedSelectionHash); choice(request.kind, ['current', 'historical']);
   list(request.unitIds, 100, { empty: false }).forEach(nativeId); unique(request.unitIds);
@@ -221,6 +222,10 @@ export async function selectExplicitCapture(capability, request, { observeRead =
       const replay = await replayControl(current, request, store); if (replay) return replay;
       if (current.hash !== request.expectedSelectionHash) fail('STALE_SELECTION');
       const { source, scope } = await deriveExplicitScope(capability, request, selection, observeRead);
+      // A window chosen from an earlier read names the hashes of its first and
+      // last records; this read must find the same bytes there, or the scope
+      // would be published under an identity that describes other bytes.
+      if (request.bounds && (scope.start.hash !== request.bounds.start || scope.end.hash !== request.bounds.end)) fail('SOURCE_ANCHOR_CONFLICT');
       const authorize = async () => { await assertWorkflowStorage(capability, selection, 'explicitCollect'); return true; };
       return controlSelection(tx, { source, expectedHash: current.hash, authorize, callerRequestHash: digest(canonicalJSON(request)),
         request: { id: request.operationId, client: selection.client, sessionId: selection.sessionId,
@@ -723,7 +728,7 @@ export async function captureChatTurns(capability, { selection, source, floor, c
     unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds });
   const fresh = window.leftOut.length ? await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat))) : window.current;
   await selectExplicitCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
-    expectedSelectionHash: fresh.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange }, { observeRead, now });
+    expectedSelectionHash: fresh.hash, operationId, kind: 'historical', unitIds: window.unitIds, readRange: window.readRange, bounds: window.bounds }, { observeRead, now });
   const run = await runChatScope(capability, chat, { id: operationId, unitIds: window.unitIds }, { ...options, fresh: true });
   return { turns: turns + run.saved, more: window.more || !run.finished, leftOut };
 }

@@ -8,7 +8,7 @@ import { storageFixture } from './test-support/storage-fixture.mjs';
 import { digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
-import { readCaptureHead, readReaderProgress } from './intake-store.mjs';
+import { readCaptureHead, readReaderProgress, readSelection } from './intake-store.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -240,6 +240,21 @@ test('one-time capture with collection disabled reads the selected window and pu
   assert.match(capture.evidence[0].text, /Alpha/); assert.equal(capture.reader.headerClientVersion, '0.146.0');
   assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B })).head, null);
   assert.equal(JSON.parse(await fs.readFile(f.options.configPath)).routes[0].collection.enabled, false);
+});
+
+test('an explicit capture chosen from an earlier read refuses a window whose records changed since', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
+  // The window's first record is the selected turn's first; its last ends the read.
+  const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)) };
+  // The last record is rewritten in place, at the same offsets.
+  await fs.writeFile(f.sourcePath, text.slice(0, -lines.at(-1).length) + lines.at(-1).replace('00:00:00.000Z', '00:00:01.000Z'));
+  await assert.rejects(selectExplicitCapture(f.capability, { ...f.request, bounds }), { code: 'SOURCE_ANCHOR_CONFLICT' });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  // With the bytes the window was chosen from, it is selected.
+  await fs.writeFile(f.sourcePath, text);
+  const chosen = await selectExplicitCapture(f.capability, { ...f.request, bounds });
+  const scope = chosen.state.explicitScopes.find(item => item.id === f.request.operationId);
+  assert.deepEqual([scope.start.hash, scope.end.hash], [bounds.start, bounds.end]);
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {
