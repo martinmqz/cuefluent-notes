@@ -68,6 +68,18 @@ test('capture mode Manual records only the metadata-only session start, so typed
   assert.deepEqual(await fs.readdir(f.collection.rawDir), []);
 });
 
+test('capture mode Manual stays silent when private storage is not available yet', async t => {
+  const f = await fixture(t);
+  f.config.routes[0].collection = { enabled: false }; f.config.routes[0].processing = { mode: 'manual' };
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  // For example before storage preparation: the hook neither fails nor creates storage.
+  await fs.rm(f.collection.intakeStateDir, { recursive: true, force: true });
+  const result = await collectionIngress('codex', f.payload, { ...f.options, launch: () => assert.fail('must not launch') });
+  assert.deepEqual(result, { status: 'manual', context: null });
+  assert.equal(collectionHookOutput(result, 'UserPromptSubmit'), null);
+  await assert.rejects(fs.stat(f.collection.intakeStateDir), { code: 'ENOENT' });
+});
+
 test('processing-only and paused notices expose a fresh blocked intake without a stored diagnostic', async t => {
   for (const kind of ['processing-only', 'paused']) {
     const f = await fixture(t);

@@ -78,19 +78,29 @@ nearest exact commands to type. That text stays evidence, as described under
 ### Capture commands
 
 `capture` captures the chat it is typed in: every finished turn since that
-chat's last capture, or since the hooks recorded where its session started,
-oldest first. One command takes a bounded window (at most 10 turns or 8 MiB of
-transcript) and publishes what it can within its operation budget; the reply
-says when more turns are waiting, and typing `capture` again finishes that
-window before reading further. Turns already left out stay out. In a chat
-Automatic capture covers it captures nothing and says so; in a paused chat it
-works as in Manual mode. `pause chat` and `resume chat` are the
+chat's last capture, or since the chat started, oldest first, and never a turn
+Automatic capture already took. A chat continued from another (Claude `/bg`)
+starts after the history it re-homed. One command takes a bounded window (at
+most 10 turns or 8 MiB of transcript) and publishes what it can within its
+operation budget, ending within about 50 seconds; the reply says when more turns are
+waiting, and typing `capture` again finishes that window before reading further.
+A turn that cannot be captured within those limits (larger than a window, or
+ending in a record too large to anchor) is left out, and the reply says so; it
+never blocks the chat's later turns. Turns already left out stay out. In a chat
+Automatic capture covers it captures nothing and says so, and in a chat whose
+Automatic capture has stopped it says that capture cannot take its turns
+either; in a paused chat it works as in Manual mode. `pause chat` and `resume chat` are the
 [pause and resume controls](session-workflow.md) at the command turn, for a chat
 Automatic capture covers; elsewhere they say there is nothing to pause or
 resume. Only the person's typed command acts: a call the model makes on its own
 applies nothing. Each command turn, like any typed command in a chat Automatic
 capture does not cover, leaves itself out of later captures by an exclusion
-instead of a receipt.
+instead of a receipt. These housekeeping exclusions stop well before the chat's
+selection capacity, so they never cause a safety stop; a turn that could not be
+left out stays capturable, and that reply carries a `PROCESSING_EXCLUSION_UNVERIFIED`
+diagnostic. Each `capture` adds to the chat's capture record, so a chat captured
+by command many hundreds of times can fill it; `capture` then refuses, while
+Automatic capture and the other commands keep working.
 
 ## Claude launch settings
 

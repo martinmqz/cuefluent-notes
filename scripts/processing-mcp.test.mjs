@@ -858,11 +858,14 @@ async function nativeParent(t, f, h, { binding = 'active', headerChanges = {} } 
     response(unitId, { type: 'message', id: `status_${rpc.id}`, role: 'assistant', content: [{ type: 'output_text', text: status }] }),
     evt('task_complete', { turn_id: unitId, last_agent_message: status })]);
   };
-  const work = async text => {
+  // `filler` adds assistant messages to the turn; `last` is its final answer,
+  // which Codex repeats in the terminal record.
+  const work = async (text, { filler = [], last } = {}) => {
     const unitId = randomUUID();
     await append([evt('task_started', { turn_id: unitId, root_turn_id: unitId }),
       item(unitId, { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text }] }),
-      evt('task_complete', { turn_id: unitId })]);
+      ...filler.map(value => item(unitId, { type: 'AgentMessage', id: randomUUID(), content: [{ type: 'Text', text: value }] })),
+      evt('task_complete', { turn_id: unitId, ...(last === undefined ? {} : { last_agent_message: last }) })]);
     return unitId;
   };
   const resume = changes => append([{ type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cwd: f.project,
@@ -1022,6 +1025,62 @@ test('a long chat is captured in order across typed captures, in bounded windows
   for (const unitId of turns) assert(await head(unitId), unitId);
 });
 
+test('capture reads a chat from its start, so a settings change cannot skip its earlier turns', async t => {
+  const { f, h, parent, head, typed } = await manualCaptureChat(t);
+  const first = await parent.work('Decision: ship on Friday.'), second = await parent.work('Owner: Dana.');
+  // Any settings change gives the next hook a new session-start record at the
+  // current end of the transcript; capture does not start there.
+  f.config.routes[0].clients = [...f.config.routes[0].clients].reverse();
+  const config = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, config);
+  f.options.expectedConfigHash = digest(config); f.capability = await verifyWorkflowStorage(f.options);
+  assert.equal((await collectionIngress('codex', { session_id: f.identity.sessionId, turn_id: randomUUID(), cwd: f.project,
+    transcript_path: parent.source.path, hook_event_name: 'UserPromptSubmit' }, { configPath: f.options.configPath,
+    launch: () => assert.fail('no collection worker') })).status, 'manual');
+  assert.equal((await typed('capture_turns', 'captured')).turns, 2);
+  assert(await head(first)); assert(await head(second));
+});
+
+test('a turn too large for a window is left out once and never blocks later turns', async t => {
+  const { parent, head, typed } = await manualCaptureChat(t);
+  const before = await parent.work('Before the large turn.');
+  const large = await parent.work('Paste the whole log.', { filler: Array.from({ length: 9 }, (_, index) => `${index}`.repeat(1024 * 1024)) });
+  const after = await parent.work('After the large turn.');
+  // The first window ends before the large turn; the next one passes it.
+  const first = await typed('capture_turns', 'captured');
+  assert.equal(first.turns, 1); assert.equal(first.more, true); assert(await head(before));
+  const second = await typed('capture_turns', 'captured');
+  assert.equal(second.turns, 1); assert.equal(second.leftOut, 1);
+  assert.match(second.statusText, /Captured 1 turn of this chat\. 1 turn too large to capture was left out\./);
+  assert.equal(await head(large), null); assert(await head(after));
+  assert.equal((await typed('capture_turns', 'nothing-new')).leftOut, undefined);
+});
+
+test('a turn whose last record is too large to anchor is left out and reported, never counted as captured', async t => {
+  const { parent, head, typed } = await manualCaptureChat(t);
+  // Codex repeats a long final answer in the turn's terminal record.
+  const first = await parent.work('First decision.'), report = await parent.work('Write the report.', { last: 'r'.repeat(70 * 1024) });
+  const after = await parent.work('Next decision.');
+  const reply = await typed('capture_turns', 'captured');
+  assert.equal(reply.turns, 2); assert.equal(reply.leftOut, 1); assert.equal(reply.more, false);
+  assert(await head(first)); assert(await head(after)); assert.equal(await head(report), null);
+  assert.equal((await typed('capture_turns', 'nothing-new')).leftOut, undefined);
+});
+
+test('typed status in a chat with no housekeeping room keeps its turn capturable and says so', async t => {
+  const { f, h, parent, store, identity, typed } = await manualCaptureChat(t);
+  await typed('capture_turns', 'nothing-new');
+  // A selection near its housekeeping limit: one more exclusion is not added,
+  // so no safety stop can follow.
+  const current = await readSelection(store, identity);
+  const full = { ...current.state, exclusions: [...current.state.exclusions, ...Array.from({ length: 2048 }, () => randomUUID())] };
+  await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${identity.sessionId}.json`, full, current.hash));
+  const rpc = await h.call('processing_status', {}); await parent.finish(rpc);
+  assert(body(rpc).diagnostics.includes('PROCESSING_EXCLUSION_UNVERIFIED'));
+  const after = (await readSelection(store, identity)).state;
+  assert.equal(after.safetyStop, null); assert.equal(after.exclusions.length, full.exclusions.length);
+  assert(!after.exclusions.includes(parent.controls.at(-1)));
+});
+
 test('a capture command the person did not type applies nothing', async t => {
   const f = await processingFixture(t), h = await harness(t, f);
   for (const tool of ['capture_turns', 'pause_capture', 'resume_capture']) {
@@ -1030,6 +1089,34 @@ test('a capture command the person did not type applies nothing', async t => {
     assert.match(rpc.error.message, /^Cuefluent: Nothing was applied: the tool call did not match the command that was typed\.$/);
   }
   assert.equal(h.dispatches, 0);
+});
+
+test('capture never takes turns Automatic capture took, after the project switches to Manual', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const automatic = await parent.work('Captured automatically.'); assert.equal((await run()).saved, 1);
+  const before = await readCaptureHead(parent.store, { ...identity, unitId: automatic });
+  f.config.routes[0].collection = { enabled: false }; f.config.routes[0].processing = { mode: 'manual' };
+  const config = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, config);
+  f.options.expectedConfigHash = digest(config); f.capability = await verifyWorkflowStorage(f.options);
+  await collectionIngress('codex', { session_id: identity.sessionId, turn_id: randomUUID(), cwd: f.project,
+    transcript_path: parent.source.path, hook_event_name: 'UserPromptSubmit' }, { configPath: f.options.configPath, launch: () => assert.fail('no worker') });
+  const manual = await parent.work('Captured by hand.');
+  const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+  assert.equal(reply.capture, 'captured', reply.statusText); assert.equal(reply.turns, 1);
+  const store = await openWorkflowIntake(f.capability);
+  assert.equal((await readCaptureHead(store, { ...identity, unitId: automatic })).hash, before.hash);
+  assert((await readCaptureHead(store, { ...identity, unitId: manual })).head);
+});
+
+test('a chat whose Automatic capture stopped is not told capture covers it', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  await parent.work('Captured automatically.'); await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await publishIngressMetadata(parent.store, collectionStatusPath, { status: 'pending', saved: 0, pending: ['UNSUPPORTED_SESSION_OWNERSHIP'],
+    diagnostics: [{ ...identity, code: 'UNSUPPORTED_SESSION_OWNERSHIP' }], boundaryExcluded: [], updatedAt: new Date().toISOString() });
+  const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
+  assert.equal(reply.capture, 'stopped');
+  assert.match(reply.statusText, /^Cuefluent: Automatic capture has stopped for this chat, so its later turns are not captured/);
 });
 
 test('typed capture, pause chat and resume chat follow Automatic capture of the chat', async t => {

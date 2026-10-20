@@ -66,14 +66,19 @@ const REVIEW_OUTCOMES = Object.freeze({
   unresolved: { pending: null, text: null },
 });
 // A typed capture command's outcome. `turns` counts the turns captured now;
-// `more` says earlier finished turns are still waiting for another capture.
+// `more` says earlier finished turns are still waiting for another capture;
+// `leftOut` counts turns too large to capture, now left out.
+const tooLarge = leftOut => leftOut ? ` ${counted(leftOut, 'turn')} too large to capture ${leftOut === 1 ? 'was' : 'were'} left out.` : '';
 const CAPTURE_OUTCOMES = Object.freeze({
-  captured: (cmd, turns, more) => `Captured ${counted(turns, 'turn')} of this chat.${more
+  captured: (cmd, turns, more, leftOut) => `Captured ${counted(turns, 'turn')} of this chat.${tooLarge(leftOut)}${more
     ? ` More finished turns are waiting; type ${cmd('capture')} again to capture them.` : ''} Type ${cmd('process')} to draft notes from captured turns.`,
-  'nothing-new': (cmd, turns, more) => more
+  'nothing-new': (cmd, turns, more, leftOut) => (more
     ? `Nothing was captured this time; type ${cmd('capture')} again to continue with this chat's later turns.`
-    : 'Nothing new to capture: every finished turn of this chat is already captured or left out.',
+    : 'Nothing new to capture: every finished turn of this chat is already captured or left out.') + tooLarge(leftOut),
   automatic: cmd => `Automatic capture already covers this chat, so there is nothing to capture by hand. To stop it for this chat, type ${cmd('pause chat')}.`,
+  // Automatic capture of this chat stopped (a safety stop or a record the
+  // reader cannot pass): a typed capture cannot take its turns either.
+  stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured, and typing ${cmd('capture')} cannot capture them either. Type ${cmd('status')} for the reason.`,
   paused: cmd => `Automatic capture is paused for this chat from this turn on; turns captured before it are kept. To restart it, type ${cmd('resume chat')}.`,
   'already-paused': cmd => `Automatic capture is already paused for this chat. To restart it, type ${cmd('resume chat')}.`,
   resumed: () => 'Automatic capture is on again for this chat; turns after this one are captured.',
@@ -347,7 +352,7 @@ const ERRORS = new Set([...DIAGNOSTICS, 'PROCESSING_CONTROL_PROTOCOL', 'PROCESSI
   'PROCESSING_STATE_CHANGED', 'PROCESSING_CONTROL_SOURCE_DISCOVERY_INCOMPLETE',
   'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED', 'REGISTRATION_REQUIRES_REVIEW',
   'UNSAFE_INTAKE_PATH', 'UNSAFE_PRIVATE_STORAGE', 'STORAGE_NOT_PRIVATE', 'INTAKE_ROOT_CHANGED', 'PRIVATE_STORAGE_CHANGED',
-  'UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
+  'UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH', 'SELECTION_CAPACITY_EXCEEDED']);
 const codexSourceErrors = new Set(['UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
 // A refused tool call answers with plain text the chat can relay; its code
 // stays machine-readable in `error.data.code`. Before the requested action
@@ -386,6 +391,9 @@ const ACTION_REFUSALS = Object.freeze({
   PROCESSING_REVIEW_SUPERSEDED: 'the draft was decided, replaced or shown again before this review was confirmed, so this chat cannot decide on it yet',
   PROCESSING_REVIEW_BLOCKED: 'another Cuefluent Notes step had not finished, or needs recovery, so nothing was shown or decided; type the command again in a moment',
   INTAKE_BLOCKED: 'Cuefluent Notes was busy with another operation; type the command again in a moment',
+  // Every capture adds to the chat's capture record; a very long-used chat
+  // can fill it. Automatic capture and the other commands keep working.
+  SELECTION_CAPACITY_EXCEEDED: 'this chat has captured so much by command that its capture record is full, so no more of its turns can be captured by command',
 });
 // Busy names its cause only for a review, whose steps run entirely under the
 // lock or not at all; another action, such as a cancel, may already have
@@ -610,11 +618,12 @@ export function processingControlStatusView(value, args) {
       choice(value.capture, Object.keys(CAPTURE_OUTCOMES));
       const counts = value.capture === 'captured' || value.capture === 'nothing-new';
       if (result.commandPrefix === undefined || (value.capture === 'captured') !== (value.turns !== undefined) ||
-          (!counts && value.more !== undefined) || (value.more !== undefined && typeof value.more !== 'boolean')) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+          (!counts && (value.more !== undefined || value.leftOut !== undefined)) || (value.more !== undefined && typeof value.more !== 'boolean')) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (value.leftOut !== undefined) { integer(value.leftOut); if (value.leftOut > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); if (value.leftOut) result.leftOut = value.leftOut; }
       if (value.turns !== undefined) { integer(value.turns); if (value.turns < 1 || value.turns > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); result.turns = value.turns; }
       if (value.more !== undefined) result.more = value.more;
       result.capture = value.capture;
-      result.statusText = `Cuefluent: ${CAPTURE_OUTCOMES[value.capture](cmd, value.turns, value.more === true)}`; ownReply = true;
+      result.statusText = `Cuefluent: ${CAPTURE_OUTCOMES[value.capture](cmd, value.turns, value.more === true, value.leftOut ?? 0)}`; ownReply = true;
     }
     // A status reply can say that automatic collection stopped for this chat.
     if (value.collection !== undefined) {

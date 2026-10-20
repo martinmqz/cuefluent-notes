@@ -233,11 +233,13 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   // the nearest exact commands and is never authority. typedHelp marks the
   // skill typed with nothing after it: nothing applies either, and the reply
   // is the command list.
-  // captureFloor is where this binding may read the chat from: a typed capture
-  // never reads before it.
+  // captureFloor is where a typed capture may read this chat from: its own
+  // start, after any re-homed prefix of the chat it continues. It does not
+  // depend on the policy-bound hook floor, so a settings change cannot move it
+  // past turns not yet captured.
   const result = Object.freeze({ source: Object.freeze(structuredClone(source)), selection: Object.freeze(selection),
     configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill,
-    captureFloor: Object.freeze({ eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord === true }),
+    captureFloor: Object.freeze({ eofByte: target?.prefix.endByte ?? 0, startsMidRecord: false }),
     unitId, argsHash, ...call,
     ...(nativeSkill ? { typedControl } : {}),
     ...(typedSuggestions ? { typedSuggestions } : {}),

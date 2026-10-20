@@ -213,10 +213,12 @@ rebuild them or discard state to bypass a revision conflict. See
 
 Both hook and manual packages include the MCP server. It starts when loaded by
 the client; an explicit `process` request can launch or resume a restricted native
-client session using its normal authentication and model resolution. When
-processing is enabled with collection off, trusted hooks may still store source
-identity and byte-boundary metadata. Explicit native controls can read bounded
-recent source records to verify their call. This creates no collection interval or
+client session using its normal authentication and model resolution. In every
+configured, non-excluded project where Automatic capture does not cover a
+session, whatever the processing mode, trusted hooks still store its source
+identity and byte-boundary metadata (the session start), so a typed command can
+verify its chat. Explicit native controls can read bounded recent source records
+to verify their call. This creates no collection interval or
 worker. Review [processing chat prerequisites and privacy boundaries](processing-chat.md)
 before using the handoff. Installation grants neither collection nor processing
 consent, and Automatic still needs an explicit processing request.

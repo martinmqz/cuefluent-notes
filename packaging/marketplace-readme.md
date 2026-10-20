@@ -57,9 +57,10 @@ and [marketplace update commands](plugins/cuefluent-notes/skills/cuefluent-notes
 Review hook or MCP registration and permission changes when prompted. Both hook and
 manual packages contain `.mcp.json`, which registers `cuefluent_control`; the
 client may start it when loading the plugin. An explicit processing request uses
-its native CLI authentication and model resolution. Processing-enabled routes may
-register source metadata even with capture mode Manual; the explicit handoff can
-inspect bounded source content to verify the native call. See
+its native CLI authentication and model resolution. Configured, non-excluded
+projects register session-start source metadata even with capture mode Manual, so
+a typed command can verify its chat; the explicit handoff can inspect bounded
+source content to verify the native call. See
 [processing chat prerequisites and privacy](plugins/cuefluent-notes/skills/cuefluent-notes/references/processing-chat.md).
 
 Existing Windows package stores are preserved, with additions needing missing

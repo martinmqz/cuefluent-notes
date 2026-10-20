@@ -15,7 +15,7 @@ import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingSh
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
-import { captureChatTurns, controlChatCapture, excludeCommandTurn } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn } from './capture-controls.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -726,14 +726,17 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const { capability } = selected(source);
     const automatic = await automaticCapture(capability, source);
     const store = await withStorageProbes(() => openWorkflowIntake(capability));
-    const paused = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state?.paused === true;
+    const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
+    const paused = state?.paused === true;
     const chat = { selection: source.selection, source: source.source };
     let outcome;
     if (tool === 'capture_turns') {
-      if (automatic && !paused) outcome = { capture: 'automatic' };
+      // A chat Automatic capture covers but has stopped is not covered.
+      if (automatic && !paused) outcome = { capture: state?.safetyStop || (await collectionStop(capability, source)).collection ? 'stopped' : 'automatic' };
       else {
-        const captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }));
-        outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more } : { capture: 'nothing-new', more: captured.more };
+        const captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal }));
+        const left = captured.leftOut ? { leftOut: captured.leftOut } : {};
+        outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more, ...left } : { capture: 'nothing-new', more: captured.more, ...left };
       }
     } else if (!automatic) outcome = { capture: 'not-automatic' };
     else if (tool === 'pause_capture') {
@@ -777,15 +780,21 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       // capture does not cover, or a chat capture command, which records none)
       // leaves out its own turn by an exclusion, so a later capture skips it.
       // An unarmed Automatic chat has no selection to add one to: its first
-      // prompt is the boundary the worker excludes. Housekeeping only: a failed
-      // exclusion cannot undo the command.
+      // prompt is the boundary the worker excludes. It cannot undo the command:
+      // when it fails, or the selection has no room for it, the turn stays
+      // capturable and the reply says so in its diagnostics.
       const typed = Boolean(source.nativeSkill && source.unitId);
       const leaveOut = async () => {
-        try { await withStorageProbes(() => excludeCommandTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId })); }
-        catch { /* the turn stays capturable */ }
+        let excluded = false;
+        try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal }))).excluded; }
+        catch { /* reported below */ }
+        if (excluded) { await release(); return undefined; }
+        const replacement = { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+        await release(processingControlStatusView(replacement, { collectionId: source.collectionId }));
+        return replacement;
       };
       if (CAPTURE_TOOLS.includes(invocation.tool) || !typed || source.captureActive === false) {
-        if (typed && (source.selectionHash !== null || !await automaticCapture(capability, source))) await leaveOut();
+        if (typed && (source.selectionHash !== null || !await automaticCapture(capability, source))) return leaveOut();
         await release();
         return;
       }
@@ -796,7 +805,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       catch (error) {
         if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error;
         await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
-        await leaveOut(); await release(); return;
+        return leaveOut();
       }
       // A code-mode control was bound through the handshake's first cell; this
       // retry's own native metadata names its cell and nested call.
