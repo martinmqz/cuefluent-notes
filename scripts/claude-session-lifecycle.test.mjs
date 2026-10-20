@@ -13,7 +13,7 @@ import { schedulerPath } from './collection-scheduler.mjs';
 import { readSelection, readCaptureHead, controlSelection, readReaderProgress } from './intake-store.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
-import { captureChatTurns, excludeChatTurn, selectExplicitCapture, controlChatCapture } from './capture-controls.mjs';
+import { captureChatTurns, excludeChatTurn, selectExplicitCapture, controlChatCapture, runSelectedCapture } from './capture-controls.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { digest } from './workflow-values.mjs';
 
@@ -551,7 +551,7 @@ test('a read cut short by its record limit still captures the turns it finished'
   for (const promptId of prompts.slice(0, 10)) assert((await A.head(promptId)).head);
 });
 
-test('capture does not count turns as covered once where Automatic capture began was rewritten', async t => {
+test('capture reads the stretch Automatic capture covered and skips the turns it took, even once where it began was rewritten', async t => {
   const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, C1] = Array.from({ length: 4 }, () => randomUUID());
   await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
   await A.hook('UserPromptSubmit', P1); await f.run();
@@ -571,10 +571,15 @@ test('capture does not count turns as covered once where Automatic capture began
   try { await handle.write(Buffer.from('X'), 0, 1, at); } finally { await handle.close(); }
   await A.hook('UserPromptSubmit', C1);
   const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
-  const bound = await A.resolve(call, f.capability);
-  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId });
-  // The turns after it are read again rather than skipped as covered.
-  assert((await A.selection()).state.explicitScopes.at(-1).unitIds.includes(P3));
+  const bound = await A.resolve(call, f.capability), taken = (await A.head(P3)).head, reads = [];
+  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { observeRead: read => reads.push(read) });
+  // The stretch is read, not skipped as covered; the turn Automatic capture
+  // took is recognized by its capture and stays as it was.
+  const decision = (await fs.readFile(A.file)).indexOf('Synthetic decision');
+  assert(reads.some(read => read.purpose === 'range' && read.offset <= decision && read.offset + read.bytes > decision));
+  assert(!(await A.selection()).state.explicitScopes.some(scope => scope.unitIds.includes(P3)));
+  assert.deepEqual((await A.head(P3)).head, taken);
 });
 
 test('turns before Automatic capture began, which it never covered, stay capturable', async t => {
@@ -1462,9 +1467,9 @@ test('a capture moves past an earlier window only while every byte of it is unch
   assert.match((await A.head(Z)).capture.evidence[0].text, /Owner: Dana/);
 });
 
-test('a window selected but never run is run, not passed on turns an earlier capture took', async t => {
+test('a window selected but never run is run, not passed on turns another capture took', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
-  const [P1, P2, C1, C2, C3] = Array.from({ length: 5 }, () => randomUUID());
+  const [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
   await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
   await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Owner: Dana.', P2), A.reply('Noted.')]);
   const bind = async promptId => {
@@ -1472,25 +1477,25 @@ test('a window selected but never run is run, not passed on turns an earlier cap
     const bound = await A.resolve(call);
     return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
   };
-  const first = await bind(C1);
-  assert.deepEqual(await captureChatTurns(f.capability, first), { turns: 2, more: false, leftOut: 0 });
-  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
-  // A prompt of that window changes in place, so the next capture chooses a
-  // window over the same turns again, and stops before running it.
-  const text = await fs.readFile(A.file, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Owner: Dana.')));
-  const handle = openSync(A.file, 'r+'); try { writeSync(handle, Buffer.from('Owner: Dano.'), 0, 12, at); } finally { closeSync(handle); }
-  const second = await bind(C2), slow = slowReads(t);
+  // The first capture selects its window but runs out of time to run it.
+  const first = await bind(C1), slow = slowReads(t);
   slow.state.jump = 32_000;
-  assert.deepEqual(await captureChatTurns(f.capability, second, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
-  const replacement = (await A.selection()).state.explicitScopes.at(-1);
-  assert.deepEqual(replacement.unitIds, [P1, P2]);
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
   slow.state.skew = slow.state.jump = 0;
-  await excludeChatTurn(f.capability, { selection: second.selection, source: second.source, unitId: C2 });
-  // Its turns' heads come from the earlier window: it is read and run, not
-  // passed as finished.
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [selected] = (await A.selection()).state.explicitScopes;
+  // Another capture of the same turns, selected and run on its own, takes them.
+  const selection = { ...first.selection, unitId: null }, current = await A.selection();
+  const other = await selectExplicitCapture(f.capability, { selection, sourcePath: A.file, expectedSourceIdentity: current.state.source.fileIdentity,
+    expectedSelectionHash: current.hash, operationId: randomUUID(), kind: 'historical', unitIds: [P1, P2],
+    readRange: { fromByte: selected.start.startByte, endByte: selected.end.endByte } });
+  await runSelectedCapture(f.capability, { selection, scopeId: other.state.explicitScopes.at(-1).id, expectedSelectionHash: other.hash, unitIds: [P1, P2] });
+  assert((await A.head(P1)).head); assert((await A.head(P2)).head);
+  // The typed window never ran: its turns' captures came from another one, so
+  // it is read and run, not passed as finished.
   const reads = [];
-  await captureChatTurns(f.capability, await bind(C3), { now: slow.clock, observeRead: read => reads.push(read) });
-  assert(reads.some(read => read.purpose === 'range' && read.offset >= replacement.start.startByte && read.offset < replacement.end.endByte));
+  await captureChatTurns(f.capability, await bind(C2), { now: slow.clock, observeRead: read => reads.push(read) });
+  assert(reads.some(read => read.purpose === 'range' && read.offset >= selected.start.startByte && read.offset < selected.end.endByte));
 });
 
 test('a capture moves past turns it left out only while every byte it passed is unchanged', async t => {

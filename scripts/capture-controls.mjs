@@ -1,12 +1,14 @@
 import { randomUUID, createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { assertWorkflowStorage, workflowCollectionGrant } from './workflow-storage.mjs';
-import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, withIntakeLock, withIntakeLockWaiting, intakeSnapshot, intakeJSON, replaceIntakeJSON } from './intake-io.mjs';
+import { openWorkflowIntake, openExplicitCaptureIntake, inspectIntakeStore, withIntakeLock, withIntakeLockWaiting, intakeSnapshot, intakeJSON, replaceIntakeJSON, intakePath } from './intake-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { canonicalWorkflowProject, validateWorkflowPlacement } from './workflow-paths.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { readContinuesLink, readContinuedLink, continuationTarget, continuationOrigin } from './claude-continuation.mjs';
 import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom, readCaptureHead, readReaderProgress, verifySourceCursor } from './intake-store.mjs';
-import { openGuarded } from './file-io.mjs';
+import { openGuarded, lstatOrNull } from './file-io.mjs';
 import { inspectSourceBoundary, newSelectionState, currentIntervals, stableSourceIdentity, MAX_SELECTION_BYTES } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.mjs';
@@ -15,7 +17,7 @@ import { processScope, READER_BLOCK_CODES } from './collection-worker.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { withWorkflowBudget } from './workflow-budget.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
-import { keys, nativeId, hash, integer, list, unique, choice, canonicalJSON, digest, digestId, fail, safeErrorCode } from './workflow-values.mjs';
+import { keys, nativeId, isNativeId, hash, integer, list, unique, choice, canonicalJSON, digest, digestId, fail, safeErrorCode } from './workflow-values.mjs';
 
 const identityOf = ({ client, sessionId }) => ({ client, sessionId });
 const oldHash = value => { if (value !== null) hash(value); };
@@ -490,53 +492,43 @@ async function advanceChatCursor(capability, chat, source, position, { now, sign
 
 // Where the next window may start: past the chat's own start (`floor`), its
 // last typed or explicit capture and how far captures read past turns they
-// left out; and the stretches Automatic capture covered (from where it began
-// to the worker's progress, or its pause), whose turns a window skips, so no
-// turn is captured twice. Turns before Automatic capture began, which it never
-// covered, stay capturable. Each counts only while the transcript still holds it.
+// left out, each only while the transcript still holds every byte it passed.
+// Stretches Automatic capture covered are not passed unread: a window reads
+// them and skips the turns Automatic capture took, so no turn is captured
+// twice and a turn written into them later is never skipped as covered.
 async function chatStart(store, chat, state, floor, source) {
   let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
   const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
-  const { cursor } = await readChatCursor(store, chat, source, { stretch: true });
-  if (cursor) later(cursor.offset, cursor.startsMidRecord);
   // Latest first: the first capture that still holds is the one that counts.
   const scopes = [...(state?.explicitScopes ?? [])].sort((a, b) => scopeEnd(b).endByte - scopeEnd(a).endByte);
   for (const scope of scopes) {
     if (scopeEnd(scope).endByte <= start.eofByte) break;
     if (await scopeHolds(source, scope)) { later(scopeEnd(scope).endByte); break; }
   }
-  const covered = [];
-  for (const interval of state ? currentIntervals(state) : []) {
-    // Only what Automatic capture has read is covered: the stretch up to the
-    // worker's progress while its anchor still matches, and no further than
-    // where a pause ended the interval. A pause turn's record, which the reader
-    // may anchor before its progress gets there, is not coverage: the turns
-    // before it are not captured yet, and the pause turn itself is left out by
-    // its own exclusion. Coverage ends where an anchor holds: at the pause's
-    // end only when the progress is anchored exactly there. Past it, the
-    // progress anchors nothing at the pause's end, so coverage ends with the
-    // pause turn's record while that holds; only the pause turn's own records
-    // follow it, which a typed capture leaves out. The stretch starts where
-    // Automatic capture began, and counts only while the transcript still holds
-    // that start's record.
-    const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
-    let verified = false;
-    if (cursor) {
-      try { await verifySourceCursor(source, cursor); verified = true; }
-      catch (error) { if (!SOURCE_CONFLICTS.includes(error.code)) throw error; }
-    }
-    const { upper } = interval;
-    let to = verified ? { eofByte: cursor.offset, startsMidRecord: false } : null;
-    if (upper && to && to.eofByte === upper.eofByte) to = { eofByte: upper.eofByte, startsMidRecord: upper.startsMidRecord };
-    else if (upper && to && to.eofByte > upper.eofByte) {
-      to = upper.record && upper.record.endByte <= upper.eofByte && await holds(source, upper.record.endByte, upper.record)
-        ? { eofByte: upper.record.endByte, startsMidRecord: false } : null;
-    }
-    if (to && to.eofByte > interval.lower.eofByte && await holds(source, interval.lower.eofByte, interval.lower.record)) {
-      covered.push({ from: interval.lower.eofByte, to });
+  // The position past turns a capture left out counts where it is later
+  // still, and only while the stretch it passed is unchanged.
+  const { cursor } = await readChatCursor(store, chat, source);
+  if (cursor && cursor.offset > start.eofByte && (await readChatCursor(store, chat, source, { stretch: true })).cursor) later(cursor.offset, cursor.startsMidRecord);
+  return { start };
+}
+
+// The turns of this chat with a capture, or one since pruned: one guarded
+// listing of their folders, not a read per turn. Only a plain `<turn>.json`
+// entry counts; anything else leaves its turn capturable.
+const CAPTURED_UNITS_LIMIT = 100_000;
+async function capturedUnits(store, chat) {
+  const units = new Set();
+  for (const folder of [`heads/${chat.client}/${nativeId(chat.sessionId)}`, `pruned/${chat.client}/${nativeId(chat.sessionId)}`]) {
+    const dir = path.dirname(await intakePath(store, 'state', `${folder}/.inspect`)), stat = await lstatOrNull(dir);
+    if (!stat) continue;
+    if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.realpath(dir) !== dir) fail('UNSAFE_INTAKE_PATH');
+    for await (const entry of await fs.opendir(dir)) {
+      const unitId = entry.name.endsWith('.json') ? entry.name.slice(0, -5) : null;
+      if (entry.isFile() && isNativeId(unitId)) units.add(unitId);
+      if (units.size > CAPTURED_UNITS_LIMIT) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
     }
   }
-  return { start, covered: covered.sort((a, b) => a.from - b.from) };
+  return units;
 }
 
 // One bounded read of the source from `start`: its turns, in order, and its
@@ -571,14 +563,14 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   const continuation = await chatContinuation(store, chat, source.path, source.fileIdentity, observeRead);
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
   const denied = deniedUnits(current.state), leftOut = [];
-  let { start, covered } = await chatStart(store, chat, current.state, floor, observed.source);
+  let { start } = await chatStart(store, chat, current.state, floor, observed.source);
   const from = start.eofByte;
-  // Turns Automatic capture covered are skipped like excluded turns; a read
-  // never starts inside such a stretch.
-  const coveredAt = offset => covered.some(range => offset >= range.from && offset < range.to.eofByte);
-  const skipped = item => denied.has(item.unitId) || coveredAt(item.record.startByte);
+  // A turn already captured (by Automatic capture or an earlier capture,
+  // including one since pruned) is skipped like an excluded turn. Whether a
+  // turn was captured is read from its capture, never from where it lies.
+  const taken = await capturedUnits(store, chat);
+  const skipped = item => denied.has(item.unitId) || taken.has(item.unitId);
   for (let scan = 0; scan < scanWindows; scan++) {
-    for (const range of covered) if (start.eofByte >= range.from && start.eofByte < range.to.eofByte) start = { ...range.to };
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
     if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };
     // Where a later read may resume, with an anchor taken from this read: the

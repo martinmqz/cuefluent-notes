@@ -97,9 +97,12 @@ earlier capture or pause that the transcript no longer matches (cut back or
 rewritten in place) is not trusted: capture starts from an earlier point the
 transcript still matches. Before moving past the latest window or the turns a
 capture last passed as left out, capture checks every byte of that stretch
-against a hash kept when it was passed; a stretch Automatic capture covered is
-checked at the records at its ends. A window chosen but never run is run
-before a later window, even when its turns were captured before. A turn that cannot be captured within those limits (larger than a window, or
+against a hash kept when it was passed. Turns Automatic capture took are
+recognized by their captures, never skipped by where they lie: capture reads the
+stretch Automatic capture covered and passes only turns already captured or left
+out, so in a long chat the first capture may need more than one command to read
+past it. A window chosen but never run is run before a later window, even when
+its turns were captured before. A turn that cannot be captured within those limits (larger than a window, or
 ending in a record too large to anchor) is left out, and the reply says so; it
 never blocks the chat's later turns. Turns already left out stay out. In a chat
 Automatic capture covers it captures nothing and says so, and in a chat whose

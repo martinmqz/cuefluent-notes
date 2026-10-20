@@ -1506,6 +1506,23 @@ test('typed capture takes a turn rewritten into the paused stretch after the pau
   });
 });
 
+test('typed capture takes a turn rewritten in place inside the stretch Automatic capture covered', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await parent.work('Decision: ship on Friday.'); const middle = await parent.work('Owner: Dana.'); await parent.work('Budget: ten.');
+  assert.equal((await run()).saved, 3);
+  const rpc = await h.call('pause_capture', {}); assert.equal(body(rpc).capture, 'paused'); await parent.finish(rpc); await run();
+  // The middle turn is rewritten in place as a turn that was never captured.
+  // Where Automatic capture began and the worker's progress both still hold.
+  const inserted = randomUUID(), text = await fs.readFile(parent.source.path, 'utf8');
+  assert.equal(inserted.length, middle.length);
+  const handle = await fs.open(parent.source.path, 'r+');
+  try { await handle.write(Buffer.from(text.replaceAll(middle, inserted)), 0, Buffer.byteLength(text), 0); } finally { await handle.close(); }
+  const typed = await h.call('capture_turns', {}), reply = body(typed); await parent.finish(typed);
+  assert.equal(reply.capture, 'captured', reply.statusText); assert.equal(reply.turns, 1);
+  assert.match((await readCaptureHead(parent.store, { ...identity, unitId: inserted })).capture.evidence[0].text, /Owner: Dana/);
+});
+
 test('typed capture in a paused chat takes a turn Automatic capture has not read yet', async t => {
   const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
   const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
