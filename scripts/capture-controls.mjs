@@ -368,7 +368,9 @@ async function chatStart(store, chat, state, floor, source) {
     // the reader anchors it. It counts while the transcript still reaches that
     // end and holds the record and the progress before it, or, before the
     // record is anchored, once the verified progress has reached it. Otherwise
-    // capture starts at the verified progress, or where Automatic capture began.
+    // capture starts at the verified progress, or where Automatic capture began
+    // while the transcript still holds that start (its first record, once
+    // anchored), or else at the chat's own start.
     const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
     let verified = false;
     if (cursor) {
@@ -380,7 +382,7 @@ async function chatStart(store, chat, state, floor, source) {
       : verified && cursor.offset >= upper.eofByte);
     if (paused) later(upper.eofByte, upper.startsMidRecord);
     else if (verified) later(cursor.offset);
-    else later(interval.lower.eofByte, interval.lower.startsMidRecord);
+    else if (await holds(source, interval.lower.eofByte, interval.lower.record)) later(interval.lower.eofByte, interval.lower.startsMidRecord);
   }
   return start;
 }

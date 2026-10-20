@@ -384,6 +384,34 @@ test('capture does not trust where an earlier capture ended once the transcript 
   });
 });
 
+test('capture does not trust where Automatic capture began once the transcript was cut back and regrown', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, P4, C1] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]);
+  const size = (await fs.stat(A.file)).size;
+  await A.append([A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const lower = (await A.selection()).state.intervals.at(-1).lower;
+  assert.notEqual(lower.record, null);
+  // The project switches to Manual; the transcript is cut back in place to
+  // before Automatic capture began, then grows past where it began and past
+  // the binding window.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  await fs.truncate(A.file, size);
+  await A.append([A.prompt('Replacement: ship on Monday.', P4),
+    ...Array.from({ length: 3 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))), A.reply('Noted.')]);
+  assert((await fs.stat(A.file)).size > lower.record.endByte);
+  await A.hook('UserPromptSubmit', C1);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call, f.capability);
+  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId });
+  assert.match((await A.head(P4)).capture.evidence[0].text, /ship on Monday/);
+});
+
 test('capture finishes the latest unfinished capture of either kind before reading further', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
   const [P1, C1, C2] = Array.from({ length: 3 }, () => randomUUID());
