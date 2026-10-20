@@ -1217,6 +1217,9 @@ test('a scope result is a reader block when any turn is held on one, not only th
   for (const code of ['UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED', 'SOURCE_IDENTITY_MISMATCH']) {
     assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', code] }), code);
   }
+  // So is saved capture state that is malformed.
+  for (const code of ['INVALID_CAPTURE_HEAD', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+    'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']) assert.equal(readerBlockOf({ pending: code }), code);
   // A turn captured by a newer reader version is held on every pass.
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_READER'] }), 'UNSUPPORTED_CLAUDE_READER');
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted'] }), null);

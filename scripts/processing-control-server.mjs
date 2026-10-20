@@ -360,6 +360,13 @@ const COLLECTION_STOPS = Object.freeze({
   CAPTURE_REVISION_SCOPE_CONFLICT: 'a turn of it was captured from outside the stretch now selected',
   CAPTURE_BASELINE_REQUIRED: 'a turn of it has earlier records that no capture covers',
   SOURCE_IDENTITY_MISMATCH: 'its transcript no longer matches the chat it was selected for',
+  INVALID_CAPTURE_HEAD: 'the saved record of a captured turn is not valid',
+  INVALID_INTAKE_METADATA: 'its saved capture state is not valid',
+  UNSUPPORTED_CAPTURE_SCHEMA: 'a saved capture of one of its turns uses a format this version of Cuefluent Notes does not support',
+  INVALID_CAPTURE_READER: 'a saved capture of one of its turns names a reader that is not valid',
+  INVALID_CAPTURE_COVERAGE: 'a saved capture of one of its turns is not valid',
+  INVALID_CAPTURE_RANGE: 'a saved capture of one of its turns is not valid',
+  CAPTURE_HASH_MISMATCH: 'a saved capture of one of its turns no longer matches its own hash',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));

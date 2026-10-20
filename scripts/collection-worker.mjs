@@ -190,7 +190,10 @@ export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUP
   // A turn whose earlier capture this reader cannot extend, or that conflicts
   // with the current transcript, is held on every pass.
   'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
-  'SOURCE_IDENTITY_MISMATCH']);
+  'SOURCE_IDENTITY_MISMATCH',
+  // Saved capture state that is malformed fails every visit that reads it.
+  'INVALID_CAPTURE_HEAD', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+  'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']);
 
 // The reader block a visit of a chat last ended on, kept per chat: a later
 // pass that does not visit the chat cannot erase it the way it rebuilds the
