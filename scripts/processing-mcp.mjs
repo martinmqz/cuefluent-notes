@@ -15,7 +15,7 @@ import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingSh
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
-import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, holdsTypedCapture } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply } from './capture-controls.mjs';
 import { readReaderBlock, clearReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
@@ -762,11 +762,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (state?.safetyStop) outcome = { capture: 'full' };
     else if (tool === 'capture_turns') {
       // A chat Automatic capture covers but has stopped is not covered. A
-      // paused chat is captured by hand, unless Automatic capture stopped on a
-      // record that a typed capture cannot read past either.
-      const stop = automatic ? (await collectionStop(capability, source)).collection?.code : undefined;
+      // paused chat is captured by hand: a record its own windows cannot read
+      // past stops them and the reply says why, while a stop in Automatic
+      // capture's own saved progress never reaches them.
+      const stop = automatic && !paused ? (await collectionStop(capability, source)).collection?.code : undefined;
       if (automatic && !paused) outcome = { capture: stop ? 'stopped' : 'automatic' };
-      else if (stop && holdsTypedCapture(stop)) outcome = { capture: 'stopped' };
       else {
         let captured = null;
         // A record the reader cannot read stops every capture of the chat at

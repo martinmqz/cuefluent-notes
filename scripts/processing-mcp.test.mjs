@@ -1392,22 +1392,29 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
   });
 });
 
-test('a paused chat keeps a reader stop that typed capture cannot pass, and passes one it can', async t => {
+test('a paused chat is captured by hand up to a reader stop typed capture meets itself, and past one it does not', async t => {
   const cases = {
-    // Bytes that are no transcript record: typed capture would read them too.
-    INVALID_SESSION_RECORD: [{ capture: 'stopped' }, async parent => {
+    // Bytes that are no transcript record: typed capture reads them too, and says so.
+    INVALID_SESSION_RECORD: [{ capture: 'blocked' }, async parent => {
       await fs.appendFile(parent.source.path, 'not a transcript record\n');
       await parent.work('Held behind the block.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
     }],
     // A turn too large to anchor: typed capture leaves it out and goes on.
     SOURCE_ANCHOR_LIMIT: [{ capture: 'nothing-new', leftOut: 1 }, parent => parent.work('Long final answer.', { last: 'x'.repeat(70 * 1024) })],
+    // Automatic capture's own saved progress is not valid: typed capture reads
+    // its own windows and never meets it.
+    INVALID_INTAKE_METADATA: [{ capture: 'captured' }, async (parent, f, identity) => {
+      const { id } = (await readSelection(parent.store, identity)).state.intervals.at(-1);
+      await fs.writeFile(path.join(f.collection.intakeStateDir, 'progress', 'codex', identity.sessionId, `${id}.json`), '{not json');
+      await parent.work('Decision: taken by hand.');
+    }],
   };
   for (const [code, [expected, block]] of Object.entries(cases)) await t.test(code, async t => {
     const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
     const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
     await parent.work('Captured automatically.'); await run();
-    await block(parent);
-    assert((await run()).pending.includes(code));
+    await block(parent, f, identity);
+    const result = await run(); assert(result.pending.includes(code), JSON.stringify(result));
     const paused = await h.call('pause_capture', {}); assert.equal(body(paused).capture, 'paused'); await parent.finish(paused);
     assert.equal(await readReaderBlock(parent.store, identity), code);
     const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
