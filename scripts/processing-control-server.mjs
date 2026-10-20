@@ -343,6 +343,7 @@ const COLLECTION_STOPS = Object.freeze({
   LATE_NATIVE_EVIDENCE_REQUIRES_REVIEW: 'its transcript has a new record for a turn that was already captured',
   UNSUPPORTED_CODEX_HEADER: 'its transcript starts in a form Cuefluent Notes does not support',
   UNSUPPORTED_CLAUDE_HEADER: 'its transcript starts in a form Cuefluent Notes does not support',
+  READER_CHECKPOINT_ALLOCATION_CAPACITY: 'its saved reading progress has used all the space Cuefluent Notes sets aside for one chat',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));

@@ -1206,6 +1206,8 @@ test('a scope result is a reader block when any turn is held on one, not only th
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_CONTENT'] }), 'UNSUPPORTED_CLAUDE_CONTENT');
   assert.equal(readerBlockOf({ pending: 'INVALID_SESSION_RECORD', holds: ['INVALID_SESSION_RECORD'] }), 'INVALID_SESSION_RECORD');
   assert.equal(readerBlockOf({ pending: 'CLAUDE_HISTORY_REQUIRES_REVIEW' }), 'CLAUDE_HISTORY_REQUIRES_REVIEW');
+  // A page reservation at its limit fails every later visit the same way.
+  assert.equal(readerBlockOf({ pending: 'READER_CHECKPOINT_ALLOCATION_CAPACITY' }), 'READER_CHECKPOINT_ALLOCATION_CAPACITY');
   assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted'] }), null);
   assert.equal(readerBlockOf({ saved: 1, pending: null, drained: true }), null);
 });
