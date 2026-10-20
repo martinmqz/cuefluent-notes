@@ -332,6 +332,7 @@ const COLLECTION_STOPS = Object.freeze({
   CONFLICTING_CODEX_CALL: 'its transcript reuses one tool call for two different calls',
   CODEX_ROLLBACK_REQUIRES_REVIEW: 'its transcript rolls back turns that were already recorded',
   SESSION_UNIT_LIMIT: 'its transcript has more turns in one stretch than Cuefluent Notes reads',
+  SOURCE_ANCHOR_LIMIT: 'its transcript has a turn whose last record is too large for Cuefluent Notes to track',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));

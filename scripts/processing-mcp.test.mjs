@@ -1185,6 +1185,9 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
       await fs.truncate(parent.source.path, Buffer.byteLength(text.slice(0, last)));
       await fs.appendFile(parent.source.path, JSON.stringify({ timestamp, ordinal, type: 'synthetic_unknown', payload: { type: 'synthetic' } }) + '\n');
     }],
+    // A finished turn whose terminal record is too large to anchor.
+    SOURCE_ANCHOR_LIMIT: [/its transcript has a turn whose last record is too large for Cuefluent Notes to track\./,
+      parent => parent.work('Long final answer.', { last: 'x'.repeat(70 * 1024) })],
   };
   for (const [code, [reason, block]] of Object.entries(cases)) await t.test(code, async t => {
     const { f, h, parent } = await nativeIngressFixture(t);
