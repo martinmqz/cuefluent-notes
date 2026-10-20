@@ -3,8 +3,9 @@ name: Checks
 on:
   # Draft pull requests skip every job; marking one ready runs them. The draft
   # package-update PR that publication opens (chore/publish-*) still runs.
+  # Converting one back to draft starts a skipped run that cancels its checks.
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
   workflow_call:

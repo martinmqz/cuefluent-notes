@@ -181,7 +181,8 @@ satisfy the required check. Published assets are neither rebuilt nor replaced by
 the shorter path. Draft pull requests skip every Checks job, so their required
 matrix checks do not exist until the pull request is marked ready for review,
 which runs them; the draft package-update PR from publication still runs. A newer
-push to a pull request cancels its running checks.
+push to a pull request, or converting it back to draft, cancels its running
+checks.
 
 The `client-smoke` job skips tag refs. On the full path it checks disposable
 client registration using separately built packages and, when present, the
