@@ -27,13 +27,15 @@ Explain the choices in ordinary terms, using the
 [words people see](../SKILL.md#words-people-see):
 
 - **Capture mode: Manual or Automatic.** Manual, the default, captures nothing on
-  its own: typing `capture` in a chat captures its finished turns since the last
-  capture. Automatic lets the hooks capture later turns of the route's clients'
+  its own: typing `capture` in a chat captures its finished turns not captured
+  yet, from the chat's start. Automatic lets the hooks capture later turns of the route's clients'
   sessions in the project folder (a narrower excluded folder stays out), or of
   listed sessions only; `pause chat` stops it for one chat and `resume chat`
   restarts it. Capturing makes sensitive local JSON copies using scripts, with no
   model calls. It starts from its saved boundary, never earlier history: each
-  session's first prompt after that boundary marks it and is not captured.
+  session's first prompt after that boundary marks it and is not captured. A
+  typed `capture` in a paused chat is explicit and also takes turns from before
+  that boundary.
   Captured sessions can include secrets and private remarks; there is no automatic
   redaction. They are not finished Cuefluent notes.
 - **Processing mode: Manual or Prompted.** Manual runs only when requested.

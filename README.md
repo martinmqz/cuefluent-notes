@@ -116,7 +116,7 @@ can need another `process` later; use
 `process repo` or `process chat` to narrow it, `process resume` for saved
 unfinished work, `status` for progress, and `process cancel` to stop owned work
 while keeping captured turns pending. With capture mode Manual, type `capture` in a
-chat to capture its finished turns since the last capture; with Automatic, type
+chat to capture its finished turns not captured yet, from the chat's start; with Automatic, type
 `pause chat` or `resume chat` to stop or restart capturing that chat. Processing
 prepares drafts; only your exact typed
 `save` (or Save in the Codex form) saves them.

@@ -450,8 +450,9 @@ collection, extend its saved boundary or create a capture of the paused input.
 Sources selected only through explicit capture also support these controls.
 When Automatic capture does not cover a session, hooks register only source
 metadata and its current byte boundary, whatever the processing mode. The explicit control request verifies
-the source and reads at most its recent 2 MiB after that boundary. No capture
-interval or worker is created. A policy change requires a fresh applicable hook
+the source and reads at most its recent 2 MiB after that boundary. A typed
+`capture` is the exception: it reads the chat's finished turns from the chat's
+start, one bounded window per command. No capture interval or worker is created. A policy change requires a fresh applicable hook
 binding. Hooks in unconfigured and excluded projects still write nothing; explicit
 CLI processing remains available without a native source-chat binding.
 

@@ -629,7 +629,7 @@ test('the command list is built from the grammar in the client spelling and carr
       : 'Cuefluent: Type one of these yourself, exactly as written:', '',
       `- ${command} setup: choose the capture and processing modes.`,
       `- ${command} status: show processing, captured turns and drafts (also: status --verbose).`,
-      `- ${command} capture: capture this chat's finished turns since the last capture.`,
+      `- ${command} capture: capture this chat's finished turns not captured yet.`,
       `- ${command} pause chat: stop Automatic capture of this chat from now on.`,
       `- ${command} resume chat: restart Automatic capture of this chat.`,
       `- ${command} process: draft notes from captured turns (also: process repo, process chat, process resume, process cancel).`,

@@ -64,7 +64,7 @@ by hand does not attach the skill and is no command:
 | `setup` | Not a processing control: follow [setup](references/setup.md). | none |
 | `status` | Show execution, bounded collection inventory, unfinished operations and drafts awaiting review. | `processing_status` |
 | `status --verbose` | The same, plus diagnostics, identifiers and each draft's exact revision. | `processing_status`; in Claude with `verbose: true` |
-| `capture` | In a chat Automatic capture does not cover, or has paused: capture its finished turns since the last capture, oldest first, a bounded window per command; the reply says when more are waiting. In a chat Automatic capture covers, it captures nothing. Never processes or saves. | `capture_turns` |
+| `capture` | In a chat Automatic capture does not cover, or has paused: capture its finished turns not captured yet, oldest first from the chat's start (in a paused chat, also turns from before Automatic capture began, never those of an earlier pause), a bounded window per command; the reply says when more are waiting. In a chat Automatic capture covers, it captures nothing. Never processes or saves. | `capture_turns` |
 | `pause chat` | Stop Automatic capture of this chat from this turn on; turns already captured stay. | `pause_capture` |
 | `resume chat` | Restart Automatic capture of a chat that was paused. | `resume_capture` |
 | `process` | Draft from pending retained captures across the existing collection, including its configured repos and clients. Resume unfinished work first. | `process_selected_captures` with no scope argument |
@@ -159,6 +159,7 @@ processing captured turns still needs an explicit request, and each affected
 route's capture mode and session selection are reported separately.
 
 Future collection preserves the registered EOF and never imports earlier history.
+A typed `capture` is explicit and reads the chat from its start instead.
 Without a proven boundary at that floor, the first later full native unit establishes
 the boundary and is excluded; subsequent eligible units can be collected. Report
 that coverage limit. Current/historical capture instead needs explicit authorization

@@ -87,7 +87,7 @@ const SUGGESTION_FORMS = Object.freeze([...PROCESSING_CONTROL_FORMS, ...PROCESSI
 const HELP_SUMMARIES = Object.freeze({
   setup: 'choose the capture and processing modes',
   status: 'show processing, captured turns and drafts',
-  capture: 'capture this chat\'s finished turns since the last capture',
+  capture: 'capture this chat\'s finished turns not captured yet',
   pause: 'stop Automatic capture of this chat from now on',
   resume: 'restart Automatic capture of this chat',
   process: 'draft notes from captured turns',
