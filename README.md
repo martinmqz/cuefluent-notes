@@ -94,11 +94,11 @@ for this user. Clone the repository and run its install:codex npm script
 2. Say **“Set up Cuefluent Notes.”** Select a project and where Markdown should go.
    The agent prepares private, machine-local evidence and state directories.
 3. Choose the capture mode and the processing mode separately. Capture mode
-   Manual captures nothing on its own; Automatic captures future turns of every
-   session in the project folder, or of listed sessions only. Processing mode
-   Manual runs when you type `process`; Prompted prepares changes for your
-   approval (Save / Skip). Automatic processing has no trigger yet, so setup
-   does not offer it.
+   Manual captures nothing on its own; Automatic captures later turns of the
+   chosen clients' sessions in the project folder, or of listed sessions only,
+   starting after each session's boundary prompt. Processing mode Manual runs
+   only when you ask; Prompted prepares changes for your approval (Save / Skip).
+   Automatic processing has no verified trigger, so setup does not offer it.
 
 **Processing starts with an explicit request.** For the reusable processing chat,
 type `/cuefluent-notes process` in Claude or `$cuefluent-notes process` in Codex;
@@ -110,7 +110,9 @@ native form), then decide by typing `save <code>` or
 applies only to the draft your last typed `review` showed. A draft or destination
 that changed after your review is refused and nothing is saved. `help` lists
 every action, also before setup.
-Plain `process` covers every captured turn waiting for the notes folder's projects; use
+Plain `process` drafts from the pending captured turns of every project and client
+saving to this notes folder or file. One request takes at most 100 of them, so a backlog
+can need another `process` later; use
 `process repo` or `process chat` to narrow it, `process resume` for saved
 unfinished work, `status` for progress, and `process cancel` to stop owned work
 while keeping captured turns pending. With capture mode Manual, type `capture` in a

@@ -14,7 +14,7 @@ import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessin
 import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingShortcut, beginProcessingShortcutControl, readProcessingShortcutControl, finishProcessingShortcutControl } from './processing-shortcuts.mjs';
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
-import { runProcessingControlServer, processingControlStatusView, reviewNotePath, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
 import { captureChatTurns, controlChatCapture, excludeCommandTurn } from './capture-controls.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
@@ -315,7 +315,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       fail('PROCESSING_REVIEW_SUPERSEDED');
     }
     replayed.set(source, receipt);
-    return receipt.response;
+    return replayedView(receipt.response);
   }
   async function acknowledgeFinishedReview(controller, capability, status, { persist = true } = {}) {
     if (status.state !== 'awaiting-review') return status;

@@ -1,6 +1,6 @@
 ---
 name: cuefluent-notes
-description: Capture and organize knowledge for fast recall in Cuefluent. Use for setup and status, bounded collection from explicitly selected Codex or Claude sessions, processing captured evidence into searchable Markdown, and direct saves, updates, summaries, documentation, meetings, and knowledge-base notes. Collection and Markdown processing have independent consent; ordinary Markdown editing enables neither.
+description: Capture and organize knowledge for fast recall in Cuefluent. Use for setup and status, bounded capture from explicitly selected Codex or Claude sessions, processing captured evidence into searchable Markdown, and direct saves, updates, summaries, documentation, meetings, and knowledge-base notes. Capture and Markdown processing have independent consent; ordinary Markdown editing enables neither.
 ---
 
 # Cuefluent Notes
@@ -44,7 +44,7 @@ talking to people, use these words and never say “collection”:
 | Internal name | Say |
 | --- | --- |
 | collection enabled or disabled (route `collection`) | capture mode: Automatic or Manual |
-| collection selection `project` or `sessions` | every session in the project folder, or listed sessions |
+| collection selection `project` or `sessions` | every session of the route's clients in the project folder (a narrower excluded folder stays out), or listed sessions |
 | a capture, captured evidence | a captured turn; together, captured sessions |
 | a collection (`collections`, `collectionId`) | the notes folder or file, with its projects |
 | collection worker, paused or stopped collection | capturing; automatic capture paused or stopped |

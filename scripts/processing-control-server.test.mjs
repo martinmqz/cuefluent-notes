@@ -5,7 +5,10 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Writable } from 'node:stream';
 import { canonicalJSON, digest } from './workflow-values.mjs';
-import { runProcessingControlServer, processingControlStatusView, processingControlRefusalText, reviewPathLink } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView, processingControlRefusalText, reviewPathLink,
+  PROCESSING_STATUS_DETAILS, PROCESSING_REVIEW_OUTCOMES, PROCESSING_REFUSAL_CODES, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
+import { collectionHookOutput } from './collection-hooks.mjs';
+import { PROCESSING_SCOPES } from './workflow-values.mjs';
 import MarkdownIt from 'markdown-it';
 import { withReviewPreview } from './test-support/processing-review.mjs';
 
@@ -650,7 +653,7 @@ test('plain status lists drafts as code and path; status --verbose adds every de
     requestId, chat: { client: 'codex', sessionId: chatId }, scope: 'repo', inventory, commandPrefix: command };
   const drafts = [{ code: 'k2mn9p', path: 'notes/a.md', fileCount: 1 }, { code: 'm3np4q', path: 'notes/"b" .md', fileCount: 3 }];
   const plain = processingControlStatusView({ ...base, drafts }, { collectionId: 'example' });
-  assert.equal(plain.statusText, ['Cuefluent: Draft ready for review. Scope: repo. Inventory (partial): 3 pending, 1 claimed, 2 drafts awaiting review.',
+  assert.equal(plain.statusText, ['Cuefluent: Draft ready for review. Scope: this repository. Inventory (partial): 3 pending, 1 claimed, 2 drafts awaiting review.',
     ['Drafts awaiting review:', '', '- k2mn9p "notes/a.md"', '- m3np4q "notes/\\"b\\"\\u2028.md" (+2 more)'].join('\n'),
     `Read one with ${command} review <draft code>.`, `For details, type ${command} status --verbose.`].join('\n\n'));
   // One draft is counted in the singular.
@@ -662,7 +665,7 @@ test('plain status lists drafts as code and path; status --verbose adds every de
   const lines = verbose.statusText.split('\n');
   // Every detail is its own list item; counts are singular where they are one.
   assert.deepEqual(lines.slice(0, 9), ['Cuefluent: Draft ready for review.', '', '- Status: awaiting-review; next action: review.',
-    '- Diagnostics: PROCESSING_EXCLUSION_UNVERIFIED.', `- Request: ${requestId}.`, `- Processing chat: codex session ${chatId}.`, '- Scope: repo.',
+    '- Diagnostics: PROCESSING_EXCLUSION_UNVERIFIED.', `- Request: ${requestId}.`, `- Processing chat: codex session ${chatId}.`, '- Scope: this repository.',
     '- Inventory (partial): 3 pending, 1 claimed, 0 blocked by a claim, 2 inspected, 4 handled, 1 unfinished operation, 2 awaiting review.',
     '- Progress: 2 selected, 0 unattempted, 1 handled, 0 unavailable, 0 cancelled, 1 unfinished operation, 2 awaiting review.']);
   assert.deepEqual(lines.slice(9, 13), ['', 'Drafts awaiting review:', '',
@@ -844,6 +847,8 @@ test('native review form isolates exact proposal bytes and serializes later tool
     const description = form.params.requestedSchema.properties.decision.description;
     for (const semantics of ['Save writes the exact proposal', 'Skip handles these captured turns without saving',
       'Cancel releases the operation and keeps its captured turns pending', 'Later keeps the proposal pending']) assert(description.includes(semantics));
+    // People read the whole form: its words are capture words too.
+    assert.doesNotMatch(JSON.stringify(form.params), /collect|captures/i);
     h.send({ ...tool('processing_status', { collectionId: 'example' }, client === 'claude' ? claudeMeta() : codexMeta()), id: 2 });
     await new Promise(resolve => setImmediate(resolve)); assert.equal(h.calls.some(call => call[0] === 'status'), false);
     h.send({ jsonrpc: '2.0', id: form.id, result: withReviewPreview(form, { action: 'accept', content: { decision: 'save' } }) });
@@ -1275,4 +1280,45 @@ test('a token expiring while native records settle cannot dispatch', async t => 
   const token = view(await h.call(1)).retryToken; now += 59_999;
   assert.equal((await h.call(2, { retryToken: token })).error.data.code, 'PROCESSING_CONTROL_SOURCE_UNVERIFIED');
   assert.deepEqual(h.counts(), { resolutions: 2, dispatches: 0 });
+});
+
+// People see capture words only: "collection" stays in settings, codes and
+// fields. Every reply a status, review, help or refusal can produce is checked.
+test('replies people read never say collection', () => {
+  const states = ['missing', 'creating', 'busy', 'idle', 'awaiting-review', 'blocked', 'completed'];
+  const texts = [], view = value => { try { return processingControlStatusView(value, { collectionId: 'example' }); } catch { return null; } };
+  for (const commandPrefix of ['/cuefluent-notes', '$cuefluent-notes']) {
+    const base = { nextAction: 'none', commandPrefix };
+    for (const statusDetail of PROCESSING_STATUS_DETAILS) {
+      const shown = states.flatMap(status => PROCESSING_SCOPES.flatMap(scope => [false, true].map(verbose =>
+        view({ ...base, status, statusDetail, scope, ...(verbose ? { verbose } : {}) })))).filter(Boolean);
+      assert(shown.length, statusDetail); texts.push(...shown.map(item => item.statusText));
+    }
+    // Each outcome with the draft fields it may carry; every outcome must build.
+    const folder = path.resolve('private-state', 'review', 't7xb88');
+    const named = [{}, { draft: { code: 't7xb88' } }, { draft: { code: 't7xb88', path: 'notes/a.md', fileCount: 2 } },
+      { draft: { code: 't7xb88', folder, fileCount: 1, files: [{ path: 'notes/a.md', bytes: 12, change: 'create' }] } }];
+    const listed = [{}, { drafts: [{ code: 'k2mn9p', path: 'notes/b.md', fileCount: 1 }] }];
+    for (const review of PROCESSING_REVIEW_OUTCOMES) {
+      const shown = states.flatMap(status => named.flatMap(draft => listed.flatMap(drafts => [false, true].map(untyped =>
+        view({ ...base, status, review, ...draft, ...drafts, ...(untyped ? { untyped } : {}) }))))).filter(Boolean);
+      assert(shown.length, review); texts.push(...shown.map(item => item.statusText));
+    }
+    for (const code of COLLECTION_STOP_CODES) for (const verbose of [false, true]) {
+      const shown = view({ ...base, status: 'idle', collection: { state: 'stopped', code }, ...(verbose ? { verbose } : {}) });
+      assert(shown, code); texts.push(shown.statusText);
+    }
+    texts.push(view({ ...base, status: 'missing', help: true }).statusText);
+  }
+  for (const code of PROCESSING_REFUSAL_CODES) for (const client of ['claude', 'codex']) for (const stage of ['binding', 'action']) {
+    for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) texts.push(processingControlRefusalText(code, { client, stage, tool }));
+  }
+  const identity = { client: 'codex', sessionId: randomUUID(), unitId: randomUUID() };
+  for (const status of ['queued', 'paused', 'processing-only', 'intake-blocked']) {
+    const output = collectionHookOutput({ status, selection: identity, notice: { diagnostics: [], pending: ['WORKER_READ_BUDGET'],
+      boundaryExcluded: [{ client: 'codex', sessionId: identity.sessionId, unitId: identity.unitId }] } }, 'UserPromptSubmit');
+    texts.push(output.hookSpecificOutput.additionalContext);
+  }
+  assert(texts.length > 400, `${texts.length} texts`);
+  for (const text of texts) assert.doesNotMatch(text, /collect/i, text);
 });
