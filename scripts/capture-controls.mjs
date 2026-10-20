@@ -459,13 +459,14 @@ async function chatStart(store, chat, state, floor, source) {
   const covered = [];
   for (const interval of state ? currentIntervals(state) : []) {
     // The worker's progress counts while its anchor still matches. A pause
-    // stores only where the transcript ended, and its pause turn's record once
-    // the reader anchors it. It counts while the transcript still reaches that
-    // end and holds the record and the progress before it, or, before the
-    // record is anchored, once the verified progress has reached it. Otherwise
-    // only the stretch up to the verified progress is covered, or none. Either
-    // stretch starts where Automatic capture began, and counts only while the
-    // transcript still holds that start's record.
+    // stores where the transcript ended, and its pause turn's record once the
+    // reader anchors it. The stretch counts through the pause's end only once
+    // the verified progress has reached it, since only progress is bound to the
+    // bytes read there; the pause record, while the transcript and the progress
+    // before it still hold it, vouches only for the stretch through that record.
+    // Otherwise only the stretch up to the verified progress is covered, or
+    // none. Either stretch starts where Automatic capture began, and counts only
+    // while the transcript still holds that start's record.
     const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
     let verified = false;
     if (cursor) {
@@ -473,9 +474,10 @@ async function chatStart(store, chat, state, floor, source) {
       catch (error) { if (!SOURCE_CONFLICTS.includes(error.code)) throw error; }
     }
     const { upper } = interval;
-    const paused = upper && (upper.record ? (!cursor || verified) && await holds(source, upper.eofByte, upper.record)
-      : verified && cursor.offset >= upper.eofByte);
-    const to = paused ? { eofByte: upper.eofByte, startsMidRecord: upper.startsMidRecord } : verified ? { eofByte: cursor.offset, startsMidRecord: false } : null;
+    let to = verified ? { eofByte: cursor.offset, startsMidRecord: false } : null;
+    if (upper && to && to.eofByte >= upper.eofByte) to = { eofByte: upper.eofByte, startsMidRecord: upper.startsMidRecord };
+    else if (upper?.record && (!cursor || verified) && upper.record.endByte <= upper.eofByte && upper.record.endByte > (to?.eofByte ?? 0) &&
+        await holds(source, upper.record.endByte, upper.record)) to = { eofByte: upper.record.endByte, startsMidRecord: false };
     if (to && to.eofByte > interval.lower.eofByte && await holds(source, interval.lower.eofByte, interval.lower.record)) {
       covered.push({ from: interval.lower.eofByte, to });
     }
