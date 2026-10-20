@@ -1,7 +1,7 @@
 import test from './test-support/storage-test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { constants, openSync, writeSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
@@ -248,13 +248,43 @@ test('an explicit capture chosen from an earlier read refuses a window whose rec
   const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
   // The last record is rewritten in place, at the same offsets.
   await fs.writeFile(f.sourcePath, text.slice(0, -lines.at(-1).length) + lines.at(-1).replace('00:00:00.000Z', '00:00:01.000Z'));
-  await assert.rejects(selectExplicitCapture(f.capability, { ...f.request, bounds }), { code: 'SOURCE_ANCHOR_CONFLICT' });
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B], bounds };
+  await assert.rejects(selectExplicitCapture(f.capability, request), { code: 'SOURCE_ANCHOR_CONFLICT' });
   assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
   // With the bytes the window was chosen from, it is selected.
   await fs.writeFile(f.sourcePath, text);
-  const chosen = await selectExplicitCapture(f.capability, { ...f.request, bounds });
+  const chosen = await selectExplicitCapture(f.capability, request);
   const scope = chosen.state.explicitScopes.find(item => item.id === f.request.operationId);
   assert.deepEqual([scope.start.hash, scope.end.hash], [bounds.start, bounds.end]);
+});
+
+test('an explicit capture refuses a window whose bytes changed after the reader read them', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), last = text.slice(text.lastIndexOf('\n', text.length - 2) + 1);
+  // The last record changes in place, at the same offsets, once the reader has
+  // read the window and before anything opens the transcript again.
+  let read = false, rewrites = 0;
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (read && !rewrites && String(file) === f.sourcePath) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+'), changed = Buffer.from(last.replace('00:00:00.000Z', '00:00:01.000Z'));
+      try { writeSync(handle, changed, 0, changed.length, Buffer.byteLength(text) - changed.length); } finally { closeSync(handle); }
+    }
+    return open.call(fs, file, ...rest);
+  });
+  await assert.rejects(selectExplicitCapture(f.capability, f.request, { observeRead: item => { if (item.purpose === 'range') read = true; } }), { code: 'SOURCE_CHANGED' });
+  assert.equal(rewrites, 1);
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+});
+
+test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
+  const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
+  // The window's bytes hold turn B as well, which it does not name.
+  await assert.rejects(selectExplicitCapture(f.capability, { ...f.request, kind: 'historical', bounds }), { code: 'SOURCE_ANCHOR_CONFLICT' });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  const chosen = await selectExplicitCapture(f.capability, { ...f.request, kind: 'historical', unitIds: [A, B], bounds });
+  assert.deepEqual(chosen.state.explicitScopes.map(scope => scope.unitIds), [[A, B]]);
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {

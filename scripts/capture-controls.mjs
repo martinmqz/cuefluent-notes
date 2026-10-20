@@ -191,6 +191,9 @@ async function deriveExplicitScope(capability, request, selection, observeRead) 
   const state = newSelectionState(observed.source), scopeId = randomUUID();
   state.active = true; state.intervals = [{ id: scopeId, lower: { ...observed.boundary,
     eofByte: request.readRange.fromByte, startsMidRecord: false, unitId: null }, upper: null }];
+  // The window is hashed before and after the reader reads it: the scope's
+  // hash then describes the same bytes its turns and anchors were read from.
+  const read = await stretchHash(observed.source, request.readRange.fromByte, request.readRange.endByte);
   const inspected = await reader(selection.client)({ state, scopeId, endByte: request.readRange.endByte, observeRead, continuation });
   if (inspected.blocked || inspected.diagnostics.limited || inspected.diagnostics.pendingTail) fail(inspected.blocked?.code ?? 'INCOMPLETE_EXPLICIT_RANGE');
   const anchors = request.unitIds.map(unitId => inspected.nativeAnchors.find(item => item.unitId === unitId));
@@ -200,8 +203,10 @@ async function deriveExplicitScope(capability, request, selection, observeRead) 
   if (!end || end.endByte !== request.readRange.endByte || end.endByte - end.startByte > 64 * 1024) fail('SOURCE_ANCHOR_LIMIT');
   // The hash of every byte the scope covers: a later capture moves past it
   // only while the transcript still holds exactly these bytes.
-  const contentHash = await stretchHash(observed.source, anchors[0].record.startByte, end.endByte);
-  return { source: observed.source, scope: { unitIds: request.unitIds, start: anchors[0].record, end, contentHash } };
+  const after = await stretchHashes(observed.source, request.readRange.fromByte, request.readRange.endByte, anchors[0].record.startByte, end.endByte);
+  if (after.outer !== read) fail('SOURCE_CHANGED');
+  const turns = inspected.nativeAnchors.filter(item => item.record.startByte >= anchors[0].record.startByte && item.record.startByte < end.endByte).map(item => item.unitId);
+  return { source: observed.source, turns, scope: { unitIds: request.unitIds, start: anchors[0].record, end, contentHash: after.inner } };
 }
 
 /** Preview reads only the explicitly authorized byte window of the named source. */
@@ -228,12 +233,18 @@ export async function selectExplicitCapture(capability, request, { observeRead =
       await assertWorkflowStorage(capability, selection, 'explicitCollect');
       const replay = await replayControl(current, request, store); if (replay) return replay;
       if (current.hash !== request.expectedSelectionHash) fail('STALE_SELECTION');
-      const { source, scope } = await deriveExplicitScope(capability, request, selection, observeRead);
+      const { source, scope, turns } = await deriveExplicitScope(capability, request, selection, observeRead);
       // A window chosen from an earlier read names the hashes of its first and
       // last records and of all its bytes; this read must find the same bytes,
       // or the scope would be published under an identity that describes others.
       if (request.bounds && (scope.start.hash !== request.bounds.start || scope.end.hash !== request.bounds.end ||
           scope.contentHash !== request.bounds.content)) fail('SOURCE_ANCHOR_CONFLICT');
+      // Every other turn in a chat window's bytes was left out or captured
+      // when it was chosen; one that is neither came from other bytes.
+      if (request.bounds) {
+        const denied = deniedUnits(current.state), taken = await capturedUnits(store, selection);
+        if (turns.some(unitId => !request.unitIds.includes(unitId) && !denied.has(unitId) && !taken.has(unitId))) fail('SOURCE_ANCHOR_CONFLICT');
+      }
       const authorize = async () => { await assertWorkflowStorage(capability, selection, 'explicitCollect'); return true; };
       return controlSelection(tx, { source, expectedHash: current.hash, authorize, callerRequestHash: digest(canonicalJSON(request)),
         request: { id: request.operationId, client: selection.client, sessionId: selection.sessionId,
@@ -357,6 +368,26 @@ async function stretchHash(source, from, to) {
       hasher.update(buffer.subarray(0, bytesRead)); offset += bytesRead;
     }
     return hasher.digest('hex');
+  } finally { await handle.close(); }
+}
+// The hashes of `from`..`to` and of the stretch `innerFrom`..`innerTo` inside
+// it, from one read.
+async function stretchHashes(source, from, to, innerFrom, innerTo) {
+  if (innerFrom < from || innerTo > to || innerFrom > innerTo) fail('INVALID_WORKFLOW');
+  const { handle, stat } = await openGuarded(source.path, { singleLink: true });
+  try {
+    if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(to)) fail('SOURCE_CHANGED');
+    const outer = createHash('sha256'), inner = createHash('sha256'), buffer = Buffer.alloc(Math.max(1, Math.min(STRETCH_READ_BYTES, to - from)));
+    for (let offset = from; offset < to;) {
+      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, to - offset), offset);
+      if (!bytesRead) fail('SOURCE_CHANGED');
+      const chunk = buffer.subarray(0, bytesRead);
+      outer.update(chunk);
+      const a = Math.max(innerFrom, offset), b = Math.min(innerTo, offset + bytesRead);
+      if (a < b) inner.update(chunk.subarray(a - offset, b - offset));
+      offset += bytesRead;
+    }
+    return { outer: outer.digest('hex'), inner: inner.digest('hex') };
   } finally { await handle.close(); }
 }
 async function stretchHolds(source, from, to, expected) {
