@@ -303,11 +303,22 @@ function verboseText(result) {
     `- ${listingLine(item)}: operation ${item.operationId}; proposal ${item.proposalHash}; claim ${item.claimHash}`)].join('\n'));
   return blocks.join('\n\n');
 }
-// Why automatic collection stopped for the invoking chat, in plain words. The
-// status callback reports only these codes.
+// Why automatic collection stopped for the invoking chat, in plain words: the
+// reader blocks a visit of the chat can end on, and a session it cannot own.
+// The status callback reports only these codes.
 const COLLECTION_STOPS = Object.freeze({
   CLAUDE_HISTORY_REQUIRES_REVIEW: 'its transcript has a record Cuefluent Notes does not read past, for example a Remote Control connection in Claude Desktop or a session moved elsewhere',
   UNSUPPORTED_SESSION_OWNERSHIP: 'its transcript belongs to a background, agent or forked session that is not linked to a captured chat',
+  UNSUPPORTED_CLAUDE_RECORD: 'its transcript has a record Cuefluent Notes cannot read',
+  CONFLICTING_CLAUDE_MIRROR: 'its transcript has two different copies of the same record',
+  CLAUDE_PARENT_CYCLE: 'its transcript has records that refer to each other in a loop',
+  CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE: 'its transcript has history before a compaction that cannot be traced',
+  UNSUPPORTED_CLAUDE_CONTENT: 'its transcript has content Cuefluent Notes cannot read',
+  INVALID_SESSION_CLIENT_VERSION: 'its transcript was written by a client version Cuefluent Notes does not support',
+  INVALID_SESSION_RECORD: 'its transcript has a record that is not valid',
+  SESSION_RECORD_LIMIT: 'its transcript has more records in one stretch than Cuefluent Notes reads',
+  READER_CHECKPOINT_CAPACITY: 'its saved reading progress grew past what Cuefluent Notes keeps',
+  INVALID_WORKFLOW: 'its capture settings or saved progress are not valid',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));

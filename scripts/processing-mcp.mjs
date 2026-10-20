@@ -16,7 +16,7 @@ import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn } from './capture-controls.mjs';
-import { READER_BLOCK_CODES, readReaderBlock } from './collection-worker.mjs';
+import { readReaderBlock } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -532,10 +532,14 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // Why automatic collection stopped for this chat, as the latest worker pass
   // reported it for exactly this session while collection still applies to it.
   // Display only: a missing or unreadable record shows nothing.
+  // Why Automatic capture of this chat stopped: the reader block its last visit
+  // ended on, kept per chat, or else a stop the latest pass reported.
   async function collectionStop(capability, source) {
     try {
       await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect'));
       const store = await withStorageProbes(() => openWorkflowIntake(capability));
+      const block = await withStorageProbes(() => readReaderBlock(store, { client, sessionId: source.selection.sessionId }));
+      if (block) return { collection: { state: 'stopped', code: block } };
       const notice = intakeJSON(await intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 }));
       const found = Array.isArray(notice?.diagnostics) ? notice.diagnostics.find(item => item?.client === source.selection.client &&
         item.sessionId === source.selection.sessionId && COLLECTION_STOP_CODES.includes(item.code)) : undefined;
@@ -751,18 +755,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     signal?.throwIfAborted();
     return { ...await currentView(source), ...outcome };
   }
-  // Whether the worker stopped Automatic capture of this chat: a stop status
-  // reports, or a reader block no later pass gets past, kept for this chat or
-  // in the latest pass's notice.
+  // Whether the worker stopped Automatic capture of this chat, as status
+  // reports it.
   async function automaticStopped(capability, source) {
-    if ((await collectionStop(capability, source)).collection) return true;
-    try {
-      const store = await withStorageProbes(() => openWorkflowIntake(capability));
-      if (await withStorageProbes(() => readReaderBlock(store, { client, sessionId: source.selection.sessionId }))) return true;
-      const notice = intakeJSON(await withStorageProbes(() => intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 })));
-      return Array.isArray(notice?.diagnostics) && notice.diagnostics.some(item => item?.client === source.selection.client &&
-        item.sessionId === source.selection.sessionId && READER_BLOCK_CODES.includes(item.code));
-    } catch { return false; }
+    return Boolean((await collectionStop(capability, source)).collection);
   }
   // A typed command that failed leaves its own turn out under the same rule
   // as one that succeeded, so a later capture never takes it. Housekeeping:

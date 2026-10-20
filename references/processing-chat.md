@@ -54,8 +54,8 @@ completed decision that has diagnostics says to type `status --verbose`; that
 reply adds the status, next action, diagnostics, request and chat identifiers,
 scope, counts and each draft's exact revision. The review folder's `summary.txt`
 also records the revision. A status reply also says when automatic collection has
-stopped for this chat, as the latest collection pass reported it, for example at
-a Claude Desktop Remote Control record (see
+stopped for this chat, as its last collection visit or the latest pass reported
+it, for example at a Claude Desktop Remote Control record (see
 [capture prevention](#capture-prevention-and-limits)).
 
 A refused or failed control answers with a plain sentence the assistant returns

@@ -19,7 +19,8 @@ import { resolveProcessingInvocation } from './processing-native-invocation.mjs'
 import { openWorkflowIntake, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
 import { collectionIngress, registrationPath, publishIngressMetadata, collectionStatusPath } from './collection-ingress.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
-import { processScope } from './collection-worker.mjs';
+import { processScope, READER_BLOCK_CODES } from './collection-worker.mjs';
+import { COLLECTION_STOP_CODES } from './processing-control-server.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
@@ -1151,6 +1152,8 @@ test('a chat whose Automatic capture stopped is not told capture covers it', asy
 });
 
 test('a reader block is kept per chat, so a later pass that skips the chat cannot hide it', async t => {
+  // Every reader block a visit can end on has a plain reason in status.
+  for (const code of READER_BLOCK_CODES) assert(COLLECTION_STOP_CODES.includes(code), code);
   const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
   const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
   await parent.work('Captured automatically.'); await run();
@@ -1162,6 +1165,10 @@ test('a reader block is kept per chat, so a later pass that skips the chat canno
     boundaryExcluded: [], updatedAt: new Date(Date.now() + 1000).toISOString() });
   const rpc = await h.call('capture_turns', {}), reply = body(rpc); await parent.finish(rpc);
   assert.equal(reply.capture, 'stopped', reply.statusText);
+  // Status, which that reply points to, says so and why.
+  const status = await h.call('processing_status', {}), shown = body(status); await parent.finish(status);
+  assert.deepEqual(shown.collection, { state: 'stopped', code: 'INVALID_SESSION_RECORD' });
+  assert.match(shown.statusText, /Automatic capture has stopped for this chat: its transcript has a record that is not valid./);
 });
 
 test('typed capture commands in a safety-stopped chat say capture stopped and change nothing', async t => {
