@@ -111,10 +111,12 @@ export async function controlCapture(capability, request, { now, resumeAt = null
       const observed = await sourceBoundary(selection, request.sourcePath, request.expectedSourceIdentity,
         restrictive ? selection.unitId : null, continuation);
       // A typed resume starts the new interval at its own command turn, so
-      // that turn, not the next one, is the boundary left out.
+      // that turn, not the next one, is the boundary left out. The record that
+      // starts the turn must still be the one read there.
       let boundary = observed.boundary;
       if (resumeAt !== null) {
-        if (operation !== 'resume' || resumeAt.eofByte > boundary.eofByte) fail('SOURCE_CHANGED');
+        if (operation !== 'resume' || resumeAt.eofByte > boundary.eofByte || resumeAt.record?.startByte !== resumeAt.eofByte ||
+            !await holds(observed.source, resumeAt.record.endByte, resumeAt.record)) fail('SOURCE_CHANGED');
         boundary = { ...boundary, eofByte: resumeAt.eofByte, startsMidRecord: false, unitId: resumeAt.unitId };
       }
       const authorize = async () => { await assertWorkflowStorage(capability, selection, authority); return true; };
@@ -468,8 +470,13 @@ async function chatStart(store, chat, state, floor, source) {
     // where a pause ended the interval. A pause turn's record, which the reader
     // may anchor before its progress gets there, is not coverage: the turns
     // before it are not captured yet, and the pause turn itself is left out by
-    // its own exclusion. The stretch starts where Automatic capture began, and
-    // counts only while the transcript still holds that start's record.
+    // its own exclusion. Coverage ends where an anchor holds: at the pause's
+    // end only when the progress is anchored exactly there. Past it, the
+    // progress anchors nothing at the pause's end, so coverage ends with the
+    // pause turn's record while that holds; only the pause turn's own records
+    // follow it, which a typed capture leaves out. The stretch starts where
+    // Automatic capture began, and counts only while the transcript still holds
+    // that start's record.
     const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
     let verified = false;
     if (cursor) {
@@ -478,7 +485,11 @@ async function chatStart(store, chat, state, floor, source) {
     }
     const { upper } = interval;
     let to = verified ? { eofByte: cursor.offset, startsMidRecord: false } : null;
-    if (upper && to && to.eofByte >= upper.eofByte) to = { eofByte: upper.eofByte, startsMidRecord: upper.startsMidRecord };
+    if (upper && to && to.eofByte === upper.eofByte) to = { eofByte: upper.eofByte, startsMidRecord: upper.startsMidRecord };
+    else if (upper && to && to.eofByte > upper.eofByte) {
+      to = upper.record && upper.record.endByte <= upper.eofByte && await holds(source, upper.record.endByte, upper.record)
+        ? { eofByte: upper.record.endByte, startsMidRecord: false } : null;
+    }
     if (to && to.eofByte > interval.lower.eofByte && await holds(source, interval.lower.eofByte, interval.lower.record)) {
       covered.push({ from: interval.lower.eofByte, to });
     }
@@ -739,13 +750,14 @@ export async function controlChatCapture(capability, { selection, source, unitId
   choice(operation, ['pause', 'resume']);
   const chat = await selected({ ...selection, unitId });
   const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
-  const resumeAt = operation === 'resume' ? { eofByte: await bounded(now, () => commandStart(capability, chat, source, unitId)), unitId } : null;
+  const resumeAt = operation === 'resume' ? { ...await bounded(now, () => commandStart(capability, chat, source, unitId)), unitId } : null;
   return controlCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: current.hash, operation,
     operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt });
 }
 // Where the command turn starts, read from the end of the transcript, where
-// the command was just typed. A command turn not found there refuses.
+// the command was just typed, with the record that starts it as read there. A
+// command turn not found there refuses.
 const CHAT_COMMAND_BYTES = 2 * 1024 * 1024;
 async function commandStart(capability, chat, source, unitId) {
   await assertWorkflowStorage(capability, chat, 'collect');
@@ -755,5 +767,6 @@ async function commandStart(capability, chat, source, unitId) {
   const { anchors } = await scanChat(chat, observed.source, { eofByte: from, startsMidRecord: from > 0 }, eof, () => {}, continuation);
   const own = anchors.find(item => item.unitId === unitId);
   if (!own) fail('NATIVE_BOUNDARY_UNAVAILABLE');
-  return own.record.startByte;
+  const { startByte, endByte, hash: recordHash } = own.record;
+  return { eofByte: startByte, record: { startByte, endByte, hash: recordHash } };
 }

@@ -1426,35 +1426,38 @@ test('typed capture, pause chat and resume chat follow Automatic capture of the 
 });
 
 test('typed capture takes a turn rewritten into the paused stretch after the pause record', async t => {
-  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
-  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
-  await parent.work('Captured automatically.'); await run();
-  const rpc = await h.call('pause_capture', {}); assert.equal(body(rpc).capture, 'paused'); await parent.finish(rpc); await run();
-  const { upper, id } = (await readSelection(parent.store, identity)).state.intervals.at(-1);
-  assert(upper.record && upper.record.endByte < upper.eofByte);
-  // No progress reached the pause's end, as when a read stopped short of it.
-  await fs.rm(path.join(f.collection.intakeStateDir, 'progress', 'codex', identity.sessionId, `${id}.json`));
-  // The transcript is rewritten in place after the pause turn's anchored record,
-  // keeping that record, the file and every byte from the pause's end on: a
-  // turn that was never captured now lies inside the paused stretch.
-  const text = await fs.readFile(parent.source.path), region = text.subarray(upper.record.endByte, upper.eofByte).toString();
-  const ordinals = region.trimEnd().split('\n').map(line => JSON.parse(line).ordinal), inserted = randomUUID();
-  const row = (ordinal, payload) => JSON.stringify({ timestamp: '2026-10-10T12:00:00.000Z', ordinal, type: 'event_msg', payload }) + '\n';
-  const said = (ordinal, item) => row(ordinal, { type: 'item_completed', thread_id: identity.sessionId, turn_id: inserted, item: { id: 'x', ...item } });
-  const rows = pad => row(ordinals[0], { type: 'task_started', turn_id: inserted, root_turn_id: inserted }) +
-    said(ordinals[1], { type: 'UserMessage', content: [{ type: 'text', text: 'Decision: rewritten in.' }] }) +
-    said(ordinals[2], { type: 'AgentMessage', content: [{ type: 'Text', text: 'Noted.' + ' '.repeat(pad) }] }) +
-    row(ordinals[3], { type: 'task_complete', turn_id: inserted });
-  assert.equal(ordinals.length, 4);
-  const replacement = Buffer.from(rows(Buffer.byteLength(region) - Buffer.byteLength(rows(0))));
-  assert.equal(replacement.length, upper.eofByte - upper.record.endByte);
-  const handle = await fs.open(parent.source.path, 'r+');
-  try { await handle.write(replacement, 0, replacement.length, upper.record.endByte); } finally { await handle.close(); }
-  // Automatic capture's progress never read the stretch, whatever the pause
-  // record still matches, so a typed capture takes the turn.
-  const typed = await h.call('capture_turns', {}), reply = body(typed); await parent.finish(typed);
-  assert.equal(reply.capture, 'captured', reply.statusText); assert.equal(reply.turns, 1);
-  assert((await readCaptureHead(parent.store, { ...identity, unitId: inserted })).head);
+  // With no progress, as when a read stopped short of the pause's end, and
+  // with progress past it whose own anchor still holds.
+  for (const progress of ['none', 'past the pause end']) await t.test(progress, async t => {
+    const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+    const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    await parent.work('Captured automatically.'); await run();
+    const rpc = await h.call('pause_capture', {}); assert.equal(body(rpc).capture, 'paused'); await parent.finish(rpc); await run();
+    const { upper, id } = (await readSelection(parent.store, identity)).state.intervals.at(-1);
+    assert(upper.record && upper.record.endByte < upper.eofByte);
+    if (progress === 'none') await fs.rm(path.join(f.collection.intakeStateDir, 'progress', 'codex', identity.sessionId, `${id}.json`));
+    // The transcript is rewritten in place after the pause turn's anchored record,
+    // keeping that record, the file and every byte from the pause's end on: a
+    // turn that was never captured now lies inside the paused stretch.
+    const text = await fs.readFile(parent.source.path), region = text.subarray(upper.record.endByte, upper.eofByte).toString();
+    const ordinals = region.trimEnd().split('\n').map(line => JSON.parse(line).ordinal), inserted = randomUUID();
+    const row = (ordinal, payload) => JSON.stringify({ timestamp: '2026-10-10T12:00:00.000Z', ordinal, type: 'event_msg', payload }) + '\n';
+    const said = (ordinal, item) => row(ordinal, { type: 'item_completed', thread_id: identity.sessionId, turn_id: inserted, item: { id: 'x', ...item } });
+    const rows = pad => row(ordinals[0], { type: 'task_started', turn_id: inserted, root_turn_id: inserted }) +
+      said(ordinals[1], { type: 'UserMessage', content: [{ type: 'text', text: 'Decision: rewritten in.' }] }) +
+      said(ordinals[2], { type: 'AgentMessage', content: [{ type: 'Text', text: 'Noted.' + ' '.repeat(pad) }] }) +
+      row(ordinals[3], { type: 'task_complete', turn_id: inserted });
+    assert.equal(ordinals.length, 4);
+    const replacement = Buffer.from(rows(Buffer.byteLength(region) - Buffer.byteLength(rows(0))));
+    assert.equal(replacement.length, upper.eofByte - upper.record.endByte);
+    const handle = await fs.open(parent.source.path, 'r+');
+    try { await handle.write(replacement, 0, replacement.length, upper.record.endByte); } finally { await handle.close(); }
+    // No anchor vouches for the stretch after the pause record, so it is not
+    // Automatic capture's: a typed capture takes the turn.
+    const typed = await h.call('capture_turns', {}), reply = body(typed); await parent.finish(typed);
+    assert.equal(reply.capture, 'captured', reply.statusText); assert.equal(reply.turns, 1);
+    assert((await readCaptureHead(parent.store, { ...identity, unitId: inserted })).head);
+  });
 });
 
 test('typed capture in a paused chat takes a turn Automatic capture has not read yet', async t => {

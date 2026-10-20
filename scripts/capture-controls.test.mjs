@@ -308,6 +308,29 @@ test('future controls seek after EOF and exclude the first proven boundary; paus
   assert.equal(state.state.active, false); assert.equal(state.state.intervals[0].upper.unitId, D);
 });
 
+test('a resume started at its command turn refuses a turn record rewritten since it was read', async t => {
+  const f = await fixture(t, { enabled: true }), D = randomUUID(), R = randomUUID();
+  const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+    expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+  const started = await controlCapture(f.capability, control);
+  await fs.appendFile(f.sourcePath, turn(D, 'Paused here'));
+  const paused = await controlCapture(f.capability, { ...control, selection: { ...f.selection, unitId: D }, expectedSelectionHash: started.hash, operation: 'pause', operationId: randomUUID() });
+  // The resume command's turn, as read where it starts.
+  const startByte = (await fs.stat(f.sourcePath)).size, first = row('event_msg', { type: 'task_started', turn_id: R });
+  await fs.appendFile(f.sourcePath, turn(R, 'resume chat'));
+  const resumeAt = { eofByte: startByte, unitId: R, record: { startByte, endByte: startByte + Buffer.byteLength(first), hash: digest(first) } };
+  const resume = { ...control, selection: { ...f.selection, unitId: R }, expectedSelectionHash: paused.hash, operation: 'resume', operationId: randomUUID() };
+  // That record is rewritten in place, at the same offsets.
+  const text = await fs.readFile(f.sourcePath, 'utf8');
+  await fs.writeFile(f.sourcePath, text.slice(0, startByte) + first.replace('00:00:00.000Z', '00:00:01.000Z') + text.slice(startByte + first.length));
+  await assert.rejects(controlCapture(f.capability, resume, { resumeAt }), { code: 'SOURCE_CHANGED' });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).hash, paused.hash);
+  // With the record as it was read, the new interval starts at that turn.
+  await fs.writeFile(f.sourcePath, text);
+  const resumed = await controlCapture(f.capability, resume, { resumeAt });
+  assert.deepEqual([resumed.state.intervals.at(-1).lower.eofByte, resumed.state.intervals.at(-1).lower.unitId], [startByte, R]);
+});
+
 test('restrictive CLI controls remain available when capture privacy is unavailable and read no source text', async t => {
   const f = await fixture(t), { executeWorkflow } = await import('./workflow.mjs');
   const brokenWriter = f.collection.notes.writerStateDir;
