@@ -442,24 +442,62 @@ test('capture does not trust a pause once the transcript was cut back and regrow
   await t.test('after the worker anchored the pause', t => paused(t, { anchored: true }));
 });
 
-test('a capture short on time still records the turns it left out, so the next one passes them', async t => {
+// A command clock that jumps forward on every transcript read, as if each
+// read ran long; storage budgets keep the real clock.
+function slowReads(t) {
+  const clock = performance.now.bind(performance), state = { skew: 0, jump: 0 };
+  t.mock.method(performance, 'now', () => clock() + state.skew);
+  return { clock, state, observeRead: () => { state.skew = state.jump; } };
+}
+
+test('a capture whose read ran long still selects its window, so the next capture runs it first', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
-  const [P1, P2, P3, C1, C2] = Array.from({ length: 5 }, () => randomUUID());
+  const [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
   await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
-  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
-    A.prompt('After the long reply.', P2), A.reply('Noted.'), A.prompt('Next decision.', P3), A.reply('Noted.')]);
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Owner: Dana.', P2), A.reply('Noted.')]);
   const bind = async promptId => {
     const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
     const bound = await A.resolve(call);
     return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
   };
-  // Time for the read and its bookkeeping, not for selecting and running a window.
-  const first = await bind(C1);
-  assert.deepEqual(await captureChatTurns(f.capability, first, { captureMs: 25_000 }), { turns: 0, more: true, leftOut: 1 });
-  assert((await A.selection()).state.exclusions.includes(P1));
+  const first = await bind(C1), slow = slowReads(t);
+  // The read takes 32 of the command's 50 seconds: enough left to select the
+  // window, not to run it.
+  slow.state.jump = 32_000;
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
+  assert.deepEqual((await A.selection()).state.explicitScopes.map(scope => scope.unitIds), [[P1, P2]]);
+  slow.state.skew = slow.state.jump = 0;
   await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
-  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 2, more: false, leftOut: 0 });
-  assert.equal((await A.head(P1)).head, null); assert((await A.head(P2)).head); assert((await A.head(P3)).head);
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2), { now: slow.clock }), { turns: 2, more: false, leftOut: 0 });
+  assert((await A.head(P1)).head); assert((await A.head(P2)).head);
+});
+
+test('a capture records the turns it left out before it moves past them', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, C1, C2, C3] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
+    A.prompt('After the long reply.', P2), A.reply('Noted.')]);
+  const slow = slowReads(t);
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call), chat = { selection: bound.selection, source: bound.source };
+    // Two reads per capture: up to the long turn, then into it.
+    const result = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId },
+      { scanWindows: 2, now: slow.clock, observeRead: slow.observeRead });
+    slow.state.skew = slow.state.jump = 0;
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return result;
+  };
+  // The reads take 45 of the command's 50 seconds: no time is left to record
+  // the long turn as left out, so the scan position stays where it was.
+  slow.state.jump = 45_000;
+  assert.deepEqual(await capture(C1), { turns: 0, more: true, leftOut: 0 });
+  assert(!(await A.selection()).state?.exclusions.includes(P1));
+  assert.deepEqual(await capture(C2), { turns: 0, more: true, leftOut: 1 });
+  assert((await A.selection()).state.exclusions.includes(P1));
+  assert.deepEqual(await capture(C3), { turns: 1, more: false, leftOut: 0 });
+  assert.equal((await A.head(P1)).head, null); assert((await A.head(P2)).head);
 });
 
 test('capture does not trust Automatic progress once the transcript changed under it', async t => {
