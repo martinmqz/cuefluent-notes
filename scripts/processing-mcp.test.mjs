@@ -1114,6 +1114,17 @@ test('a window with a turn the reader holds for its records keeps waiting, never
   assert.equal((await readSelection(store, identity)).state.explicitScopes.length, 1);
 });
 
+test('a turn whose terminal record is too large to anchor is left out even behind later metadata', async t => {
+  const { parent, store, identity, head, typed } = await manualCaptureChat(t);
+  const big = await parent.work('Long final answer.', { last: 'x'.repeat(70 * 1024) });
+  await parent.resume({});
+  const later = await parent.work('Owner: Dana.');
+  const reply = await typed('capture_turns', 'captured');
+  assert.equal(reply.turns, 1); assert.equal(reply.leftOut, 1);
+  assert(await head(later)); assert.equal(await head(big), null);
+  assert((await readSelection(store, identity)).state.exclusions.includes(big));
+});
+
 test('a failed typed command whose turn could not be left out says so in its refusal', async t => {
   const { h, parent, store, identity, typed } = await manualCaptureChat(t);
   await typed('capture_turns', 'nothing-new');

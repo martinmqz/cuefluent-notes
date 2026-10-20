@@ -79,15 +79,19 @@ nearest exact commands to type. That text stays evidence, as described under
 
 `capture` captures the chat it is typed in: every finished turn since that
 chat's last capture, or since the chat started, oldest first, and never a turn
-Automatic capture already took. Like every typed command, it verifies its chat
+Automatic capture already took; turns from before Automatic capture began, which
+it never covered, stay capturable. Like every typed command, it verifies its chat
 through the session start the hook package records; a manual package records
-none, so there it works only in a chat already selected by explicit capture. A chat continued from another (Claude `/bg`)
-starts after the history it re-homed. One command takes a bounded window (at
-most 10 turns or 8 MiB of transcript) and publishes what it can within its
-operation budget, ending within about 50 seconds; the reply says when more turns are
-waiting, and typing `capture` again first finishes the chat's latest capture, if
-unfinished; a command that captures turns that way stops there, and the next one
-reads further. A turn whose records break the transcript's rules keeps its window
+none, so there it works only in a chat already selected by explicit capture. A
+chat continued from another (Claude `/bg`) starts after the history it
+re-homed. One command takes a bounded window (at most 10 turns or 8 MiB of
+transcript; a read that reaches its record limit ends there) and publishes what
+it can within its operation budget, ending within about 50 seconds; another call
+of the same typed command takes no second window. The reply says when more turns
+are waiting, and typing `capture` again first finishes the chat's latest capture,
+if unfinished; a command that captures turns that way stops there, and the next
+one reads further. That capture may be one selected another way, such as through
+the CLI, which can hold up to 100 turns: it is finished whole. A turn whose records break the transcript's rules keeps its window
 waiting, as it keeps Automatic capture waiting, so no later window passes it. An
 earlier capture or pause that the transcript no longer matches (cut back or
 rewritten in place) is not trusted: capture starts from an earlier point the

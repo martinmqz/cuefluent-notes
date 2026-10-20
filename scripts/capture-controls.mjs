@@ -373,10 +373,11 @@ async function advanceChatCursor(capability, chat, source, position, { now, sign
 }
 
 // Where the next window may start: past the chat's own start (`floor`), its
-// last typed or explicit capture, how far captures read past turns they left
-// out, and whatever Automatic capture already covered (the worker's progress,
-// or its pause), so no turn is captured twice. Each counts only while the
-// transcript still holds it.
+// last typed or explicit capture and how far captures read past turns they
+// left out; and the stretches Automatic capture covered (from where it began
+// to the worker's progress, or its pause), whose turns a window skips, so no
+// turn is captured twice. Turns before Automatic capture began, which it never
+// covered, stay capturable. Each counts only while the transcript still holds it.
 async function chatStart(store, chat, state, floor, source) {
   let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
   const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
@@ -388,15 +389,14 @@ async function chatStart(store, chat, state, floor, source) {
     if (end.endByte <= start.eofByte) break;
     if (await holds(source, end.endByte, end)) { later(end.endByte); break; }
   }
+  const covered = [];
   for (const interval of state ? currentIntervals(state) : []) {
     // The worker's progress counts while its anchor still matches. A pause
     // stores only where the transcript ended, and its pause turn's record once
     // the reader anchors it. It counts while the transcript still reaches that
     // end and holds the record and the progress before it, or, before the
     // record is anchored, once the verified progress has reached it. Otherwise
-    // capture starts at the verified progress, or where Automatic capture began
-    // while the transcript still holds that start (its first record, once
-    // anchored), or else at the chat's own start.
+    // only the stretch up to the verified progress is covered, or none.
     const { cursor } = await readReaderProgress(store, identityOf(chat), interval.id, state.source.fileIdentity, { metadataOnly: true });
     let verified = false;
     if (cursor) {
@@ -406,11 +406,10 @@ async function chatStart(store, chat, state, floor, source) {
     const { upper } = interval;
     const paused = upper && (upper.record ? (!cursor || verified) && await holds(source, upper.eofByte, upper.record)
       : verified && cursor.offset >= upper.eofByte);
-    if (paused) later(upper.eofByte, upper.startsMidRecord);
-    else if (verified) later(cursor.offset);
-    else if (await holds(source, interval.lower.eofByte, interval.lower.record)) later(interval.lower.eofByte, interval.lower.startsMidRecord);
+    const to = paused ? { eofByte: upper.eofByte, startsMidRecord: upper.startsMidRecord } : verified ? { eofByte: cursor.offset, startsMidRecord: false } : null;
+    if (to && to.eofByte > interval.lower.eofByte) covered.push({ from: interval.lower.eofByte, to });
   }
-  return start;
+  return { start, covered: covered.sort((a, b) => a.from - b.from) };
 }
 
 // One bounded read of the source from `start`: its turns, in order, and its
@@ -420,10 +419,16 @@ async function scanChat(chat, source, start, endByte, observeRead, continuation 
   state.active = true; state.intervals = [{ id: scopeId, upper: null,
     lower: { sourceIdentity: source.fileIdentity, eofByte: start.eofByte, startsMidRecord: start.startsMidRecord, unitId: null, record: null } }];
   const inspected = await reader(chat.client)({ state, scopeId, endByte, observeRead, continuation });
-  if (inspected.blocked) fail(inspected.blocked.code ?? 'INCOMPLETE_EXPLICIT_RANGE');
+  // A read that reached its record limit ends where it stopped: the turns
+  // before that point are complete, and the next read continues from it.
+  const limited = inspected.blocked?.code === 'SESSION_READ_LIMIT';
+  if (inspected.blocked && !limited) fail(inspected.blocked.code ?? 'INCOMPLETE_EXPLICIT_RANGE');
   const anchors = [...new Map(inspected.nativeAnchors.map(item => [item.unitId, item])).values()]
-    .filter(item => item.record.startByte >= start.eofByte).sort((a, b) => a.record.startByte - b.record.startByte);
-  return { anchors, records: inspected.recordAnchors };
+    .filter(item => item.record.startByte >= start.eofByte && (!limited || item.record.startByte < inspected.blocked.offset))
+    .sort((a, b) => a.record.startByte - b.record.startByte);
+  // The turns the reader holds because their own terminal record is too large to anchor.
+  const tooLarge = new Set(inspected.pending.filter(item => item.reason === 'SOURCE_ANCHOR_LIMIT').map(item => item.unitId));
+  return { anchors, records: inspected.recordAnchors, end: limited ? inspected.blocked.offset : endByte, tooLarge };
 }
 
 // The next window of the chat's finished turns: at most 10 turns or 8 MiB, up
@@ -439,15 +444,21 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   const continuation = await chatContinuation(store, chat, source.path, source.fileIdentity, observeRead);
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
   const denied = deniedUnits(current.state), leftOut = [];
-  let start = await chatStart(store, chat, current.state, floor, observed.source);
+  let { start, covered } = await chatStart(store, chat, current.state, floor, observed.source);
+  // Turns Automatic capture covered are skipped like excluded turns; a read
+  // never starts inside such a stretch.
+  const coveredAt = offset => covered.some(range => offset >= range.from && offset < range.to.eofByte);
+  const skipped = item => denied.has(item.unitId) || coveredAt(item.record.startByte);
   for (let scan = 0; scan < scanWindows; scan++) {
+    for (const range of covered) if (start.eofByte >= range.from && start.eofByte < range.to.eofByte) start = { ...range.to };
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
     if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };
     // Where a later read may resume, with an anchor taken from this read: the
     // bytes before its limit, hashed just before it reads them, or the record
     // it read that ends there.
     const limitAnchor = limit < eof ? await chatCursorAnchor(observed.source, limit) : null;
-    const { anchors, records } = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
+    const scanned = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
+    const { anchors, records, end, tooLarge } = scanned;
     const at = (eofByte, startsMidRecord) => {
       const record = records.find(item => item.endByte === eofByte && item.endByte - item.startByte <= CHAT_ANCHOR_BYTES);
       return { eofByte, startsMidRecord, anchor: eofByte === limit ? limitAnchor : record ? { startByte: record.startByte, endByte: record.endByte, hash: record.hash } : null };
@@ -456,32 +467,34 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     // ends before its last turn, which may continue past it.
     const command = anchors.find(item => item.unitId === commandUnitId);
     const before = anchors.filter(item => !command || item.record.startByte < command.record.startByte);
-    const cut = !command && limit < eof ? before.pop() : null;
-    let stop = command?.record.startByte ?? cut?.record.startByte ?? limit, more = Boolean(cut);
+    const cut = !command && end < eof ? before.pop() : null;
+    let stop = command?.record.startByte ?? cut?.record.startByte ?? end, more = Boolean(cut);
     // A turn whose own last record is too large to anchor can never be
-    // published (the readers hold it as SOURCE_ANCHOR_LIMIT): leave it out.
+    // published (the readers hold it as SOURCE_ANCHOR_LIMIT): leave it out,
+    // whether that record is the last before the next turn or the reader
+    // finds it behind later metadata.
     const lastRecord = item => {
       const next = anchors.find(other => other.record.startByte > item.record.startByte)?.record.startByte ?? stop;
       return records.filter(record => record.endByte <= next).at(-1);
     };
     for (const item of before) {
-      const end = lastRecord(item);
-      if (item.unitId !== commandUnitId && !denied.has(item.unitId) && !leftOut.includes(item.unitId) &&
-          end && end.startByte >= item.record.startByte && end.endByte - end.startByte > CHAT_ANCHOR_BYTES) leftOut.push(item.unitId);
+      const last = lastRecord(item);
+      if (item.unitId !== commandUnitId && !skipped(item) && !leftOut.includes(item.unitId) &&
+          (tooLarge.has(item.unitId) || (last && last.startByte >= item.record.startByte && last.endByte - last.startByte > CHAT_ANCHOR_BYTES))) leftOut.push(item.unitId);
     }
-    const units = before.filter(item => item.unitId !== commandUnitId && !denied.has(item.unitId) && !leftOut.includes(item.unitId));
+    const units = before.filter(item => item.unitId !== commandUnitId && !skipped(item) && !leftOut.includes(item.unitId));
     if (!units.length) {
       if (!cut) {
-        if (anchors.length || limit >= eof) return { current, unitIds: [], more: false, leftOut };
+        if (anchors.length || end >= eof) return { current, unitIds: [], more: false, leftOut };
         // Still inside a turn larger than a window: read on from here.
-        start = at(limit, true); continue;
+        start = at(end, end === limit); continue;
       }
       // A turn that fills this whole read is larger than a window: leave it
       // out and read on. Otherwise only excluded turns came first: start the
       // next read at the cut turn, which may fit.
       if (!before.length && cut.record.startByte === start.eofByte) {
-        if (!denied.has(cut.unitId)) leftOut.push(cut.unitId);
-        start = at(limit, true);
+        if (!skipped(cut)) leftOut.push(cut.unitId);
+        start = at(end, end === limit);
       }
       else start = at(cut.record.startByte, false);
       continue;
@@ -492,10 +505,10 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     // cannot is left out and the window starts after it.
     for (let count = units.length; count > 0; count--) {
       const until = count < units.length ? units[count].record.startByte : stop;
-      const end = records.filter(record => record.endByte <= until).at(-1);
-      if (end && end.endByte > units[0].record.startByte && end.endByte - end.startByte <= CHAT_ANCHOR_BYTES) {
+      const closing = records.filter(record => record.endByte <= until).at(-1);
+      if (closing && closing.endByte > units[0].record.startByte && closing.endByte - closing.startByte <= CHAT_ANCHOR_BYTES) {
         return { current, unitIds: units.slice(0, count).map(item => item.unitId),
-          readRange: { fromByte: units[0].record.startByte, endByte: end.endByte }, more: more || count < units.length, leftOut };
+          readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte }, more: more || count < units.length, leftOut };
       }
     }
     leftOut.push(units[0].unitId);
@@ -535,6 +548,8 @@ async function runChatScope(capability, chat, scope, { observeRead, now, fresh, 
     let run;
     try {
       const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
+      // The run takes no signal: a cancellation during the read stops it here.
+      signal?.throwIfAborted();
       run = await runSelectedCapture(capability, { selection: chat, scopeId: scope.id, expectedSelectionHash: current.hash, unitIds: scope.unitIds }, { observeRead, now });
     } catch (error) { failure = error; break; }
     saved += run.saved;
@@ -585,10 +600,15 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   let turns = 0;
   signal?.throwIfAborted();
   const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
+  // Each check of an earlier capture's end, and the drain check after it, is
+  // a bounded operation within the command's time.
   let last = null;
   for (const scope of [...previous.state?.explicitScopes ?? []].sort((a, b) => scopeEnd(b).endByte - scopeEnd(a).endByte)) {
+    signal?.throwIfAborted();
+    if (!timeFor(deadline, 2)) return { turns, more: true, leftOut: 0 };
     if (await bounded(now, () => holds(source, scopeEnd(scope).endByte, scopeEnd(scope)))) { last = scope; break; }
   }
+  signal?.throwIfAborted();
   if (last && !await scopeDrained(capability, chat, previous.state, last, now)) {
     // A window that captures turns now, or stays unfinished, is this
     // command's one window; a new one waits for the next command.
@@ -596,6 +616,9 @@ export async function captureChatTurns(capability, { selection, source, floor, c
     turns += rerun.saved;
     if (!rerun.finished || turns) return { turns, more: true, leftOut: 0 };
   }
+  // A command turn takes one window: another call of the same typed command,
+  // whose turn is already left out, only finishes that window.
+  if (deniedUnits(previous.state).has(commandUnitId)) return { turns, more: true, leftOut: 0 };
   signal?.throwIfAborted();
   // A window is read only when what it finds can still be recorded after it:
   // the turns it left out and how far it read, and the window itself. The
