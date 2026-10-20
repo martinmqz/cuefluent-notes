@@ -639,10 +639,12 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     const before = anchors.filter(item => !command || item.record.startByte < command.record.startByte);
     const cut = !command && end < eof ? before.pop() : null;
     let stop = command?.record.startByte ?? cut?.record.startByte ?? end, more = Boolean(cut);
-    // A turn whose own last record is too large to anchor can never be
-    // published (the readers hold it as SOURCE_ANCHOR_LIMIT): leave it out,
+    // A Codex turn whose own last record is too large to anchor can never be
+    // published (the reader holds it as SOURCE_ANCHOR_LIMIT): leave it out,
     // whether that record is the last before the next turn or the reader
-    // finds it behind later metadata.
+    // finds it behind later metadata. The Claude reader anchors such a record
+    // by its last bytes, so a Claude turn is only left out when no window can
+    // hold it.
     const lastRecord = item => {
       if (unitEnds.has(item.unitId)) return unitEnds.get(item.unitId);
       const next = anchors.find(other => other.record.startByte > item.record.startByte)?.record.startByte ?? stop;
@@ -651,7 +653,8 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     for (const item of before) {
       const last = lastRecord(item);
       if (item.unitId !== commandUnitId && !skipped(item) && !leftOut.includes(item.unitId) &&
-          (tooLarge.has(item.unitId) || (last && last.startByte >= item.record.startByte && last.endByte - last.startByte > CHAT_ANCHOR_BYTES))) leftOut.push(item.unitId);
+          (tooLarge.has(item.unitId) || (chat.client === 'codex' && last && last.startByte >= item.record.startByte &&
+            last.endByte - last.startByte > CHAT_ANCHOR_BYTES))) leftOut.push(item.unitId);
     }
     const units = before.filter(item => item.unitId !== commandUnitId && !skipped(item) && !leftOut.includes(item.unitId));
     if (!units.length) {
@@ -690,6 +693,11 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
           more: more || count < units.length, leftOut };
       }
     }
+    // A Claude turn that ends in a record too large to close a window waits
+    // for a later, smaller record, such as the command turn's own, to close
+    // it: the next capture takes it.
+    const last = lastRecord(units[0]);
+    if (chat.client === 'claude' && last && last.endByte - last.startByte > CHAT_ANCHOR_BYTES) return { current, unitIds: [], more: true, leftOut };
     leftOut.push(units[0].unitId);
     start = await at(units[1]?.record.startByte ?? stop, false);
   }
