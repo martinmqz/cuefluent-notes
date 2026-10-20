@@ -1208,7 +1208,7 @@ test('a redelivered capture command answers with its first reply and acts once',
     const again = await redeliver(h, parent, rpc, f.identity.sessionId);
     assert.deepEqual(again.result, rpc.result, JSON.stringify(again.error ?? body(again)));
   });
-  await t.test('a delivery refused for a reserved call leaves its turn alone', async t => {
+  await t.test('a duplicate delivery leaves its turn alone, even when it cannot read the reservation', async t => {
     const chat = await manualCaptureChat(t), { f, h, parent, store, identity } = chat;
     await chat.typed('capture_turns', 'nothing-new');
     const room = await crowd(chat), rename = fs.rename;
@@ -1220,9 +1220,14 @@ test('a redelivered capture command answers with its first reply and acts once',
     let rpc; try { rpc = await h.call('capture_turns', {}); rpc.name = 'capture_turns'; } finally { fs.rename = rename; }
     assert.equal(rpc.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(rpc));
     // With room again, a duplicate finds the call reserved without a reply, as
-    // it would while the first delivery acts: it changes nothing.
+    // it would while the first delivery acts: it changes nothing, nor does one
+    // that fails before it can tell whether the call is reserved.
     await room();
-    const unitId = parent.controls.at(-1), before = await readSelection(store, identity);
+    const unitId = parent.controls.at(-1), before = await readSelection(store, identity), open = fs.open;
+    fs.open = async (file, ...args) => { if (String(file).split(path.sep).includes('replies')) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return open(file, ...args); };
+    let failed; try { failed = await redeliver(h, parent, rpc, f.identity.sessionId); } finally { fs.open = open; }
+    assert(failed.error, JSON.stringify(failed));
+    assert.equal((await readSelection(store, identity)).hash, before.hash);
     const again = await redeliver(h, parent, rpc, f.identity.sessionId);
     assert.equal(again.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(again));
     const after = await readSelection(store, identity);

@@ -261,11 +261,13 @@ or `resume chat` keeps its reply as well, so its redelivery answers as the first
 delivery did and acts once. Its call is reserved before it acts: a delivery
 that finds the call reserved without a kept reply, because another delivery is
 acting or stopped before keeping its reply, reports `PROCESSING_CONTROL_FAILED`
-without acting or leaving out its turn. A command whose reply cannot be kept
-reports it too, after acting. The kept reply says whether the command left out
-its own turn. A `pause chat` that paused Automatic capture is the exception:
-the chat's binding then starts after that call, so its redelivery is refused
-before acting and the pause stays. The returned `requestId` is the
+without acting or leaving out its turn. A delivery that fails before it can
+tell does not leave out its turn either; its refusal reports
+`PROCESSING_EXCLUSION_UNVERIFIED`. A command whose reply cannot be kept reports
+`PROCESSING_CONTROL_FAILED` too, after acting. The kept reply says whether the
+command left out its own turn. A `pause chat` that paused Automatic capture is
+the exception: the chat's binding then starts after that call, so its
+redelivery is refused before acting and the pause stays. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
 

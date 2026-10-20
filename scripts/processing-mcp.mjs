@@ -725,9 +725,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // A typed chat capture command. Whether Automatic capture covers this chat
   // is policy (its route and session list) plus the chat's own pause. Only the
   // person's typed command acts; a model's own call is refused before acting.
-  // Sources of capture-command deliveries refused because another delivery
-  // reserved their call.
-  const unowned = new WeakSet();
+  // Sources of capture-command deliveries that reserved their call: only these
+  // act, and only these keep the command turn's bookkeeping.
+  const reserving = new WeakSet();
   async function requestCapture({ source, tool, signal }) {
     signal?.throwIfAborted();
     if (!source.nativeSkill || !source.unitId) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
@@ -738,7 +738,8 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     // tell the outcome, so it is refused as uncertain without acting.
     const call = { unitId: source.unitId, callId: source.callId, tool, argsHash: source.argsHash };
     const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal }));
-    if (!reserved.acting) { if (reserved.reply) return reserved.reply; unowned.add(source); fail('PROCESSING_CONTROL_FAILED'); }
+    if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
+    reserving.add(source);
     const automatic = await automaticCapture(capability, source);
     const store = await withStorageProbes(() => openWorkflowIntake(capability));
     const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
@@ -794,10 +795,10 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // left out as it should be, so a refusal can say when it may not be.
   async function afterFailure({ source, invocation }) {
     if (!source?.nativeSkill || !source.unitId || !owners.has(source)) return true;
-    // A capture command refused because another delivery reserved its call
-    // changes nothing: that delivery owns the turn's bookkeeping, and an
-    // exclusion here would change the selection it is using.
-    if (unowned.has(source)) return false;
+    // A capture command that did not reserve its call changes nothing, however
+    // it failed: another delivery may hold the call and own the turn's
+    // bookkeeping, and an exclusion here would change the selection it is using.
+    if (CAPTURE_TOOLS.includes(invocation.tool) && !reserving.has(source)) return false;
     try {
       const { capability } = selected(source);
       const automatic = await automaticCapture(capability, source);
