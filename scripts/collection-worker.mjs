@@ -184,6 +184,12 @@ async function recordReaderBlock(store, identity, code) {
   if ((previous?.code ?? null) === next) return;
   await publishIngressMetadata(store, name, { version: 1, code: next });
 }
+/** The reader block a scope's result holds a turn on, if any: any of its hold
+ * reasons, not only the first. */
+export function readerBlockOf(result) {
+  return (result.holds ?? []).find(code => READER_BLOCK_CODES.includes(code)) ??
+    (READER_BLOCK_CODES.includes(result.pending) ? result.pending : null);
+}
 /** The reader block this chat's last visit ended on, if any. */
 export async function readReaderBlock(store, identity) {
   const value = intakeJSON(await intakeSnapshot(store, 'state', readerBlockPath(identity), { maxBytes: 4096 }));
@@ -375,7 +381,7 @@ async function runRegistration(capability, registration, registrationHash, route
       await authorize();
       const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link);
       saved += result.saved; pending ??= result.pending; incomplete ||= Boolean(result.incomplete);
-      if (!readerBlock && READER_BLOCK_CODES.includes(result.pending)) readerBlock = result.pending;
+      readerBlock ??= readerBlockOf(result);
       drained &&= result.drained === true; suspended &&= result.suspended === true || result.drained === true;
       selection = await readSelection(store, identity);
     }

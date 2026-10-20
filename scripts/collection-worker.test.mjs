@@ -5,6 +5,7 @@ import path from 'node:path';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { collectionIngress, snapshotSourceMetadata, registrationPath, READER_SUSPENSION_VERSION } from './collection-ingress.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
+import { readerBlockOf } from './collection-worker.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock, openWorkflowIntake } from './intake-io.mjs';
 import { readSelection, readCaptureHead, controlSelection, publishCapture, inspectPendingPublication, recoverPendingPublication } from './intake-store.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint, CODEX_READER_VERSION } from './codex-reader.mjs';
@@ -1199,6 +1200,14 @@ test('workers that encounter a live lock or offline maintenance preserve the exi
   try { const result = await f.run(); assert(result.pending.includes('INTAKE_OFFLINE_MAINTENANCE')); assert.deepEqual(writes, []); }
   finally { Object.assign(fs, { open, mkdir, rename, unlink }); }
   assert.equal((await intakeSnapshot(f.store, 'state', collectionStatusPath)).hash, before.hash);
+});
+
+test('a scope result is a reader block when any turn is held on one, not only the first', () => {
+  assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_CONTENT'] }), 'UNSUPPORTED_CLAUDE_CONTENT');
+  assert.equal(readerBlockOf({ pending: 'INVALID_SESSION_RECORD', holds: ['INVALID_SESSION_RECORD'] }), 'INVALID_SESSION_RECORD');
+  assert.equal(readerBlockOf({ pending: 'CLAUDE_HISTORY_REQUIRES_REVIEW' }), 'CLAUDE_HISTORY_REQUIRES_REVIEW');
+  assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted'] }), null);
+  assert.equal(readerBlockOf({ saved: 1, pending: null, drained: true }), null);
 });
 
 test('hook notices scope session diagnostics and do not revive historical lock contention', () => {
