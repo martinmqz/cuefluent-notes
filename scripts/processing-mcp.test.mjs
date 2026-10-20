@@ -1089,8 +1089,24 @@ test('a typed capture that fails still leaves its own turn out of later captures
   await fs.appendFile(parent.source.path, 'not a transcript record\n');
   await parent.work('Later turn.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
   const rpc = await h.call('capture_turns', {});
-  assert.equal(rpc.error.code, -32600, JSON.stringify(rpc));
+  assert.equal(rpc.error.code, -32600, JSON.stringify(rpc)); assert.equal(rpc.error.data.diagnostics, undefined);
   assert((await readSelection(store, identity)).state.exclusions.includes(parent.controls.at(-1)));
+});
+
+test('a failed typed command whose turn could not be left out says so in its refusal', async t => {
+  const { h, parent, store, identity, typed } = await manualCaptureChat(t);
+  await typed('capture_turns', 'nothing-new');
+  // A selection at its housekeeping limit: the failed command's turn is not left out.
+  const current = await readSelection(store, identity);
+  const full = { ...current.state, exclusions: [...current.state.exclusions, ...Array.from({ length: 2048 }, () => randomUUID())] };
+  await withIntakeLock(store, tx => replaceIntakeJSON(tx, `sessions/codex/${identity.sessionId}.json`, full, current.hash));
+  await parent.work('Decision: ship on Friday.');
+  await fs.appendFile(parent.source.path, 'not a transcript record\n');
+  await parent.work('Later turn.', { filler: ['x'.repeat(2.2 * 1024 * 1024)] });
+  const rpc = await h.call('capture_turns', {});
+  assert.equal(rpc.error.code, -32600, JSON.stringify(rpc));
+  assert.deepEqual(rpc.error.data.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
+  assert(!(await readSelection(store, identity)).state.exclusions.includes(parent.controls.at(-1)));
 });
 
 test('a capture command the person did not type applies nothing', async t => {

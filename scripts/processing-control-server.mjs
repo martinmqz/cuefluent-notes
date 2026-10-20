@@ -908,8 +908,11 @@ export async function runProcessingControlServer({ client, input = process.stdin
       if (delivered) { try { await delivered(); } catch { /* reply already written */ } }
     } catch (error) {
       request.complete = true;
-      // A command whose action failed still gets its bookkeeping.
-      if (acting && typeof afterFailure === 'function') { try { await afterFailure(acting); } catch { /* the refusal stands */ } }
+      // A command whose action failed still gets its bookkeeping; a command
+      // turn it could not leave out stays capturable, which the refusal's data
+      // reports as for a reply.
+      let unverified = false;
+      if (acting && typeof afterFailure === 'function') { try { unverified = await afterFailure(acting) === false; } catch { unverified = true; } }
       if (request.cancelled) return;
       // Claude may have rejected an unrelated registered source during /clear
       // fallback, so an ownership or identity failure there is not attributed
@@ -918,7 +921,8 @@ export async function runProcessingControlServer({ client, input = process.stdin
       const known = ERRORS.has(error?.code) && !(client === 'claude' && codexSourceErrors.has(error.code));
       const code = known ? error.code : stage === 'binding' ? 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' : 'PROCESSING_CONTROL_FAILED';
       const message = stage === null ? code : processingControlRefusalText(code, { client, stage, tool: row.params?.name });
-      await reply({ jsonrpc: '2.0', id: rpcId, error: { code: code === 'PROCESSING_CONTROL_METHOD_UNSUPPORTED' ? -32601 : -32600, message, data: { code } } });
+      await reply({ jsonrpc: '2.0', id: rpcId, error: { code: code === 'PROCESSING_CONTROL_METHOD_UNSUPPORTED' ? -32601 : -32600, message,
+        data: { code, ...(unverified ? { diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'] } : {}) } } });
     } finally { requests.delete(rpcId); rejectForms('PROCESSING_REVIEW_INTERRUPTED', rpcId); }
   };
   const processLine = async line => {

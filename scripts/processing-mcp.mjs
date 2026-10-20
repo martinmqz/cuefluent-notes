@@ -766,14 +766,17 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   }
   // A typed command that failed leaves its own turn out under the same rule
   // as one that succeeded, so a later capture never takes it. Housekeeping:
-  // the refusal stands whatever happens here.
+  // the refusal stands whatever happens here. It answers whether the turn is
+  // left out as it should be, so a refusal can say when it may not be.
   async function afterFailure({ source, invocation }) {
-    if (!source?.nativeSkill || !source.unitId || !owners.has(source)) return;
-    const { capability } = selected(source);
-    const automatic = await automaticCapture(capability, source);
-    if (!(CAPTURE_TOOLS.includes(invocation.tool) || source.captureActive === false || !automatic)) return;
-    if (source.selectionHash === null && automatic) return;
-    await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }));
+    if (!source?.nativeSkill || !source.unitId || !owners.has(source)) return true;
+    try {
+      const { capability } = selected(source);
+      const automatic = await automaticCapture(capability, source);
+      if (!(CAPTURE_TOOLS.includes(invocation.tool) || source.captureActive === false || !automatic)) return true;
+      if (source.selectionHash === null && automatic) return true;
+      return (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }))).excluded;
+    } catch { return false; }
   }
   async function automaticCapture(capability, source) {
     try { await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect')); return true; }

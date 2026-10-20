@@ -101,8 +101,8 @@ applies nothing. Each command turn, like any typed command in a chat Automatic
 capture does not cover, leaves itself out of later captures by an exclusion
 instead of a receipt. These housekeeping exclusions stop well before the chat's
 selection capacity, so they never cause a safety stop; a turn that could not be
-left out stays capturable, and that reply carries a `PROCESSING_EXCLUSION_UNVERIFIED`
-diagnostic. Each `capture` adds to the chat's capture record, so a chat captured
+left out stays capturable, and that reply (or refusal) carries a
+`PROCESSING_EXCLUSION_UNVERIFIED` diagnostic. Each `capture` adds to the chat's capture record, so a chat captured
 by command many hundreds of times can fill it; `capture` then refuses, while
 Automatic capture and the other commands keep working.
 

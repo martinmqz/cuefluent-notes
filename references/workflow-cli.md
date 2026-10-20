@@ -268,7 +268,8 @@ reports `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. A failure after the action start
 reports `PROCESSING_CONTROL_FAILED` unless it is a known code, and its message
 says the outcome is not certain and to check `status`; a refusal for the native
 client's sign-in or launch settings, or an unconfirmed cancel, names that cause
-instead.
+instead. When a typed command fails and its own turn could not be left out of
+later captures, `data.diagnostics` also lists `PROCESSING_EXCLUSION_UNVERIFIED`.
 
 Source-binding failures use bounded MCP error codes. An exact Codex ingress
 registration with current collection authority but without a selection or
