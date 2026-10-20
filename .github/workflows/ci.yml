@@ -1,7 +1,10 @@
 name: Checks
 
 on:
+  # Draft pull requests skip every job; marking one ready runs them. The draft
+  # package-update PR that publication opens (chore/publish-*) still runs.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_call:
@@ -19,6 +22,7 @@ concurrency:
 
 jobs:
   scope:
+    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft || startsWith(github.head_ref, 'chore/publish-')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -79,7 +83,7 @@ jobs:
   guidance:
     # Maintenance tooling cannot suppress product checks or run in a job that
     # produces release assets. A tag uses the already-reviewed source guidance.
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ !startsWith(github.ref, 'refs/tags/') && (github.event_name != 'pull_request' || !github.event.pull_request.draft || startsWith(github.head_ref, 'chore/publish-')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -188,8 +192,9 @@ jobs:
         run: node scripts/client-smoke.mjs
   reproducibility:
     # Required by branch protection. Selection/verification failures must not
-    # turn omitted native suites into a passing package-update PR.
-    if: ${{ always() }}
+    # turn omitted native suites into a passing package-update PR. A skipped
+    # draft run reports nothing, and its matrix checks never exist.
+    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft || startsWith(github.head_ref, 'chore/publish-')) }}
     needs: [scope, test, client-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
