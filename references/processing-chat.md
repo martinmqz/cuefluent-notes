@@ -101,7 +101,8 @@ earlier capture, or the point a capture last passed left-out turns to, that the
 transcript no longer matches (cut back or rewritten in place) is not trusted:
 capture starts from an earlier point the transcript still matches. Before moving past the latest window or the turns a
 capture last passed as left out, capture checks every byte of that stretch
-against a hash kept when it was passed. Turns Automatic capture took are
+against a hash kept when it was passed, including the turns a
+window passed before its own. Turns Automatic capture took are
 recognized by their captures, never skipped by where they lie: capture reads the
 stretch Automatic capture covered and passes only turns already captured or left
 out, so in a long chat the first capture may need more than one command to read

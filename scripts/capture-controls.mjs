@@ -188,8 +188,12 @@ export async function restrictCapture({ configPath, expectedConfigHash, collecti
 async function explicitRequest(request) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'kind', 'unitIds', 'readRange'], ['bounds']);
   if (request.bounds !== undefined) {
-    keys(request.bounds, ['start', 'end', 'content'], ['leftOut']); hash(request.bounds.start); hash(request.bounds.end); hash(request.bounds.content);
+    keys(request.bounds, ['start', 'end', 'content'], ['leftOut', 'passed']); hash(request.bounds.start); hash(request.bounds.end); hash(request.bounds.content);
     if (request.bounds.leftOut !== undefined) { list(request.bounds.leftOut, 2048, { empty: false }).forEach(nativeId); unique(request.bounds.leftOut); }
+    if (request.bounds.passed !== undefined) {
+      keys(request.bounds.passed, ['from', 'hash']); integer(request.bounds.passed.from); hash(request.bounds.passed.hash);
+      if (request.bounds.passed.from >= request.readRange.fromByte) fail('INVALID_WORKFLOW');
+    }
   }
   const selection = await selected(request.selection);
   nativeId(request.operationId); oldHash(request.expectedSelectionHash); choice(request.kind, ['current', 'historical']);
@@ -220,11 +224,16 @@ async function deriveExplicitScope(capability, request, selection, observeRead) 
   const end = inspected.recordAnchors.at(-1);
   if (!end || end.endByte !== request.readRange.endByte || end.endByte - end.startByte > 64 * 1024) fail('SOURCE_ANCHOR_LIMIT');
   // The hash of every byte the scope covers: a later capture moves past it
-  // only while the transcript still holds exactly these bytes.
-  const after = await stretchHashes(observed.source, request.readRange.fromByte, request.readRange.endByte, anchors[0].record.startByte, end.endByte);
-  if (after.outer !== read) fail('SOURCE_CHANGED');
+  // only while the transcript still holds exactly these bytes. A typed window
+  // also keeps the hash from where its capture began reading, past turns it
+  // did not take, so a later capture never moves past those unchecked.
+  const passed = request.bounds?.passed;
+  const hashes = await rangeHashes(observed.source, [{ from: request.readRange.fromByte, to: request.readRange.endByte },
+    { from: anchors[0].record.startByte, to: end.endByte }, ...(passed ? [{ from: passed.from, to: end.endByte }] : [])]);
+  if (!hashes || hashes[0] !== read) fail('SOURCE_CHANGED');
   const turns = inspected.nativeAnchors.filter(item => item.record.startByte >= anchors[0].record.startByte && item.record.startByte < end.endByte);
-  return { source: observed.source, turns, scope: { unitIds: request.unitIds, start: anchors[0].record, end, contentHash: after.inner } };
+  return { source: observed.source, turns, scope: { unitIds: request.unitIds, start: anchors[0].record, end, contentHash: hashes[1],
+    ...(passed ? { passed: { from: passed.from, hash: hashes[2] } } : {}) } };
 }
 
 /** Preview reads only the explicitly authorized byte window of the named source. */
@@ -256,7 +265,7 @@ export async function selectExplicitCapture(capability, request, { observeRead =
       // last records and of all its bytes; this read must find the same bytes,
       // or the scope would be published under an identity that describes others.
       if (request.bounds && (scope.start.hash !== request.bounds.start || scope.end.hash !== request.bounds.end ||
-          scope.contentHash !== request.bounds.content)) fail('SOURCE_ANCHOR_CONFLICT');
+          scope.contentHash !== request.bounds.content || scope.passed?.hash !== request.bounds.passed?.hash)) fail('SOURCE_ANCHOR_CONFLICT');
       // Every other turn in a chat window's bytes was left out or captured
       // when it was chosen, including a turn the window left out when the
       // selection had no room to record it; one that is neither came from
@@ -427,14 +436,6 @@ async function stretchHash(source, from, to) {
   if (!hashes) fail('SOURCE_CHANGED');
   return hashes[0];
 }
-// The hashes of `from`..`to` and of the stretch `innerFrom`..`innerTo` inside
-// it, from one read.
-async function stretchHashes(source, from, to, innerFrom, innerTo) {
-  if (innerFrom < from || innerTo > to || innerFrom > innerTo) fail('INVALID_WORKFLOW');
-  const hashes = await rangeHashes(source, [{ from, to }, { from: innerFrom, to: innerTo }]);
-  if (!hashes) fail('SOURCE_CHANGED');
-  return { outer: hashes[0], inner: hashes[1] };
-}
 async function stretchHolds(source, from, to, expected) {
   try { return await stretchHash(source, from, to) === expected; }
   catch (error) { if (SOURCE_CONFLICTS.includes(error.code)) return false; throw error; }
@@ -523,8 +524,12 @@ const scopeEnd = scope => scope.end ?? scope.start;
 async function scopeHolds(source, scope) {
   const end = scopeEnd(scope);
   if (!await holds(source, end.endByte, end)) return false;
+  if (scope.passed && !await stretchHolds(source, scope.passed.from, end.endByte, scope.passed.hash)) return false;
   return scope.contentHash === undefined || stretchHolds(source, scope.start.startByte, end.endByte, scope.contentHash);
 }
+// The bytes a later capture passes when it starts at this scope's end, with
+// their hash: from where its capture began reading, when it kept that.
+const passedBy = scope => scope.passed ? { from: scope.passed.from, to: scopeEnd(scope).endByte, hash: scope.passed.hash } : chosenStretch(scope);
 // After a record too large to anchor whole, the anchor is the hash of its last
 // bytes, read again and accepted only while the whole record still hashes as
 // the scan read it: still bound to that read.
@@ -629,7 +634,7 @@ async function chatStart(store, chat, state, floor, source) {
   const scopes = [...(state?.explicitScopes ?? [])].sort((a, b) => scopeEnd(b).endByte - scopeEnd(a).endByte);
   for (const scope of scopes) {
     if (scopeEnd(scope).endByte <= start.eofByte) break;
-    if (await scopeHolds(source, scope)) { later(scopeEnd(scope).endByte, false, chosenStretch(scope)); break; }
+    if (await scopeHolds(source, scope)) { later(scopeEnd(scope).endByte, false, passedBy(scope)); break; }
   }
   // The position past turns a capture left out counts where it is later
   // still, and only while the stretch it passed is unchanged.
@@ -785,10 +790,19 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
       const closing = records.filter(record => record.endByte >= own && fits(record, until)).at(-1) ??
         [records.filter(record => record.endByte <= until).at(-1)].find(record => record && fits(record, until));
       if (closing) {
+        // The window's bytes, and from where this capture began reading when
+        // it passed turns before them, hashed while every byte the scans
+        // consumed still hashes as read: a later capture moves past exactly
+        // what was read here.
+        const prefix = from < units[0].record.startByte;
+        const hashes = await rangeHashes(observed.source, [{ from: units[0].record.startByte, to: closing.endByte },
+          ...(prefix ? [{ from, to: closing.endByte }] : []), ...reads]);
+        const consumed = hashes?.slice(prefix ? 2 : 1);
+        if (!hashes || consumed.some((value, index) => value !== reads[index].hash)) return { current, unitIds: [], more: true, leftOut, reads };
         return { current, unitIds: units.slice(0, count).map(item => item.unitId),
           readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte },
-          bounds: { start: units[0].record.hash, end: closing.hash, content: await stretchHash(observed.source, units[0].record.startByte, closing.endByte),
-            ...(leftOut.length ? { leftOut: [...leftOut] } : {}) },
+          bounds: { start: units[0].record.hash, end: closing.hash, content: hashes[0],
+            ...(prefix ? { passed: { from, hash: hashes[1] } } : {}), ...(leftOut.length ? { leftOut: [...leftOut] } : {}) },
           more: more || count < units.length, leftOut, reads };
       }
     }

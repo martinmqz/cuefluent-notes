@@ -571,6 +571,28 @@ test('each left-out turn is checked against its bytes right before its exclusion
   assert(exclusions.includes(BIG1)); assert(!exclusions.includes(BIG2));
 });
 
+test('a capture never moves past turns a window passed before its own once they are rewritten', async t => {
+  const f = await fixture(t), [C1, C2, NEW] = Array.from({ length: 3 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const started = id => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: 'capture' });
+  const command = async commandUnitId => {
+    const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+    return { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId };
+  };
+  await fs.appendFile(f.sourcePath, started(C1));
+  const first = await command(C1);
+  // Turn A is left out, so the window passes it and takes B alone.
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: A });
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: () => 0 }), { turns: 1, more: false, leftOut: 0 });
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [scope] = (await readSelection(f.store, identity)).state.explicitScopes;
+  assert.deepEqual(scope.unitIds, [B]); assert.equal(scope.passed.from, 0);
+  // Turn A is rewritten in place as a turn never captured; B's own bytes stay.
+  const text = await fs.readFile(f.sourcePath, 'utf8');
+  await fs.writeFile(f.sourcePath, text.replaceAll(A, NEW) + row('event_msg', { type: 'task_complete', turn_id: C1 }) + started(C2));
+  assert.deepEqual(await captureChatTurns(f.capability, await command(C2), { now: () => 0 }), { turns: 1, more: false, leftOut: 0 });
+  assert((await readCaptureHead(f.store, { ...identity, unitId: NEW })).head);
+});
+
 test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
