@@ -422,7 +422,20 @@ async function stretchHolds(source, from, to, expected) {
 // read that also finds its endpoint anchor and every byte its scans consumed
 // as they read them; null when any of those changed since.
 async function scannedStretch(source, { from, eofByte, anchor, reads }) {
-  const ranges = [{ from, to: eofByte }, { from: anchor.startByte, to: anchor.endByte }, ...reads.map(read => ({ from: read.from, to: read.to }))];
+  const hashes = await rangeHashes(source, [{ from, to: eofByte }, { from: anchor.startByte, to: anchor.endByte }, ...reads]);
+  if (!hashes) return null;
+  const [stretch, ends, ...consumed] = hashes;
+  return ends === anchor.hash && consumed.every((value, index) => value === reads[index].hash) ? stretch : null;
+}
+// Whether every byte a chat window's scans consumed still hashes as they read it.
+async function readsHold(source, reads) {
+  const hashes = await rangeHashes(source, reads);
+  return Boolean(hashes) && hashes.every((value, index) => value === reads[index].hash);
+}
+// The hashes of several `from`..`to` ranges of the transcript, from one
+// guarded read; null when the file is no longer the same or that long.
+async function rangeHashes(source, ranges) {
+  if (!ranges.length) return [];
   const start = Math.min(...ranges.map(range => range.from)), end = Math.max(...ranges.map(range => range.to)), hashers = ranges.map(() => createHash('sha256'));
   const { handle, stat } = await openGuarded(source.path, { singleLink: true });
   try {
@@ -438,8 +451,7 @@ async function scannedStretch(source, { from, eofByte, anchor, reads }) {
       offset += bytesRead;
     }
   } finally { await handle.close(); }
-  const [stretch, ends, ...consumed] = hashers.map(hasher => hasher.digest('hex'));
-  return ends === anchor.hash && consumed.every((value, index) => value === reads[index].hash) ? stretch : null;
+  return hashers.map(hasher => hasher.digest('hex'));
 }
 // The hash of up to 4 KiB of transcript bytes ending at `offset`, read from
 // the verified file.
@@ -655,7 +667,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   const skipped = item => withheld(item) || taken.has(item.unitId);
   for (let scan = 0; scan < scanWindows; scan++) {
     const limit = Math.min(eof, start.eofByte + CHAT_WINDOW_BYTES);
-    if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut };
+    if (limit <= start.eofByte) return { current, unitIds: [], more: false, leftOut, reads };
     // Where a later read may resume, with an anchor taken from this read: the
     // bytes before its limit, hashed just before it reads them, or the record
     // it read that ends there (its last bytes, when it is too large whole).
@@ -695,7 +707,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     const units = before.filter(item => item.unitId !== commandUnitId && !skipped(item) && !leftOut.includes(item.unitId));
     if (!units.length) {
       if (!cut) {
-        if (anchors.length || end >= eof) return { current, unitIds: [], more: false, leftOut };
+        if (anchors.length || end >= eof) return { current, unitIds: [], more: false, leftOut, reads };
         // Still inside a turn larger than a window: read on from here.
         start = await at(end, end === limit && straddles); continue;
       }
@@ -727,19 +739,19 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
           readRange: { fromByte: units[0].record.startByte, endByte: closing.endByte },
           bounds: { start: units[0].record.hash, end: closing.hash, content: await stretchHash(observed.source, units[0].record.startByte, closing.endByte),
             ...(leftOut.length ? { leftOut: [...leftOut] } : {}) },
-          more: more || count < units.length, leftOut };
+          more: more || count < units.length, leftOut, reads };
       }
     }
     // A Claude turn that ends in a record too large to close a window waits
     // for a later, smaller record, such as the command turn's own, to close
     // it: the next capture takes it.
     const last = lastRecord(units[0]);
-    if (chat.client === 'claude' && last && last.endByte - last.startByte > CHAT_ANCHOR_BYTES) return { current, unitIds: [], more: true, leftOut };
+    if (chat.client === 'claude' && last && last.endByte - last.startByte > CHAT_ANCHOR_BYTES) return { current, unitIds: [], more: true, leftOut, reads };
     leftOut.push(units[0].unitId);
     start = await at(units[1]?.record.startByte ?? stop, false);
   }
   // Out of reads inside left-out or excluded turns: the next capture resumes here.
-  return { current, unitIds: [], more: true, leftOut, resumeAt: { ...start, from, reads } };
+  return { current, unitIds: [], more: true, leftOut, reads, resumeAt: { ...start, from, reads } };
 }
 
 // Bounded runs of a chat's capture scope, each publishing a few turns, while
@@ -869,6 +881,9 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   // capture stopped first reads it again; a selection with no housekeeping
   // room left passes it unrecorded. Either way the reply counts it.
   let leftOut = 0;
+  // A turn is left out for good only while the bytes the scans judged it by
+  // are unchanged: a turn rewritten since may now be capturable.
+  if (window.leftOut.length && (!timeFor(deadline, 2) || !await bounded(now, () => readsHold(source, window.reads)))) return { turns, more: true, leftOut };
   for (const unitId of window.leftOut) {
     if (!timeFor(deadline, 2)) return { turns, more: true, leftOut };
     await excludeChatTurn(capability, { selection: chat, source, unitId }, { now, signal }); leftOut++;
