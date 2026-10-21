@@ -396,6 +396,34 @@ test('a turn left out is recorded only while the bytes that judged it are unchan
   assert.equal((await readSelection(f.store, identity)).state, null);
 });
 
+test('a turn left out is checked against the bytes that judged it as its exclusion is written', async t => {
+  const f = await fixture(t), BIG = randomUUID(), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: BIG }) + row('event_msg', { type: 'user_message', message: 'Write the report.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: BIG, last_agent_message: 'r'.repeat(70 * 1024) }) +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  // The long turn is rewritten in place, keeping its ID, as its exclusion is
+  // about to be written: after any earlier check of the bytes.
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Write the report')));
+  const lstat = fs.lstat, depth = Error.stackTraceLimit; let rewrites = 0;
+  Error.stackTraceLimit = 50; t.after(() => { Error.stackTraceLimit = depth; });
+  t.mock.method(fs, 'lstat', async (file, ...rest) => {
+    const stack = new Error().stack;
+    if (!rewrites && path.basename(String(file)) === path.basename(f.sourcePath) && stack.includes('snapshotSourceMetadata') && !stack.includes('chatWindow')) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('w'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return lstat.call(fs, file, ...rest);
+  });
+  const result = await captureChatTurns(f.capability, command, { now: () => 0 }).catch(error => ({ error: error.code }));
+  assert.equal(rewrites, 1);
+  assert.deepEqual(result, { turns: 0, more: true, leftOut: 0 });
+  assert.equal((await readSelection(f.store, identity)).state, null);
+});
+
 test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };

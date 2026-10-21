@@ -335,20 +335,42 @@ export async function excludeChatTurn(capability, { selection, source, unitId },
   return bounded(now, async () => {
     await assertWorkflowStorage(capability);
     const store = await openWorkflowIntake(capability);
+    return withIntakeLockWaiting(store, tx => excludeTurn(tx, store, chat, source, unitId), { signal });
+  });
+}
+// Several turns a chat window left out, in one locked step that first checks,
+// with `verify`, that the bytes they were judged by are unchanged: when they
+// changed, nothing is left out (`stale`).
+async function excludeChatTurns(capability, { chat, source, unitIds, verify }, { now, signal }) {
+  return bounded(now, async () => {
+    await assertWorkflowStorage(capability);
+    const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
-      const current = await readSelection(store, identityOf(chat));
-      if (current.state?.safetyStop || deniedUnits(current.state).has(unitId)) return { ...current, excluded: true };
-      if (current.state && (current.state.exclusions.length >= HOUSEKEEPING_EXCLUSIONS ||
-          Buffer.byteLength(canonicalJSON(current.state)) >= HOUSEKEEPING_BYTES)) return { ...current, excluded: false };
-      const metadata = await snapshotSourceMetadata(source.path);
-      if (!metadata || metadata.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
-      const observed = { client: chat.client, sessionId: chat.sessionId, path: metadata.path, projectRoot: chat.cwd, fileIdentity: metadata.fileIdentity };
-      return { ...await controlSelection(tx, { source: observed, expectedHash: current.hash,
-        boundary: { sourceIdentity: metadata.fileIdentity, eofByte: metadata.eofByte, startsMidRecord: true, unitId, record: null },
-        request: { id: digestId('cuefluent-command-turn-v1', { client: chat.client, sessionId: chat.sessionId, unitId }),
-          client: chat.client, sessionId: chat.sessionId, unitId, expectedRevision: current.state?.revision ?? 0, operation: 'exclude' } }), excluded: true };
+      // The file is looked at first and the bytes checked last, right before
+      // the exclusions are written.
+      const metadata = await sourceMetadata(source);
+      if (!await verify()) return { stale: true };
+      for (const unitId of unitIds) await excludeTurn(tx, store, chat, source, unitId, metadata);
+      return { stale: false };
     }, { signal });
   });
+}
+async function sourceMetadata(source) {
+  const metadata = await snapshotSourceMetadata(source.path);
+  if (!metadata || metadata.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
+  return metadata;
+}
+async function excludeTurn(tx, store, chat, source, unitId, seen = null) {
+  const current = await readSelection(store, identityOf(chat));
+  if (current.state?.safetyStop || deniedUnits(current.state).has(unitId)) return { ...current, excluded: true };
+  if (current.state && (current.state.exclusions.length >= HOUSEKEEPING_EXCLUSIONS ||
+      Buffer.byteLength(canonicalJSON(current.state)) >= HOUSEKEEPING_BYTES)) return { ...current, excluded: false };
+  const metadata = seen ?? await sourceMetadata(source);
+  const observed = { client: chat.client, sessionId: chat.sessionId, path: metadata.path, projectRoot: chat.cwd, fileIdentity: metadata.fileIdentity };
+  return { ...await controlSelection(tx, { source: observed, expectedHash: current.hash,
+    boundary: { sourceIdentity: metadata.fileIdentity, eofByte: metadata.eofByte, startsMidRecord: true, unitId, record: null },
+    request: { id: digestId('cuefluent-command-turn-v1', { client: chat.client, sessionId: chat.sessionId, unitId }),
+      client: chat.client, sessionId: chat.sessionId, unitId, expectedRevision: current.state?.revision ?? 0, operation: 'exclude' } }), excluded: true };
 }
 
 // How far typed captures have read past turns they left out, for this exact
@@ -880,13 +902,15 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   // Its exclusion is recorded before the scan position moves past it, so a
   // capture stopped first reads it again; a selection with no housekeeping
   // room left passes it unrecorded. Either way the reply counts it.
+  // They are left out for good only while the bytes the scans judged them by
+  // are unchanged, checked under the lock that records them: a turn
+  // rewritten since may now be capturable.
   let leftOut = 0;
-  // A turn is left out for good only while the bytes the scans judged it by
-  // are unchanged: a turn rewritten since may now be capturable.
-  if (window.leftOut.length && (!timeFor(deadline, 2) || !await bounded(now, () => readsHold(source, window.reads)))) return { turns, more: true, leftOut };
-  for (const unitId of window.leftOut) {
+  if (window.leftOut.length) {
     if (!timeFor(deadline, 2)) return { turns, more: true, leftOut };
-    await excludeChatTurn(capability, { selection: chat, source, unitId }, { now, signal }); leftOut++;
+    const recorded = await excludeChatTurns(capability, { chat, source, unitIds: window.leftOut, verify: () => readsHold(source, window.reads) }, { now, signal });
+    if (recorded.stale) return { turns, more: true, leftOut };
+    leftOut = window.leftOut.length;
   }
   if (window.resumeAt) await advanceChatCursor(capability, chat, source, window.resumeAt, { now, signal });
   if (!window.unitIds.length) return { turns, more: window.more, leftOut };
