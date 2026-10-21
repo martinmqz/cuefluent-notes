@@ -418,6 +418,29 @@ async function stretchHolds(source, from, to, expected) {
   try { return await stretchHash(source, from, to) === expected; }
   catch (error) { if (SOURCE_CONFLICTS.includes(error.code)) return false; throw error; }
 }
+// The hash of the stretch a capture passed (`from` to `eofByte`), from one
+// read that also finds its endpoint anchor and every byte its scans consumed
+// as they read them; null when any of those changed since.
+async function scannedStretch(source, { from, eofByte, anchor, reads }) {
+  const ranges = [{ from, to: eofByte }, { from: anchor.startByte, to: anchor.endByte }, ...reads.map(read => ({ from: read.from, to: read.to }))];
+  const start = Math.min(...ranges.map(range => range.from)), end = Math.max(...ranges.map(range => range.to)), hashers = ranges.map(() => createHash('sha256'));
+  const { handle, stat } = await openGuarded(source.path, { singleLink: true });
+  try {
+    if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(end)) return null;
+    const buffer = Buffer.alloc(Math.max(1, Math.min(STRETCH_READ_BYTES, end - start)));
+    for (let offset = start; offset < end;) {
+      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, end - offset), offset);
+      if (!bytesRead) return null;
+      ranges.forEach((range, index) => {
+        const low = Math.max(range.from, offset), high = Math.min(range.to, offset + bytesRead);
+        if (low < high) hashers[index].update(buffer.subarray(low - offset, high - offset));
+      });
+      offset += bytesRead;
+    }
+  } finally { await handle.close(); }
+  const [stretch, ends, ...consumed] = hashers.map(hasher => hasher.digest('hex'));
+  return ends === anchor.hash && consumed.every((value, index) => value === reads[index].hash) ? stretch : null;
+}
 // The hash of up to 4 KiB of transcript bytes ending at `offset`, read from
 // the verified file.
 async function chatCursorAnchor(source, offset) {
@@ -527,10 +550,8 @@ export async function recordChatCommandReply(capability, selection, call, respon
 async function advanceChatCursor(capability, chat, source, position, { now, signal }) {
   if (position.eofByte <= 0 || !position.anchor) return;
   return bounded(now, async () => {
-    if (!await holds(source, position.eofByte, position.anchor)) return;
-    let contentHash;
-    try { contentHash = await stretchHash(source, position.from, position.eofByte); }
-    catch (error) { if (SOURCE_CONFLICTS.includes(error.code)) return; throw error; }
+    const contentHash = await scannedStretch(source, position);
+    if (!contentHash) return;
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
       // A stored position whose stretch no longer holds is replaced, so a
@@ -608,7 +629,8 @@ async function scanChat(chat, source, start, endByte, observeRead, continuation 
   // Whether a record runs past the read's end, so a read from there starts
   // inside it; a read that ends exactly between records does not.
   const straddles = !limited && inspected.diagnostics.pendingTail === true && !inspected.recordAnchors.some(record => record.endByte === endByte);
-  return { anchors, records: inspected.recordAnchors, end: limited ? inspected.blocked.offset : endByte, tooLarge, unitEnds, straddles };
+  return { anchors, records: inspected.recordAnchors, end: limited ? inspected.blocked.offset : endByte, tooLarge, unitEnds, straddles,
+    consumed: inspected.diagnostics.consumed };
 }
 
 // The next window of the chat's finished turns: at most 10 turns or 8 MiB, up
@@ -623,7 +645,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   if (current.state && current.state.source.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
   const continuation = await chatContinuation(store, chat, source.path, source.fileIdentity, observeRead);
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
-  const withheld = withheldTurns(current.state), leftOut = [];
+  const withheld = withheldTurns(current.state), leftOut = [], reads = [];
   let { start } = await chatStart(store, chat, current.state, floor, observed.source);
   const from = start.eofByte;
   // A turn already captured (by Automatic capture or an earlier capture,
@@ -639,6 +661,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     // it read that ends there (its last bytes, when it is too large whole).
     const limitAnchor = limit < eof ? await chatCursorAnchor(observed.source, limit) : null;
     const scanned = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
+    reads.push(scanned.consumed);
     const { anchors, records, end, tooLarge, unitEnds, straddles } = scanned;
     const at = async (eofByte, startsMidRecord) => {
       const record = eofByte === limit ? null : records.find(item => item.endByte === eofByte);
@@ -716,7 +739,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     start = await at(units[1]?.record.startByte ?? stop, false);
   }
   // Out of reads inside left-out or excluded turns: the next capture resumes here.
-  return { current, unitIds: [], more: true, leftOut, resumeAt: { ...start, from } };
+  return { current, unitIds: [], more: true, leftOut, resumeAt: { ...start, from, reads } };
 }
 
 // Bounded runs of a chat's capture scope, each publishing a few turns, while

@@ -479,7 +479,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   return { candidates, covered, pending, noEvidence, processingControls, unanchoredUnits: [], blocked, anchorUpdates, selection, from, to, frames, eligibility, checkpoint: carry,
     continuedIn: blocked?.code === 'CLAUDE_HISTORY_REQUIRES_REVIEW' && continuedIn?.record.startByte === blocked.offset ? continuedIn : null, terminal,
     nativeAnchors: carry.units.map(unit => ({ unitId: unit.id, record: anchor(rows.get(unit.recordId)) })), recordAnchors: scan.records.filter(record => record.id && record.endByte <= to.offset).map(anchor),
-    diagnostics: { pendingTail: scan.pendingTail || markerTailPending, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd,
+    diagnostics: { pendingTail: scan.pendingTail || markerTailPending, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd, consumed: scan.consumed,
       automaticCeilingReached: Boolean(scope.upper && scan.snapshotEnd >= ceiling && !scan.limited && !scan.blocked),
       unownedRecords: carry.records.filter(row => row.kind === 'unowned').length, coverage: 'proven-human-input-only' } };
 }

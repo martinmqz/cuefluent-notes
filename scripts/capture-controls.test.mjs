@@ -1,7 +1,7 @@
 import test from './test-support/storage-test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { constants, openSync, writeSync, closeSync } from 'node:fs';
+import { constants, openSync, writeSync, closeSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
@@ -317,6 +317,57 @@ test('a selected window rewritten just before its reader opens the transcript pu
   await assert.rejects(runSelectedCapture(f.capability, args), { code: 'SOURCE_CHANGED' });
   assert.equal(rewrites, 1);
   for (const unitId of [A, B]) assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head, null);
+});
+
+test('a selected window rewritten while the transcript grows during its read publishes nothing', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8');
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B] };
+  const chosen = await selectExplicitCapture(f.capability, request);
+  const args = { selection: f.selection, scopeId: request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A, B] };
+  // Once the reader has hashed the window, one byte inside it changes in place
+  // and the transcript grows, so its size no longer shows the rewrite.
+  const at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  let rewrites = 0;
+  const observeRead = read => {
+    if (read.purpose !== 'stretch' || rewrites++) return;
+    const handle = openSync(f.sourcePath, 'r+');
+    try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+    appendFileSync(f.sourcePath, turn(randomUUID(), 'Later turn.'));
+  };
+  await assert.rejects(runSelectedCapture(f.capability, args, { observeRead }), { code: 'SOURCE_CHANGED' });
+  assert(rewrites >= 1);
+  for (const unitId of [A, B]) assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head, null);
+});
+
+test('a position past left-out turns is kept only for the bytes the capture read', async t => {
+  const f = await fixture(t), X = randomUUID(), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  // Turns A and B are left out, and a turn larger than a window follows them:
+  // with one read, the capture stores where it got to.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: X }) + row('event_msg', { type: 'user_message', message: 'Write a long report.' }) +
+    Array.from({ length: 9 }, () => row('event_msg', { type: 'agent_message', message: 'x'.repeat(1024 * 1024) })).join('') +
+    row('event_msg', { type: 'task_complete', turn_id: X }) + row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const chat = { ...f.selection, unitId: null }, source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity };
+  for (const unitId of [A, B]) await excludeChatTurn(f.capability, { selection: chat, source, unitId });
+  const command = { selection: chat, source, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  const cursor = path.join(f.collection.intakeStateDir, 'chat-capture', 'codex', `${S}.json`);
+  // Once the capture has read past the turns, one byte of turn A changes in
+  // place, keeping every byte at the stored position's end.
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    const stack = new Error().stack;
+    if (!rewrites && String(file) === f.sourcePath && stack.includes('captureChatTurns') && !stack.includes('chatWindow')) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return open.call(fs, file, ...rest);
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0, scanWindows: 1 }), { turns: 0, more: true, leftOut: 0 });
+  assert.equal(rewrites, 1);
+  await assert.rejects(fs.stat(cursor), { code: 'ENOENT' });
+  assert.equal((await readSelection(f.store, identity)).state.explicitScopes.length, 0);
 });
 
 test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {

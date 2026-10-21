@@ -772,7 +772,7 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
   return { candidates, pending, noEvidence, processingControls, unanchoredUnits: [...unanchoredUnits], blocked, anchorUpdates, selection, from, frames, eligibility, scopeId,
     nativeAnchors: anchors, unitEnds, cursorAnchors: scan.records.map(record => record.tailAnchor),
     recordAnchors: scan.records.filter(record => record.id && (!blocked || record.endByte <= blocked.offset)).map(anchor),
-    diagnostics: { pendingTail: scan.pendingTail, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd } };
+    diagnostics: { pendingTail: scan.pendingTail, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd, consumed: scan.consumed } };
 }
 
 /** Preview and intake use the same conservative prefix accounting. Published hashes are helper-owned. */
