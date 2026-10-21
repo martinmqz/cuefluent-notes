@@ -137,7 +137,10 @@ selection capacity, so they never cause a safety stop; a turn that could not be
 left out stays capturable, and that reply (or refusal) carries a
 `PROCESSING_EXCLUSION_UNVERIFIED` diagnostic. Each `capture` adds to the chat's capture record, so a chat captured
 by command many hundreds of times can fill it; `capture` then refuses, while
-Automatic capture and the other commands keep working.
+Automatic capture and the other commands keep working: captures stop short of
+the record's limit to keep room for `pause chat` and `resume chat`. Many pauses
+and resumes after that can still fill the rest; `resume chat` then refuses, and
+`pause chat`, an opt-out that always applies, makes a safety stop.
 
 ## Claude launch settings
 

@@ -10,6 +10,9 @@ export const SOURCE_HEADER_BYTES = 1024 * 1024;
 
 export const MAX_SELECTION_BYTES = 1024 * 1024;
 const ACTIVE_SELECTION_BYTES = MAX_SELECTION_BYTES - 16 * 1024;
+// An explicit capture stops this far short of the active ceiling, so `pause
+// chat` and `resume chat` keep room after captures fill the record.
+const CAPTURE_SELECTION_BYTES = ACTIVE_SELECTION_BYTES - 16 * 1024;
 export const stableSourceIdentity = stat => digest(canonicalJSON([stat.dev, stat.ino, stat.birthtimeNs].map(String)));
 const optionalId = value => value === null ? null : nativeId(value);
 function record(value) {
@@ -179,7 +182,8 @@ export function applySelectionControl(state, request, trustedBoundary, { grantHa
   }
   next.revision++;
   next.lastRequest = { id: request.id, inputHash };
-  if (!restrictive && Buffer.byteLength(canonicalJSON(next)) > ACTIVE_SELECTION_BYTES) fail('SELECTION_CAPACITY_EXCEEDED');
+  const ceiling = request.operation.startsWith('capture-') ? CAPTURE_SELECTION_BYTES : ACTIVE_SELECTION_BYTES;
+  if (!restrictive && Buffer.byteLength(canonicalJSON(next)) > ceiling) fail('SELECTION_CAPACITY_EXCEEDED');
   return validateSelectionState(next);
 }
 
