@@ -257,6 +257,27 @@ test('pause chat as the first prompt of a new Automatic chat leaves later typed 
   for (const unitId of [P1, P2]) assert.equal((await A.head(unitId)).head, null);
 });
 
+test('a chat paused before arming still binds after its capture settings changed, and resumes under them', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = Array.from({ length: 3 }, () => randomUUID());
+  const typed = async (control, promptId, capability) => {
+    const call = A.call(control); await A.append([...A.control(control, promptId)]); await A.hook('UserPromptSubmit', promptId);
+    await A.append([call]); return A.resolve(call, capability);
+  };
+  const pause = await typed('pause chat', P1);
+  await controlChatCapture(f.capability, { selection: pause.selection, source: pause.source, unitId: P1, operation: 'pause' });
+  await A.append([A.reply('Paused.')]);
+  // Capture settings saved again: the chat's registration grant is now stale.
+  f.config.routes[0].collection.generation = randomUUID();
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
+  const resume = await typed('resume chat', P2, capability);
+  assert.equal(resume.unitId, P2); assert.equal(resume.typedControl, 'resume chat');
+  await controlChatCapture(capability, { selection: resume.selection, source: resume.source, unitId: P2, operation: 'resume' });
+  await A.append([A.reply('Resumed.'), A.prompt('Decision: ship on Friday.', P3), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P3); await f.run();
+  assert((await A.head(P3)).head);
+});
+
 test('a typed command before the frozen session start is left out and its chat still binds and arms', async t => {
   const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, P4, P5, P6] = Array.from({ length: 6 }, () => randomUUID());
   const typed = async (control, promptId) => {

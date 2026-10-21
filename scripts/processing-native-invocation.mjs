@@ -89,7 +89,9 @@ function codexNestedCall(records, context, invocation, argsHash) {
  * The exact current registration and its saved floor pin the native file; the
  * registration's own grant must still be current collection consent. This
  * binds a call only; it creates no selection and moves no floor. */
-async function registeredSource(capability, store, identity, sessionKinds) {
+// `staleGrant` accepts a registration whose grant the current settings no
+// longer match, still within the current route and collection.
+async function registeredSource(capability, store, identity, sessionKinds, { staleGrant = false } = {}) {
   const { snapshot, registration } = await readRegistration(store, identity, { mismatchCode: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
   if (!registration) throw new MissingNativeInvocation();
   const { collection } = await workflowProcessingContext(capability);
@@ -98,7 +100,7 @@ async function registeredSource(capability, store, identity, sessionKinds) {
   let grant;
   try { grant = await workflowCollectionGrant(capability, selection); }
   catch (error) { if (['WORKFLOW_NOT_AUTHORIZED', 'COLLECTION_GRANT_REQUIRES_SETUP'].includes(error.code)) throw new UnavailableNativeSource(); throw error; }
-  if (grant !== registration.grantHash) throw new UnavailableNativeSource();
+  if (!staleGrant && grant !== registration.grantHash) throw new UnavailableNativeSource();
   const records = [{ name: registrationPath(identity), hash: snapshot.hash }];
   let frozen = registration.snapshot;
   if (!frozen) {
@@ -185,7 +187,10 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
       // all, or one holding only what typed commands recorded before arming
       // (their own turns left out, or a pause); a retired selection keeps its
       // existing refusal, also as a fallback candidate.
-      const found = await settle(() => registeredSource(capability, store, identity, sessionKinds), MissingRegistrationFloor);
+      // A selection typed commands already recorded binds even after the
+      // settings changed: a pause, an opt-out, still applies, and a paused
+      // chat can be captured by hand or resumed under the current settings.
+      const found = await settle(() => registeredSource(capability, store, identity, sessionKinds, { staleGrant: selected.state !== null }), MissingRegistrationFloor);
       source = found.source; floor = found.floor; pinned.push(...found.records);
       // Collection is on but not armed: a later typed control needs the armed
       // selection, whose exclusion receipt keeps it out of captured evidence.
