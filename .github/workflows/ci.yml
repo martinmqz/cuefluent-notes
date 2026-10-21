@@ -102,19 +102,23 @@ jobs:
       - run: npm run check:guidance
   test:
     needs: scope
-    # macOS and Windows run their suites as two parallel halves. The first
-    # keeps the required check name and builds the release preview; the second
-    # is gated through `reproducibility`, which needs every leg of this job.
-    name: test (${{ matrix.os }}${{ matrix.shard == '2/2' && ', 2/2' || '' }})
+    # macOS and Windows run four duration-weighted shards. The first keeps
+    # the required check name and builds the release preview; every shard is
+    # gated through `reproducibility`, which needs the entire matrix.
+    name: test (${{ matrix.os }}${{ matrix.suffix }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, shard: '' }
-          - { os: macos-14, shard: '1/2' }
-          - { os: macos-14, shard: '2/2' }
-          - { os: windows-2025, shard: '1/2' }
-          - { os: windows-2025, shard: '2/2' }
+          - { os: ubuntu-24.04, shard: '', suffix: '', primary: true }
+          - { os: macos-14, shard: '1/4', suffix: '', primary: true }
+          - { os: macos-14, shard: '2/4', suffix: ', 2/4', primary: false }
+          - { os: macos-14, shard: '3/4', suffix: ', 3/4', primary: false }
+          - { os: macos-14, shard: '4/4', suffix: ', 4/4', primary: false }
+          - { os: windows-2025, shard: '1/4', suffix: '', primary: true }
+          - { os: windows-2025, shard: '2/4', suffix: ', 2/4', primary: false }
+          - { os: windows-2025, shard: '3/4', suffix: ', 3/4', primary: false }
+          - { os: windows-2025, shard: '4/4', suffix: ', 4/4', primary: false }
     # Required contexts always test on their named platform. The package path
     # checks committed files there without repeating the full source suite.
     runs-on: ${{ matrix.os }}
@@ -133,14 +137,14 @@ jobs:
         run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release(),parallelism:require('os').availableParallelism()})"
       - run: npm ci --ignore-scripts
       - name: Test committed marketplace packages on the native platform
-        if: needs.scope.outputs.mode == 'packages' && matrix.shard != '2/2'
+        if: needs.scope.outputs.mode == 'packages' && matrix.primary
         run: node --test scripts/published-marketplace.test.mjs
       - name: Verify Windows privacy probe before the full suite
-        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.shard != '2/2'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.primary
         timeout-minutes: 2
         run: node scripts/windows-probe-smoke.mjs
       - name: Verify private storage under a real standard-user token
-        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.shard != '2/2'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.primary
         shell: powershell
         run: ./scripts/test-windows-standard-user.ps1
       - name: Run tests
@@ -149,6 +153,7 @@ jobs:
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
           CUEFLUENT_TEST_SHARD: ${{ matrix.shard }}
+          CUEFLUENT_TEST_TIMINGS: .local/ci-test-timings
       # Raise Node's default on small runners without lowering it on larger ones.
       # Files are isolated; tests inside a file remain sequential for fault injection.
       - name: Run Windows tests
@@ -160,12 +165,22 @@ jobs:
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
           CUEFLUENT_TEST_SHARD: ${{ matrix.shard }}
+          CUEFLUENT_TEST_TIMINGS: .local/ci-test-timings
+      - name: Upload per-file test timings
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always() && needs.scope.outputs.mode == 'full'
+        with:
+          name: test-timings-${{ matrix.os }}-${{ strategy.job-index }}
+          path: .local/ci-test-timings/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
       - run: npm run check:examples
-        if: needs.scope.outputs.mode == 'full' && matrix.shard != '2/2'
+        if: needs.scope.outputs.mode == 'full' && matrix.primary
       - run: npm run release:build
-        if: needs.scope.outputs.mode == 'full' && matrix.shard != '2/2'
+        if: needs.scope.outputs.mode == 'full' && matrix.primary
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: needs.scope.outputs.mode == 'full' && matrix.shard != '2/2'
+        if: needs.scope.outputs.mode == 'full' && matrix.primary
         with:
           name: release-preview-${{ matrix.os }}
           path: dist/release/artifacts/

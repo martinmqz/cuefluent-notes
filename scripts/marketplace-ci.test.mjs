@@ -462,25 +462,39 @@ test('workflow preserves required checks and gates short-path smokes on provenan
   assert.ok(jobs.reproducibility.steps.some(step => step.run === 'node scripts/marketplace-ci.mjs gate' && step.env.CI_NEEDS === '${{ toJSON(needs) }}'));
   assert.equal(jobs.test.needs, 'scope'); assert.equal(jobs['client-smoke'].needs, 'scope');
   assert.equal(jobs.test.if, undefined, 'Required matrix context names must exist on both paths.');
-  assert.equal(jobs.test.name, "test (${{ matrix.os }}${{ matrix.shard == '2/2' && ', 2/2' || '' }})");
-  // macOS and Windows run as two halves; the first keeps the required context name.
+  assert.equal(jobs.test.name, 'test (${{ matrix.os }}${{ matrix.suffix }})');
   const legs = jobs.test.strategy.matrix.include;
-  assert.deepEqual(legs, [{ os: 'ubuntu-24.04', shard: '' }, { os: 'macos-14', shard: '1/2' }, { os: 'macos-14', shard: '2/2' },
-    { os: 'windows-2025', shard: '1/2' }, { os: 'windows-2025', shard: '2/2' }]);
-  assert.deepEqual(legs.map(leg => `test (${leg.os}${leg.shard === '2/2' ? ', 2/2' : ''})`),
-    ['test (ubuntu-24.04)', 'test (macos-14)', 'test (macos-14, 2/2)', 'test (windows-2025)', 'test (windows-2025, 2/2)']);
-  for (const name of ['Run tests', 'Run Windows tests']) assert.equal(jobs.test.steps.find(step => step.name === name).env.CUEFLUENT_TEST_SHARD, '${{ matrix.shard }}');
-  // Only the first half builds and uploads the Windows release preview.
-  for (const step of jobs.test.steps.filter(step => step.uses?.startsWith('actions/upload-artifact@') || step.run === 'npm run release:build')) {
-    assert.match(step.if, / && matrix.shard != '2\/2'$/);
+  assert.equal(legs.length, 9);
+  assert.deepEqual(legs.filter(leg => leg.primary).map(leg => `test (${leg.os}${leg.suffix})`),
+    ['test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)']);
+  for (const os of ['macos-14', 'windows-2025']) {
+    const native = legs.filter(leg => leg.os === os);
+    assert.deepEqual(native.map(leg => leg.shard), ['1/4', '2/4', '3/4', '4/4']);
+    assert.deepEqual(native.map(leg => leg.suffix), ['', ', 2/4', ', 3/4', ', 4/4']);
+    assert.deepEqual(native.map(leg => leg.primary), [true, false, false, false]);
   }
+  assert.equal(legs.find(leg => leg.os === 'ubuntu-24.04').shard, '');
+  for (const name of ['Run tests', 'Run Windows tests']) {
+    const env = jobs.test.steps.find(step => step.name === name).env;
+    assert.equal(env.CUEFLUENT_TEST_SHARD, '${{ matrix.shard }}');
+    assert.equal(env.CUEFLUENT_TEST_TIMINGS, '.local/ci-test-timings');
+  }
+  const releaseSteps = jobs.test.steps.filter(step => step.with?.name?.startsWith('release-preview-') ||
+    ['npm run release:build', 'npm run check:examples', 'node scripts/windows-probe-smoke.mjs', './scripts/test-windows-standard-user.ps1'].includes(step.run));
+  assert.equal(releaseSteps.length, 5);
+  for (const step of releaseSteps) assert.match(step.if, / && matrix.primary$/);
+  const timingUpload = jobs.test.steps.find(step => step.name === 'Upload per-file test timings');
+  assert.equal(timingUpload.if, "always() && needs.scope.outputs.mode == 'full'");
+  assert.equal(timingUpload.with.name, 'test-timings-${{ matrix.os }}-${{ strategy.job-index }}');
+  assert.equal(timingUpload.with.path, '.local/ci-test-timings/');
+  assert.equal(timingUpload.with['include-hidden-files'], true);
   assert.equal(jobs.test['runs-on'], '${{ matrix.os }}', 'Required platform checks must run on their named OS.');
   assert.match(jobs.test['timeout-minutes'], /^\$\{\{ needs.scope.outputs.mode == 'packages' && 10 \|\|/);
   const packageStep = jobs.test.steps.findIndex(step => step.run === 'node --test scripts/published-marketplace.test.mjs');
   assert.ok(packageStep > 0, 'The short path must run actual package tests, not an echo acknowledgement.');
-  assert.equal(jobs.test.steps[packageStep].if, "needs.scope.outputs.mode == 'packages' && matrix.shard != '2/2'");
+  assert.equal(jobs.test.steps[packageStep].if, "needs.scope.outputs.mode == 'packages' && matrix.primary");
   for (const step of jobs.test.steps.slice(0, packageStep)) assert.equal(step.if, undefined, 'Both paths need native setup.');
-  for (const step of jobs.test.steps.slice(packageStep + 1)) assert.match(step.if, /^needs.scope.outputs.mode == 'full'/);
+  for (const step of jobs.test.steps.slice(packageStep + 1)) assert.match(step.if, /^(?:always\(\) && )?needs.scope.outputs.mode == 'full'/);
   assert.deepEqual(jobs['client-smoke'].strategy.matrix.os, ['macos-14', 'windows-2025']);
   const select = jobs.scope.steps.find(step => step.id === 'select');
   assert.equal(select.run, 'node scripts/marketplace-ci.mjs select --fetch');

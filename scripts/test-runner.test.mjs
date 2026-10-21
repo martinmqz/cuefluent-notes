@@ -11,6 +11,7 @@ for (const statuses of [[1, 0], [0, 7], [2, 7], [null, 0], ['spawn-error', 0], [
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-test-runner-# '));
     t.after(() => fs.rm(root, { recursive: true, force: true }));
     await fs.copyFile(new URL('./test.mjs', import.meta.url), path.join(root, 'test.mjs'));
+    await fs.copyFile(new URL('./test-sharding.mjs', import.meta.url), path.join(root, 'test-sharding.mjs'));
     await fs.mkdir(path.join(root, 'test-support'));
     // This process only simulates phase dispatch. Its spoofed platform must not
     // invoke Windows ACL tools or create settings as if it were a native host.
@@ -35,7 +36,7 @@ for (const statuses of [[1, 0], [0, 7], [2, 7], [null, 0], ['spawn-error', 0], [
     `);
     // CI runs this file inside a shard; the runner under test sees no shard.
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(root, 'preload.mjs')).href, path.join(root, 'test.mjs'), '--test-concurrency=4'],
-      { encoding: 'utf8', env: { ...process.env, CUEFLUENT_TEST_SHARD: '' } });
+      { encoding: 'utf8', env: { ...process.env, CUEFLUENT_TEST_SHARD: '', CUEFLUENT_TEST_TIMINGS: '' } });
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null, result.stderr);
     await assert.doesNotReject(() => fs.access(path.join(root, 'calls.json')), result.stderr);
@@ -46,7 +47,9 @@ for (const statuses of [[1, 0], [0, 7], [2, 7], [null, 0], ['spawn-error', 0], [
     assert.equal(calls.length, 2);
     assert.deepEqual(calls[0].args.slice(0, 3), ['--test', '--test-concurrency=4', '--test-concurrency=1']);
     assert.deepEqual(calls[1].args.slice(0, 2), ['--test', '--test-concurrency=4']);
-    assert.deepEqual(calls.flatMap(call => call.args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file))), names);
+    assert.deepEqual(calls[0].args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file)), names.filter(name => name !== 'ordinary.test.mjs'));
+    assert.deepEqual(calls[1].args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file)), ['ordinary.test.mjs']);
+    assert.deepEqual(calls.flatMap(call => call.args.filter(arg => arg.endsWith('.test.mjs')).map(file => path.basename(file))).sort(), [...names].sort());
   });
 
 // CI can split the suite across parallel jobs. Each shard is a disjoint part;
@@ -55,6 +58,7 @@ test('test shards run every file exactly once, balanced by size, and refuse inva
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-test-shards-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.copyFile(new URL('./test.mjs', import.meta.url), path.join(root, 'test.mjs'));
+  await fs.copyFile(new URL('./test-sharding.mjs', import.meta.url), path.join(root, 'test-sharding.mjs'));
   await fs.mkdir(path.join(root, 'test-support'));
   await fs.writeFile(path.join(root, 'test-support', 'isolated-settings.mjs'), '// No settings in this orchestration-only fixture.\n');
   const sizes = { 'a.test.mjs': 900, 'b.test.mjs': 500, 'c.test.mjs': 400, 'd.test.mjs': 300, 'e.test.mjs': 300, 'f.test.mjs': 100 };
@@ -71,7 +75,7 @@ test('test shards run every file exactly once, balanced by size, and refuse inva
   const run = spec => {
     const calls = path.join(root, `calls-${spec.replace('/', '-')}.json`);
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(root, 'preload.mjs')).href, path.join(root, 'test.mjs')],
-      { encoding: 'utf8', env: { ...process.env, CUEFLUENT_TEST_SHARD: spec, CALLS_FILE: calls } });
+      { encoding: 'utf8', env: { ...process.env, CUEFLUENT_TEST_SHARD: spec, CUEFLUENT_TEST_TIMINGS: '', CALLS_FILE: calls } });
     return { result, calls };
   };
   const shards = [];

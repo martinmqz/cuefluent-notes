@@ -178,17 +178,33 @@ npm dependencies. On the full path it still compares all native build artifacts;
 only tag runs may omit client registration, as defined below. Required check names
 and protected-main settings stay the same. A failed or cancelled selection cannot
 satisfy the required check. Published assets are neither rebuilt nor replaced by
-the shorter path. On the full path the required `test (macos-14)` and
-`test (windows-2025)` checks each run half of the source suite; the other half
-runs as `test (macos-14, 2/2)` and `test (windows-2025, 2/2)`, which are not
-required checks themselves but which `reproducibility` requires. Draft pull
-requests skip every Checks job, so their required matrix checks do not exist and
-their other checks, `reproducibility` included, report as skipped until the pull
-request is marked ready for review, which runs them; a draft cannot be merged. The
-draft package-update PR from publication still runs, so marking it ready runs its
-checks a second time. A newer push to a pull request, or converting it back to
-draft, cancels its running checks; a re-run of an earlier run waits for them
-instead, and a cancelled run does not run `reproducibility`.
+the shorter path. On the full path, macOS and Windows each run four disjoint
+source-test shards. The first keeps the required `test (macos-14)` or
+`test (windows-2025)` name; the others add `, 2/4`, `, 3/4` and `, 4/4`.
+All shards must succeed through the matrix-wide `reproducibility` gate. Only
+one shard per native platform runs the additional privacy checks, examples,
+release build and release-artifact upload.
+
+The runner discovers all test files independently of its platform-specific timing
+weights and starts larger estimated workloads first. Missing measurements use a
+deterministic file-size estimate; they never remove files from discovery. Windows
+retains its separate serial phase for timing-sensitive native tests. Full CI also
+uploads small `test-timings-*` artifacts, separately from release artifacts, even
+after a test failure. Each phase has its own file: per-file summaries record
+runtime and counts, and a final total distinguishes completion from interruption.
+Initial weights are summed top-level test durations; use successful, complete
+native per-file summaries to refresh them. They are scheduling estimates, not
+promised CI completion times. Test cases, native privacy checks, existing job
+timeouts and production deadlines remain unchanged.
+
+Draft pull requests skip every Checks job, so their required matrix checks do
+not exist and their other checks, `reproducibility` included, report as skipped
+until the pull request is marked ready for review, which runs them; a draft
+cannot be merged. The draft package-update PR from publication still runs, so
+marking it ready runs its checks a second time. A newer push to a pull request,
+or converting it back to draft, cancels its running checks; a re-run of an
+earlier run waits for them instead, and a cancelled run does not run
+`reproducibility`.
 
 The `client-smoke` job skips tag refs. On the full path it checks disposable
 client registration using separately built packages and, when present, the

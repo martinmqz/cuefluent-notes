@@ -143,3 +143,36 @@ export async function harness(t, f, overrides = {}) {
     : { ...initialize, params: { ...initialize.params, capabilities: overrides.capabilities } })).result.serverInfo.name, 'cuefluent_control');
   return h;
 }
+
+async function prepareFromPending(call, f) {
+  const pending = await call('processing_pending', {});
+  const request = pending.nextPreparation;
+  assert(request, 'the engine must expose a bounded exact next batch');
+  f.operationId = request.operationId;
+  return call('processing_prepare', request);
+}
+
+const draft = '# PRIVATE-SYNTHETIC-PROPOSAL\n\n## Decision\n\nKeep the rollout paused.\n';
+function proposeThroughTools(f, content = draft, expectedHash = null) {
+  return async call => {
+    let claim = await prepareFromPending(call, f);
+    for (let page = 0; page < claim.packet.pages.length; page++) {
+      const read = await call('processing_page', { operationId: f.operationId, expectedClaimHash: claim.claimHash, page });
+      claim = await call('processing_ack', { operationId: f.operationId, expectedClaimHash: read.claimHash,
+        pages: [{ index: page, hash: read.hash }] });
+    }
+    await call('processing_propose', { operationId: f.operationId, expectedClaimHash: claim.claimHash,
+      proposal: { files: [{ path: 'meetings/rollout.md', expectedHash, content }],
+        mappings: [{ identity: f.identity, paths: ['meetings/rollout.md'] }] } });
+  };
+}
+async function proposeInChat(f, h, content = draft, expectedHash = null) {
+  h.script = proposeThroughTools(f, content, expectedHash);
+  const closed = h.whenClosed(), requestId = randomUUID();
+  const first = body(await h.call('process_selected_captures', { collectionId: f.collection.id, requestId, selection: selectedInput(f) }));
+  await closed;
+  assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'awaiting-review');
+  return first;
+}
+
+export { prepareFromPending, draft, proposeThroughTools, proposeInChat };
