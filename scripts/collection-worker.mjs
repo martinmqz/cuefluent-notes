@@ -190,9 +190,10 @@ export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUP
   // A turn whose earlier capture this reader cannot extend, or that conflicts
   // with the current transcript, is held on every pass.
   'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
-  'SOURCE_IDENTITY_MISMATCH',
-  // A turn whose capture would be larger than a capture may be.
-  'CAPTURE_SIZE_LIMIT',
+  'SOURCE_IDENTITY_MISMATCH', 'FINAL_CAPTURE_CONFLICT',
+  // A turn whose capture would be larger than a capture may be, or would hold
+  // what a capture cannot: every pass refuses it the same way.
+  'CAPTURE_SIZE_LIMIT', 'CAPTURE_TOOL_LIMIT', 'UNSUPPORTED_ATTACHMENT',
   // Saved capture state that is malformed, or a head whose saved capture is
   // missing or changed, fails every visit that reads it.
   'INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',

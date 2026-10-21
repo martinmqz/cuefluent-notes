@@ -1604,6 +1604,22 @@ test('a window re-chosen after a change only inside it is a new window, not the 
   assert.deepEqual([scopes[1].unitIds, scopes[1].start, scopes[1].end], [selected.unitIds, selected.start, selected.end]);
 });
 
+test('a turn with an attachment reference a capture cannot record is captured without it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // An image link with a C1 control character, which no capture may hold.
+  await A.append([A.root('user', { promptId: P1, message: { role: 'user', content: [{ type: 'text', text: 'See the chart.' },
+    { type: 'image', source: { type: 'url', url: 'https://example.com/chart\u0085.png' } }] } }), A.reply('Noted.'),
+  A.prompt('Decision: ship on Friday.', P2), A.reply('Noted.')]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }),
+    { turns: 2, more: false, leftOut: 0 });
+  const { capture } = await A.head(P1);
+  assert.match(capture.evidence[0].text, /See the chart/);
+  assert(capture.coverage.omissions.some(item => item.reason === 'unsupported-attachment-reference'));
+});
+
 test('a Claude turn whose last record is too large to anchor is captured, as is the turn before it', async t => {
   const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
   await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
