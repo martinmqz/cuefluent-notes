@@ -24,6 +24,7 @@ import { COLLECTION_STOP_CODES } from './processing-control-server.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
+import { workflowTimeout } from './workflow-budget.mjs';
 
 async function prepareFromPending(call, f) {
   const pending = await call('processing_pending', {});
@@ -984,6 +985,73 @@ async function manualCaptureChat(t) {
   };
   return { f, h, parent, store, identity, head, typed, config };
 }
+
+test('typed capture bounds slow pre-action checks and failure bookkeeping by its original deadline', async t => {
+  for (const delay of [11_000, 50_000]) await t.test(`status delayed ${delay} ms`, async t => {
+    const { h, parent, store, identity, head } = await manualCaptureChat(t);
+    const work = await parent.work('Decision: ship on Friday.');
+    let elapsed = 0;
+    t.mock.method(performance, 'now', () => 1_000_000 + elapsed);
+    h.beforeStatus = async () => { elapsed += delay; };
+    const rpc = await h.call('capture_turns', {});
+    assert.equal(rpc.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(rpc));
+    assert.equal(await head(work), null, 'an expired preflight cannot capture');
+    const state = (await readSelection(store, identity)).state;
+    assert.equal(state?.explicitScopes.length ?? 0, 0);
+    if (delay < 50_000) {
+      assert(state.exclusions.includes(parent.controls.at(-1)), 'failure bookkeeping can use the remaining command time');
+    } else {
+      assert.equal(state, null, 'failure bookkeeping cannot write after the command deadline');
+      assert.deepEqual(rpc.error.data.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
+    }
+  });
+});
+
+test('typed capture preflight gets only the time left after reserving the command', async t => {
+  const { h, parent, store, identity, head } = await manualCaptureChat(t);
+  const work = await parent.work('Decision: ship on Friday.');
+  let elapsed = 0;
+  t.mock.method(performance, 'now', () => 1_000_000 + elapsed);
+  const rename = fs.rename;
+  t.mock.method(fs, 'rename', async (from, to) => {
+    const reservation = String(to).split(path.sep).includes('replies') && JSON.parse(await fs.readFile(from, 'utf8')).response === null;
+    const result = await rename(from, to);
+    // An OS operation that returned late leaves just 1 s for preflight.
+    if (reservation) elapsed = 39_000;
+    return result;
+  });
+  let inspected = false;
+  h.beforeStatus = async () => {
+    inspected = true;
+    assert.equal(workflowTimeout(), 1_000);
+    elapsed += 1_001;
+  };
+  const rpc = await h.call('capture_turns', {});
+  assert(inspected);
+  assert.equal(rpc.error?.data?.code, 'PROCESSING_CONTROL_FAILED', JSON.stringify(rpc));
+  assert.equal(await head(work), null);
+  const state = (await readSelection(store, identity)).state;
+  assert.equal(state.explicitScopes.length, 0);
+  assert(state.exclusions.includes(parent.controls.at(-1)));
+});
+
+test('cancelling capture during preflight stops its action but still leaves its command turn out', async t => {
+  const { h, parent, store, identity, head } = await manualCaptureChat(t);
+  const work = await parent.work('Decision: ship on Friday.'), entered = deferred(), release = deferred();
+  h.release = release.resolve;
+  h.beforeStatus = async () => { entered.resolve(); await release.promise; };
+  const pending = h.call('capture_turns', {});
+  await entered.promise;
+  h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 1 } });
+  release.resolve(); h.end(); await h.server;
+  assert.equal(await head(work), null);
+  const state = (await readSelection(store, identity)).state;
+  assert.equal(state.explicitScopes.length, 0);
+  assert(state.exclusions.includes(parent.controls.at(-1)));
+  assert(!h.responses.some(row => row.id === 1), 'a cancelled request has no late reply');
+  // The host abandoned its cancelled RPC; no response is expected for it.
+  pending.catch(() => {});
+});
 
 test('typed capture in a Manual chat captures every finished turn since the last capture, never a command turn', async t => {
   const { f, h, parent, store, identity, head, typed, config } = await manualCaptureChat(t);

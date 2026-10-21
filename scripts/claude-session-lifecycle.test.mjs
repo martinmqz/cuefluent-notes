@@ -584,9 +584,10 @@ test('capture does not trust a pause once the transcript was cut back and regrow
 });
 
 // A command clock that jumps forward on every transcript read, as if each
-// read ran long; storage budgets keep the real clock.
-function slowReads(t) {
-  const clock = performance.now.bind(performance), state = { skew: 0, jump: 0 };
+// read ran long; storage budgets keep the unshifted clock. Logical correctness
+// fixtures can supply a fixed clock so host load cannot create partial runs.
+function slowReads(t, { clock = performance.now.bind(performance) } = {}) {
+  const state = { skew: 0, jump: 0 };
   t.mock.method(performance, 'now', () => clock() + state.skew);
   return { clock, state, observeRead: () => { state.skew = state.jump; } };
 }
@@ -599,10 +600,11 @@ test('another call of the same typed capture never takes a second window', async
   const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
   const bound = await A.resolve(call);
   const command = { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
-  assert.deepEqual(await captureChatTurns(f.capability, command), { turns: 10, more: true, leftOut: 0 });
+  const { clock } = slowReads(t, { clock: () => 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: clock }), { turns: 10, more: true, leftOut: 0 });
   await excludeChatTurn(f.capability, { selection: bound.selection, source: bound.source, unitId: C1 });
   // The model calls the tool again in the same command turn.
-  assert.deepEqual(await captureChatTurns(f.capability, command), { turns: 0, more: true, leftOut: 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: clock }), { turns: 0, more: true, leftOut: 0 });
   assert.equal((await A.selection()).state.explicitScopes.length, 1);
   for (const promptId of prompts.slice(10)) assert.equal((await A.head(promptId)).head, null);
 });
@@ -618,7 +620,8 @@ test('a read cut short by its record limit still captures the turns it finished'
   await A.append([A.reply('x'.repeat(2.2 * 1024 * 1024))]);
   const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
   const bound = await A.resolve(call);
-  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }),
+  const { clock } = slowReads(t, { clock: () => 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }, { now: clock }),
     { turns: 10, more: true, leftOut: 0 });
   for (const promptId of prompts.slice(0, 10)) assert((await A.head(promptId)).head);
 });
@@ -780,7 +783,7 @@ test('a window rewritten in place after it was selected is selected again as a n
     return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
   };
   // The first capture selects the window but runs out of time to run it.
-  const first = await bind(C1), slow = slowReads(t);
+  const first = await bind(C1), slow = slowReads(t, { clock: () => 0 });
   slow.state.jump = 22_000;
   assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
   slow.state.skew = slow.state.jump = 0;
@@ -1607,7 +1610,7 @@ test('a window re-chosen after a change only inside it is a new window, not the 
     return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
   };
   // The first capture selects the window but runs out of time to run it.
-  const first = await bind(C1), slow = slowReads(t);
+  const first = await bind(C1), slow = slowReads(t, { clock: () => 0 });
   slow.state.jump = 22_000;
   assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
   slow.state.skew = slow.state.jump = 0;

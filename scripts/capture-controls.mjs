@@ -16,7 +16,7 @@ import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.m
 import { snapshotSourceMetadata } from './collection-ingress.mjs';
 import { processScope, READER_BLOCK_CODES, clearReaderBlock } from './collection-worker.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
-import { withWorkflowBudget } from './workflow-budget.mjs';
+import { withWorkflowBudget, checkWorkflowBudget } from './workflow-budget.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { keys, nativeId, isNativeId, hash, integer, list, unique, choice, canonicalJSON, digest, digestId, fail, safeErrorCode } from './workflow-values.mjs';
 
@@ -472,7 +472,9 @@ async function rangeHashes(source, ranges) {
     const pass = async () => {
       const hashers = ranges.map(() => createHash('sha256'));
       for (let offset = start; offset < end;) {
+        checkWorkflowBudget();
         const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, end - offset), offset);
+        checkWorkflowBudget();
         if (!bytesRead) return null;
         ranges.forEach((range, index) => {
           const low = Math.max(range.from, offset), high = Math.min(range.to, offset + bytesRead);
@@ -501,7 +503,9 @@ async function chatCursorAnchor(source, offset) {
     if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(offset)) fail('SOURCE_CHANGED');
     const startByte = Math.max(0, offset - CHAT_CURSOR_ANCHOR_BYTES), bytes = Buffer.alloc(offset - startByte);
     for (let read = 0; read < bytes.length;) {
+      checkWorkflowBudget();
       const result = await handle.read(bytes, read, bytes.length - read, startByte + read);
+      checkWorkflowBudget();
       if (!result.bytesRead) fail('SOURCE_CHANGED'); read += result.bytesRead;
     }
     return { startByte, endByte: offset, hash: digest(bytes) };
@@ -542,7 +546,9 @@ async function recordTailAnchor(source, record) {
     if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(record.endByte)) return null;
     const bytes = Buffer.alloc(record.endByte - record.startByte);
     for (let read = 0; read < bytes.length;) {
+      checkWorkflowBudget();
       const result = await handle.read(bytes, read, bytes.length - read, record.startByte + read);
+      checkWorkflowBudget();
       if (!result.bytesRead) return null; read += result.bytesRead;
     }
     if (digest(bytes) !== record.hash) return null;
@@ -662,6 +668,7 @@ async function capturedUnits(store, chat) {
     if (!stat) continue;
     if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.realpath(dir) !== dir) fail('UNSAFE_INTAKE_PATH');
     for await (const entry of await fs.opendir(dir)) {
+      checkWorkflowBudget();
       const unitId = entry.name.endsWith('.json') ? entry.name.slice(0, -5) : null;
       if (entry.isFile() && isNativeId(unitId)) units.add(unitId);
       if (units.size > CAPTURED_UNITS_LIMIT) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');

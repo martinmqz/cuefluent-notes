@@ -282,6 +282,35 @@ test('an explicit capture refuses a window whose bytes changed after the reader 
   assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
 });
 
+test('explicit capture stops hashing a long stretch when its time budget expires', async t => {
+  const f = await fixture(t), original = await fs.readFile(f.sourcePath, 'utf8');
+  const end = row('event_msg', { type: 'task_complete', turn_id: A });
+  const padding = row('event_msg', { type: 'agent_message', message: 'x'.repeat(32 * 1024) }).repeat(100);
+  await fs.writeFile(f.sourcePath, original.replace(end, padding + end));
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B],
+    readRange: { ...f.request.readRange, endByte: (await fs.stat(f.sourcePath)).size } };
+  // These are valid bounded native records; without a delayed disk the same
+  // public preview succeeds and establishes the positive control.
+  assert.equal((await previewExplicitCapture(f.capability, request, { now: () => 0 })).status, 'selection-verified');
+  let elapsed = 0, reads = 0;
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    const handle = await open(file, ...rest);
+    if (String(file) === f.sourcePath) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...args) => {
+        const result = await read(...args);
+        if (args[2] === 1024 * 1024) { reads++; elapsed += 6_000; }
+        return result;
+      };
+    }
+    return handle;
+  });
+  await assert.rejects(previewExplicitCapture(f.capability, request, { now: () => elapsed }), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal(reads, 2, 'stop after the chunk that expires the budget, without hashing the remaining stretch');
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+});
+
 test('a selected window refuses to run once a byte it covers changed, even with its records and offsets kept', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   const request = { ...f.request, kind: 'historical', unitIds: [A, B] };

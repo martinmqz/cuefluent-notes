@@ -17,6 +17,7 @@ import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, typedCaptureDeadline, typedCommandDeadline } from './capture-controls.mjs';
 import { readReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
+import { withWorkflowBudget, checkWorkflowBudget } from './workflow-budget.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -729,7 +730,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // person's typed command acts; a model's own call is refused before acting.
   // Sources of capture-command deliveries that reserved their call: only these
   // act, and only these keep the command turn's bookkeeping.
-  const reserving = new WeakSet();
+  const reserving = new WeakMap();
   // Sources whose dispatch receipt was recorded: their command turn is kept out
   // of Automatic capture.
   const receipted = new WeakSet();
@@ -747,21 +748,34 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const call = { unitId: source.unitId, callId: source.callId, tool, argsHash: source.argsHash };
     const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal, deadline: typedCaptureDeadline(started) }));
     if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
-    reserving.add(source);
+    reserving.set(source, { started });
     // The reply's status is read before the command acts: a status that
     // cannot be read refuses with nothing applied, never after acting.
-    const view = await currentView(source);
-    const automatic = await automaticCapture(capability, source);
-    const store = await withStorageProbes(() => openWorkflowIntake(capability));
-    const state = (await withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId }))).state;
-    const paused = state?.paused === true;
+    const remaining = Math.min(10_000, Math.floor(typedCaptureDeadline(started) - performance.now()));
+    if (remaining <= 0) fail('WORKER_TIME_BUDGET');
+    const { view, automatic, state, paused, stop } = await withWorkflowBudget({ milliseconds: remaining }, async () => {
+      // Controller and privacy probes share one bounded preflight step and the
+      // command's absolute deadline. Check after each await too: a slow final
+      // probe must never admit an action after its budget has expired.
+      const inspect = async run => {
+        signal?.throwIfAborted(); checkWorkflowBudget();
+        const value = await run();
+        signal?.throwIfAborted(); checkWorkflowBudget(); return value;
+      };
+      const view = await inspect(() => currentView(source));
+      const automatic = await inspect(() => automaticCapture(capability, source));
+      const store = await inspect(() => withStorageProbes(() => openWorkflowIntake(capability)));
+      const state = (await inspect(() => withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId })))).state;
+      const paused = state?.paused === true;
+      // A changed Automatic grant waits for review. Paused, the chat can be
+      // captured by hand and resumed under current settings; a pause always
+      // remains available as an opt-out.
+      if (automatic && !paused && !state?.safetyStop && tool !== 'pause_capture' && await inspect(() => grantChanged(capability, source, store, state))) fail('REGISTRATION_REQUIRES_REVIEW');
+      const stop = tool === 'capture_turns' && automatic && !paused && !state?.safetyStop
+        ? (await inspect(() => collectionStop(capability, source))).collection?.code : undefined;
+      return { view, automatic, state, paused, stop };
+    });
     const chat = { selection: source.selection, source: source.source };
-    // A chat whose capture settings changed since Automatic capture was
-    // granted for it waits for review, and the worker refuses it until then:
-    // neither capture nor resume chat says Automatic capture covers it. Paused,
-    // it is captured by hand and resume chat grants it again under the current
-    // settings; a pause, an opt-out, always applies.
-    if (automatic && !paused && !state?.safetyStop && tool !== 'pause_capture' && await grantChanged(capability, source, store, state)) fail('REGISTRATION_REQUIRES_REVIEW');
     let outcome;
     // After a safety stop nothing of the chat is captured, in either capture
     // mode, and there is nothing to pause or resume.
@@ -771,7 +785,6 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       // paused chat is captured by hand: a record its own windows cannot read
       // past stops them and the reply says why, while a stop in Automatic
       // capture's own saved progress never reaches them.
-      const stop = automatic && !paused ? (await collectionStop(capability, source)).collection?.code : undefined;
       if (automatic && !paused) outcome = { capture: stop ? 'stopped' : 'automatic' };
       else {
         let captured = null;
@@ -829,9 +842,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       // dispatch receipt, and an exclusion here would change the selection a
       // redelivery replays under. Without that receipt the turn stays
       // capturable, which the refusal reports.
-      const automatic = await automaticCapture(capability, source);
-      if (!(CAPTURE_TOOLS.includes(invocation.tool) || source.captureActive === false || !automatic)) return receipted.has(source);
-      return (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }))).excluded;
+      const command = reserving.get(source);
+      if (!command && source.captureActive !== false && await automaticCapture(capability, source)) return receipted.has(source);
+      // Cancellation stops the action, not the command turn's opt-out. Its
+      // housekeeping can still finish within the original command deadline.
+      const options = command ? { deadline: typedCommandDeadline(command.started) } : {};
+      return (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, options))).excluded;
     } catch { return false; }
   }
   // Whether the grant the chat's Automatic capture was given, kept with its
