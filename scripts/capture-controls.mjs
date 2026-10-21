@@ -573,9 +573,12 @@ function keptReply(snapshot, call) {
 }
 /** Reserves a typed capture command's call before it acts: `acting` only for
  * the delivery that reserved it; any other gets the kept reply, or null. */
-export async function reserveChatCommand(capability, selection, call, { now, signal } = {}) {
-  const chat = await selected(selection), name = chatReplyPath(chat, replyCall(call));
+export async function reserveChatCommand(capability, selection, call, { now, signal, deadline = null } = {}) {
+  replyCall(call);
+  // The project path is resolved within the step and the command's time, so
+  // the reservation is never written after it.
   return bounded(now, async () => {
+    const name = chatReplyPath(await selected(selection), replyCall(call));
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
       const kept = keptReply(await intakeSnapshot(store, 'state', name, { maxBytes: CHAT_REPLY_BYTES }), call);
@@ -583,7 +586,7 @@ export async function reserveChatCommand(capability, selection, call, { now, sig
       await replaceIntakeJSON(tx, name, { format: CHAT_REPLY_FORMAT, version: 1, call, response: null }, null);
       return { acting: true };
     }, { signal });
-  });
+  }, deadline);
 }
 /** Keeps the reply of the delivery that reserved the call. */
 export async function recordChatCommandReply(capability, selection, call, response, { now, signal, deadline = null } = {}) {

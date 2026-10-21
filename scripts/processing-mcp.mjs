@@ -745,7 +745,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     // reply (another delivery is acting, or could not keep its reply) cannot
     // tell the outcome, so it is refused as uncertain without acting.
     const call = { unitId: source.unitId, callId: source.callId, tool, argsHash: source.argsHash };
-    const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal }));
+    const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal, deadline: typedCaptureDeadline(started) }));
     if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
     reserving.add(source);
     // The reply's status is read before the command acts: a status that

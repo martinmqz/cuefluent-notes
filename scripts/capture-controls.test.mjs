@@ -816,7 +816,9 @@ test('pause chat and resume chat take each step only within their command\'s tim
   await assert.rejects(captureChatTurns(f.capability, { selection: { ...f.selection, unitId: null }, source: pause.source, floor: { eofByte: 0, startsMidRecord: false },
     commandUnitId: C }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
   await assert.rejects(excludeChatTurn(f.capability, { selection: f.selection, source: pause.source, unitId: C }, { deadline: typedCommandDeadline(performance.now() - 50_000) }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(reserveChatCommand(f.capability, f.selection, { unitId: C, callId: 'call_1', tool: 'pause_capture', argsHash: 'a'.repeat(64) }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
   assert.equal(lookups, 0); mock.mock.restore();
+  await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'chat-capture', 'codex', S, 'replies')), { code: 'ENOENT' });
   assert.equal((await readSelection(f.store, identity)).hash, started.hash);
   assert.equal((await controlChatCapture(f.capability, pause, { deadline: typedCaptureDeadline(performance.now()) })).state.paused, true);
 });
