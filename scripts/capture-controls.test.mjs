@@ -11,6 +11,8 @@ import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIn
 import { readCaptureHead, readReaderProgress, readSelection, publishCapture, inspectPendingPublication } from './intake-store.mjs';
 import { readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
+import { readReaderBlock, readerBlockPath } from './collection-worker.mjs';
+import { publishIngressMetadata } from './collection-ingress.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn, typedCaptureDeadline } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
@@ -590,6 +592,19 @@ test('future controls seek after EOF and exclude the first proven boundary; paus
   assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: D })).head);
   state = await controlCapture(f.capability, { ...control, selection: { ...f.selection, unitId: D }, expectedSelectionHash: run.hash, operation: 'pause', operationId: randomUUID() });
   assert.equal(state.state.active, false); assert.equal(state.state.intervals[0].upper.unitId, D);
+});
+
+test('a resume clears the stop kept for the earlier stretch in the same locked step', async t => {
+  const f = await fixture(t, { enabled: true }), identity = { client: 'codex', sessionId: S };
+  const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+    expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+  let state = await controlCapture(f.capability, control);
+  state = await controlCapture(f.capability, { ...control, selection: { ...f.selection, unitId: B }, expectedSelectionHash: state.hash, operation: 'pause', operationId: randomUUID() });
+  await publishIngressMetadata(f.store, readerBlockPath(identity), { version: 1, code: 'EVIDENCE_AFTER_CODEX_TERMINAL' });
+  assert.equal(await readReaderBlock(f.store, identity), 'EVIDENCE_AFTER_CODEX_TERMINAL');
+  // A pause keeps it; the resume that starts a new stretch clears it, under its own lock.
+  await controlCapture(f.capability, { ...control, expectedSelectionHash: state.hash, operation: 'resume', operationId: randomUUID() });
+  assert.equal(await readReaderBlock(f.store, identity), null);
 });
 
 test('a resume started at its command turn refuses a turn record rewritten since it was read', async t => {

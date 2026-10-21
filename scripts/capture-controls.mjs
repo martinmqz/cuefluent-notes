@@ -13,7 +13,7 @@ import { inspectSourceBoundary, newSelectionState, currentIntervals, stableSourc
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.mjs';
 import { snapshotSourceMetadata } from './collection-ingress.mjs';
-import { processScope, READER_BLOCK_CODES } from './collection-worker.mjs';
+import { processScope, READER_BLOCK_CODES, clearReaderBlock } from './collection-worker.mjs';
 import { normalizeWorkflowSelection as selected } from './workflow-selection.mjs';
 import { withWorkflowBudget } from './workflow-budget.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
@@ -125,10 +125,15 @@ export async function controlCapture(capability, request, { now, resumeAt = null
         boundary = { ...boundary, eofByte: resumeAt.eofByte, startsMidRecord: false, unitId: resumeAt.unitId };
       }
       const authorize = async () => { await assertWorkflowStorage(capability, selection, authority); return true; };
-      return controlSelection(tx, { source: observed.source, boundary, expectedHash: current.hash, authorize, grantHash,
+      const result = await controlSelection(tx, { source: observed.source, boundary, expectedHash: current.hash, authorize, grantHash,
         callerRequestHash: digest(canonicalJSON(request)),
         request: { id: operationId, client: selection.client, sessionId: selection.sessionId, unitId: boundary.unitId,
           expectedRevision: current.state?.revision ?? 0, operation } });
+      // A resume starts a new stretch, which no stop kept for an earlier one
+      // applies to. Cleared under the lock the worker records stops under, so
+      // it never erases a newer one. Display only.
+      if (operation === 'resume') { try { await clearReaderBlock(store, identityOf(selection)); } catch { /* the next visit */ } }
+      return result;
     });
   });
 }
