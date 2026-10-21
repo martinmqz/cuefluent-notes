@@ -1628,6 +1628,28 @@ test('a typed command that fails in a chat Automatic capture covers says its tur
   assert(!(await readSelection(parent.store, identity)).state.exclusions.includes(parent.controls.at(-1)));
 });
 
+test('a block thrown by a typed capture after Automatic capture went on is not its stop', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  const typed = async (tool, expected) => {
+    const rpc = await h.call(tool, {}), reply = body(rpc);
+    assert.equal(reply.capture, expected, reply.statusText); await parent.finish(rpc); await run();
+  };
+  await parent.work('Captured automatically.'); await run();
+  await typed('pause_capture', 'paused');
+  await parent.work('Decision: taken by hand.');
+  await typed('capture_turns', 'captured');
+  await typed('resume_capture', 'resumed');
+  // The typed capture's saved progress is no longer valid: every visit that
+  // reaches it throws, after the stretch Automatic capture extends.
+  const [scope] = (await readSelection(parent.store, identity)).state.explicitScopes;
+  await fs.writeFile(path.join(f.collection.intakeStateDir, 'progress', 'codex', identity.sessionId, `${scope.id}.json`), '{not json');
+  const later = await parent.work('Captured after the resume.'); await run();
+  assert((await readCaptureHead(parent.store, { ...identity, unitId: later })).head);
+  assert.equal(await readReaderBlock(parent.store, identity), null);
+  await typed('capture_turns', 'automatic');
+});
+
 test('typed capture takes a turn rewritten into the paused stretch after the pause record', async t => {
   // With no progress, as when a read stopped short of the pause's end, and
   // with progress past it whose own anchor still holds.

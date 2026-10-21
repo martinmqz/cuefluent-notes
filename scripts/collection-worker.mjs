@@ -374,7 +374,7 @@ async function runRegistration(capability, registration, registrationHash, route
   const visit = link => withIntakeLock(store, async transaction => {
     let result;
     try { result = await visitChat(transaction, link); }
-    catch (error) { if (READER_BLOCK_CODES.includes(error.code)) await keepBlock(error.code); throw error; }
+    catch (error) { if (READER_BLOCK_CODES.includes(error.code) && !error.pastLatest) await keepBlock(error.code); throw error; }
     // Any scope's reader block counts, not only the first reason one reported.
     await keepBlock(result.readerBlock !== undefined ? result.readerBlock : result.pending);
     return result;
@@ -411,9 +411,15 @@ async function runRegistration(capability, registration, registrationHash, route
     // it: a block in an earlier pause's stretch or in a typed or CLI capture
     // leaves later turns to Automatic capture.
     const latest = currentIntervals(selection.state).at(-1)?.id;
+    // A scope that throws after the latest interval went through, such as a
+    // typed capture's, stops this visit but not Automatic capture.
+    let pastLatest = latest === undefined;
     for (const scope of [...currentIntervals(selection.state), ...selection.state.explicitScopes]) {
       await authorize();
-      const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link);
+      let result;
+      try { result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link); }
+      catch (error) { if (pastLatest && error && typeof error === 'object' && Object.isExtensible(error)) error.pastLatest = true; throw error; }
+      if (scope.id === latest) pastLatest = true;
       saved += result.saved; pending ??= result.pending; incomplete ||= Boolean(result.incomplete);
       if (scope.id === latest) readerBlock ??= readerBlockOf(result);
       drained &&= result.drained === true; suspended &&= result.suspended === true || result.drained === true;
@@ -596,7 +602,9 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
         } catch (error) {
           output.pending.push(error.code ?? 'COLLECTION_FAILED');
           if (passStopCodes.has(error.code)) break;
-          output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: error.code ?? 'COLLECTION_FAILED' });
+          // As in the chat's kept marker, a reader block past the latest
+          // interval is not this chat's stop.
+          if (!(error.pastLatest && READER_BLOCK_CODES.includes(error.code))) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: error.code ?? 'COLLECTION_FAILED' });
         }
       }
       if (count === maxJobs) {
