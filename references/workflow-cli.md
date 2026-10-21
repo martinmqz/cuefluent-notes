@@ -267,9 +267,14 @@ that finds the call reserved without a kept reply, because another delivery is
 acting or stopped before keeping its reply, reports `PROCESSING_CONTROL_FAILED`
 without acting or leaving out its turn. A delivery that fails before it can
 tell does not leave out its turn either; its refusal reports
-`PROCESSING_EXCLUSION_UNVERIFIED`. The status its reply carries is read before
-it acts, so a status that cannot be read refuses the command with nothing
-applied. A command whose reply cannot be kept reports
+`PROCESSING_EXCLUSION_UNVERIFIED`. Capture and resume read processing status
+before acting, so unreadable status refuses those commands with nothing applied.
+A verified `pause chat` applies independently, then reads processing status for
+its reply; if that status is unavailable, the reply confirms the pause with
+`PROCESSING_CHAT_OUTCOME_UNKNOWN`. Native binding, collection/storage checks and
+the original command deadline still apply. Cancellation before a pause or resume
+starts durable publication leaves its capture policy unchanged; once publication
+starts, its result and reply finish together. A command whose reply cannot be kept reports
 `PROCESSING_CONTROL_FAILED` too, after acting. The kept reply says whether the
 command left out its own turn. A `pause chat` that paused Automatic capture is
 the exception: the chat's binding then starts after that call, so its

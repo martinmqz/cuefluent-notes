@@ -103,38 +103,46 @@ async function selectionHeadroom(store, selection, state, scopeId) {
 
 /** Future start/resume freezes EOF. With no verified current native anchor the
  * first subsequent full native unit establishes (and is excluded by) the floor. */
-export async function controlCapture(capability, request, { now, resumeAt = null, waitForLock = false, deadline = null } = {}) {
+export async function controlCapture(capability, request, { now, resumeAt = null, waitForLock = false, deadline = null, signal, beforePublish } = {}) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation']);
   const { operationId, operation, expectedSelectionHash } = request;
   nativeId(operationId); oldHash(expectedSelectionHash); choice(operation, ['start', 'resume', 'pause', 'exclude']);
+  // Cancellation can stop an uncommitted command, including a lock wait or
+  // metadata staging. Once publication starts, finish its known outcome and
+  // cleanup; the host commits its reply at this same boundary.
+  let committed = false;
+  const check = () => { if (!committed) signal?.throwIfAborted(); };
+  const inspect = async run => { check(); const result = await run(); check(); return result; };
+  const publish = () => { if (!committed) { check(); beforePublish?.(); committed = true; } };
   // The project path is resolved within the step, and its time.
   return bounded(now, async () => {
-    const selection = await selected(request.selection);
+    const selection = await inspect(() => selected(request.selection));
     if (['pause', 'exclude'].includes(operation) && selection.unitId === null) fail('NATIVE_BOUNDARY_REQUIRED');
     const restrictive = ['pause', 'exclude'].includes(operation), authority = restrictive ? 'maintenance' : 'collect';
-    await assertWorkflowStorage(capability, selection, authority);
-    const store = await openWorkflowIntake(capability, selection, authority);
+    await inspect(() => assertWorkflowStorage(capability, selection, authority));
+    const store = await inspect(() => openWorkflowIntake(capability, selection, authority));
     return intakeLock(waitForLock)(store, async tx => {
-      const current = await readSelection(store, identityOf(selection));
-      await assertWorkflowStorage(capability, selection, authority);
-      const grantHash = restrictive ? undefined : await workflowCollectionGrant(capability, selection);
+      check();
+      const current = await inspect(() => readSelection(store, identityOf(selection)));
+      await inspect(() => assertWorkflowStorage(capability, selection, authority));
+      const grantHash = restrictive ? undefined : await inspect(() => workflowCollectionGrant(capability, selection));
       if (!restrictive && current.state?.lastRequest?.id === operationId && current.state.currentGrantHash !== grantHash) fail('COLLECTION_GRANT_REQUIRES_REVIEW');
-      const replay = await replayControl(current, request, store); if (replay) return replay;
+      const replay = await inspect(() => replayControl(current, request, store)); if (replay) return replay;
       if (current.hash !== expectedSelectionHash) fail('STALE_SELECTION');
-      const continuation = await chatContinuation(store, selection, request.sourcePath, request.expectedSourceIdentity);
-      const observed = await sourceBoundary(selection, request.sourcePath, request.expectedSourceIdentity,
-        restrictive ? selection.unitId : null, continuation);
+      const continuation = await inspect(() => chatContinuation(store, selection, request.sourcePath, request.expectedSourceIdentity));
+      const observed = await inspect(() => sourceBoundary(selection, request.sourcePath, request.expectedSourceIdentity,
+        restrictive ? selection.unitId : null, continuation));
       // A typed resume starts the new interval at its own command turn, so
       // that turn, not the next one, is the boundary left out. The record that
       // starts the turn must still be the one read there.
       let boundary = observed.boundary;
       if (resumeAt !== null) {
         if (operation !== 'resume' || resumeAt.eofByte > boundary.eofByte || resumeAt.record?.startByte !== resumeAt.eofByte ||
-            !await holds(observed.source, resumeAt.record.endByte, resumeAt.record)) fail('SOURCE_CHANGED');
+            !await inspect(() => holds(observed.source, resumeAt.record.endByte, resumeAt.record))) fail('SOURCE_CHANGED');
         boundary = { ...boundary, eofByte: resumeAt.eofByte, startsMidRecord: false, unitId: resumeAt.unitId };
       }
-      const authorize = async () => { await assertWorkflowStorage(capability, selection, authority); return true; };
-      const result = await controlSelection(tx, { source: observed.source, boundary, expectedHash: current.hash, authorize, grantHash,
+      const authorize = async () => { await inspect(() => assertWorkflowStorage(capability, selection, authority)); return true; };
+      const result = await controlSelection(tx, { source: observed.source, boundary, expectedHash: current.hash, authorize, grantHash, beforePublish: publish,
         callerRequestHash: digest(canonicalJSON(request)),
         request: { id: operationId, client: selection.client, sessionId: selection.sessionId, unitId: boundary.unitId,
           expectedRevision: current.state?.revision ?? 0, operation } });
@@ -143,7 +151,7 @@ export async function controlCapture(capability, request, { now, resumeAt = null
       // it never erases a newer one. Display only.
       if (operation === 'resume') { try { await clearReaderBlock(store, identityOf(selection)); } catch { /* the next visit */ } }
       return result;
-    });
+    }, { signal });
   }, deadline);
 }
 
@@ -995,27 +1003,32 @@ export async function captureChatTurns(capability, { selection, source, floor, c
  * the command turn, which each leaves out of captured turns. */
 // Each step ends by `deadline`, when given: a typed command's, which leaves
 // time for its own bookkeeping after.
-export async function controlChatCapture(capability, { selection, source, unitId, operation }, { now, deadline = null } = {}) {
+export async function controlChatCapture(capability, { selection, source, unitId, operation }, { now, deadline = null, signal, beforePublish } = {}) {
+  signal?.throwIfAborted();
   choice(operation, ['pause', 'resume']);
   const { chat, current } = await bounded(now, async () => {
     const chat = await selected({ ...selection, unitId });
     return { chat, current: await readSelection(await openWorkflowIntake(capability), identityOf(chat)) };
   }, deadline);
-  const resumeAt = operation === 'resume' ? { ...await bounded(now, () => commandStart(capability, chat, source, unitId), deadline), unitId } : null;
+  signal?.throwIfAborted();
+  const resumeAt = operation === 'resume' ? { ...await bounded(now, () => commandStart(capability, chat, source, unitId, signal), deadline), unitId } : null;
+  signal?.throwIfAborted();
   return controlCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: current.hash, operation,
-    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt, waitForLock: true, deadline });
+    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt, waitForLock: true, deadline, signal, beforePublish });
 }
 // Where the command turn starts, read from the end of the transcript, where
 // the command was just typed, with the record that starts it as read there. A
 // command turn not found there refuses.
 const CHAT_COMMAND_BYTES = 2 * 1024 * 1024;
-async function commandStart(capability, chat, source, unitId) {
+async function commandStart(capability, chat, source, unitId, signal) {
+  signal?.throwIfAborted();
   await assertWorkflowStorage(capability, chat, 'collect');
   const continuation = await chatContinuation(await openWorkflowIntake(capability), chat, source.path, source.fileIdentity);
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
   const from = Math.max(0, eof - CHAT_COMMAND_BYTES);
   const { anchors } = await scanChat(chat, observed.source, { eofByte: from, startsMidRecord: from > 0 }, eof, () => {}, continuation);
+  signal?.throwIfAborted();
   const own = anchors.find(item => item.unitId === unitId);
   if (!own) fail('NATIVE_BOUNDARY_UNAVAILABLE');
   const { startByte, endByte, hash: recordHash } = own.record;

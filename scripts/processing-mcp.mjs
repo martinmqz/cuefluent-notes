@@ -734,7 +734,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // Sources whose dispatch receipt was recorded: their command turn is kept out
   // of Automatic capture.
   const receipted = new WeakSet();
-  async function requestCapture({ source, tool, signal }) {
+  async function requestCapture({ source, tool, signal, commitResponse }) {
     // The command's time runs from here, so its capture and the steps around
     // it end within it.
     const started = performance.now();
@@ -749,11 +749,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal, deadline: typedCaptureDeadline(started) }));
     if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
     reserving.set(source, { started });
-    // The reply's status is read before the command acts: a status that
-    // cannot be read refuses with nothing applied, never after acting.
+    // Capture and resume require readable processing status before acting.
+    // A pause is an independent opt-out: its status is optional, read after.
     const remaining = Math.min(10_000, Math.floor(typedCaptureDeadline(started) - performance.now()));
     if (remaining <= 0) fail('WORKER_TIME_BUDGET');
-    const { view, automatic, state, paused, stop } = await withWorkflowBudget({ milliseconds: remaining }, async () => {
+    let { view, automatic, state, paused, stop } = await withWorkflowBudget({ milliseconds: remaining }, async () => {
       // Controller and privacy probes share one bounded preflight step and the
       // command's absolute deadline. Check after each await too: a slow final
       // probe must never admit an action after its budget has expired.
@@ -762,7 +762,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         const value = await run();
         signal?.throwIfAborted(); checkWorkflowBudget(); return value;
       };
-      const view = await inspect(() => currentView(source));
+      const view = tool === 'pause_capture' ? null : await inspect(() => currentView(source));
       const automatic = await inspect(() => automaticCapture(capability, source));
       const store = await inspect(() => withStorageProbes(() => openWorkflowIntake(capability)));
       const state = (await inspect(() => withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId })))).state;
@@ -801,10 +801,23 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     } else if (!automatic) outcome = { capture: 'not-automatic' };
     else if (tool === 'pause_capture') {
       if (paused) outcome = { capture: 'already-paused' };
-      else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'pause' }, { deadline: typedCaptureDeadline(started) })); outcome = { capture: 'paused' }; }
+      else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'pause' }, { deadline: typedCaptureDeadline(started), signal, beforePublish: commitResponse })); outcome = { capture: 'paused' }; }
     } else if (!paused) outcome = { capture: 'already-active' };
-    else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' }, { deadline: typedCaptureDeadline(started) })); outcome = { capture: 'resumed' }; }
+    else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' }, { deadline: typedCaptureDeadline(started), signal, beforePublish: commitResponse })); outcome = { capture: 'resumed' }; }
     signal?.throwIfAborted();
+    if (tool === 'pause_capture') {
+      try {
+        const remaining = Math.min(10_000, Math.floor(typedCaptureDeadline(started) - performance.now()));
+        if (remaining <= 0) fail('WORKER_TIME_BUDGET');
+        view = await withWorkflowBudget({ milliseconds: remaining }, async () => {
+          const view = await currentView(source); checkWorkflowBudget(); return view;
+        });
+      } catch {
+        signal?.throwIfAborted();
+        view = { status: 'blocked', statusDetail: 'blocked', requestId: null, chat: null,
+          nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_OUTCOME_UNKNOWN'] };
+      }
+    }
     let response = { ...view, ...outcome };
     // The command leaves out its own turn, so a later capture skips it, before
     // its reply is kept: a redelivery then replays whether that worked. In an

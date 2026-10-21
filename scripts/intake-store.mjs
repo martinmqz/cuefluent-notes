@@ -115,7 +115,7 @@ export async function selectionPendingWarning(store, identity) {
   return null;
 }
 
-export async function controlSelection(transaction, { source, request, boundary, expectedHash, authorize, callerRequestHash, grantHash }) {
+export async function controlSelection(transaction, { source, request, boundary, expectedHash, authorize, callerRequestHash, grantHash, beforePublish }) {
   if (callerRequestHash !== undefined) hash(callerRequestHash);
   const store = await assertIntakeTransaction(transaction);
   const restrictive = ['pause', 'exclude'].includes(request.operation);
@@ -142,6 +142,9 @@ export async function controlSelection(transaction, { source, request, boundary,
   }
   if (pending?.identity?.client === source.client && pending.identity.sessionId === source.sessionId) {
     if (!restrictive) fail('INTAKE_RECOVERY_REQUIRED');
+    // Opt-out recovery can mutate before the selection replacement. Admit
+    // the command at that first write, outside the recovery-warning catch.
+    beforePublish?.();
     try {
       const cancellation = await abandonPendingPublication(transaction, { reason: 'opt-out' });
       if (cancellation.status === 'already-published') await recoverPendingPublication(transaction, { authorize: async () => true });
@@ -150,7 +153,7 @@ export async function controlSelection(transaction, { source, request, boundary,
       pendingWarning = error.code ?? 'INTAKE_RECOVERY_REQUIRED';
     }
   }
-  const resultHash = await replaceIntakeJSON(transaction, selectionPath({ client: source.client, sessionId: source.sessionId }), state, before.hash);
+  const resultHash = await replaceIntakeJSON(transaction, selectionPath({ client: source.client, sessionId: source.sessionId }), state, before.hash, { beforePublish });
   return { state, hash: resultHash, ...(pendingWarning ? { pendingWarning } : {}) };
 }
 

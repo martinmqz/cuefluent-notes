@@ -852,6 +852,39 @@ test('pause chat and resume chat take each step only within their command\'s tim
   assert.equal((await controlChatCapture(f.capability, pause, { deadline: typedCaptureDeadline(performance.now()) })).state.paused, true);
 });
 
+test('pause and resume stop before publishing when cancelled during their checks or lock wait', async t => {
+  for (const operation of ['pause', 'resume']) for (const phase of ['storage', 'source', 'lock', 'publication']) await t.test(`${operation}: ${phase}`, async t => {
+    const f = await fixture(t, { enabled: true }), identity = { client: 'codex', sessionId: S }, command = randomUUID();
+    const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+      expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+    let before = await controlCapture(f.capability, control);
+    if (operation === 'resume') before = await controlCapture(f.capability, { ...control,
+      selection: { ...f.selection, unitId: B }, expectedSelectionHash: before.hash, operationId: randomUUID(), operation: 'pause' });
+    await fs.appendFile(f.sourcePath, turn(command, `${operation} chat`));
+    const controller = new AbortController(); let cancelled = false;
+    const cancel = () => { cancelled = true; controller.abort(); };
+    const realpath = fs.realpath, mkdir = fs.mkdir, open = fs.open;
+    if (phase === 'storage') t.mock.method(fs, 'realpath', async (...args) => {
+      const result = await realpath(...args); if (!cancelled) cancel(); return result;
+    });
+    if (phase === 'lock') t.mock.method(fs, 'mkdir', async (file, ...args) => {
+      if (!cancelled && path.basename(file) === '.intake-lock') { cancel(); throw Object.assign(new Error('busy'), { code: 'EEXIST' }); }
+      return mkdir(file, ...args);
+    });
+    if (phase === 'source' || phase === 'publication') t.mock.method(fs, 'open', async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (!cancelled && (phase === 'source' ? file === f.sourcePath : path.basename(file).startsWith('.metadata-') && args[0] === 'wx')) cancel();
+      return handle;
+    });
+    await assert.rejects(controlChatCapture(f.capability, { selection: f.selection,
+      source: { path: f.sourcePath, fileIdentity: f.request.expectedSourceIdentity }, unitId: command, operation }, { signal: controller.signal }), { name: 'AbortError' });
+    assert(cancelled, 'the test reached the selected asynchronous boundary');
+    assert.equal((await readSelection(f.store, identity)).hash, before.hash, 'the selection remains byte-for-byte unchanged');
+    await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, '.intake-lock')), { code: 'ENOENT' });
+    assert.deepEqual(await fs.readdir(path.join(f.collection.intakeStateDir, 'metadata-stages')), [], 'owned staging files are cleaned up after cancellation');
+  });
+});
+
 test('a resume clears the stop kept for the earlier stretch in the same locked step', async t => {
   const f = await fixture(t, { enabled: true }), identity = { client: 'codex', sessionId: S };
   const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,

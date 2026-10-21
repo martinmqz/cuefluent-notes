@@ -1563,6 +1563,69 @@ test('typed capture commands in a safety-stopped chat say its capture record is 
   assert.equal((await readSelection(parent.store, identity)).hash, stopped.hash);
 });
 
+test('pause chat applies even when processing status is unavailable or slow', async t => {
+  for (const delayed of [false, true]) await t.test(delayed ? 'slow unreadable status' : 'unreadable status', async t => {
+    const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+    const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    const before = await parent.work('Captured before the pause.'); await run();
+    let elapsed = 0, pausedAtStatus;
+    t.mock.method(performance, 'now', () => 1_000_000 + elapsed);
+    h.beforeStatus = async () => {
+      pausedAtStatus = (await readSelection(parent.store, identity)).state.paused;
+      if (delayed) elapsed += 11_000;
+      else throw Object.assign(new Error('unavailable synthetic processing registry'), { code: 'PROCESSING_CHAT_CONFLICT' });
+    };
+    const rpc = await h.call('pause_capture', {}), reply = body(rpc); await parent.finish(rpc);
+    assert.equal(reply.capture, 'paused'); assert.equal(reply.status, 'blocked');
+    assert.equal(pausedAtStatus, true, 'the opt-out precedes optional processing status');
+    assert(reply.diagnostics.includes('PROCESSING_CHAT_OUTCOME_UNKNOWN'));
+    assert((await readCaptureHead(parent.store, { ...identity, unitId: before })).head);
+    const after = await parent.work('Kept out after the pause.'); await run();
+    assert.equal((await readCaptureHead(parent.store, { ...identity, unitId: after })).head, null);
+  });
+});
+
+test('pause and resume cancellation before publication preserves capture policy; publication keeps its known reply', async t => {
+  for (const operation of ['pause', 'resume']) for (const duringPublication of [false, true]) await t.test(`${operation}: ${duringPublication ? 'during' : 'before'} publication`, async t => {
+    const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+    await parent.work('Captured before controls.');
+    await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+    if (operation === 'resume') { const rpc = await h.call('pause_capture', {}); assert.equal(body(rpc).capture, 'paused'); await parent.finish(rpc); }
+    const requestId = operation === 'resume' ? 2 : 1, before = (await readSelection(parent.store, identity)).state;
+    const open = fs.open, rename = fs.rename, notified = deferred(); let cancelled = false;
+    const cancel = async () => {
+      cancelled = true; h.notify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId } });
+      await new Promise(resolve => setImmediate(resolve)); notified.resolve();
+    };
+    if (duringPublication) t.mock.method(fs, 'rename', async (from, to) => {
+      if (!cancelled && String(to).split(path.sep).includes('sessions')) await cancel();
+      return rename(from, to);
+    });
+    else t.mock.method(fs, 'open', async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (!cancelled && path.basename(file).startsWith('.metadata-') && args[0] === 'wx') {
+        const bytes = handle.writeFile.bind(handle);
+        handle.writeFile = async value => {
+          if (!cancelled && JSON.parse(value).format === 'cuefluent-selection') await cancel();
+          return bytes(value);
+        };
+      }
+      return handle;
+    });
+    const pending = h.call(operation === 'pause' ? 'pause_capture' : 'resume_capture', {});
+    if (duringPublication) {
+      const rpc = await pending; assert(cancelled); assert.equal(body(rpc).capture, operation === 'pause' ? 'paused' : 'resumed'); await parent.finish(rpc);
+    } else {
+      pending.catch(() => {}); await notified.promise; h.end(); await h.server;
+      assert(cancelled); assert(!h.responses.some(row => row.id === requestId), 'cancelled controls have no late success reply');
+    }
+    const after = (await readSelection(parent.store, identity)).state;
+    assert.equal(after.paused, duringPublication ? operation === 'pause' : before.paused);
+    assert.equal(after.active, duringPublication ? operation === 'resume' : before.active);
+    if (!duringPublication) assert.deepEqual(after.intervals, before.intervals, 'only command opt-out bookkeeping may change');
+  });
+});
+
 test('typed capture, pause chat and resume chat follow Automatic capture of the chat', async t => {
   const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
   const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });

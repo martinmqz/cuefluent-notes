@@ -953,7 +953,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
               elicit: client === 'codex' && formSupported ? elicit : undefined, signal, commitResponse });
           } else if (CAPTURE_TOOLS.includes(row.params.name)) {
             if (typeof requestCapture !== 'function') fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
-            response = await requestCapture({ source, context, ...resolvedArgs, tool: row.params.name, signal });
+            response = await requestCapture({ source, context, ...resolvedArgs, tool: row.params.name, signal, commitResponse });
           } else {
             const action = { processing_status: getStatus, process_selected_captures: requestProcessing,
               processing_resume: requestResume, processing_cancel: requestCancel }[row.params.name];
