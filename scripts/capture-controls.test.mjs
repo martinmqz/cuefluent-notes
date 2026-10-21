@@ -381,12 +381,12 @@ test('a turn left out is recorded only while the bytes that judged it are unchan
   const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
   const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
     floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
-  // Once the window is read, the long turn is rewritten in place, keeping its ID.
+  // Once the window is read, the long turn is rewritten in place, keeping its
+  // ID, as its bytes are checked before it is left out.
   const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Write the report')));
   const open = fs.open; let rewrites = 0;
   t.mock.method(fs, 'open', async (file, ...rest) => {
-    const stack = new Error().stack;
-    if (!rewrites && String(file) === f.sourcePath && stack.includes('captureChatTurns') && !stack.includes('chatWindow')) {
+    if (!rewrites && String(file) === f.sourcePath && new Error().stack.includes('readsHold')) {
       rewrites++;
       const handle = openSync(f.sourcePath, 'r+');
       try { writeSync(handle, Buffer.from('w'), 0, 1, at); } finally { closeSync(handle); }
