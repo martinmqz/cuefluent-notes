@@ -807,8 +807,16 @@ test('pause chat and resume chat take each step only within their command\'s tim
   await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'pause chat' }));
   const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
   const pause = { selection: f.selection, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, unitId: C, operation: 'pause' };
-  // A command that started 50 s ago has no time left: nothing is applied.
-  await assert.rejects(controlChatCapture(f.capability, pause, { deadline: typedCaptureDeadline(performance.now() - 50_000) }), { code: 'WORKER_TIME_BUDGET' });
+  // A command that started 50 s ago has no time left: nothing is applied, and
+  // not even the project path is looked up.
+  const realpath = fs.realpath; let lookups = 0;
+  const mock = t.mock.method(fs, 'realpath', async (...args) => { lookups++; return realpath.call(fs, ...args); });
+  const late = typedCaptureDeadline(performance.now() - 50_000);
+  await assert.rejects(controlChatCapture(f.capability, pause, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(captureChatTurns(f.capability, { selection: { ...f.selection, unitId: null }, source: pause.source, floor: { eofByte: 0, startsMidRecord: false },
+    commandUnitId: C }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(excludeChatTurn(f.capability, { selection: f.selection, source: pause.source, unitId: C }, { deadline: typedCommandDeadline(performance.now() - 50_000) }), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal(lookups, 0); mock.mock.restore();
   assert.equal((await readSelection(f.store, identity)).hash, started.hash);
   assert.equal((await controlChatCapture(f.capability, pause, { deadline: typedCaptureDeadline(performance.now()) })).state.paused, true);
 });

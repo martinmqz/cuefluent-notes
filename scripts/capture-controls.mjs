@@ -105,10 +105,12 @@ async function selectionHeadroom(store, selection, state, scopeId) {
  * first subsequent full native unit establishes (and is excluded by) the floor. */
 export async function controlCapture(capability, request, { now, resumeAt = null, waitForLock = false, deadline = null } = {}) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation']);
-  const selection = await selected(request.selection), { operationId, operation, expectedSelectionHash } = request;
+  const { operationId, operation, expectedSelectionHash } = request;
   nativeId(operationId); oldHash(expectedSelectionHash); choice(operation, ['start', 'resume', 'pause', 'exclude']);
-  if (['pause', 'exclude'].includes(operation) && selection.unitId === null) fail('NATIVE_BOUNDARY_REQUIRED');
+  // The project path is resolved within the step, and its time.
   return bounded(now, async () => {
+    const selection = await selected(request.selection);
+    if (['pause', 'exclude'].includes(operation) && selection.unitId === null) fail('NATIVE_BOUNDARY_REQUIRED');
     const restrictive = ['pause', 'exclude'].includes(operation), authority = restrictive ? 'maintenance' : 'collect';
     await assertWorkflowStorage(capability, selection, authority);
     const store = await openWorkflowIntake(capability, selection, authority);
@@ -354,8 +356,9 @@ function withheldTurns(state) {
  * get past a conflict, and is skipped (`excluded: false`) when the selection
  * has no housekeeping room left. */
 export async function excludeChatTurn(capability, { selection, source, unitId }, { now, signal, deadline = null } = {}) {
-  const chat = await selected(selection); nativeId(unitId); hash(source.fileIdentity);
+  nativeId(unitId); hash(source.fileIdentity);
   return bounded(now, async () => {
+    const chat = await selected(selection);
     await assertWorkflowStorage(capability);
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, tx => excludeTurn(tx, store, chat, source, unitId), { signal });
@@ -584,10 +587,10 @@ export async function reserveChatCommand(capability, selection, call, { now, sig
 }
 /** Keeps the reply of the delivery that reserved the call. */
 export async function recordChatCommandReply(capability, selection, call, response, { now, signal, deadline = null } = {}) {
-  const chat = await selected(selection), value = { format: CHAT_REPLY_FORMAT, version: 1, call: replyCall(call), response };
+  const value = { format: CHAT_REPLY_FORMAT, version: 1, call: replyCall(call), response };
   if (Buffer.byteLength(canonicalJSON(value) + '\n') > CHAT_REPLY_BYTES) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
-  const name = chatReplyPath(chat, call);
   return bounded(now, async () => {
+    const name = chatReplyPath(await selected(selection), call);
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
       const snapshot = await intakeSnapshot(store, 'state', name, { maxBytes: CHAT_REPLY_BYTES });
@@ -907,12 +910,16 @@ async function scopeDrained(capability, chat, state, scope, now) {
  * cancellation, keeping what it captured. */
 export async function captureChatTurns(capability, { selection, source, floor, commandUnitId }, { observeRead = () => {}, now, signal, scanWindows,
   deadline = typedCaptureDeadline(performance.now()) } = {}) {
-  const chat = await selected(selection); nativeId(commandUnitId); hash(source.fileIdentity);
+  nativeId(commandUnitId); hash(source.fileIdentity);
   keys(floor, ['eofByte', 'startsMidRecord']); integer(floor.eofByte);
   const options = { observeRead, now, signal, deadline };
   let turns = 0;
   signal?.throwIfAborted();
-  const previous = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
+  // The project path is resolved in the first step, within the command's time.
+  const { chat, previous } = await bounded(now, async () => {
+    const chat = await selected(selection);
+    return { chat, previous: await readSelection(await openWorkflowIntake(capability), identityOf(chat)) };
+  }, deadline);
   // Each check of an earlier capture's end, and the drain check after it, is
   // a bounded operation within the command's time.
   let last = null;
@@ -980,8 +987,10 @@ export async function captureChatTurns(capability, { selection, source, floor, c
 // time for its own bookkeeping after.
 export async function controlChatCapture(capability, { selection, source, unitId, operation }, { now, deadline = null } = {}) {
   choice(operation, ['pause', 'resume']);
-  const chat = await selected({ ...selection, unitId });
-  const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)), deadline);
+  const { chat, current } = await bounded(now, async () => {
+    const chat = await selected({ ...selection, unitId });
+    return { chat, current: await readSelection(await openWorkflowIntake(capability), identityOf(chat)) };
+  }, deadline);
   const resumeAt = operation === 'resume' ? { ...await bounded(now, () => commandStart(capability, chat, source, unitId), deadline), unitId } : null;
   return controlCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: current.hash, operation,
