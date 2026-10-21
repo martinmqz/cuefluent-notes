@@ -14,7 +14,7 @@ import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { readReaderBlock, readerBlockPath } from './collection-worker.mjs';
 import { publishIngressMetadata, collectionIngress } from './collection-ingress.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
-import { captureChatTurns, controlChatCapture, excludeChatTurn, typedCaptureDeadline } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, typedCaptureDeadline, typedCommandDeadline, reserveChatCommand, recordChatCommandReply } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
 const row = (type, payload) => JSON.stringify({ timestamp: '2026-09-24T00:00:00.000Z', type, payload }) + '\n';
@@ -706,6 +706,24 @@ test('an interrupted typed or CLI capture is finished even when the Automatic gr
   assert(!pass.pending.includes('INTAKE_RECOVERY_REQUIRED'), JSON.stringify(pass));
   assert.equal(await inspectPendingPublication(f.store), null, JSON.stringify(pass));
   assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head);
+});
+
+test('a typed command\'s bookkeeping after its capture runs only within the command\'s deadline', async t => {
+  const f = await fixture(t), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const chat = { ...f.selection, unitId: null }, source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity };
+  const call = { unitId: C, callId: 'call_1', tool: 'capture_turns', argsHash: 'a'.repeat(64) };
+  assert.equal((await reserveChatCommand(f.capability, chat, call)).acting, true);
+  // A command that started 50 s ago has no time left for either write.
+  const late = typedCommandDeadline(performance.now() - 50_000);
+  await assert.rejects(excludeChatTurn(f.capability, { selection: chat, source, unitId: C }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(recordChatCommandReply(f.capability, chat, call, { capture: 'nothing-new' }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal((await readSelection(f.store, identity)).state, null);
+  // Within it, both run.
+  const on = typedCommandDeadline(performance.now());
+  assert.equal((await excludeChatTurn(f.capability, { selection: chat, source, unitId: C }, { deadline: on })).excluded, true);
+  await recordChatCommandReply(f.capability, chat, call, { capture: 'nothing-new' }, { deadline: on });
+  assert.deepEqual((await reserveChatCommand(f.capability, chat, call)).reply, { capture: 'nothing-new' });
 });
 
 test('each capture control enforces its budget and preserves selection for retry', async t => {

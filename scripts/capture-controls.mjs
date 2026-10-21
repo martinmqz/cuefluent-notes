@@ -22,7 +22,13 @@ import { keys, nativeId, isNativeId, hash, integer, list, unique, choice, canoni
 
 const identityOf = ({ client, sessionId }) => ({ client, sessionId });
 const oldHash = value => { if (value !== null) hash(value); };
-const bounded = (now, run) => withWorkflowBudget({ now }, () => withStorageProbes(run));
+// One bounded operation of at most 10 s, or less when a typed command's
+// `deadline` (`performance.now()`) comes first.
+const bounded = (now, run, deadline = null) => {
+  const milliseconds = deadline === null ? 10_000 : Math.min(10_000, Math.floor(deadline - performance.now()));
+  if (milliseconds <= 0) fail('WORKER_TIME_BUDGET');
+  return withWorkflowBudget({ now, milliseconds }, () => withStorageProbes(run));
+};
 // A typed command's steps wait briefly for an intake lock another pass holds,
 // as its own bookkeeping does; a CLI step refuses at once as busy.
 const intakeLock = wait => wait ? withIntakeLockWaiting : withIntakeLock;
@@ -311,8 +317,10 @@ const CHAT_WINDOW_BYTES = 8 * 1024 * 1024, CHAT_WINDOW_UNITS = 10, CHAT_ANCHOR_B
 const CHAT_SCAN_WINDOWS = 8, CHAT_COMMAND_MS = 50_000, CHAT_STEP_MS = 10_000, CHAT_AFTER_STEPS = 1;
 const timeFor = (deadline, steps) => performance.now() + steps * CHAT_STEP_MS <= deadline;
 /** The deadline of a typed capture whose command started at `started`
- * (`performance.now()`). */
+ * (`performance.now()`), and of the whole command, whose own bookkeeping
+ * writes after the capture share the time left until it. */
 export const typedCaptureDeadline = started => started + CHAT_COMMAND_MS - CHAT_AFTER_STEPS * CHAT_STEP_MS;
+export const typedCommandDeadline = started => started + CHAT_COMMAND_MS;
 // Housekeeping exclusions stop well short of selection capacity: at capacity
 // an exclusion becomes a safety stop that denies every turn of the chat, which
 // only a real opt-out may cause.
@@ -336,13 +344,13 @@ function withheldTurns(state) {
  * idempotent; it waits briefly for the intake lock, never refreshes a hash to
  * get past a conflict, and is skipped (`excluded: false`) when the selection
  * has no housekeeping room left. */
-export async function excludeChatTurn(capability, { selection, source, unitId }, { now, signal } = {}) {
+export async function excludeChatTurn(capability, { selection, source, unitId }, { now, signal, deadline = null } = {}) {
   const chat = await selected(selection); nativeId(unitId); hash(source.fileIdentity);
   return bounded(now, async () => {
     await assertWorkflowStorage(capability);
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, tx => excludeTurn(tx, store, chat, source, unitId), { signal });
-  });
+  }, deadline);
 }
 // Several turns a chat window left out, in one locked step that first checks,
 // with `verify`, right before each is written, that the bytes they were judged
@@ -570,7 +578,7 @@ export async function reserveChatCommand(capability, selection, call, { now, sig
   });
 }
 /** Keeps the reply of the delivery that reserved the call. */
-export async function recordChatCommandReply(capability, selection, call, response, { now, signal } = {}) {
+export async function recordChatCommandReply(capability, selection, call, response, { now, signal, deadline = null } = {}) {
   const chat = await selected(selection), value = { format: CHAT_REPLY_FORMAT, version: 1, call: replyCall(call), response };
   if (Buffer.byteLength(canonicalJSON(value) + '\n') > CHAT_REPLY_BYTES) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
   const name = chatReplyPath(chat, call);
@@ -581,7 +589,7 @@ export async function recordChatCommandReply(capability, selection, call, respon
       if (keptReply(snapshot, call) !== null) fail('INVALID_INTAKE_METADATA');
       await replaceIntakeJSON(tx, name, value, snapshot.hash);
     }, { signal });
-  });
+  }, deadline);
 }
 
 // The position is stored with the anchor the read that reached it took, and

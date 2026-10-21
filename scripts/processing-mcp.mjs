@@ -15,7 +15,7 @@ import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingSh
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
 import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
-import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, typedCaptureDeadline } from './capture-controls.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, typedCaptureDeadline, typedCommandDeadline } from './capture-controls.mjs';
 import { readReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
@@ -801,13 +801,15 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     // the selection has no room for it, the turn stays capturable and the reply
     // says so in its diagnostics.
     let excluded = false;
-    try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal }))).excluded; }
+    try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal, deadline: typedCommandDeadline(started) }))).excluded; }
     catch { /* reported below */ }
     if (!excluded) response = { ...response, diagnostics: [...new Set([...response.diagnostics ?? [], 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
     // The command has acted. Without its kept reply a redelivery would act
     // again, so no reply is given unless it is kept: the outcome is reported
     // as not certain, and status shows it.
-    try { await withStorageProbes(() => recordChatCommandReply(capability, source.selection, call, response, { signal })); }
+    // The command's own two bookkeeping writes share the time left before its
+    // deadline, so the whole command ends within it.
+    try { await withStorageProbes(() => recordChatCommandReply(capability, source.selection, call, response, { signal, deadline: typedCommandDeadline(started) })); }
     catch { signal?.throwIfAborted(); fail('PROCESSING_CONTROL_FAILED'); }
     return response;
   }
