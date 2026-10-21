@@ -12,7 +12,7 @@ Prompted processing requires approval before saving; Automatic processing uses
 the user's approved scope. Manual processing and direct saves do not require
 ongoing collection. Installation, hook trust, or an old policy enables neither.
 
-The new configuration has `format: "cuefluent-workflow"`, `schemaVersion: 1`,
+The configuration has `format: "cuefluent-workflow"`, `schemaVersion: 1`,
 `collections`, and `routes`. Legacy migration and mixed-version operation are
 unsupported. The override is
 `CUEFLUENT_WORKFLOW_CONFIG`; otherwise settings use
@@ -21,10 +21,11 @@ unsupported. The override is
 The [synthetic example](../examples/workflow.json) illustrates the shape with
 placeholder POSIX paths and both processes inactive; it is not a setup command.
 Windows settings use fully qualified Windows paths instead. `--config` overrides
-the environment setting. Windows preserves a sole existing old LocalAppData
-default; distinct old and new defaults require explicit selection. See
+the environment setting. Windows does not automatically select settings from
+an earlier default location. A distinct settings file there requires explicit
+selection even when the current default is absent. See
 [Windows storage selection](setup.md#windows-storage-selection) for discovery,
-existing package stores and custom profile-path compatibility.
+existing-file safeguards and custom paths.
 
 A collection has an `id`, `rawDir`, `intakeStateDir`, and `notes`. Notes specify
 either `notesDir` with `organization: "by-type" | "flat"`, or a single Markdown
@@ -57,8 +58,8 @@ and invalid JSON/schema reports `INVALID_WORKFLOW`. macOS placement conservative
 rejects case-only overlapping suffixes even before directories exist.
 
 Fresh Windows raw, intake and writer defaults share
-`<local user profile>\.cuefluent-notes\collections\<id>`. An existing selected old
-LocalAppData default retains its old private-path suggestions. macOS uses
+`<local user profile>\.cuefluent-notes\collections\<id>`. For an explicitly
+selected settings path, those suggestions share its parent directory. macOS uses
 Application Support; Linux uses XDG state storage. Existing collection paths are
 never changed by default resolution, and no fallback store bypasses failed checks.
 Raw and intake storage must stay outside finished notes, configured
@@ -133,47 +134,49 @@ exactly the trusted skill command's envelope
 `cuefluent-notes:cuefluent-notes`, the name Claude records whether the bare
 `/cuefluent-notes` or the full name was typed) without a proof keeps its typed
 arguments as evidence, exactly as written, without the markup. When nothing was
-typed after the command, Claude can record only the first two lines,
-and that input, like an empty arguments element, is structural under every reader
-version; a published head that kept it as text replays unchanged. Another skill or plugin, any other shape or
-text outside the envelope, and SDK input stay verbatim. A control mixed with
-more words or content is therefore retained in full. A Codex unit started with
-this skill keeps all user text and assistant text, without its command markup,
-which is never an omission. It is started with this skill when its user message
-carries this skill's block (its exact native shape and the skill name
-`cuefluent-notes`) or, from reader version 4, when the turn carries Codex CLI
-0.163's `skills.selected_skill_instructions` item naming
-`cuefluent-notes:cuefluent-notes` or `cuefluent-notes`. The block, the selection
-item and, on the message the selection was made for (the turn's latest user
-message before the item), its leading mention (`$cuefluent-notes:cuefluent-notes`
-or `$cuefluent-notes`) plus one space are the markup; any other message in the
-turn keeps its text, even one that starts with the mention. From version 4, a
-message whose text after that markup (or after the block) is exactly one action
-is only the command and leaves no evidence. Each version decides that with the
-actions it shipped with: version 5 adds `capture`, `pause chat` and
-`resume chat`, which version 4 keeps as typed text. The installed path, which changes
-with each plugin version, is not consulted, so a published unit replays
-unchanged after an upgrade.
+typed after the command, Claude can record only the first two lines;
+that input and an empty arguments element are structural. Another skill or
+plugin, any other shape or text outside the envelope, and SDK input stay
+verbatim. A control mixed with more words or content is retained in full.
+
+The current Codex capture reader is `codex-rollout/7`. A unit starts with this
+skill when its user message carries this skill's block (its exact native shape
+and the skill name `cuefluent-notes`) or the turn carries Codex CLI 0.163's
+`skills.selected_skill_instructions` item naming
+`cuefluent-notes:cuefluent-notes` or `cuefluent-notes`. The block and selection
+item are command markup. On the message the selection was made for (the turn's
+latest user message before that item), its leading mention
+(`$cuefluent-notes:cuefluent-notes` or `$cuefluent-notes`) plus one space is also
+markup; other messages keep their text. A message whose remaining text is
+exactly a supported action is only the command and leaves no evidence.
+
+Desktop's literal Markdown link around either mention is recognized only when
+its destination exactly matches the selected-skill path recorded for that same
+message. One final LF is removed when deciding whether that shape is a bare
+mention or exact command. For ordinary Desktop input, the verified link and one
+separator space are removed while all remaining text and line endings are kept.
+Unselected or mismatched links stay as typed. The reader uses the selected paths
+in the transcript, not the currently installed plugin path. User and assistant
+text outside the verified markup and control exchanges remains evidence.
 
 Calls to this plugin's control server and their results are left out as its own
-processing and review activity: under version 3 in a unit started with this
-skill, and from version 4 in every Codex unit, whether the skill was picked, its
-mention typed by hand (kept exactly as typed, since Codex attached no skill) or
-the request made in the person's own words. They are identified by native
+processing and review activity in every Codex unit, whether the skill was picked,
+its mention typed by hand (kept exactly as typed, since Codex attached no skill),
+or the request made in the person's own words. They are identified by native
 identity alone: the call namespace `mcp__cuefluent_control` plus a native MCP
 item for the same call ID with server `cuefluent_control` and the same tool.
-From version 4, a code-mode `exec` cell is left out too, with its `wait` calls,
-outputs and nested MCP items, when every nested native item within the cell's
-span (from its call to its last output) is a call to `cuefluent_control` and
-every output of the cell is Codex's own framing around nothing or around exactly
-what one of those calls returned; other cells stay. A nested item outside every
-cell or within two open cells, or a child agent in the unit, keeps every
-code-mode record. From version 4, an assistant message that only repeats the
-status text (including the command list and a not-a-command reply) or the
-refusal message of one of those left-out calls in the same unit (as Codex
-recorded it, or the plain message inside Codex CLI 0.163's own error framing)
-is that reply, not evidence. The message and each reply are compared in one
-comparison form, which changes only how the same words are marked up:
+A code-mode `exec` cell is left out too, with its `wait` calls, outputs and nested
+MCP items, when every nested native item within the cell's span (from its call
+to its last output) is a call to `cuefluent_control` and every output of the cell
+is Codex's own framing around nothing or around exactly what one of those calls
+returned; other cells stay. A nested item outside every cell or within two open
+cells, or a child agent in the unit, keeps every code-mode record.
+An assistant message that only repeats the status text (including the command
+list and a not-a-command reply) or refusal message of one of those left-out calls
+in the same unit (as Codex recorded it, or the plain message inside Codex CLI
+0.163's own error framing) is that reply, not evidence. The message and each
+reply are compared in one comparison form, which changes only how the same
+words are marked up:
 
 1. CRLF and CR line endings become LF.
 2. A code span (a run of backticks closed by the next run of the same length)
@@ -203,16 +206,13 @@ reply, while a paraphrase, added or changed words, changed spacing inside a line
 or a path, a link named otherwise, a path shown as a link on one side and as
 text or a code span on the other, emphasis or joined lines keep the message; a
 refusal relayed in other words, for example without its `Cuefluent:` prefix,
-therefore stays as assistant text. These rules belong to reader versions 4 and
-5; changing one needs a new reader version.
+therefore stays as assistant text.
 Text alone never identifies anything: the person's words stay as typed, even an
 exact action typed without the skill, and commentary, any other assistant text,
 a reply with words added and other tools stay. Legacy history records MCP calls
-without native MCP items, so its control calls and replies stay. Published
-captures keep the rules of their reader version: versions 1 and 2 keep the
-block as an omission and the exchanges, version 3 applies the block rules and
-leaves out exchanges only in units started with this skill, versions 4 and 5
-the rules above, each with its own actions.
+without native MCP items, so its control calls and replies stay. Capture
+extraction accepts only the current reader version; an unsupported version is
+refused rather than replayed with historical rules or reinterpreted.
 
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same
@@ -266,9 +266,9 @@ An omission-only capture is permitted when selected input contains no reusable
 evidence, for example inline images. It retains native identity, byte provenance,
 terminal status, and explicit omissions instead of inventing empty user text.
 
-The Codex reader `codex-rollout/2` applies tighter text allocations within those
-unchanged format limits: 64 KiB for call arguments and 192 KiB for results, with
-8 KiB of arguments and 16 KiB of result text per native call across its records.
+The Codex reader applies tighter text allocations within those format limits:
+64 KiB for call arguments and 192 KiB for results, with 8 KiB of arguments and
+16 KiB of result text per native call across its records.
 Unused allowance is not loaned between kinds. Source order and distinct record
 identities survive; identical text, API documentation and large objects are not
 excluded by keywords or presumed usefulness. Only already-supported native
@@ -290,24 +290,20 @@ bytes nor omitted content are available through an invented artifact reference.
 Omissions distinguish `tool-call-call-limit` / `tool-result-call-limit` (per-call
 text), `tool-call-budget-exhausted` / `tool-result-budget-exhausted` (per-kind
 text), and `tool-evidence-record-limit` / `tool-evidence-serialized-limit` (overall envelope).
-A collector seeded with older retained evidence can also report
-`tool-budget-exhausted`: the shared 256 KiB format ceiling still applies even if
-older call text exceeds its new per-kind allocation. New v2-only evidence reaches
-the per-kind limit first. Successive bounds account for disjoint omitted byte ranges;
-aggregated omission counts are affected records/ranges, not missing notes. Native read limits and
-unsupported structures remain separately reported by the readers.
+The shared 256 KiB format ceiling also applies. Successive bounds account for
+disjoint omitted byte ranges; aggregated omission counts are affected
+records/ranges, not missing notes. Native read limits and unsupported structures
+remain separately reported by the readers.
 
-This allocation applies to new Codex units; it cannot recover previously
-omitted bytes. Existing captures, processing packets and acknowledgements are
-not rewritten. During collection, an already-published unit is normalized with its
-recorded reader rules, including version 1, so a held cursor can pass its unchanged
-evidence again without replacing it. Changed native evidence still conflicts.
-The Codex cursor-only checkpoint keeps its independent `codex-rollout/1` label;
-its representation has not changed with the text allocation. Reader rebuild
-remains deferred. Claude's
-human-only reader remains at version 1 because its supported evidence has no
-tool text. Budget changes do not move selection boundaries or rewind an advanced
-cursor to rebalance allocations.
+These allocations cannot recover omitted bytes. Existing captures, processing
+packets and acknowledgements are not rewritten. Capture extraction accepts only
+`codex-rollout/7` and `claude-transcript/2`; unsupported capture reader versions
+refuse with `UNSUPPORTED_CODEX_READER` or `UNSUPPORTED_CLAUDE_READER`.
+Invalid capture reader metadata refuses with `INVALID_CAPTURE_READER`; the
+capture is preserved without importing or converting it.
+The metadata-only checkpoint labels are independent of capture reader versions:
+`codex-rollout/1` and `claude-transcript/1` remain the current checkpoint formats.
+Budget changes do not move selection boundaries or rewind an advanced cursor.
 
 ## Selection and intake primitives
 
@@ -335,7 +331,9 @@ Pause records the command unit as an exclusive upper native boundary and an
 exclusion. Pause EOF is supplementary evidence: earlier eligible work
 may persist after it. Controls never search prose for instructions. Repeated
 start preserves the active interval; explicit current/historical selection does
-not change ongoing collection. Exact last-request retries retain the original
+not change ongoing collection. An explicit capture scope binds its selected byte
+range with a content hash; a saved scope without that hash is unsupported.
+Exact last-request retries retain the original
 request hash (including its inspected selection hash) and return the current
 saved selection without rereading source evidence or deriving a new EOF. Native
 anchor resolution may update that selection's hash while preserving the same
@@ -416,8 +414,6 @@ shapes are accepted across client version strings, including prereleases.
 `reader.headerClientVersion` retains the bounded, nonempty version string from
 the session header. It does not identify the client that emitted each later record
 after an update; readers never scan before the selected floor to infer that.
-Existing captures with `reader.clientVersion` have the same
-header-only meaning and remain readable without rewriting their bytes.
 Malformed version metadata reports `INVALID_SESSION_CLIENT_VERSION`, separately
 from configuration errors.
 Compressed files, missing native sequence, unsupported record types/content and uncertain
@@ -471,12 +467,9 @@ Stable native item IDs deduplicate identical mirrors; distinct IDs retain repeat
 text. Native source ranges remain attached to the unit's actual records. Reasoning,
 compaction summaries, hook prompts and inter-agent content are excluded structurally.
 Native collaboration call IDs and pinned collaboration tool names exclude their
-outputs with an omission. Reader version 3 treats this plugin's own skill block
-as command markup and leaves out its control-server exchanges in a unit started
-with that skill; version 4 leaves them out in every unit (see
-[the provenance gate](#generated-output-provenance-gate)); versions 1 and 2
-record the block as an `unsupported-content-block` omission and keep those
-exchanges. A published unit is always reread under its own version.
+outputs with an omission. This plugin's own skill block is command markup,
+and its verified control-server exchanges are left out in every unit (see
+[the provenance gate](#generated-output-provenance-gate)).
 Native user text, including IDE context supplied in
 that text, stays attributed evidence; prose delimiters do not authorize stripping
 arbitrary parts of a user's message.
@@ -564,13 +557,12 @@ context, sidechain/child records, reasoning and queued attachment records are
 excluded. API request snapshot records (`api-request-shape`, `api-request-blob`
 and `api-request`, written by Claude CLI 2.1.299) are excluded transport metadata;
 their message copies never become evidence. Selected human prose is not filtered
-by instruction-like words. Capture reader version 2 keeps only the typed
-arguments of the trusted skill command's exact envelope (see
-[the provenance gate](#generated-output-provenance-gate)); a version 1 head
-extends with verbatim text, except that an envelope with nothing typed is
-structural under both. Both share the structural checkpoint version
-`claude-transcript/1`; an unknown capture reader version refuses that unit with
-`UNSUPPORTED_CLAUDE_READER` rather than being reinterpreted.
+by instruction-like words. The current capture reader, `claude-transcript/2`,
+keeps only the typed arguments of the trusted skill command's exact envelope
+(see [the provenance gate](#generated-output-provenance-gate)); an envelope with
+nothing typed is structural. Its current structural checkpoint format is
+`claude-transcript/1`. An unsupported capture reader version refuses that unit
+with `UNSUPPORTED_CLAUDE_READER` rather than being reinterpreted.
 Classification uses the documented native types, ownership fields and known
 injection flags. Neither reader validates every optional field: a future producer
 that changes human/injected-message semantics under a known type needs a reader
@@ -842,10 +834,10 @@ preserve collection progress. Fresh whole-configuration authorization still runs
 before reads and writes.
 
 When a registration already has an EOF snapshot or a saved registration floor,
-a compatible reader retries it under the original valid grant, file identity and
-frozen EOF. Eligible work accumulated after that floor can be retained; the first
-proven boundary is still excluded. A reader update does not import pre-floor
-history or replace that saved floor with the upgrade time. If the source was
+the reader retries it under the original valid grant, file identity and frozen
+EOF. Eligible work accumulated after that floor can be retained; the first
+proven boundary is still excluded. A retry does not import pre-floor history
+or replace that saved floor with the current time. If the source was
 missing at registration and its header has never verified, there is no saved
 floor yet: the first successful verification uses the available authorized wake's
 EOF. A Claude prompt wake whose file was still missing too (Claude can create a
@@ -891,12 +883,16 @@ saved upper EOF, for both range and header reads. The worker processes complete,
 eligible records within that ceiling, then persists a source/interval/cursor-bound
 inspection suspension. Matching suspensions are checked before hydrating carry pages.
 Reader suspensions and the `ingress/suspended` hook hint are bound to the Claude
-reader's rules revision; bump that revision when its compatibility or classification
-rules change. Other suspension-cache versions are stale and revalidated.
+reader's rules revision. The worker refuses unsupported suspension shapes,
+versions or invalid rules revisions with `INVALID_READER_SUSPENSION`, without
+reading the transcript or replacing the suspension, cursor or captures. An invalid
+ingress hint cannot suppress a worker wake.
 The `ingress/drained` hint instead represents committed terminal progress and
 does not expire with the reader's rules revision.
-The worker revalidates stale caches only within the saved ceiling, preserving
-selection, capture and checkpoint identities.
+A valid current-format suspension with changed rules revision, source, interval,
+cursor or ceiling bindings is a cache miss. Reinspection stays within the
+authorized frozen pause range and preserves selection, capture and checkpoint
+identities.
 Completed explicit windows also stop at their committed end. Transient head/storage
 errors remain retryable instead of becoming permanent suspensions. A partial tail or unresolved boundary retains its backlog
 and diagnostic; it never reads future bytes to resolve it. This is a suspension,

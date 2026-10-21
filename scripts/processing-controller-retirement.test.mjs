@@ -35,7 +35,7 @@ async function additionalSelectedCapture(f) {
   const selected = await withIntakeLock(f.store, tx => controlSelection(tx, {
     source: f.source, expectedHash: previous.hash, authorize: async () => true,
     request: { id: scopeId, operation: 'capture-current', ...identity, expectedRevision: previous.state.revision,
-      scope: { unitIds: [identity.unitId], start: proof.start, end: null } }
+      scope: { unitIds: [identity.unitId], start: proof.start, end: null, contentHash: proof.start.hash } }
   }));
   const capture = createCapture({ ...f.capture, identity });
   const published = await withIntakeLock(f.store, tx => publishCapture(tx, {

@@ -15,12 +15,14 @@ async function fixture(t) {
   return { root, ...locations, put };
 }
 
-test('Windows default selects existing settings by identity and refuses two distinct copies', async t => {
+test('Windows defaults never adopt earlier settings or silently create a competing setup', async t => {
   const f = await fixture(t);
   assert.equal(await resolveWindowsConfig(f), f.newConfig);
   assert.deepEqual(await fs.readdir(f.root), []);
   await f.put(f.oldConfig);
-  assert.equal(await resolveWindowsConfig(f), f.oldConfig);
+  await assert.rejects(resolveWindowsConfig(f), { code: 'WORKFLOW_CONFIG_SELECTION_REQUIRED' });
+  assert.equal(await fs.readFile(f.oldConfig, 'utf8'), 'metadata only');
+  await assert.rejects(fs.lstat(f.newConfig), { code: 'ENOENT' });
   await f.put(f.newConfig);
   await assert.rejects(resolveWindowsConfig(f), { code: 'WORKFLOW_CONFIG_SELECTION_REQUIRED' });
   await fs.unlink(f.oldConfig);
@@ -56,11 +58,21 @@ test('explicit config precedence performs no default discovery', async t => {
   assert.equal(win.writerStateDir, 'C:\\settings\\collections\\example\\writer');
 });
 
-test('a network profile never replaces an existing local setup or becomes a fresh default', async t => {
+test('a network profile refuses default selection even when earlier local settings exist', async t => {
   const f = await fixture(t), locations = { oldConfig: f.oldConfig, newConfig: '\\\\server\\profile\\.cuefluent-notes\\workflow.json' };
+  const lstat = fs.lstat.bind(fs);
+  t.mock.method(fs, 'lstat', (file, ...args) => {
+    if (file === locations.newConfig) throw new Error('must not inspect network default');
+    return lstat(file, ...args);
+  });
   await assert.rejects(resolveWindowsConfig(locations), { code: 'LOCAL_STATE_LOCATION_REQUIRED' });
   await f.put(f.oldConfig);
-  assert.equal(await resolveWindowsConfig(locations), f.oldConfig);
+  await assert.rejects(resolveWindowsConfig(locations), { code: 'LOCAL_STATE_LOCATION_REQUIRED' });
+  assert.equal(await fs.readFile(f.oldConfig, 'utf8'), 'metadata only');
+  const selected = await resolveWorkflowConfig({ platform: 'win32', home: '\\\\server\\profile',
+    env: { LOCALAPPDATA: 'C:\\Users\\Example\\AppData\\Local' }, explicit: 'C:\\settings\\workflow.json' });
+  assert.equal(selected.configPath, 'C:\\settings\\workflow.json');
+  assert.equal(selected.explicit, true);
 });
 
 test('shared resolver preserves override provenance and refuses empty overrides consistently', async t => {

@@ -339,7 +339,7 @@ for (const client of ['codex', 'claude']) {
       { scopeId: requestId, unitIds: [f.boundary.unitId] });
     const selected = await withIntakeLock(explicit, tx => controlSelection(tx, { source: f.source, expectedHash: null,
       request: { id: requestId, operation: 'capture-current', client, sessionId: f.context.sessionId,
-        unitId: f.boundary.unitId, expectedRevision: 0, scope: { unitIds: [f.boundary.unitId], start: f.boundary.record, end: null } },
+        unitId: f.boundary.unitId, expectedRevision: 0, scope: { unitIds: [f.boundary.unitId], start: f.boundary.record, end: null, contentHash: f.boundary.record.hash } },
       authorize: async () => true }));
     for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) {
       f.invocation.tool = tool; f.context.toolCallId = `call_${tool}`;
@@ -1096,5 +1096,62 @@ test('a continuation link or pointer changed after the binding first read it ref
     // Only a fresh binding reads the changed records; the earlier lineage is never reused.
     if (typeof after === 'string') await assert.rejects(f.resolve(), { code: after });
     else assert.deepEqual((await f.resolve()).chatLineage, after);
+  });
+});
+
+test('Desktop links use the recorded spelling after verifying the installed skill identity', async t => {
+  for (const nested of [false, true]) for (const exact of [true, false]) await t.test(`${nested ? 'code mode' : 'direct'} ${exact ? 'recorded path' : 'different link spelling'}`, async t => {
+    const f = await fixture(t);
+    const recorded = path.dirname(f.skillPath) + path.sep + path.sep + path.basename(f.skillPath);
+    assert.notEqual(recorded, f.skillPath); assert.equal(path.normalize(recorded), path.normalize(f.skillPath));
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+    const input = menuInput(f, `[$cuefluent-notes:cuefluent-notes](${exact ? recorded : f.skillPath}) save\n`,
+      { placeholder: false, skillPath: recorded });
+    if (nested) {
+      const rows = nestedRows(f, { content: [{ type: 'text', text: 'Synthetic challenge' }], isError: false });
+      await f.append([f.spacer(), ...input, rows.outer, rows.call, rows.output]);
+    } else await f.append([f.spacer(), ...input, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, exact);
+    assert.equal(bound.typedControl, exact ? 'save' : undefined);
+  });
+});
+
+test('Desktop linked menu commands bind only to the selected installed skill and exact action', async t => {
+  for (const control of ['review', 'save', 'save t7xb88', 'skip', 'review cancel', 'help']) for (const nested of [false, true]) {
+    await t.test(`${control}${nested ? ' through code mode' : ' directly'}`, async t => {
+      const f = await fixture(t);
+      f.invocation.tool = control === 'help' ? 'processing_status' : 'processing_review';
+      f.invocation.arguments = { collectionId: f.collection.id };
+      const input = menuInput(f, `[$cuefluent-notes:cuefluent-notes](${f.skillPath}) ${control}\n`, { placeholder: false });
+      if (nested) {
+        const rows = nestedRows(f, { content: [{ type: 'text', text: 'Synthetic challenge' }], isError: false });
+        await f.append([f.spacer(), ...input, rows.outer, rows.call, rows.output]);
+      } else await f.append([f.spacer(), ...input, f.nativeCall()]);
+      const bound = await f.resolve();
+      assert.equal(bound.nativeSkill, true); assert.equal(bound.typedControl, control);
+      assert.equal(bound.handshakeResultHash !== undefined, nested);
+    });
+  }
+  for (const [name, change, options = {}] of [
+    ['no native menu selection', text => text, { selections: 0 }],
+    ['selection from another turn', text => text, { turn: randomUUID() }],
+    ['selection of another installed copy', text => text, { skillPath: '/other/SKILL.md' }],
+    ['another link destination', text => text.replace(/\]\([^)]*\)/, '](/other/SKILL.md)')],
+    ['a file URL instead of the selected path', text => text.replace('](', '](file://')],
+    ['extra selected skill', text => text, { selections: 2 }],
+    ['placeholder metadata', text => text, { placeholder: true }],
+    ['two trailing newlines', text => text + '\n'],
+    ['a second instruction', text => text + 'Also save the other draft.'],
+    ['trailing spaces', text => text.replace('save\n', 'save \n')],
+    ['extra separator', text => text.replace(') save', ')  save')],
+    ['extra part', text => text, { extraPart: true }],
+  ]) await t.test(`no authority: ${name}`, async t => {
+    const f = await fixture(t); f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+    const input = menuInput(f, change(`[$cuefluent-notes:cuefluent-notes](${f.skillPath}) save\n`), { placeholder: false, ...options });
+    if (options.extraPart) input[0].payload.item.content.push({ type: 'text', text: 'review instead' });
+    await f.append([f.spacer(), ...input, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, false); assert.equal(Object.hasOwn(bound, 'typedControl'), false);
   });
 });

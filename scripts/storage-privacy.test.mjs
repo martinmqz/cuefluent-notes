@@ -83,6 +83,36 @@ test('privacy rechecks replaced roots and never silently repairs existing permis
   }
 });
 
+test('Finder metadata beside the review root does not weaken private storage checks', async t => {
+  const f = await storageFixture(t), finderFile = path.join(f.collection.intakeStateDir, '.DS_Store');
+  await fs.writeFile(finderFile, 'synthetic Finder metadata', { mode: 0o644 });
+  await fs.chmod(finderFile, 0o644);
+  await prepareWorkflowStorage(f.options);
+  assert.deepEqual(await auditWorkflowStorage(f.capability), { complete: true });
+  assert.equal(await fs.readFile(finderFile, 'utf8'), 'synthetic Finder metadata');
+  if (process.platform !== 'win32') {
+    assert.equal((await fs.stat(finderFile)).mode & 0o777, 0o644);
+    // The exception is for an unconsumed Finder entry, not an explicit data path.
+    await assert.rejects(assertPrivatePaths(f.capability, [finderFile]), { code: 'STORAGE_NOT_PRIVATE' });
+    for (const file of [path.join(f.collection.intakeStateDir, 'private.json'),
+      path.join(f.collection.rawDir, '.DS_Store'), path.join(f.collection.notes.writerStateDir, '.DS_Store')]) {
+      await fs.writeFile(file, 'synthetic private data', { mode: 0o644 }); await fs.chmod(file, 0o644);
+      await assert.rejects(prepareWorkflowStorage(f.options), { code: 'STORAGE_NOT_PRIVATE' });
+      await fs.unlink(file);
+    }
+    await fs.unlink(finderFile);
+    await fs.symlink(path.join(f.root, 'missing'), finderFile);
+    await assert.rejects(prepareWorkflowStorage(f.options), { code: 'UNSAFE_PRIVATE_STORAGE' });
+    await fs.unlink(finderFile);
+  } else await fs.unlink(finderFile);
+  // A directory with Finder's name is still inspected, never silently skipped.
+  await fs.mkdir(finderFile, { mode: 0o700 });
+  const invalid = path.join(finderFile, 'invalid.json');
+  await fs.writeFile(invalid, 'synthetic', { mode: 0o600 });
+  await fs.link(invalid, path.join(f.root, 'outside-link'));
+  await assert.rejects(prepareWorkflowStorage(f.options), { code: 'UNSAFE_PRIVATE_STORAGE' });
+});
+
 test('privacy refuses linked children and macOS extended grants even with mode 0700', async t => {
   const f = await storageFixture(t), file = path.join(f.collection.rawDir, 'private.json');
   await fs.writeFile(file, '{}', { mode: 0o600 }); await fs.link(file, file + '.linked');

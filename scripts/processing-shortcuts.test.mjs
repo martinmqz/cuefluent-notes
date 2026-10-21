@@ -57,7 +57,7 @@ test('CLI resume without unfinished work never creates a selection or claims new
   assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'missing');
 });
 
-test('legacy unfinished operation is resumed exactly before the frozen unclaimed remainder', async t => {
+test('standalone unfinished operation is resumed exactly before the frozen unclaimed remainder', async t => {
   const f = await processingFixture(t), b = await processingFixture(t, { base: f, client: 'claude' });
   const claim = await prepareProcessing(f.capability, { ...f.args, inputs: f.inputs });
   const chosen = await selectProcessingShortcut(b.capability, { selection: b.selection, requestId: randomUUID() },

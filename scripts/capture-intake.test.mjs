@@ -10,6 +10,7 @@ import { inspectIntakeStore, withIntakeLock, intakeSnapshot, intakeJSON, intakeP
 import { controlSelection, readSelection, publishCapture, recoverPendingPublication, verifySourceCursor, resolveStoredSelectionAnchor, readCaptureHead } from './intake-store.mjs';
 import { createCapture, captureRelativePath } from './capture-contract.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
+import { chosenStretch } from './session-jsonl.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const U = Array.from({ length: 8 }, (_, i) => `20000000-0000-4000-8000-00000000000${i}`);
@@ -43,10 +44,10 @@ test('captures that fill a selection leave room to pause and resume', () => {
   state = applySelectionControl(state, request(state, 'pause', U[3]), boundary(U[3], 150));
   // Captures fill the record to just short of where captures stop.
   const captureCeiling = MAX_SELECTION_BYTES - 32 * 1024;
-  const scope = () => ({ id: randomUUID(), kind: 'historical', unitIds: Array.from({ length: 8 }, () => randomUUID()), start: anchor('s', 200, 220), end: anchor('e', 280, 300) });
+  const scope = () => ({ id: randomUUID(), kind: 'historical', contentHash: hash, unitIds: Array.from({ length: 8 }, () => randomUUID()), start: anchor('s', 200, 220), end: anchor('e', 280, 300) });
   while (Buffer.byteLength(canonicalJSON(state)) < captureCeiling - 200) state.explicitScopes.push(scope());
   state = validateSelectionState(state);
-  const capture = request(state, 'capture-historical', undefined, { scope: { unitIds: [U[5]], start: proof().start, end: proof().end } });
+  const capture = request(state, 'capture-historical', undefined, { scope: { contentHash: hash, unitIds: [U[5]], start: proof().start, end: proof().end } });
   assert.throws(() => applySelectionControl(state, capture, null), { code: 'SELECTION_CAPACITY_EXCEEDED' });
   // Resuming and pausing again still fit, without a safety stop.
   state = applySelectionControl(state, request(state, 'resume', U[4]), boundary(U[4], 500));
@@ -97,12 +98,36 @@ test('controls are retryable, refuse stale requests, and never infer changes fro
   assert.throws(() => applySelectionControl(repeat, start, boundary(U[1], 100)), { code: 'STALE_SELECTION' });
   assert.throws(() => applySelectionControl(state, { ...request(state, 'pause', U[2]), sessionId: U[7] }, boundary(U[2], 200)), { code: 'SELECTION_IDENTITY_MISMATCH' });
   assert.throws(() => applySelectionControl(state, { ...request(state, 'exclude', U[2]), prose: 'do not capture' }, null));
-  const current = applySelectionControl(state, request(state, 'capture-current', U[2], { scope: { unitIds: [U[2]], start: proof().start, end: null } }), null);
+  const current = applySelectionControl(state, request(state, 'capture-current', U[2], { scope: { contentHash: hash, unitIds: [U[2]], start: proof().start, end: null } }), null);
   assert.equal(current.intervals[0].lower.eofByte, 100);
   assert.equal(evaluateUnitSelection(current, proof()).kind, 'current');
   const manual = newSelectionState(source());
-  const history = applySelectionControl(manual, request(manual, 'capture-historical', undefined, { scope: { unitIds: [U[2]], start: proof().start, end: proof().end } }), null);
+  const history = applySelectionControl(manual, request(manual, 'capture-historical', undefined, { scope: { contentHash: hash, unitIds: [U[2]], start: proof().start, end: proof().end } }), null);
   assert.equal(history.active, false); assert.equal(history.intervals.length, 0);
+});
+
+test('explicit capture requests and saved scopes require their inspected content hash', () => {
+  const state = newSelectionState(source());
+  for (const kind of ['current', 'historical']) {
+    const scope = { contentHash: hash, unitIds: [U[2]], start: proof().start, end: kind === 'current' ? null : proof().end };
+    const control = request(state, `capture-${kind}`, kind === 'current' ? U[2] : undefined, { scope });
+    const selected = applySelectionControl(state, control, null);
+    assert.equal(selected.explicitScopes[0].contentHash, hash);
+    assert.deepEqual(chosenStretch(selected.explicitScopes[0]), { from: scope.start.startByte, to: (scope.end ?? scope.start).endByte, hash });
+    const before = canonicalJSON(selected);
+    for (const value of [undefined, null, '', 'not-a-hash']) {
+      const missing = structuredClone(control), stored = structuredClone(selected);
+      if (value === undefined) { delete missing.scope.contentHash; delete stored.explicitScopes[0].contentHash; }
+      else { missing.scope.contentHash = value; stored.explicitScopes[0].contentHash = value; }
+      assert.throws(() => applySelectionControl(state, missing, null), { code: 'INVALID_WORKFLOW' });
+      assert.throws(() => validateSelectionState(stored), { code: 'INVALID_WORKFLOW' });
+      assert.throws(() => chosenStretch(stored.explicitScopes[0]), { code: 'INVALID_WORKFLOW' });
+    }
+    assert.equal(canonicalJSON(selected), before);
+    assert.equal(state.revision, 0); assert.deepEqual(state.explicitScopes, []);
+  }
+  const automatic = applySelectionControl(state, request(state, 'start', U[1]), boundary(U[1], 100));
+  assert.equal(chosenStretch(automatic.intervals[0]), null);
 });
 
 test('registration fixes EOF without reading a 50 MiB historical prefix', async t => {
@@ -154,11 +179,11 @@ async function fixture(t) {
   selected.fileIdentity = stableSourceIdentity(await fs.lstat(selected.path, { bigint: true }));
   const initial = newSelectionState(selected), unitProof = { ...proof(), sourceIdentity: selected.fileIdentity };
   unitProof.start.hash = unitProof.end.hash = digest('x'.repeat(20));
-  const control = request(initial, 'capture-current', U[2], { scope: { unitIds: [U[2]], start: unitProof.start, end: null } });
+  const control = request(initial, 'capture-current', U[2], { scope: { contentHash: digest('x'.repeat(20)), unitIds: [U[2]], start: unitProof.start, end: null } });
   const selection = await withIntakeLock(store, tx => controlSelection(tx, { source: selected, request: control, expectedHash: null, authorize: allow }));
   const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity: { client: 'codex', sessionId: S, unitId: U[2] },
     projectRoot: root, source: { path: selected.path, fileIdentity: selected.fileIdentity,
-      ranges: [{ startByte: 220, endByte: 280, recordIds: ['message'] }] }, reader: { name: 'synthetic', version: '1', clientVersion: 'fixture' },
+      ranges: [{ startByte: 220, endByte: 280, recordIds: ['message'] }] }, reader: { name: 'synthetic', version: '1', headerClientVersion: 'fixture' },
     occurredAt: stamp, capturedAt: stamp, terminal: 'completed', coverage: { partial: false, omissions: [] },
     evidence: [{ kind: 'user', recordId: 'message', range: { startByte: 220, endByte: 280, recordIds: ['message'] }, text: 'Supplied meeting decision.' }] });
   const scan = { from: { sourceIdentity: selected.fileIdentity, offset: 200, anchor: null },
@@ -287,7 +312,7 @@ test('cursor anchors detect in-place source changes and truncation', async t => 
 test('existing equal evidence retains original provenance in a new explicit scope', async t => {
   const f = await fixture(t);
   const first = await withIntakeLock(f.store, tx => publishCapture(tx, f.args));
-  const nextRequest = request(f.selection.state, 'capture-current', U[2], { scope: { unitIds: [U[2]], start: f.args.proof.start, end: null } });
+  const nextRequest = request(f.selection.state, 'capture-current', U[2], { scope: { contentHash: f.args.proof.start.hash, unitIds: [U[2]], start: f.args.proof.start, end: null } });
   const next = await withIntakeLock(f.store, tx => controlSelection(tx, { source: f.source, request: nextRequest, expectedHash: f.selection.hash, authorize: allow }));
   const retry = createCapture({ ...f.args.capture, capturedAt: '2026-03-01T00:00:00.000Z', reader: { ...f.args.capture.reader, version: '2' } });
   const result = await withIntakeLock(f.store, tx => publishCapture(tx, { ...f.args, capture: retry, selectionHash: next.hash, scopeId: nextRequest.id }));
@@ -397,13 +422,13 @@ test('capacity cannot make pause or exclude fail open', () => {
   const stopped = applySelectionControl(state, request(state, 'exclude', U[3]), null);
   assert.equal(stopped.safetyStop.reason, 'capacity');
   assert.equal(evaluateUnitSelection(stopped, proof()).reason, 'safety-stop');
-  assert.throws(() => applySelectionControl(paused, request(paused, 'capture-current', U[2], { scope: { unitIds: [U[2]], start: proof().start, end: null } }), null), { code: 'EXCLUDED_CAPTURE_REQUEST' });
+  assert.throws(() => applySelectionControl(paused, request(paused, 'capture-current', U[2], { scope: { contentHash: hash, unitIds: [U[2]], start: proof().start, end: null } }), null), { code: 'EXCLUDED_CAPTURE_REQUEST' });
 });
 
 test('selection returns all matching scopes and rejects cross-kind scope ID collisions', () => {
   let state = newSelectionState(source()); const low = anchor('lower', 100, 120);
   state = applySelectionControl(state, request(state, 'start', U[1]), boundary(U[1], 100, low));
-  state = applySelectionControl(state, request(state, 'capture-current', U[2], { scope: { unitIds: [U[2]], start: proof().start, end: null } }), null);
+  state = applySelectionControl(state, request(state, 'capture-current', U[2], { scope: { contentHash: hash, unitIds: [U[2]], start: proof().start, end: null } }), null);
   const order = { kind: 'native-links', units: [U[1], U[2]], anchors: [{ unitId: U[1], record: low }, { unitId: U[2], record: proof().start }] };
   assert.deepEqual(evaluateUnitSelection(state, proof(U[2], order)).scopes.map(scope => scope.kind), ['current', 'future']);
   state.explicitScopes[0].id = state.intervals[0].id;
@@ -486,7 +511,7 @@ for (const failure of ['truncate', 'hardlink', 'denied', 'missing-stage']) {
 test('interleaved completed units publish behind a low-water cursor and later account for prior captures', async t => {
   const f = await fixture(t); await fs.appendFile(f.source.path, 'x'.repeat(200));
   const end = { ...anchor('end-A', 480, 500), hash: digest('x'.repeat(20)) };
-  const selected = request(f.selection.state, 'capture-historical', undefined, { scope: { unitIds: [U[2], U[3]], start: f.args.proof.start, end } });
+  const selected = request(f.selection.state, 'capture-historical', undefined, { scope: { contentHash: digest('x'.repeat(300)), unitIds: [U[2], U[3]], start: f.args.proof.start, end } });
   const selection = await withIntakeLock(f.store, tx => controlSelection(tx, { source: f.source, request: selected, expectedHash: f.selection.hash, authorize: allow }));
   const makeCapture = (unitId, ranges) => createCapture({ ...f.args.capture, identity: { ...f.args.capture.identity, unitId },
     source: { ...f.args.capture.source, ranges: ranges.map((pair, i) => ({ startByte: pair[0], endByte: pair[1], recordIds: [`record-${i}`] })) },

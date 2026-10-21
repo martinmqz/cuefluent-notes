@@ -88,15 +88,21 @@ test('seeded collection matches uninterrupted quotas and never mutates retained 
   }
 });
 
-test('old larger per-kind allocations remain intact without allowing new text above the global limit', () => {
-  const evidence = Array.from({ length: 8 }, (_, i) => ({ kind: i < 4 ? 'tool-call' : 'tool-result', callId: `old${i}`,
-    tool: 'synthetic', text: 'x'.repeat(32768), ...(i >= 4 ? { outcome: 'unknown' } : {}), recordId: `old${i}`,
-    range: { startByte: i * 10, endByte: i * 10 + 10, recordIds: [`old${i}`] } }));
-  const out = append(evidenceCollector({ evidence, omissions: [] }), [row('tool-result', 'new result', 'new', 'unknown')], 8);
-  assert.deepEqual(out.evidence.slice(0, 8), evidence);
+test('resuming saturated call and result pools preserves their bounds and later human evidence', () => {
+  const first = append(evidenceCollector(), [
+    ...Array.from({ length: 8 }, (_, i) => row('tool-call', 'x'.repeat(8192), `c${i}`)),
+    ...Array.from({ length: 12 }, (_, i) => row('tool-result', 'x'.repeat(16384), `c${i}`))
+  ]);
+  const retained = structuredClone({ evidence: first.evidence, omissions: first.omissions });
+  const out = append(evidenceCollector(first), [row('tool-call', 'new arguments', 'new'),
+    row('tool-result', 'new result', 'new'), row('user', 'Late correction.')], 20);
+  assert.deepEqual(out.evidence.slice(0, 20), retained.evidence);
   assert.equal(bytes(out, 'tool-call') + bytes(out, 'tool-result'), 262144);
-  assert.equal(out.evidence.at(-1).text, '');
-  assert.equal(out.omissions[0].reason, 'tool-budget-exhausted');
+  assert.deepEqual(out.evidence.slice(-3).map(item => item.text), ['', '', 'Late correction.']);
+  assert(out.omissions.some(item => item.reason === 'tool-call-budget-exhausted'));
+  assert(out.omissions.some(item => item.reason === 'tool-result-budget-exhausted'));
+  assert.equal(omittedBytes(out), Buffer.byteLength('new argumentsnew result'));
+  assert.deepEqual({ evidence: first.evidence, omissions: first.omissions }, retained);
 });
 
 test('ordinary nested API text is bounded, not semantically filtered or advertised as available elsewhere', () => {

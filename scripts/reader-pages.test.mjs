@@ -23,6 +23,18 @@ async function fixture(t) {
 const base = value => `reader-pages/claude/${S}/${value.scopeId}`;
 const name = (value, page) => `${base(value)}/${page.index.toString(16).padStart(2, '0')}-${page.hash.slice(0, 20)}/page.json`;
 
+test('stored checkpoints require paged Claude state while current Codex state remains inline', async t => {
+  const f = await fixture(t), value = carry();
+  assert.throws(() => validateStoredCheckpoint(value), /INVALID_READER_CHECKPOINT/);
+  await assert.rejects(hydrateReaderCheckpoint(f.store, value), /INVALID_READER_CHECKPOINT/);
+  const codex = { ...value, client: 'codex', reader: 'codex-jsonl/7', records: [], units: [] };
+  assert.deepEqual(validateStoredCheckpoint(codex), codex);
+  assert.deepEqual(await hydrateReaderCheckpoint(f.store, codex), codex);
+  const root = await f.publish(value);
+  assert.equal(root.version, 2);
+  assert.deepEqual(await hydrateReaderCheckpoint(f.store, root), value);
+});
+
 test('allocation status distinguishes unused, charged, low, exhausted, and inconsistent metadata', async t => {
   const f = await fixture(t), value = carry(), read = root => readReaderAllocation(f.store, value, root);
   const empty = await read(null);

@@ -1,7 +1,5 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { assertIntakeTransaction, intakeSnapshot, intakeJSON, replaceIntakeJSON,
-  openWorkflowIntake, withIntakeLock, intakePath } from './intake-io.mjs';
+  openWorkflowIntake, withIntakeLock } from './intake-io.mjs';
 import { assertWorkflowStorage } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { locateProcessingExecutionSource, resolveClaudeProcessingUnit, verifyProcessingExecution,
@@ -10,8 +8,6 @@ import { readSessionRange } from './session-jsonl.mjs';
 import { verifyCodexHeader } from './codex-reader.mjs';
 import { processingToolDeclarations } from './processing-tool-contracts.mjs';
 import { absolutePath } from './workflow-paths.mjs';
-import { lstatOrNull } from './file-io.mjs';
-import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { canonicalJSON, digest, fail, keys, nativeId, hash, integer, choice, CLIENTS } from './workflow-values.mjs';
 
 const MAX_BYTES = 32 * 1024;
@@ -56,13 +52,15 @@ export async function findCompletedProcessingExecution(transaction, { session, r
   if (typeof authorize !== 'function' || await authorize() !== true) fail('INTAKE_NOT_AUTHORIZED');
   const store = await assertIntakeTransaction(transaction);
   const requestName = requestFilename({ ...session, requestId });
-  const indexed = parse(await intakeSnapshot(store, 'state', requestName, { maxBytes: MAX_BYTES }));
+  const requestSnapshot = await intakeSnapshot(store, 'state', requestName, { maxBytes: MAX_BYTES });
+  const indexed = parse(requestSnapshot);
   if (indexed) {
     if (requestFilename(indexed) !== requestName || indexed.inputHash !== inputHash || indexed.inputId !== requestId ||
         indexed.profileId !== session.profileId || indexed.toolContractHash !== session.toolContractHash ||
         (session.client === 'codex' && indexed.sourcePath !== session.sourcePath)) fail('PROCESSING_EXECUTION_CONFLICT');
-    const unit = parse(await intakeSnapshot(store, 'state', filename(indexed), { maxBytes: MAX_BYTES }));
-    if (unit && canonicalJSON(unit) !== canonicalJSON(indexed)) fail('PROCESSING_EXECUTION_CONFLICT');
+    const unitSnapshot = await intakeSnapshot(store, 'state', filename(indexed), { maxBytes: MAX_BYTES });
+    const unit = parse(unitSnapshot);
+    if (unit && unitSnapshot.hash !== requestSnapshot.hash) fail('PROCESSING_EXECUTION_CONFLICT');
     // The proof-sealed request record is published first. If publication stopped
     // before its identical unit projection, recovery still has the exact bytes;
     // collection simply has no unit receipt to use until an authorized retry.
@@ -70,27 +68,11 @@ export async function findCompletedProcessingExecution(transaction, { session, r
     await assertIntakeTransaction(transaction);
     return Object.freeze({ ...indexed, allowedTools: Object.freeze([...indexed.allowedTools]) });
   }
-  // Preserve lookup for previously sealed records without rewriting them. New
-  // records never traverse lifetime history, even after registry rollover.
-  const prefix = `processing-executions/${session.client}/${session.sessionId}`;
-  const directory = path.dirname(await intakePath(store, 'state', `${prefix}/unused.json`));
-  if (!await lstatOrNull(directory)) return null;
-  let count = 0, found = null;
-  for await (const entry of await fs.opendir(directory)) {
-    checkWorkflowBudget();
-    if (++count > 128 || !entry.isFile() || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.json$/.test(entry.name)) fail('PROCESSING_EXECUTION_LOOKUP_LIMIT');
-    const value = parse(await intakeSnapshot(store, 'state', `${prefix}/${entry.name}`, { maxBytes: MAX_BYTES }));
-    if (value === null) fail('PROCESSING_EXECUTION_CHANGED');
-    if (filename(value) !== `${prefix}/${entry.name}`) fail('INVALID_PROCESSING_EXECUTION');
-    if (value.requestId !== requestId) continue;
-    if (found || value.inputHash !== inputHash || value.inputId !== requestId ||
-        value.profileId !== session.profileId || value.toolContractHash !== session.toolContractHash ||
-        (session.client === 'codex' && value.sourcePath !== session.sourcePath)) fail('PROCESSING_EXECUTION_CONFLICT');
-    found = value;
-  }
+  // Missing current request authority grants no recovery. Unit projections
+  // are not searched or promoted into request records.
   if (await authorize() !== true) fail('INTAKE_NOT_AUTHORIZED');
   await assertIntakeTransaction(transaction);
-  return found && Object.freeze({ ...found, allowedTools: Object.freeze([...found.allowedTools]) });
+  return null;
 }
 
 /** Internal completed-client callback only. Serialized CLI requests cannot mint
@@ -105,8 +87,11 @@ export async function recordProcessingExecution(transaction, receipt, proof) {
   const store = await assertIntakeTransaction(transaction), name = filename(value), requestName = requestFilename(value);
   const snapshot = await intakeSnapshot(store, 'state', name, { maxBytes: MAX_BYTES }), previous = parse(snapshot);
   const requestSnapshot = await intakeSnapshot(store, 'state', requestName, { maxBytes: MAX_BYTES }), indexed = parse(requestSnapshot);
-  if ((previous && canonicalJSON(previous) !== canonicalJSON(value)) ||
-      (indexed && canonicalJSON(indexed) !== canonicalJSON(value))) fail('PROCESSING_EXECUTION_CONFLICT');
+  // Current publication writes the request first. A unit-only record cannot
+  // result from that write order and must not be migrated by a retry.
+  const valueHash = digest(canonicalJSON(value) + '\n');
+  if ((previous && (!indexed || snapshot.hash !== valueHash)) ||
+      (indexed && requestSnapshot.hash !== valueHash)) fail('PROCESSING_EXECUTION_CONFLICT');
   if (!indexed) await replaceIntakeJSON(transaction, requestName, value, null);
   if (previous) return snapshot.hash;
   return replaceIntakeJSON(transaction, name, value, null);
@@ -120,9 +105,14 @@ export function createProcessingExecutionResolver(transaction, { source, authori
     if (query.client !== source.client || query.sessionId !== source.sessionId) return null;
     if (typeof authorize !== 'function' || await authorize() !== true) fail('INTAKE_NOT_AUTHORIZED');
     const store = await assertIntakeTransaction(transaction);
-    const value = parse(await intakeSnapshot(store, 'state', filename(query), { maxBytes: MAX_BYTES }));
+    const unitSnapshot = await intakeSnapshot(store, 'state', filename(query), { maxBytes: MAX_BYTES });
+    const value = parse(unitSnapshot);
     if (!value || value.sourcePath !== source.path || value.sourceIdentity !== source.fileIdentity ||
         Object.entries(query).some(([key, item]) => value[key] !== item)) return null;
+    const requestSnapshot = await intakeSnapshot(store, 'state', requestFilename(value), { maxBytes: MAX_BYTES });
+    const indexed = parse(requestSnapshot);
+    if (!indexed) return null;
+    if (requestSnapshot.hash !== unitSnapshot.hash) fail('PROCESSING_EXECUTION_CONFLICT');
     if (await authorize() !== true) fail('INTAKE_NOT_AUTHORIZED');
     return Object.freeze({ ...value, allowedTools: Object.freeze([...value.allowedTools]) });
   };

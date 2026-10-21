@@ -122,7 +122,8 @@ test('processing metadata reads retain privacy checks without repeating policy l
 });
 
 test('manifest objects reject nonplain prototypes while JSON manifests remain valid', () => {
-  const value = { name: 'cuefluent-notes', version: '1.0.0', description: 'Knowledge notes', author: { name: 'Example' } };
+  const value = { name: 'cuefluent-notes', version: '1.0.0', description: 'Knowledge notes', author: { name: 'Example' },
+    mcpServers: './.mcp.json', license: 'SUL-1.0' };
   validatePluginManifest(value, 'claude');
   assert.throws(() => validatePluginManifest(Object.assign(Object.create({ inherited: true }), value), 'claude'));
   assert.throws(() => validatePluginManifest({ ...value, author: Object.assign(Object.create({}), value.author) }, 'claude'));

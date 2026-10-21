@@ -32,26 +32,22 @@ claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#m
 claude plugin install cuefluent-notes@cuefluent --scope user
 ```
 
-For a **fresh installation or a setup with only legacy capture settings**, start
-a fresh session, review hooks and the bundled `cuefluent_control` MCP server
-registration and permissions, then say **Set up Cuefluent Notes**. Choose
-the capture mode and the processing mode separately; both start Manual. Legacy settings are preserved without import. Use the
+For a fresh installation, start a fresh session, review hooks and the bundled
+`cuefluent_control` MCP server registration and permissions, then say
+**Set up Cuefluent Notes**. Choose the capture mode and the processing mode
+separately; both start Manual. If settings already exist, use the
 [settings inspection guidance](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#existing-settings)
-to distinguish them from a recognized workflow configuration; a failed status
-check is not a reason to start over.
+before changing them. A failed status check is not a reason to start over.
 
-## Updating
+## Package replacement
 
-For recognized `cuefluent-workflow` settings,
-preserve settings, paths, captures and active operations. Do not rerun setup
-unless the selected release requires it. Before replacing packages, stop
-capture entrypoints (hooks and capture commands) and processing, close affected
-sessions, and let workers
-and processing clients finish. Update every client plugin/helper sharing the
-store to the same released version before resuming. Check the release notes for
-storage compatibility and downgrade boundaries; a patch does not necessarily
-change stored formats. Follow the
-[coordinated upgrade guide](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#existing-settings)
+Preserve settings, paths, captures and active operations. Only current formats
+are supported; there is no legacy migration or mixed-version support. Before
+replacing packages, stop capture entrypoints (hooks and capture commands) and
+processing, close affected sessions, and let workers and processing clients
+finish. Keep every client plugin/helper sharing the store on the same version
+before resuming. Follow the
+[package replacement guidance](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#existing-settings)
 and [marketplace update commands](plugins/cuefluent-notes/skills/cuefluent-notes/README.md#update-a-marketplace-installation).
 
 Review hook or MCP registration and permission changes when prompted. Both hook and
@@ -66,7 +62,7 @@ verify the native call. See
 [processing chat prerequisites and privacy](plugins/cuefluent-notes/skills/cuefluent-notes/references/processing-chat.md).
 
 Existing Windows package stores are preserved, with additions needing missing
-roots frozen pending separate migration. Do not create a second writer or move
+roots refused. Do not create a second writer or move
 paths to bypass a refusal; follow
 [Windows storage selection](plugins/cuefluent-notes/skills/cuefluent-notes/references/setup.md#windows-storage-selection).
 
@@ -94,7 +90,4 @@ files on the [release page](https://github.com/martinmqz/cuefluent-notes/release
 Both variants use the same plugin identity; choose one per client.
 
 This is a publisher-hosted marketplace, not an OpenAI or Anthropic public-directory
-listing. Edit source and templates on `main`, not generated packages. If your
-existing marketplace registration selects the old `marketplace` branch, follow the
-[branch migration instructions](plugins/cuefluent-notes/skills/cuefluent-notes/README.md#switch-an-older-marketplace-registration-to-main)
-once the replacement catalogs are available.
+listing. Edit source and templates on `main`, not generated packages.

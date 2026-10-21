@@ -386,9 +386,6 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
       'Cuefluent: Nothing was applied: draft t7xb88 is not pending.'],
     [{ ...pending, review: 'changed', reason: 'stale', commandPrefix: '$cuefluent-notes', draft: named },
       'Cuefluent: Nothing was applied: draft t7xb88 ("meetings/launch.md") needs a fresh review in this chat. Read it again with $cuefluent-notes review t7xb88.'],
-    // A stored reply without a cause keeps its wording.
-    [{ ...pending, review: 'changed', commandPrefix: command, draft: named },
-      `Cuefluent: Nothing was applied: draft t7xb88 ("meetings/launch.md") changed, its destination changed, or it is no longer pending. Review the current draft with ${command} review before deciding. If a note changed, restore it or process again.`],
     [{ status: 'idle', nextAction: 'none', review: 'unresolved', commandPrefix: '$cuefluent-notes', drafts: [] },
       'Cuefluent: Nothing was applied: name the draft to decide on, as in $cuefluent-notes save <draft code>, after reading it with $cuefluent-notes review <draft code>.\n\nNo drafts are pending.'],
     [{ ...pending, review: 'unresolved', commandPrefix: command, drafts },
@@ -421,6 +418,7 @@ test('review folder replies are bounded, escaped, canonical and omit diagnostic 
     { ...pending, review: 'unresolved', commandPrefix: command, drafts: Array.from({ length: 5 }, (_, index) => ({ code: `k2mn9${index + 2}`, path: 'a.md', fileCount: 1 })) },
     { ...pending, review: 'unresolved', commandPrefix: command, drafts: [{ ...drafts[0], operationId: randomUUID(), proposalHash: 'a'.repeat(64), claimHash: 'b'.repeat(64) }] },
     { ...pending, review: 'saved', commandPrefix: command, verbose: true },
+    { ...pending, review: 'changed', commandPrefix: command, draft: named },
     { ...pending, review: 'changed', reason: 'gone', commandPrefix: command, draft: named },
     { ...pending, review: 'not-shown', reason: 'changed', commandPrefix: command, draft: named },
     { ...pending, review: 'presented', commandPrefix: command, draft: { ...draft, files: [{ ...draft.files[0], review: '../summary.txt' }, ...draft.files.slice(1)] } },
@@ -716,7 +714,7 @@ test('visible reply text carries no hash, UUID or diagnostic code outside status
     { status: 'idle', statusDetail: 'continuation', nextAction: 'resume', ...ids, diagnostics },
     { ...review, drafts, inventory },
     ...['presented', 'declined', 'display-altered', 'deferred'].map(outcome => ({ ...review, review: outcome, draft, ...(outcome === 'presented' ? { drafts } : {}) })),
-    ...['not-shown', 'unverified', 'changed'].map(outcome => ({ ...review, review: outcome, draft: named })),
+    ...['not-shown', 'unverified', 'changed'].map(outcome => ({ ...review, review: outcome, draft: named, ...(outcome === 'changed' ? { reason: 'changed' } : {}) })),
     { ...review, review: 'unresolved', drafts },
     ...['saved', 'skipped', 'cancelled'].map(outcome => ({ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', ...ids, diagnostics, commandPrefix: command, review: outcome, draft: named })),
     ...['saved', 'skipped', 'cancelled'].map(outcome => ({ status: 'completed', statusDetail: 'completed', nextAction: 'inspect', ...ids, diagnostics, review: outcome })),
@@ -1310,7 +1308,7 @@ test('replies people read never say collection', () => {
     const listed = [{}, { drafts: [{ code: 'k2mn9p', path: 'notes/b.md', fileCount: 1 }] }];
     for (const review of PROCESSING_REVIEW_OUTCOMES) {
       const shown = states.flatMap(status => named.flatMap(draft => listed.flatMap(drafts => [false, true].map(untyped =>
-        view({ ...base, status, review, ...draft, ...drafts, ...(untyped ? { untyped } : {}) }))))).filter(Boolean);
+        view({ ...base, status, review, ...draft, ...drafts, ...(review === 'changed' ? { reason: 'changed' } : {}), ...(untyped ? { untyped } : {}) }))))).filter(Boolean);
       assert(shown.length, review); texts.push(...shown.map(item => item.statusText));
     }
     for (const code of COLLECTION_STOP_CODES) for (const verbose of [false, true]) {

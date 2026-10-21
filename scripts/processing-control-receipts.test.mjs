@@ -6,7 +6,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { privateIntakeFixture, explicitIntakeFixture } from './test-support/intake-fixture.mjs';
 import { stableSourceIdentity } from './capture-selection.mjs';
-import { withIntakeLock, intakeSnapshot } from './intake-io.mjs';
+import { withIntakeLock, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { controlSelection, readSelection, readCaptureHead, readReaderProgress, commitReaderProgress, publishCapture } from './intake-store.mjs';
 import { readCodexSelection, codexProgressPlan, codexPublicationPlan } from './codex-reader.mjs';
 import { readClaudeSelection, claudePublicationPlan } from './claude-reader.mjs';
@@ -25,7 +25,8 @@ const stamp = '2026-10-10T12:00:00.000Z';
 const authorize = async () => true;
 const statusText = 'Processing request accepted. Open the existing processing chat.';
 const args = { command: 'process', requestId: '33333333-3333-4333-8333-333333333333' };
-const result = { content: [{ type: 'text', text: '{"status":"accepted"}' }] };
+const controlReply = { collectionId: 'fixture', status: 'accepted', statusText };
+const result = { content: [{ type: 'text', text: canonicalJSON(controlReply) }], isError: false };
 const evt = (type, fields = {}) => ({ type: 'event_msg', payload: { type, ...fields } });
 const item = (turn, value) => evt('item_completed', { thread_id: sessionId, turn_id: turn, item: value });
 const response = (payload, kinds) => ({ type: 'response_item', payload: { ...payload,
@@ -79,7 +80,7 @@ async function claudeFixture(t, { partial = false, control = 'process', installe
   const scopeId = selection.state.intervals[0].id;
   const dispatch = { client: 'claude', sessionId, unitId, callId: 'dispatch-call', tool: `mcp__cuefluent_control__${tool}`,
     argsHash: digest(canonicalJSON(callArgs)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
-    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result.content)),
+    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result.content)), response: controlReply,
     inputId: input.uuid, inputHash: digest(input.message.content), companionId: companion.uuid, companionHash: digest(lines[1]),
     skillExpansionHash: digest(companion.message.content[0].text), skillCommand: command };
   const resolve = tx => createProcessingControlResolver(tx, { state: selection.state, selectionHash: selection.hash, authorize });
@@ -239,10 +240,11 @@ async function fixture(t, { mixed = false, ending = 'completed', mutate = () => 
   const store = await privateIntakeFixture(t, source), scopeId = randomUUID();
   const selection = await withIntakeLock(store, tx => controlSelection(tx, { source, expectedHash: null, authorize,
     request: { id: scopeId, client: 'codex', sessionId, expectedRevision: 0, operation: 'capture-historical',
-      scope: { unitIds: mixed ? [beforeId, unitId, afterId] : [unitId], start: anchors[1], end: anchors.at(-1) } } }));
+      scope: { unitIds: mixed ? [beforeId, unitId, afterId] : [unitId], start: anchors[1], end: anchors.at(-1),
+        contentHash: digest(Buffer.from(lines.join('')).subarray(anchors[1].startByte, anchors.at(-1).endByte)) } } }));
   const dispatch = { client: 'codex', sessionId, unitId, callId: 'dispatch-call', tool: 'mcp__cuefluent.process',
     argsHash: digest(canonicalJSON(args)), sourceIdentity: source.fileIdentity, sourcePath: source.path,
-    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result)), ...built?.receipt };
+    requestHash: 'a'.repeat(64), skillName: 'cuefluent-notes', skillPath, statusText, resultHash: digest(canonicalJSON(result)), response: controlReply, ...built?.receipt };
   const name = `control-dispatch/codex/${sessionId}/${digest(dispatch.callId).slice(0, 24)}.json`;
   const query = Object.fromEntries(['client', 'sessionId', 'unitId', 'callId', 'tool', 'argsHash'].map(k => [k, dispatch[k]]));
   const record = (tx, d = dispatch, hash = selection.hash, auth = authorize) =>
@@ -264,7 +266,10 @@ test('dispatch receipts are bounded, immutable, metadata-only and read only unde
     assert.equal(await f.resolve(tx)({ ...f.query, argsHash: 'b'.repeat(64) }), null);
     const bytes = (await intakeSnapshot(f.store, 'state', f.name)).bytes.toString();
     assert.doesNotMatch(bytes, /"arguments"|"content"|"evidence"/);
-    await assert.rejects(f.record(tx, { ...f.dispatch, statusText: 'Different status' }), { code: 'PROCESSING_CONTROL_RECEIPT_CONFLICT' });
+    const changedReply = { ...f.dispatch.response, statusText: 'Different status' };
+    await assert.rejects(f.record(tx, { ...f.dispatch, statusText: changedReply.statusText, response: changedReply,
+      resultHash: digest(canonicalJSON({ content: [{ type: 'text', text: canonicalJSON(changedReply) }], isError: false })) }),
+    { code: 'PROCESSING_CONTROL_RECEIPT_CONFLICT' });
     escaped = f.resolve(tx);
   });
   await assert.rejects(escaped(f.query), { code: 'INTAKE_LOCK_REQUIRED' });
@@ -302,15 +307,35 @@ test('unfamiliar duplicate-key receipt bytes are preserved and cannot authorize 
   });
 });
 
-test('a receipt keeps validating against its own recorded reply after replies are reworded', async t => {
-  // The exact reply v0.15.1 recorded for this status; this release words it differently.
+for (const client of ['codex', 'claude']) test(`${client} dispatch receipts require the stored response on publication and replay`, async t => {
+  const f = await (client === 'codex' ? fixture(t) : claudeFixture(t));
+  const name = `control-dispatch/${client}/${sessionId}/${digest(f.dispatch.callId).slice(0, 24)}.json`;
+  const query = Object.fromEntries(['client', 'sessionId', 'unitId', 'callId', 'tool', 'argsHash'].map(key => [key, f.dispatch[key]]));
+  const { response: _response, ...incomplete } = f.dispatch;
+  await withIntakeLock(f.store, async tx => {
+    await assert.rejects(recordProcessingControlDispatch(tx, { source: f.source, selectionHash: f.selection.hash, dispatch: incomplete }, { authorize }),
+      { code: 'INVALID_WORKFLOW' });
+    assert.equal((await intakeSnapshot(f.store, 'state', name)).bytes, null);
+    await f.record(tx);
+    const original = intakeJSON(await intakeSnapshot(f.store, 'state', name));
+    delete original.dispatch.response;
+    const unsupported = Buffer.from(canonicalJSON(original) + '\n');
+    await fs.writeFile(path.join(f.store.intakeStateDir, name), unsupported);
+    const resolve = createProcessingControlResolver(tx, { state: f.selection.state, selectionHash: f.selection.hash, authorize });
+    await assert.rejects(resolve(query), { code: 'INVALID_WORKFLOW' });
+    assert.deepEqual((await intakeSnapshot(f.store, 'state', name)).bytes, unsupported);
+    assert.equal((await readSelection(f.store, { client, sessionId })).hash, f.selection.hash);
+  });
+});
+
+test('a receipt validates its exact stored reply text and result hash', async t => {
   const response = { chat: null, collectionId: 'fixture', diagnostics: ['PROCESSING_RECOVERY_REQUIRED'], interfaceVersion: 1,
-    nextAction: 'inspect', requestId: null, status: 'blocked', statusText: 'Cuefluent processing: blocked. PROCESSING_RECOVERY_REQUIRED. Next action: inspect.' };
+    nextAction: 'inspect', requestId: null, status: 'blocked', statusText: 'Cuefluent: Processing needs attention. Inspect the pending save.' };
   const f = await fixture(t), resultHash = digest(canonicalJSON({ content: [{ type: 'text', text: canonicalJSON(response) }], isError: false }));
   const dispatch = { ...f.dispatch, statusText: response.statusText, resultHash, response };
   await withIntakeLock(f.store, async tx => {
-    for (const changed of [{ ...dispatch, statusText: 'Cuefluent processing: blocked.' }, { ...dispatch, resultHash: 'b'.repeat(64) },
-      { ...dispatch, response: { ...response, statusText: 'Cuefluent processing: blocked.' } }, { ...dispatch, response: [response] }]) {
+    for (const changed of [{ ...dispatch, statusText: 'Cuefluent: Processing needs attention.' }, { ...dispatch, resultHash: 'b'.repeat(64) },
+      { ...dispatch, response: { ...response, statusText: 'Cuefluent: Processing needs attention.' } }, { ...dispatch, response: [response] }]) {
       await assert.rejects(f.record(tx, changed), { code: 'INVALID_PROCESSING_CONTROL_RECEIPT' });
     }
     assert.equal((await f.record(tx, dispatch)).status, 'recorded');
@@ -453,7 +478,8 @@ test('receipt resolution rechecks the exact active selection and does not outliv
 
 test('Codex 0.163 code-mode receipts name both cells and the retry call, and exclude exactly the proven turn', async t => {
   for (const [name, turn] of [['code mode', {}], ['code mode finished by wait', { waits: 1 }], ['older skill part, code mode', { form: 'block' }],
-    ['direct call', { mode: 'direct' }]]) await t.test(name, async t => {
+    ['direct call', { mode: 'direct' }], ['Desktop code mode', { form: 'desktop' }],
+    ['Desktop direct call', { form: 'desktop', mode: 'direct' }]]) await t.test(name, async t => {
     for (const mixed of [false, true]) {
       const f = await fixture(t, { mixed, turn: { control: 'save t7xb88', ...turn } });
       await withIntakeLock(f.store, async tx => {

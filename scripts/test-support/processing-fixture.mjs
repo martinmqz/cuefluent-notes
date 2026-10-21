@@ -32,12 +32,12 @@ export async function processingFixture(t, { base, client = 'codex', terminal = 
     start: { id: 'start', startByte: 200, endByte: 220, hash: digest('x'.repeat(20)) },
     end: { id: 'end', startByte: 280, endByte: 300, hash: digest('x'.repeat(20)) }, nativeOrder: null };
   const request = { id: randomUUID(), operation: 'capture-current', ...identity, expectedRevision: 0,
-    scope: { unitIds: [unitId], start: proof.start, end: null } };
+    scope: { unitIds: [unitId], start: proof.start, end: null, contentHash: proof.start.hash } };
   const authorize = async () => true;
   const state = await withIntakeLock(store, tx => controlSelection(tx, { source, request, expectedHash: null, authorize }));
   const range = { startByte: 220, endByte: 280, recordIds: ['message'] };
   const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity, projectRoot: f.project,
-    source: { path: source.path, fileIdentity: source.fileIdentity, ranges: [range] }, reader: { name: 'fixture', version: '1', clientVersion: 'fixture' },
+    source: { path: source.path, fileIdentity: source.fileIdentity, ranges: [range] }, reader: { name: 'fixture', version: '1', headerClientVersion: 'fixture' },
     occurredAt: '2026-01-01T00:00:00.000Z', capturedAt: '2026-01-01T00:00:00.000Z', terminal,
     coverage: { partial: terminal !== 'completed' || omissions.length > 0, omissions }, evidence: evidence ?? [{ kind: 'user', recordId: 'message', range, text }] });
   const scan = { from: { sourceIdentity: source.fileIdentity, offset: 200, anchor: null },

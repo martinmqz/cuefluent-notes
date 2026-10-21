@@ -305,7 +305,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           callId: source.callId, tool: source.tool, argsHash: source.argsHash });
       });
     });
-    if (!receipt?.response) return null;
+    if (receipt === null) return null;
     if (receipt.response.collectionId !== source.collectionId) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT');
     // A review reply is recorded before its presentation is confirmed. When
     // that confirmation failed, the reply the chat received was the refusal;
@@ -902,13 +902,11 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       // A chat capture command left out its own turn before its reply was
       // kept, so its reply, first or replayed, already says whether it did.
       if (CAPTURE_TOOLS.includes(invocation.tool)) { await release(); return; }
-      // Any other typed command with no receipt to exclude it (in a chat
-      // Automatic capture does not cover) leaves out its own turn by an
-      // exclusion, so a later capture skips it.
-      // An unarmed Automatic chat has no selection to add one to: its first
-      // prompt is the boundary the worker excludes. It cannot undo the command:
-      // when it fails, or the selection has no room for it, the turn stays
-      // capturable and the reply says so in its diagnostics.
+      // A typed command without an active capture receipt leaves out its own
+      // turn, including before Automatic capture is armed. The worker's later
+      // boundary does not protect it from an explicit capture of earlier turns.
+      // This exclusion cannot undo the command: if it fails or the selection
+      // has no room, the turn stays capturable and the reply says so.
       const typed = Boolean(source.nativeSkill && source.unitId);
       const leaveOut = async () => {
         let excluded = false;
@@ -920,7 +918,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         return replacement;
       };
       if (!typed || source.captureActive === false) {
-        if (typed && (source.selectionHash !== null || !await automaticCapture(capability, source))) return leaveOut();
+        if (typed) return leaveOut();
         await release();
         return;
       }

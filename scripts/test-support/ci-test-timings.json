@@ -96,10 +96,6 @@
         "ms": 84104.442,
         "bytes": 33684
       },
-      "marketplace-notice.test.mjs": {
-        "ms": 3070.517,
-        "bytes": 2847
-      },
       "metadata-publication.test.mjs": {
         "ms": 9729.483,
         "bytes": 11500
@@ -429,10 +425,6 @@
       "marketplace-ci.test.mjs": {
         "ms": 14356.541,
         "bytes": 33684
-      },
-      "marketplace-notice.test.mjs": {
-        "ms": 621.512,
-        "bytes": 2847
       },
       "metadata-publication.test.mjs": {
         "ms": 1873.765,

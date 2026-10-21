@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import childProcess from 'node:child_process';
+import http from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { processingFixture } from './test-support/processing-fixture.mjs';
@@ -14,6 +15,18 @@ import { runProcessingMcp } from './processing-mcp.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { claudeHarness, success, initialization, completed } from './test-support/claude-client.mjs';
 import { rpcClient } from './test-support/rpc-client.mjs';
+
+// Native launch can fail before the harness receives a frame (for example when
+// loopback IPC is unavailable). Never wait only for a frame that cannot arrive.
+async function waitForNativeStart(entered, { active, timeoutMs = 30_000 } = {}) {
+  let timer;
+  const waits = [entered, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Synthetic native launch did not start before its deadline')), timeoutMs);
+  })];
+  if (active) waits.push(active.then(() => { throw new Error('Synthetic native run ended before launch'); }));
+  try { return await Promise.race(waits); }
+  finally { clearTimeout(timer); }
+}
 
 async function withLaunchFixture(t, run, nativeRun = success, { insideClaude = true } = {}) {
   // One explicit lifetime owns jobs, mocks, environment and files. LIFO cleanup
@@ -321,7 +334,7 @@ test('MCP cached Claude controls refuse a changed mode before cancelling or muta
       if (active) { active.child.send(completed(active.input.session_id)); active.child.emit('close', 0, null); active = null; }
     };
     f.defer(finish);
-    await admit(rpc, f); await ready;
+    await admit(rpc, f); await waitForNativeStart(ready);
     const before = await writerSnapshot(f), worker = active.child;
     env.CUEFLUENT_CLAUDE_AUTHENTICATION = 'native-profile';
     let id = 1;
@@ -432,7 +445,7 @@ test('MCP no-launch checks return an active job without host credentials or new 
       CLAUDE_CODE_HOST_AUTH_ENV_VAR: 'ANTHROPIC_AUTH_TOKEN', ANTHROPIC_AUTH_TOKEN: 'synthetic-host-token' };
     const rpc = processingRpc(f, { env });
     f.defer(async () => { released = true; finishNative?.(); await rpc.close(); });
-    await admit(rpc, f); await entered.promise;
+    await admit(rpc, f); await waitForNativeStart(entered.promise);
     const before = await writerSnapshot(f);
     delete env.ANTHROPIC_AUTH_TOKEN;
     for (const [index, tool] of ['process_selected_captures', 'processing_resume'].entries()) {
@@ -460,7 +473,7 @@ for (const peer of [false, true]) for (const state of ['busy', 'blocked']) {
       active.catch(() => {});
       f.defer(async () => { released = true; finishNative?.(); await active.catch(() => {}); });
       if (state === 'blocked') await assert.rejects(active, error => error.processingChat?.state === 'blocked');
-      else await entered.promise;
+      else await waitForNativeStart(entered.promise, { active });
       const status = await owner.status(); assert.equal(status.state, state);
       const env = { ...process.env, CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1' };
       if (peer) { env.CLAUDE_CONFIG_DIR = path.join(f.root, 'other-profile'); await fs.mkdir(env.CLAUDE_CONFIG_DIR); }
@@ -490,6 +503,36 @@ for (const peer of [false, true]) for (const state of ['busy', 'blocked']) {
     });
   });
 }
+
+test('native launch failure rejects the rendezvous and releases its synthetic fixture', async t => {
+  const failure = Object.assign(new Error('synthetic loopback permission denied'), { code: 'EPERM' });
+  const originalSpawn = childProcess.spawn, originalProfile = process.env.CLAUDE_CONFIG_DIR;
+  const originalListen = http.Server.prototype.listen;
+  let fixture;
+  await assert.rejects(withLaunchFixture(t, async f => {
+    fixture = f;
+    const owner = await openProcessingController({ ...f.options, client: 'claude' });
+    f.defer(() => owner.close());
+    const listen = t.mock.method(http.Server.prototype, 'listen', function () {
+      queueMicrotask(() => this.emit('error', failure)); return this;
+    });
+    f.defer(() => listen.mock.restore());
+    const entered = Promise.withResolvers();
+    const active = owner.run({ requestId: randomUUID(), selection: f.selection, expectedChatHash: null });
+    f.defer(() => active.catch(() => {}));
+    await waitForNativeStart(entered.promise, { active });
+  }), error => error === failure);
+  assert.equal(fixture.nativeCalls.length, 0);
+  assert.equal(childProcess.spawn, originalSpawn);
+  assert.equal(http.Server.prototype.listen, originalListen);
+  assert.equal(process.env.CLAUDE_CONFIG_DIR, originalProfile);
+  assert.equal(existsSync(fixture.root), false);
+});
+
+test('a missing native-start notification has a bounded wait even without a run promise', async () => {
+  await assert.rejects(waitForNativeStart(new Promise(() => {}), { timeoutMs: 20 }),
+    /Synthetic native launch did not start before its deadline/);
+});
 
 test('retargeted native profile alias cannot dispatch in the old processing namespace', { skip: process.platform === 'win32' }, async t => withLaunchFixture(t, async f => {
   const alias = path.join(f.root, 'profile-alias'), replacement = path.join(f.root, 'other-profile');

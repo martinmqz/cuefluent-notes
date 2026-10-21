@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { abortUpdate, fingerprint, applyPlan, recover, inspectState } from './safe-update.mjs';
+import { abortUpdate, fingerprint, applyPlan, recover, inspectState, inspectDirectories } from './safe-update.mjs';
 import { prepareNote } from './note-generation.mjs';
 import MarkdownIt from 'markdown-it';
 
@@ -378,6 +378,43 @@ async function twoFiles(f) {
   f.plan.files.push({ ...structuredClone(f.plan.files[0]), path: 'other.md', contentPath: otherProposal });
   return otherProposal;
 }
+test('journals require their recorded previous manifest without consulting current state', async t => {
+  for (const [mode, version, existing] of [['authored', 1, false], ['authored', 2, false], ['derived', 1, false], ['derived', 1, true]]) {
+    await t.test(`${mode} v${version}${existing ? ' existing collection' : ' initial save'}`, async t => {
+      const f = await fixture(t, mode);
+      if (version === 2) {
+        Object.assign(f.plan, { version, stateDir: path.join(await fs.realpath(f.directory), 'state'),
+          ...await inspectDirectories(f.root, ['note.md']) });
+        f.stateDir = f.plan.stateDir;
+      }
+      if (existing) {
+        await applyPlan(f.plan); await reinspect(f.plan);
+        await fs.appendFile(f.proposal, '\nA reviewed addition.\n');
+      }
+      await assert.rejects(applyPlan(f.plan, { afterStage() { throw new Error('Interrupted'); } }), /Interrupted/);
+      const journalPath = path.join(f.stateDir, 'journal.json'), manifestPath = path.join(f.stateDir, 'manifest.json');
+      const original = await fs.readFile(journalPath), journal = JSON.parse(original);
+      assert.equal(journal.version, version);
+      assert.equal(journal.previousManifest === null, !existing);
+      const selected = await abortPlan(f.stateDir);
+      const guarded = [f.target, manifestPath, ...journal.files.map(file => file.stagePath).filter(Boolean)];
+      const before = await Promise.all(guarded.map(file => fingerprint(file)));
+      delete journal.previousManifest;
+      const unsupported = JSON.stringify(journal) + '\n';
+      await fs.writeFile(journalPath, unsupported);
+      selected.expectedJournalHash = await fingerprint(journalPath);
+      for (const action of [() => inspectState(f.stateDir), () => recover(f.stateDir), () => abortUpdate(selected)]) {
+        await assert.rejects(action(), /requires an explicit previous manifest/);
+        assert.equal(await fs.readFile(journalPath, 'utf8'), unsupported);
+        assert.deepEqual(await Promise.all(guarded.map(file => fingerprint(file))), before);
+      }
+      await fs.writeFile(journalPath, original);
+      await recover(f.stateDir);
+      assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+      assert.equal((await inspectState(f.stateDir)).recoveryPending, false);
+    });
+  }
+});
 test('reviewed abort after source drift retains completed writes and allows a fresh derived plan', async t => {
   const f = await fixture(t, 'derived');
   const otherProposal = await twoFiles(f);
@@ -527,6 +564,71 @@ test('replacement preserves representable permission bits and ownership', async 
   assert.equal(changed.uid, owner.uid);
   assert.equal(changed.gid, owner.gid);
 });
+test('journals require recorded permission metadata and preserve unsupported recovery evidence', async t => {
+  for (const [mode, version, existing] of [['authored', 1, false], ['authored', 1, true], ['authored', 2, true], ['derived', 1, true]]) {
+    await t.test(`${mode} v${version} ${existing ? 'replacement' : 'creation'}`, async t => {
+      const f = await fixture(t, mode);
+      if (version === 2) {
+        Object.assign(f.plan, { version, stateDir: path.join(await fs.realpath(f.directory), 'state'),
+          ...await inspectDirectories(f.root, ['note.md']) });
+        f.stateDir = f.plan.stateDir;
+      }
+      if (existing) {
+        await applyPlan(f.plan); await reinspect(f.plan);
+        await fs.appendFile(f.proposal, '\nA reviewed correction.\n');
+      }
+      await assert.rejects(applyPlan(f.plan, { afterStage() { throw new Error('Interrupted'); } }), /Interrupted/);
+      const journalPath = path.join(f.stateDir, 'journal.json');
+      const original = await fs.readFile(journalPath), journal = JSON.parse(original);
+      const selected = await abortPlan(f.stateDir);
+      const guarded = [f.target, path.join(f.stateDir, 'manifest.json'), ...journal.files.map(file => file.stagePath).filter(Boolean)];
+      const before = await Promise.all(guarded.map(file => fingerprint(file)));
+      if (existing) await fs.chmod(f.target, process.platform === 'win32' ? 0o444 : 0o644);
+      const permissions = existing ? (await fs.stat(f.target)).mode : null;
+      const mutations = [value => { delete value.files[0].metadata; }];
+      if (existing) mutations.push(value => { value.files[0].metadata = null; });
+      for (const mutate of mutations) {
+        const value = structuredClone(journal); mutate(value);
+        const unsupported = JSON.stringify(value) + '\n';
+        await fs.writeFile(journalPath, unsupported);
+        selected.expectedJournalHash = await fingerprint(journalPath);
+        for (const action of [() => inspectState(f.stateDir), () => recover(f.stateDir), () => abortUpdate(selected)]) {
+          await assert.rejects(action(), /permission metadata/);
+          assert.equal(await fs.readFile(journalPath, 'utf8'), unsupported);
+          assert.deepEqual(await Promise.all(guarded.map(file => fingerprint(file))), before);
+          if (existing) assert.equal((await fs.stat(f.target)).mode, permissions);
+        }
+      }
+      await fs.writeFile(journalPath, original);
+      if (existing) {
+        await assert.rejects(recover(f.stateDir), /permissions or ownership changed|read-only/);
+        await fs.chmod(f.target, journal.files[0].metadata.mode);
+      }
+      await recover(f.stateDir);
+      assert.deepEqual(await fs.readFile(f.target), await fs.readFile(f.proposal));
+      assert.equal((await inspectState(f.stateDir)).recoveryPending, false);
+    });
+  }
+});
+test('recovery checks private permissions for a new output already renamed into place', async t => {
+  const f = await fixture(t);
+  await assert.rejects(applyPlan(f.plan, { afterReplace() { throw new Error('Interrupted replacement'); } }), /Interrupted replacement/);
+  const journalPath = path.join(f.stateDir, 'journal.json'), bytes = await fs.readFile(journalPath);
+  const file = JSON.parse(bytes).files[0];
+  assert.equal(file.oldHash, null); assert.equal(file.metadata, null);
+  const note = await fs.readFile(f.target);
+  if (process.platform !== 'win32') {
+    await fs.chmod(f.target, 0o644);
+    await assert.rejects(recover(f.stateDir), /permissions or ownership changed/);
+    assert.deepEqual(await fs.readFile(journalPath), bytes);
+    assert.deepEqual(await fs.readFile(f.target), note);
+    await fs.chmod(f.target, 0o600);
+  }
+  await recover(f.stateDir);
+  assert.deepEqual(await fs.readFile(f.target), note);
+  assert.equal((await inspectState(f.stateDir)).recoveryPending, false);
+});
+
 test('recovery preserves permissions and refuses metadata drift or hard-linked replacements', async t => {
   const f = await fixture(t);
   await applyPlan(f.plan);

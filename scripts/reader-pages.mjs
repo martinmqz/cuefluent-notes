@@ -50,7 +50,8 @@ export async function readReaderAllocation(store, { client, sessionId, scopeId, 
 }
 
 export function validateStoredCheckpoint(value, expected) {
-  if (value?.version !== 2) return validateReaderCheckpoint(value, expected);
+  if (value?.client === 'codex') return validateReaderCheckpoint(value, expected);
+  if (value?.version !== 2) fail('INVALID_READER_CHECKPOINT');
   keys(value, ['format', 'version', 'reader', 'client', 'sessionId', 'scopeId', 'sourceIdentity', 'offset', 'pages', 'recordCount', 'unitCount']);
   if (value.format !== 'cuefluent-reader-checkpoint' || value.client !== 'claude') fail('INVALID_READER_CHECKPOINT');
   validateReaderCheckpoint(inline(value, [], []), expected);
@@ -85,7 +86,7 @@ export function planReaderCheckpoint(value) {
 export async function hydrateReaderCheckpoint(store, root) {
   if (root === null) return null;
   validateStoredCheckpoint(root);
-  if (root.version !== 2) return root;
+  if (root.client === 'codex') return root;
   const snapshots = await intakeSnapshotBatch(store, root.pages.map(page => pagePath(root, page)), { maxBytes: READER_PAGE_BYTES });
   for (let i = 0; i < root.pages.length; i++) {
     if (snapshots[i].hash !== root.pages[i].hash || snapshots[i].bytes?.length !== root.pages[i].bytes) fail('READER_PAGE_CONFLICT');

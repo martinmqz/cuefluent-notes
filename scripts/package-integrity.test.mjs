@@ -46,6 +46,32 @@ test('integrity distinguishes internal consistency, trusted identity and coheren
   assert.equal(result.trustedReleaseVerified, false);
 });
 
+test('coherent inventories cannot authorize manifests missing current required fields', async () => {
+  for (const client of ['claude', 'codex']) {
+    const template = JSON.parse(await fs.readFile(new URL(`../packaging/${client}/plugin.json`, import.meta.url)));
+    const manifestPath = `.${client}-plugin/plugin.json`;
+    const current = base().map(file => file.name === '.claude-plugin/plugin.json'
+      ? { name: manifestPath, bytes: encode({ ...template, version: '1.2.3' }) } : file);
+    for (const missing of [['mcpServers'], ['license'], ['mcpServers', 'license']]) {
+      const files = withPackageInventory(current.map(file => ({ name: file.name, bytes: Buffer.from(file.bytes) })),
+        { client, version: '1.2.3', withHooks: false });
+      const file = files.find(file => file.name === manifestPath), value = JSON.parse(file.bytes);
+      for (const field of missing) delete value[field];
+      file.bytes = encode(value);
+      const inventoryFile = files.find(file => file.name === INVENTORY_FILE), inventory = JSON.parse(inventoryFile.bytes);
+      const entry = inventory.files.find(entry => entry.path === manifestPath);
+      entry.bytes = file.bytes.length; entry.sha256 = hash(file.bytes);
+      inventoryFile.bytes = encode(inventory);
+      const result = verifyPackageFiles(files, { expectedInventorySha256: expected(files) });
+      assert.deepEqual(result.counts, { missing: 0, changed: 0, unexpected: 0 });
+      assert.equal(result.identityMatches, false);
+      assert.equal(result.integrityVerified, false);
+      assert.equal(result.trustedReleaseVerified, false);
+      assert.throws(() => withPackageInventory(files, { client, version: '1.2.3', withHooks: false }), /identity differs/);
+    }
+  }
+});
+
 test('verification reports missing, changed and unexpected files without writing', async t => {
   const root = await fixture(t), files = packaged(); await write(root, files);
   await fs.rm(path.join(root, 'README.md'));
@@ -118,9 +144,9 @@ test('inventory parsing rejects unsupported, duplicate, unsafe, over-budget and 
     { client: 'claude', version: '1.2.3', withHooks: false }), /identity/);
 });
 
-test('verification refuses oversized files and reports legacy inventories as unavailable', async t => {
+test('verification refuses missing inventories and oversized files', async t => {
   const root = await fixture(t); await write(root, base());
-  await assert.rejects(verifyPackage(root), /older packages/);
+  await assert.rejects(verifyPackage(root), /Package inventory is missing/);
   await write(root, packaged());
   const file = await fs.open(path.join(root, 'too-large.bin'), 'w');
   try { await file.truncate(17 * 1024 * 1024); } finally { await file.close(); }

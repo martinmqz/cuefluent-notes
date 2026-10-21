@@ -190,45 +190,27 @@ test('formal native-call replay preserves its original receipt after completion 
   assert.deepEqual(await fs.readFile(receiptFile), bytes);
 });
 
-test('legacy status receipts replay unchanged after clearer status details are introduced', async t => {
+test('formal replay preserves retained wording byte for byte across a reconnect', async t => {
   const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
   const args = { collectionId: f.collection.id }, closed = h.whenClosed();
   await h.call('process_selected_captures', args); await closed;
-  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
-  const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
-  const legacy = receipt.dispatch.response;
-  delete legacy.statusDetail; delete legacy.scope; delete legacy.progress;
-  legacy.statusText = 'Cuefluent processing: busy.';
-  const result = { content: [{ type: 'text', text: canonicalJSON(legacy) }], isError: false };
-  receipt.dispatch.statusText = legacy.statusText;
+  const receiptFile = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
+  const receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8'));
+  // Keep the complete current receipt shape, with wording the current renderer
+  // would not generate: replay must return the stored result, not rerender it.
+  receipt.dispatch.response.statusText = 'Cuefluent: Synthetic retained response wording.';
+  const result = { content: [{ type: 'text', text: canonicalJSON(receipt.dispatch.response) }], isError: false };
+  receipt.dispatch.statusText = receipt.dispatch.response.statusText;
   receipt.dispatch.resultHash = digest(canonicalJSON(result));
-  const bytes = canonicalJSON(receipt) + '\n';
-  await fs.writeFile(file, bytes);
+  const bytes = canonicalJSON(receipt) + '\n'; await fs.writeFile(receiptFile, bytes);
   h.callId = 'call_1';
   assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
-  assert.equal(h.dispatches, 1);
-  assert.equal(await fs.readFile(file, 'utf8'), bytes);
-});
-
-test('a receipt written with earlier reply wording replays byte-for-byte, never re-rendered', async t => {
-  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
-  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
-  await h.call('process_selected_captures', args); await closed;
-  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
-  const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
-  // The same reply as an earlier release worded it, recorded consistently.
-  const earlier = receipt.dispatch.response;
-  assert.equal(earlier.statusDetail, 'accepted'); assert.equal(earlier.scope, 'collection');
-  earlier.statusText = 'Cuefluent: Processing request accepted. Scope: collection.';
-  const result = { content: [{ type: 'text', text: canonicalJSON(earlier) }], isError: false };
-  receipt.dispatch.statusText = earlier.statusText;
-  receipt.dispatch.resultHash = digest(canonicalJSON(result));
-  const bytes = canonicalJSON(receipt) + '\n';
-  await fs.writeFile(file, bytes);
-  h.callId = 'call_1';
-  assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
-  assert.equal(h.dispatches, 1);
-  assert.equal(await fs.readFile(file, 'utf8'), bytes);
+  assert.equal(h.dispatches, 1); assert.equal(await fs.readFile(receiptFile, 'utf8'), bytes);
+  h.end(); await h.server;
+  const again = await harness(t, f); again.nativeSkill = true; again.callId = 'call_1';
+  assert.deepEqual((await again.call('process_selected_captures', args)).result, result);
+  assert.equal(again.dispatches, 0); assert.equal(again.opens, 0);
+  assert.equal(await fs.readFile(receiptFile, 'utf8'), bytes);
 });
 
 test('formal replay rejects a changed stored response without changing its receipt or dispatching', async t => {

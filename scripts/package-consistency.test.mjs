@@ -42,16 +42,15 @@ test('both clients use captured inputs even when source changes after the first 
   const { buildPackages } = await import(pathToFileURL(path.join(source, 'scripts/package.mjs')));
   const initial = await fs.readFile(path.join(source, 'SKILL.md'));
   let injected = false;
-  // Observe actual file publication, supporting the former copy-based builder too.
+  // Change the source after the first client's captured bytes are published.
   const mutate = async destination => {
     if (!injected && String(destination).endsWith(path.join('codex', 'cuefluent-notes', 'skills', 'cuefluent-notes', 'SKILL.md'))) {
       injected = true;
       await fs.appendFile(path.join(source, 'SKILL.md'), '\nSynthetic source edit during packaging.\n');
     }
   };
-  const write = fs.writeFile, copy = fs.copyFile;
+  const write = fs.writeFile;
   t.mock.method(fs, 'writeFile', async (destination, ...args) => { const result = await write(destination, ...args); await mutate(destination); return result; });
-  t.mock.method(fs, 'copyFile', async (from, destination, ...args) => { const result = await copy(from, destination, ...args); await mutate(destination); return result; });
   const built = await buildPackages({ outDir: path.join(root, 'output') });
   assert.equal(injected, true);
   for (const pkg of built.packages) {
@@ -130,7 +129,9 @@ test('builds refuse absent or inconsistent license metadata before publishing ou
       if (license === undefined) delete select(value).license;
       else select(value).license = license;
       await fs.writeFile(file, JSON.stringify(value));
-      await assert.rejects(buildPackages({ outDir: output }), /license|lockfile disagree/);
+      const expected = license === undefined && relative.startsWith('packaging/')
+        ? /Invalid Cuefluent Notes plugin manifest metadata/ : /license|lockfile disagree/;
+      await assert.rejects(buildPackages({ outDir: output }), expected);
       await assert.rejects(fs.stat(output), { code: 'ENOENT' });
     }
     await fs.writeFile(file, original);
@@ -173,7 +174,7 @@ test('marketplace verification rejects coherently rehashed divergence between cl
   assert.throws(() => verifyMarketplaceFiles(files), /Shared client package contents differ/);
 });
 
-test('only releases before 0.11.0 may omit package inventories', async () => {
+test('marketplace verification requires inventories regardless of the declared release version', async () => {
   const { files: original } = await releaseFixture();
   for (const version of ['0.10.99', '0.11.0', '0.12.0', '1.0.0']) {
     const files = original.filter(f => !f.name.endsWith(`/${INVENTORY_FILE}`)).map(f => ({ ...f }));
@@ -184,14 +185,12 @@ test('only releases before 0.11.0 may omit package inventories', async () => {
         const file = files.find(f => f.name === prefix + relative), value = JSON.parse(file.bytes);
         value.version = version; file.bytes = Buffer.from(JSON.stringify(value));
       }
-      if (client === 'claude') files.find(f => f.name === prefix + 'skills/cuefluent-notes/SKILL.md').bytes = Buffer.from('Synthetic divergent legacy skill.');
       const archive = release.archives.find(a => a.client === client && a.variant === 'hooks');
       archive.sha256 = hash(pluginZip(files.filter(f => f.name.startsWith(prefix)).map(f => ({ ...f, name: f.name.slice(prefix.length) }))));
       delete archive.inventorySha256;
     }
     record.bytes = Buffer.from(JSON.stringify(release));
-    if (version === '0.10.99') assert.equal(verifyMarketplaceFiles(files).version, version);
-    else assert.throws(() => verifyMarketplaceFiles(files), /invalid package inventory/);
+    assert.throws(() => verifyMarketplaceFiles(files), /invalid package inventory/);
   }
 });
 

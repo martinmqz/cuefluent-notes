@@ -8,6 +8,9 @@ import { createProcessingChatState, MAX_PROCESSING_CHAT_BINDINGS, MAX_PROCESSING
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 
+const syntheticOwner = { pid: 123, controllerId: randomUUID(), hostname: 'synthetic', boot: 'synthetic-boot',
+  processStart: 'synthetic-start', platform: 'linux' };
+
 async function fixture(t, client = 'codex') {
   const f = await storageFixture(t, { fullSetup: false });
   Object.assign(f, { client, hostId: digest('synthetic-host'), profileId: digest('synthetic-profile'), sessionId: randomUUID(),
@@ -34,11 +37,11 @@ async function fixture(t, client = 'codex') {
     }
   };
   f.registry = await createProcessingChatState(f.factory);
-  f.reserve = () => f.registry.reserve({ expectedHash: null, requestId: f.creationId, requestHash: f.requestHash });
+  f.reserve = () => f.registry.reserve({ owner: syntheticOwner, expectedHash: null, requestId: f.creationId, requestHash: f.requestHash });
   f.bind = state => f.registry.bind({ expectedHash: state.hash, generation: state.generation, requestId: f.creationId, sessionId: f.sessionId });
   return f;
 }
-const beginArgs = state => ({ expectedHash: state.hash, generation: state.generation, requestId: randomUUID(), inputHash: digest('process this selected workset') });
+const beginArgs = state => ({ owner: syntheticOwner, expectedHash: state.hash, generation: state.generation, requestId: randomUUID(), inputHash: digest('process this selected workset') });
 const nativeRun = (units = [randomUUID()]) => ({ runId: randomUUID(), inputId: randomUUID(), unitIds: units });
 const finishArgs = (state, request, native = nativeRun()) => ({ expectedHash: state.hash, generation: state.generation,
   requestId: request.requestId, outcome: 'idle', nativeRun: native });
@@ -49,6 +52,44 @@ const writeFixtureState = async (f, state, mutate) => {
   await fs.writeFile(statePath(f, state), bytes, { mode: 0o600 });
   return digest(bytes);
 };
+
+test('creation and run admission require the current controller identity before changing the registry', async t => {
+  const f = await fixture(t), before = await fs.readdir(f.collection.intakeStateDir);
+  await assert.rejects(f.registry.reserve({ expectedHash: null, requestId: f.creationId, requestHash: f.requestHash }),
+    { code: 'INVALID_WORKFLOW' });
+  assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
+  const bound = await f.bind(await f.reserve());
+  const { owner: _owner, ...request } = beginArgs(bound);
+  const bytes = await fs.readFile(statePath(f, bound));
+  await assert.rejects(f.registry.begin(request), { code: 'INVALID_WORKFLOW' });
+  assert.deepEqual(await fs.readFile(statePath(f, bound)), bytes);
+});
+
+test('stored creation, active and completed requests without their controller identity are refused unchanged', async t => {
+  for (const phase of ['creation', 'active', 'completed']) await t.test(phase, async t => {
+    const f = await fixture(t);
+    let current = await f.reserve(), request = null;
+    if (phase !== 'creation') {
+      current = await f.bind(current); request = beginArgs(current);
+      current = await f.registry.begin(request);
+      if (phase === 'completed') current = await f.registry.finish(finishArgs(current, request));
+    }
+    const hash = await writeFixtureState(f, current, value => {
+      if (phase === 'creation') delete value.creation.owner;
+      else if (phase === 'active') delete value.active.owner;
+      else delete value.runs[0].request.owner;
+    });
+    const bytes = await fs.readFile(statePath(f, current)), files = await fs.readdir(f.collection.intakeStateDir);
+    let verified = false;
+    const state = await createProcessingChatState({ ...f.factory, verifyAbandon: async () => { verified = true; return true; } });
+    await assert.rejects(state.read(), { code: 'INVALID_PROCESSING_CHAT_STATE' });
+    await assert.rejects(state.abandon({ expectedHash: hash, requestId: request?.requestId ?? f.creationId, offline: true }),
+      { code: 'INVALID_PROCESSING_CHAT_STATE' });
+    assert.equal(verified, false);
+    assert.deepEqual(await fs.readFile(statePath(f, current)), bytes);
+    assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), files);
+  });
+});
 
 test('offline abandonment checks the exact owner and hash before retiring an unknown creation', async t => {
   const f = await fixture(t), owner = { pid: 123, controllerId: randomUUID(), hostname: 'synthetic', boot: 'synthetic-boot', processStart: 'synthetic-start', platform: 'linux' };
@@ -75,7 +116,7 @@ test('retired active binding requires fresh restart proof under the intake lock 
   const busy = await f.registry.begin(request);
   const state = await createProcessingChatState({ ...f.factory, verifyAbandon: async () => true });
   const retired = await state.abandon({ expectedHash: busy.hash, requestId: request.requestId, offline: true });
-  const args = { expectedHash: retired.hash, requestId: randomUUID(), requestHash: digest('replacement request') };
+  const args = { owner: syntheticOwner, expectedHash: retired.hash, requestId: randomUUID(), requestHash: digest('replacement request') };
   const original = await fs.readFile(statePath(f, retired));
   assert.equal((await state.reserve(args)).action, 'inspect-existing');
   assert.deepEqual(await fs.readFile(statePath(f, retired)), original);
@@ -103,11 +144,11 @@ test('chat registry reads without writes, reserves creation idempotently and reu
   const reserved = await f.reserve();
   assert.equal(reserved.action, 'create'); assert.equal(reserved.state, 'creating');
   assert.equal((await f.reserve()).action, 'reconcile-creation');
-  await assert.rejects(f.registry.reserve({ expectedHash: reserved.hash, requestId: f.creationId, requestHash: digest('changed request') }), { code: 'PROCESSING_CHAT_REQUEST_CONFLICT' });
+  await assert.rejects(f.registry.reserve({ owner: syntheticOwner, expectedHash: reserved.hash, requestId: f.creationId, requestHash: digest('changed request') }), { code: 'PROCESSING_CHAT_REQUEST_CONFLICT' });
   const bound = await f.bind(reserved);
   assert.equal(bound.state, 'idle'); assert.deepEqual(bound.registry.session.descriptor, f.descriptor);
   assert.equal(bound.registry.session.verification, 'verified');
-  const reused = await f.registry.reserve({ expectedHash: bound.hash, requestId: randomUUID(), requestHash: digest('later request') });
+  const reused = await f.registry.reserve({ owner: syntheticOwner, expectedHash: bound.hash, requestId: randomUUID(), requestHash: digest('later request') });
   assert.equal(reused.action, 'reuse'); assert.equal(reused.hash, bound.hash);
   assert.equal(reused.registry.session.sessionId, f.sessionId);
   assert.equal(f.verifySessions, 1);
@@ -118,7 +159,7 @@ test('chat registry reads without writes, reserves creation idempotently and reu
 test('unknown creation remains blocked without a fallback chat; exact native reconciliation can bind it', async t => {
   const f = await fixture(t), reserved = await f.reserve();
   const blocked = await f.registry.block({ expectedHash: reserved.hash, generation: reserved.generation, reason: 'creation-outcome-unknown' });
-  const next = await f.registry.reserve({ expectedHash: blocked.hash, requestId: randomUUID(), requestHash: digest('another request') });
+  const next = await f.registry.reserve({ owner: syntheticOwner, expectedHash: blocked.hash, requestId: randomUUID(), requestHash: digest('another request') });
   assert.equal(next.action, 'reconcile-creation'); assert.equal(next.hash, blocked.hash);
   await assert.rejects(f.registry.bind({ expectedHash: blocked.hash, generation: 1, requestId: randomUUID(), sessionId: f.sessionId }), { code: 'PROCESSING_CHAT_REQUEST_CONFLICT' });
   const bound = await f.bind(blocked);
@@ -171,7 +212,7 @@ test('a change during native verification prevents stale dispatch without holdin
   await assert.rejects(racing.begin(request), { code: 'PROCESSING_CHAT_STATE_CHANGED' });
   const current = await f.registry.read();
   assert.equal(current.state, 'blocked'); assert.equal(current.registry.active, null);
-  assert.equal((await f.registry.reserve({ expectedHash: current.hash, requestId: randomUUID(), requestHash: digest('new') })).registry.session.sessionId, f.sessionId);
+  assert.equal((await f.registry.reserve({ owner: syntheticOwner, expectedHash: current.hash, requestId: randomUUID(), requestHash: digest('new') })).registry.session.sessionId, f.sessionId);
 });
 
 test('Claude first-dispatch reservation is not native proof; unknown outcomes retain the same UUID', async t => {
@@ -270,7 +311,7 @@ test('serialized proof flags cannot replace trusted callbacks, and malformed pro
 test('registry caps history and bindings with actionable errors and never prunes or silently forks', async t => {
   const f = await fixture(t), bound = await f.bind(await f.reserve());
   await writeFixtureState(f, bound, value => {
-    value.runs = Array.from({ length: MAX_PROCESSING_CHAT_RUNS }, () => ({ request: { requestId: randomUUID(), inputHash: digest('input'), operationId: null, worksetId: null, selection: null },
+    value.runs = Array.from({ length: MAX_PROCESSING_CHAT_RUNS }, () => ({ request: { requestId: randomUUID(), inputHash: digest('input'), operationId: null, worksetId: null, selection: null, owner: syntheticOwner },
       native: nativeRun(), outcome: 'idle', reviewOperationId: null, reviewResolved: false }));
   });
   const full = await f.registry.read();
@@ -288,7 +329,7 @@ test('registry caps history and bindings with actionable errors and never prunes
   const folder = path.dirname(statePath(f, full));
   for (let i = 0; i < MAX_PROCESSING_CHAT_BINDINGS - 1; i++) await fs.writeFile(path.join(folder, `${digest(String(i)).slice(0, 20)}.json`), '{}\n', { mode: 0o600 });
   const other = await createProcessingChatState({ ...f.factory, profileId: digest('other-profile') });
-  await assert.rejects(other.reserve({ expectedHash: null, requestId: randomUUID(), requestHash: digest('creation') }), { code: 'PROCESSING_CHAT_BINDINGS_FULL' });
+  await assert.rejects(other.reserve({ owner: syntheticOwner, expectedHash: null, requestId: randomUUID(), requestHash: digest('creation') }), { code: 'PROCESSING_CHAT_BINDINGS_FULL' });
   assert.equal((await fs.readdir(folder)).length, MAX_PROCESSING_CHAT_BINDINGS);
 });
 
@@ -368,7 +409,7 @@ test('changed policy, namespace and unsupported persisted state fail without rep
   const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(config) });
   const changed = await createProcessingChatState({ ...f.factory, capability });
   assert.equal((await changed.read()).policyState, 'changed');
-  await assert.rejects(changed.reserve({ expectedHash: reserved.hash, requestId: randomUUID(), requestHash: digest('new') }), { code: 'PROCESSING_CHAT_POLICY_CHANGED' });
+  await assert.rejects(changed.reserve({ owner: syntheticOwner, expectedHash: reserved.hash, requestId: randomUUID(), requestHash: digest('new') }), { code: 'PROCESSING_CHAT_POLICY_CHANGED' });
   assert.deepEqual(await fs.readFile(statePath(f, reserved)), original);
 });
 
@@ -377,7 +418,7 @@ test('peer execution gates resume independently of terminal operation ownership'
   const request = { ...beginArgs(bound), operationId }, busy = await f.registry.begin(request);
   await f.registry.finish(finishArgs(busy, request));
   const peer = await createProcessingChatState({ ...f.factory, profileId: digest('other-synthetic-profile') });
-  const reserved = await peer.reserve({ expectedHash: null, requestId: randomUUID(), requestHash: digest('peer creation') });
+  const reserved = await peer.reserve({ owner: syntheticOwner, expectedHash: null, requestId: randomUUID(), requestHash: digest('peer creation') });
   const blocked = await peer.block({ expectedHash: reserved.hash, generation: reserved.generation, reason: 'creation-not-dispatched' });
   for (const [reason, allowed] of [['creation-not-dispatched', true], ['run-abandoned', true], ['creation-outcome-unknown', false], ['host-unavailable', false]]) {
     await writeFixtureState(f, blocked, value => { value.block.reason = reason; });

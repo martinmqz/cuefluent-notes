@@ -8,10 +8,9 @@ into clear, searchable Markdown. Directly saving user-selected material also wor
 without capturing sessions. Notes stay ordinary files with descriptive
 names and optional type folders.
 
-**v0.8.0** introduced this replacement workflow. Published versions through
-**v0.7.1** use the prior workflow. The new workflow does not import old capture
-settings. Fresh setup leaves the capture mode and the processing mode at Manual.
-Installation and hook trust enable neither process.
+Fresh setup leaves the capture mode and the processing mode at Manual.
+Installation and hook trust enable neither process. Only current storage formats
+are supported; there is no legacy migration or mixed-version support.
 
 The plugin requires no Cuefluent app or Devlog. User notes, raw evidence and private
 settings belong outside the replaceable package; examples in this repository are
@@ -148,7 +147,7 @@ Cuefluent's recursive loading and search ranking remain separately unverified.
 ### Update a marketplace installation
 
 Before updating clients that share a notes folder and its private storage, follow the
-[coordinated upgrade steps](references/setup.md#existing-settings). Preserve notes,
+[package replacement guidance](references/setup.md#existing-settings). Preserve notes,
 settings, captures and active operations. The catalog's `release.json` identifies
 the available package version; it may lag development source or a newly published
 release until the package-update PR merges.
@@ -173,40 +172,11 @@ hooks and the `cuefluent_control` MCP registration and permissions before resumi
 neither installation nor server availability enables automatic capture or
 automatic Markdown processing. See [processing chat prerequisites](references/processing-chat.md).
 
-#### Switch an older marketplace registration to main
-
-Registrations pinned to `marketplace` do not follow `main` automatically. First
-confirm that both catalogs and `release.json` are published on `main`, then follow
-the [coordinated upgrade steps](references/setup.md#existing-settings). Do not
-remove a working registration before its replacement is available.
-
-For a Codex registration named `cuefluent`:
-
-```sh
-codex plugin marketplace remove cuefluent
-codex plugin marketplace add martinmqz/cuefluent-notes --ref main
-codex plugin add cuefluent-notes@cuefluent
-```
-
-For a Claude user installation registered as `cuefluent`:
-
-```sh
-claude plugin marketplace remove cuefluent --scope user
-claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#main --scope user
-claude plugin install cuefluent-notes@cuefluent --scope user
-```
-
-Use the existing marketplace name and Claude scope if different. Keep notes,
-workflow settings, evidence and writer state outside the replaceable package;
-do not rerun setup or move storage for this registration change. Restart the
-client and review changed hooks and MCP permissions. The old branch may be absent,
-so a migration notice from that branch is not required to make this switch.
-
 ### Update or customize a source installation
 
 To update an installation made by these commands, pull the repository changes
 and repeat the command for your client. Follow the same
-[coordinated upgrade steps](references/setup.md#existing-settings) before updating
+[package replacement guidance](references/setup.md#existing-settings) before updating
 any clients that share storage:
 
 ```sh

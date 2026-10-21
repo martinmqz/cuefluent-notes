@@ -799,7 +799,8 @@ test('files an editor or Finder adds to a review folder never fail the storage c
   const f = await processingFixture(t, { client: 'claude' }); await proposedClaim(f);
   const h = await claudeReview(t, f); h.nativeSkill = true;
   const view = await review(h), folder = view.draft.folder;
-  for (const file of [path.join(folder, '.DS_Store'), path.join(path.dirname(folder), '.DS_Store'), path.join(folder, 'proposed.md~')]) {
+  const parentFinderFile = path.join(f.collection.intakeStateDir, '.DS_Store');
+  for (const file of [parentFinderFile, path.join(folder, '.DS_Store'), path.join(path.dirname(folder), '.DS_Store'), path.join(folder, 'proposed.md~')]) {
     await fs.writeFile(file, 'synthetic', { mode: 0o644 }); await fs.chmod(file, 0o644);
   }
   // An editor's lock file is a dangling link (Emacs).
@@ -812,6 +813,7 @@ test('files an editor or Finder adds to a review folder never fail the storage c
     await fs.chmod(path.join(folder, 'proposed.md'), 0o600);
   }
   assert.equal((await review(h, { decision: 'save', draft: view.draft.code })).review, 'saved');
+  assert.equal(await fs.readFile(parentFinderFile, 'utf8'), 'synthetic');
   // Finder's file went with the folder's own files; the editor's keep the folder.
   assert.deepEqual((await fs.readdir(folder)).sort(), [...(posix ? ['.#proposed.md'] : []), 'proposed.md~']);
   await fs.rm(path.join(folder, 'proposed.md~')); if (posix) await fs.unlink(path.join(folder, '.#proposed.md'));

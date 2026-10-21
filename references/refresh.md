@@ -400,9 +400,8 @@ The approved abort is itself journaled. If cleanup is interrupted, `recover`
 finishes that abort without applying remaining proposals or requiring stale
 sources to be restored. After completion, inspect again, review current evidence,
 and prepare a new plan using current hashes. An abort does not roll note bytes
-back. Older journals without a previous-manifest snapshot support reconciliation
-when the original manifest is still available; otherwise the helper may require
-manual reconciliation rather than guessing ownership.
+back. Journals must include the previous-manifest snapshot. Unsupported or
+incomplete journals are refused without changing notes, stages or tracking.
 
 The lock coordinates cooperating helper processes only. Hash checks detect
 changes since inspection, but a separate editor can still write between the

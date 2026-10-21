@@ -5,6 +5,7 @@ import { appendFileSync, openSync, writeSync, closeSync, readFileSync } from 'no
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
+import { harness, body } from './test-support/processing-mcp.mjs';
 import { storageChurn, onVerificationAttempt, directoryChurn } from './test-support/storage-churn.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { collectionIngress, registrationFloorPath } from './collection-ingress.mjs';
@@ -314,6 +315,61 @@ test('a processing-only route also verifies a first-prompt control before its ho
   const call = A.call('review'); await A.append([call]);
   const bound = await A.resolve(call);
   assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1); assert.equal(bound.captureActive, false);
+});
+
+test('first-prompt MCP controls stay excluded when later capture reaches before the Automatic boundary', async t => {
+  for (const control of ['review', 'status', 'help']) await t.test(control, async t => {
+    const f = await claudeFixture(t), A = f.session();
+    const [first, boundary, ordinary, pause, pausedOrdinary, capture] = Array.from({ length: 6 }, () => randomUUID());
+    const settings = await fs.readFile(f.options.configPath);
+    await A.append([A.meta('mode', { mode: 'normal' }), ...A.control(control, first), A.snapshot()]);
+    await A.hook('UserPromptSubmit', first); await f.run();
+    const call = A.call(control); await A.append([call]);
+    const bound = await A.resolve(call);
+    assert.equal(bound.captureActive, false); assert.equal(bound.selectionHash, null);
+    const h = await harness(t, { ...f, identity: { client: 'claude', sessionId: A.sessionId, unitId: first } }, {
+      client: 'claude',
+      resolveInvocation: (capability, context, invocation) => resolveProcessingInvocation(capability, context, invocation,
+        { skillPath: f.skillPath, settleMs: 0 }),
+    });
+    const respond = async (command, callRow, promptId) => {
+      h.callId = callRow.message.content[0].id;
+      const request = CONTROLS[command], rpc = await h.call(request.tool, request.arguments), view = body(rpc);
+      assert.deepEqual(view.diagnostics, []);
+      await A.append([A.root('user', { promptId, sourceToolAssistantUUID: callRow.uuid, toolUseResult: rpc.result.content,
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: h.callId, content: rpc.result.content }] } }),
+      A.reply(view.statusText)]);
+      return view;
+    };
+    const typed = async (command, promptId) => {
+      await A.append(A.control(command, promptId)); await A.hook('UserPromptSubmit', promptId); await f.run();
+      const callRow = A.call(command); await A.append([callRow]); return respond(command, callRow, promptId);
+    };
+    await respond(control, call, first);
+    // The control response, unlike source binding, must persist an exclusion.
+    // It must not pause collection or arm it earlier than the worker's floor.
+    const unarmed = (await A.selection()).state;
+    assert(unarmed?.exclusions.includes(first), 'first control needs a durable exclusion before its response');
+    assert.equal(unarmed.active, false); assert.equal(unarmed.paused, false);
+    await typed('capture', boundary);
+    await A.append([A.prompt('Fictional A: Juniper uses a 25-minute cache.', ordinary), A.reply('Acknowledged.')]);
+    await A.hook('UserPromptSubmit', ordinary); await f.run();
+    const retained = await A.head(ordinary); assert(retained.head);
+    await typed('pause chat', pause);
+    await A.append([A.prompt('Fictional B: Birch uses a 40-minute cache.', pausedOrdinary), A.reply('Acknowledged.')]);
+    await A.hook('UserPromptSubmit', pausedOrdinary); await f.run();
+    assert.equal((await A.head(pausedOrdinary)).head, null);
+    const captured = await typed('capture', capture);
+    assert.equal(captured.capture, 'captured'); assert.equal(captured.turns, 1);
+    assert((await A.head(pausedOrdinary)).head);
+    assert.deepEqual(await A.head(ordinary), retained);
+    for (const unitId of [first, boundary, pause, capture]) assert.equal((await A.head(unitId)).head, null, unitId);
+    const selection = (await A.selection()).state;
+    assert.equal(selection.paused, true); assert.equal(selection.active, false);
+    assert.deepEqual(await fs.readFile(f.options.configPath), settings);
+    assert.deepEqual(await fs.readdir(f.collection.notes.notesDir).catch(error => { if (error.code === 'ENOENT') return []; throw error; }), []);
+    h.end(); await h.server;
+  });
 });
 
 test('typed capture in a Manual Claude chat captures its turns since the last capture, never a command turn', async t => {

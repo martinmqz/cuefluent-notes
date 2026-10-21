@@ -17,11 +17,7 @@ test('source manifests bind both clients to their explicit bundled controller', 
     for (const mcpServers of ['/outside/mcp.json', '../mcp.json', {}, ['./.mcp.json']]) {
       assert.throws(() => validatePluginManifest({ ...value.plugin, mcpServers }, client));
     }
-    const older = { ...value.plugin }; delete older.mcpServers;
-    validatePluginManifest(older, client);
   }
-  const olderClaude = { ...fixtures.claude.plugin }; delete olderClaude.mcpServers;
-  assert.throws(() => validateManifestPair(fixtures.codex.plugin, olderClaude), /metadata differs/);
 });
 
 test('MCP templates cannot introduce arbitrary commands, servers, environment or client arguments', () => {
@@ -42,18 +38,22 @@ test('MCP templates cannot introduce arbitrary commands, servers, environment or
   assert.throws(() => validateProcessingMcp(codex, 'codex'), /MCP configuration/);
 });
 
-test('license metadata is validated while older manifests remain readable', () => {
-  const older = {};
+test('license metadata is validated and both current manifest fields are required', () => {
   for (const [client, { plugin }] of Object.entries(fixtures)) {
     assert.equal(plugin.license, 'SUL-1.0');
     for (const license of [null, {}, [], '', '   ', ' MIT ']) {
       assert.throws(() => validatePluginManifest({ ...plugin, license }, client), /manifest metadata/);
     }
-    older[client] = { ...plugin };
-    delete older[client].license;
-    validatePluginManifest(older[client], client);
   }
-  validateManifestPair(older.codex, older.claude);
-  assert.throws(() => validateManifestPair(fixtures.codex.plugin, older.claude), /metadata differs/);
+  for (const missing of [['mcpServers'], ['license'], ['mcpServers', 'license']]) {
+    const altered = Object.fromEntries(Object.entries(fixtures).map(([client, { plugin }]) => {
+      const manifest = { ...plugin };
+      for (const field of missing) delete manifest[field];
+      assert.throws(() => validatePluginManifest(manifest, client), /manifest metadata/);
+      return [client, manifest];
+    }));
+    assert.throws(() => validateManifestPair(altered.codex, altered.claude), /manifest metadata/);
+    assert.throws(() => validateManifestPair(fixtures.codex.plugin, altered.claude), /manifest metadata/);
+  }
   assert.throws(() => validateManifestPair(fixtures.codex.plugin, { ...fixtures.claude.plugin, license: 'MIT' }), /metadata differs/);
 });

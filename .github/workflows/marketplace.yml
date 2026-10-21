@@ -52,9 +52,7 @@ jobs:
             cat > "$RUNNER_TEMP/publication-pr.md" <<'BODY'
           Update the marketplace catalogs and complete plugin packages from the verified published release snapshot. Source files and the root README are preserved.
 
-          Review the generated changes, select "Approve workflows to run" when GitHub requests approval, and wait for the PR's Checks workflow before merging. Packages become available from main only after this PR is merged. Existing installations pinned to the former marketplace branch must follow the migration instructions in the repository README.
+          Review the generated changes, select "Approve workflows to run" when GitHub requests approval, and wait for the PR's Checks workflow before merging. Packages become available from main only after this PR is merged.
           BODY
             gh pr create --draft --base main --head "$PUBLICATION_BRANCH" --title "chore(release): publish $RELEASE_TAG" --body-file "$RUNNER_TEMP/publication-pr.md"
           fi
-      - name: Leave a final migration notice on the old marketplace branch
-        run: bash scripts/marketplace-notice.sh

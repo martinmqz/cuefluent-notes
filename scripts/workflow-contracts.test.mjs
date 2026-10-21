@@ -26,7 +26,7 @@ const range = { startByte: 80, endByte: 180, recordIds: ['message-1'] };
 const capture = () => createCapture({ format: 'cuefluent-capture', schemaVersion: 2,
   identity: { client: 'codex', sessionId, unitId }, projectRoot: p('project'),
   source: { path: p('session.jsonl'), fileIdentity: 'synthetic-file-1', ranges: [copy(range)] },
-  reader: { name: 'codex', version: '1', clientVersion: 'fixture' }, occurredAt: stamp, capturedAt: stamp,
+  reader: { name: 'codex', version: '1', headerClientVersion: 'fixture' }, occurredAt: stamp, capturedAt: stamp,
   terminal: 'completed', coverage: { partial: false, omissions: [] },
   evidence: [{ kind: 'user', recordId: 'message-1', range: copy(range), text: 'Meeting: decide the next milestone.' }] });
 async function temporary(t) {
@@ -306,22 +306,19 @@ test('logical identity, evidence fingerprint, and exact file hash remain distinc
   assert.equal(canonicalJSON({ b: 1, a: [true, null] }), '{"a":[true,null],"b":1}');
 });
 
-test('header version provenance preserves existing capture bytes and rejects malformed or ambiguous labels', () => {
-  const previous = capture(), current = copy(previous);
-  const originalBytes = serializeCapture(previous);
-  current.reader = { name: previous.reader.name, version: previous.reader.version,
-    headerClientVersion: previous.reader.clientVersion };
-  assert.equal(createCapture(current).evidenceHash, previous.evidenceHash);
-  assert.deepEqual(serializeCapture(previous), originalBytes);
-  assert.notDeepEqual(serializeCapture(current), originalBytes);
-  for (const field of ['clientVersion', 'headerClientVersion']) {
-    for (const value of [undefined, null, 1, {}, '', ' ', 'v'.repeat(129), '\u0000', '\ud800']) {
-      assert.throws(() => createCapture({ ...current, reader: { name: 'fixture', version: '1', [field]: value } }),
-        { code: 'INVALID_SESSION_CLIENT_VERSION' });
-    }
+test('capture reader requires current header provenance and rejects the retired field alias', () => {
+  const current = capture();
+  for (const value of [undefined, null, 1, {}, '', ' ', 'v'.repeat(129), '\u0000', '\ud800']) {
+    assert.throws(() => createCapture({ ...current, reader: { name: 'fixture', version: '1', headerClientVersion: value } }),
+      { code: 'INVALID_SESSION_CLIENT_VERSION' });
   }
-  assert.throws(() => createCapture({ ...current, reader: { ...current.reader, clientVersion: 'other' } }), { code: 'INVALID_CAPTURE_READER' });
-  assert.throws(() => createCapture({ ...current, reader: { name: 'fixture', version: '1' } }), { code: 'INVALID_CAPTURE_READER' });
+  for (const reader of [
+    { name: 'fixture', version: '1', clientVersion: 'fixture' },
+    { ...current.reader, clientVersion: 'fixture' },
+    { name: 'fixture', version: '1' },
+    { ...current.reader, name: '' },
+    { ...current.reader, version: 1 },
+  ]) assert.throws(() => createCapture({ ...current, reader }), { code: 'INVALID_CAPTURE_READER' });
 });
 
 test('capture validates ordered provenance, partial coverage and binary exclusions', () => {

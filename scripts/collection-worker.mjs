@@ -189,14 +189,14 @@ export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUP
   'INVALID_READER_PROGRESS', 'INVALID_READER_SUSPENSION', 'READER_CHECKPOINT_REQUIRED', 'INVALID_INTAKE_CURSOR',
   // A turn whose earlier capture this reader cannot extend, or that conflicts
   // with the current transcript, is held on every pass.
-  'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
+  'UNSUPPORTED_CODEX_READER', 'INVALID_CAPTURE_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
   'SOURCE_IDENTITY_MISMATCH', 'FINAL_CAPTURE_CONFLICT',
   // A turn whose capture would be larger than a capture may be, or would hold
   // what a capture cannot: every pass refuses it the same way.
   'CAPTURE_SIZE_LIMIT', 'CAPTURE_TOOL_LIMIT', 'UNSUPPORTED_ATTACHMENT',
   // Saved capture state that is malformed, or a head whose saved capture is
   // missing or changed, fails every visit that reads it.
-  'INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+  'INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA',
   'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']);
 
 // The reader block a visit of a chat last ended on, kept per chat: a later
@@ -253,18 +253,18 @@ export async function processScope(transaction, store, selection, scopeId, autho
     if (suspensionBinding) {
       suspensionSnapshot = await intakeSnapshot(store, 'state', suspensionName);
       const old = intakeJSON(suspensionSnapshot);
-      if (old) {
-        if (!Number.isSafeInteger(old.version) || old.version < 1) fail('INVALID_READER_SUSPENSION');
-        // Unknown cache shapes and stale reader rules are misses, not permanent
-        // errors. Re-read only the already-authorized, frozen range.
-        if (old.version === READER_SUSPENSION_VERSION && old.readerRulesRevision === CLAUDE_READER_RULES_REVISION) {
+      if (suspensionSnapshot.bytes !== null) {
+        try {
           keys(old, ['version', 'readerRulesRevision', 'sourceIdentity', 'intervalHash', 'cursorHash', 'ceilingByte', 'reason', 'diagnostic']);
+          if (old.version !== READER_SUSPENSION_VERSION || integer(old.readerRulesRevision) === 0) fail('INVALID_READER_SUSPENSION');
+          hash(old.sourceIdentity); hash(old.intervalHash); if (old.cursorHash !== null) hash(old.cursorHash);
+          integer(old.ceilingByte);
           choice(old.reason, ['pause-boundary', 'partial-tail', 'unresolved-boundary']);
           if (old.diagnostic !== null && typeof old.diagnostic !== 'string') fail('INVALID_READER_SUSPENSION');
-          const { version: _version, reason, diagnostic, ...binding } = old;
-          if (canonicalJSON(binding) === canonicalJSON(suspensionBinding)) {
-            return { saved, pending: diagnostic, incomplete: false, suspended: true, suspensionReason: reason };
-          }
+        } catch { fail('INVALID_READER_SUSPENSION'); }
+        const { version: _version, reason, diagnostic, ...binding } = old;
+        if (canonicalJSON(binding) === canonicalJSON(suspensionBinding)) {
+          return { saved, pending: diagnostic, incomplete: false, suspended: true, suspensionReason: reason };
         }
       }
     }

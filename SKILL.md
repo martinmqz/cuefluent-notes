@@ -78,9 +78,17 @@ by hand does not attach the skill and is no command:
 | `skip`, `skip <code>` | Handle that draft's captures without saving, under the same rule. | `processing_review`; in Claude with `decision: "skip"` and any `draft` |
 | `review cancel`, `review cancel <code>` | Cancel that draft's operation, under the same rule; its captures stay pending. | `processing_review`; in Claude with `decision: "cancel"` and any `draft` |
 
-For an exact action, call its available `cuefluent_control` tool once. Native
-clients may prefix tool names. In Claude, copy the typed draft code, decision,
-`verbose` or `help` into the tool arguments exactly as the table shows; omit
+For an exact action, select the **specific tool in that row**, then call it once.
+`cuefluent_control` is the server name, not a dispatcher: its tools are separate
+functions. There is no `action` argument. In code mode, never select the first
+tool whose name merely contains `cuefluent_control`; that can select
+`capture_turns` for a help or review request. Match both the server and the exact
+tool name. For `help`, a bare skill invocation, or `status`, use
+`processing_status`; for `review`, `save`, `skip`, or `review cancel`, use
+`processing_review`. Native clients may prefix these names.
+
+In Claude, copy the typed draft code, decision, `verbose` or `help` into the
+tool arguments exactly as the table shows; omit
 them when the action has none. In Codex, call the tool without those arguments;
 the typed text carries them. The adapter derives request identity from that
 native call; do not invent a request ID or selection. Omit `collectionId` unless
@@ -109,8 +117,27 @@ something only a control does (processing, a review or a decision), call
 Do not read more files, packets or notes or synthesize in this source chat. In
 Codex code mode, run the control call alone in its exec cell and print only its
 result; call no other tool and print nothing else in that turn, so the control
-turn can be kept out of captures. If the
-tool returns `verification-required`, end that exec/tool call. In a separate
+turn can be kept out of captures. For example, a first `help` or `status` call:
+
+```js
+const matches = ALL_TOOLS.filter(t =>
+  t.name.includes("cuefluent_control") &&
+  t.name.split(/\.|__/).at(-1) === "processing_status");
+if (matches.length !== 1) {
+  text("Cuefluent Notes processing_status tool is unavailable or ambiguous.");
+} else {
+  const result = await tools[matches[0].name]({});
+  for (const item of result.content ?? []) {
+    if (item.type === "text") text(item.text);
+  }
+}
+```
+
+For a review or draft decision, select `processing_review` instead, still with
+`{}` on the first Codex call. For other actions use their table row and schema.
+Do not send `{action: "processing_status"}` or `{action: "processing_review"}`
+to any tool. If the tool returns `verification-required`, end that exec/tool
+call. In a separate
 exec/tool call, repeat the same tool and arguments with its returned `retryToken`
 once. This handshake does not start processing or approve a proposal. Do not
 retry inside the same exec or invent a token. Never repeat an action to poll;

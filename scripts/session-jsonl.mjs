@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { openGuarded, sameFileIdentity } from './file-io.mjs';
 import { stableSourceIdentity, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
-import { integer, digest, fail } from './workflow-values.mjs';
+import { integer, digest, hash, fail } from './workflow-values.mjs';
 import { checkWorkflowBudget, consumeWorkflowBytes, workflowReadLimit } from './workflow-budget.mjs';
 
 export const SESSION_READ_LIMIT = 64 * 1024 * 1024;
@@ -26,9 +26,12 @@ export async function readSessionHeader({ readHeader, size }) {
 /** Read one fixed snapshot with positional I/O. Caller supplies an authorized floor.
  * Header reads are bounded independently; no discovery or historical prefix scan.
  */
-/** The bytes an explicit capture was chosen from, when its selection kept their hash. */
-export const chosenStretch = scope => scope.contentHash === undefined ? null
-  : { from: scope.start.startByte, to: (scope.end ?? scope.start).endByte, hash: scope.contentHash };
+/** Explicit captures bind their chosen bytes; automatic intervals use a native boundary. */
+export function chosenStretch(scope) {
+  if (scope.lower) return null;
+  hash(scope.contentHash);
+  return { from: scope.start.startByte, to: (scope.end ?? scope.start).endByte, hash: scope.contentHash };
+}
 /** `stretch` ({from, to, hash}) names bytes chosen by their hash. They are
  * hashed through this read's own handle before any record is read and again
  * after, so the records read come from the bytes that hashed, also when the

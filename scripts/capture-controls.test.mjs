@@ -10,6 +10,7 @@ import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
 import { readCaptureHead, readReaderProgress, readSelection, publishCapture, inspectPendingPublication } from './intake-store.mjs';
 import { readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
+import { captureRelativePath } from './capture-contract.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { readReaderBlock, readerBlockPath } from './collection-worker.mjs';
 import { publishIngressMetadata, collectionIngress } from './collection-ingress.mjs';
@@ -32,6 +33,20 @@ async function fixture(t, { enabled = false, version = '0.156.1' } = {}) {
     operationId: randomUUID(), kind: 'current', unitIds: [A], readRange: { fromByte: Buffer.byteLength(header), endByte: status.source.eofByte } };
   return { ...f, capability, sourcePath, selection, request, store: await openWorkflowIntake(capability) };
 }
+
+test('explicit capture stores the inspected hash and refuses a hashless saved selection without rewriting it', async t => {
+  const f = await fixture(t), chosen = await selectExplicitCapture(f.capability, f.request);
+  const scope = chosen.state.explicitScopes[0], source = await fs.readFile(f.sourcePath);
+  assert.equal(scope.contentHash, digest(source.subarray(scope.start.startByte, scope.end.endByte)));
+  const stored = structuredClone(chosen.state); delete stored.explicitScopes[0].contentHash;
+  const selectionPath = `sessions/codex/${S}.json`;
+  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, selectionPath, stored, chosen.hash));
+  const file = path.join(f.collection.intakeStateDir, selectionPath), before = await fs.readFile(file);
+  await assert.rejects(captureSelectionStatus(f.capability, { selection: f.selection }), { code: 'INVALID_WORKFLOW' });
+  await assert.rejects(selectExplicitCapture(f.capability, f.request), { code: 'INVALID_WORKFLOW' });
+  assert.deepEqual(await fs.readFile(file), before);
+  assert.deepEqual(await fs.readFile(f.sourcePath), source);
+});
 
 async function claudeScopeFixture(t) {
   const f = await fixture(t), stamp = '2026-09-24T00:00:00.000Z';
@@ -245,6 +260,34 @@ test('one-time capture with collection disabled reads the selected window and pu
   assert.match(capture.evidence[0].text, /Alpha/); assert.equal(capture.reader.headerClientVersion, '0.146.0');
   assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: B })).head, null);
   assert.equal(JSON.parse(await fs.readFile(f.options.configPath)).routes[0].collection.enabled, false);
+});
+
+test('invalid retained reader metadata does not hold a typed capture window forever', async t => {
+  const f = await fixture(t), identity = { client: 'codex', sessionId: S };
+  const chosen = await selectExplicitCapture(f.capability, { ...f.request,
+    readRange: { ...f.request.readRange, endByte: f.request.readRange.fromByte + Buffer.byteLength(turn(A, 'Meeting: decision Alpha')) } });
+  await runSelectedCapture(f.capability, { selection: f.selection, scopeId: f.request.operationId,
+    expectedSelectionHash: chosen.hash, unitIds: [A] });
+  const retained = await readCaptureHead(f.store, { ...identity, unitId: A });
+  await selectExplicitCapture(f.capability, { ...f.request, expectedSelectionHash: chosen.hash,
+    operationId: randomUUID(), kind: 'historical', unitIds: [A, B] });
+  const raw = path.join(f.collection.rawDir, captureRelativePath(retained.capture.identity, retained.capture.evidenceHash));
+  const invalid = { ...retained.capture, reader: { ...retained.capture.reader, version: 7 } };
+  const bytes = JSON.stringify(invalid) + '\n'; await fs.writeFile(raw, bytes);
+  const headPath = path.join(f.collection.intakeStateDir, 'heads/codex', S, `${A}.json`);
+  const headBytes = await fs.readFile(headPath);
+  const C = randomUUID();
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) +
+    row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null },
+    source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 1, more: true, leftOut: 0 });
+  assert((await readCaptureHead(f.store, { ...identity, unitId: B })).head);
+  await assert.rejects(readCaptureHead(f.store, { ...identity, unitId: A }), { code: 'INVALID_CAPTURE_READER' });
+  assert.equal(await fs.readFile(raw, 'utf8'), bytes); assert.deepEqual(await fs.readFile(headPath), headBytes);
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 0, more: false, leftOut: 0 });
 });
 
 test('an explicit capture chosen from an earlier read refuses a window whose records changed since', async t => {

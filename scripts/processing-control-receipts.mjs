@@ -7,7 +7,7 @@ import { canonicalJSON, digest, fail, keys, nativeId, hash, string, id } from '.
 const FORMAT = 'cuefluent-processing-control-dispatch';
 const MAX_RECEIPT_BYTES = 32 * 1024;
 const FIELDS = ['client', 'sessionId', 'unitId', 'callId', 'tool', 'argsHash', 'sourceIdentity', 'sourcePath',
-  'requestHash', 'skillName', 'skillPath', 'statusText', 'resultHash'];
+  'requestHash', 'skillName', 'skillPath', 'statusText', 'resultHash', 'response'];
 const CLAUDE_FIELDS = ['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand'];
 // A Codex code-mode control: the handshake's first cell (its item ID), the
 // retry's cell and nested call, and the handshake result, all from native
@@ -16,7 +16,7 @@ const CODEX_CODE_MODE_FIELDS = ['outerItemId', 'retryItemId', 'retryCallId', 'ha
 const nativeToken = value => { string(value, 128); if (!/^[a-zA-Z0-9_-]+$/.test(value)) fail('INVALID_PROCESSING_CONTROL_RECEIPT'); };
 
 function dispatchDescriptor(value) {
-  keys(value, value?.client === 'claude' ? [...FIELDS, ...CLAUDE_FIELDS] : FIELDS, ['response', 'presentation', ...(value?.client === 'codex' ? CODEX_CODE_MODE_FIELDS : [])]);
+  keys(value, value?.client === 'claude' ? [...FIELDS, ...CLAUDE_FIELDS] : FIELDS, ['presentation', ...(value?.client === 'codex' ? CODEX_CODE_MODE_FIELDS : [])]);
   if (!['codex', 'claude'].includes(value.client) || value.skillName !== 'cuefluent-notes') fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   nativeId(value.sessionId); nativeId(value.unitId); string(value.callId, 512);
   if (value.client === 'codex' && CODEX_CODE_MODE_FIELDS.some(field => value[field] !== undefined)) {
@@ -39,18 +39,15 @@ function dispatchDescriptor(value) {
   if (value.presentation !== undefined) {
     keys(value.presentation, ['operationId', 'proposalHash', 'claimHash']);
     nativeId(value.presentation.operationId); hash(value.presentation.proposalHash); hash(value.presentation.claimHash);
-    if (value.response === undefined || !/processing_review$/.test(value.tool)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+    if (!/processing_review$/.test(value.tool)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   }
-  // The stored reply is checked against the text and result hash recorded with
-  // it, never re-rendered: a receipt stays valid when a later release words
-  // its replies differently.
-  if (value.response !== undefined) {
-    if (value.response === null || typeof value.response !== 'object' || Array.isArray(value.response)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
-    id(value.response.collectionId);
-    const result = { content: [{ type: 'text', text: canonicalJSON(value.response) }], isError: false };
-    if (value.response.statusText !== value.statusText ||
-        digest(canonicalJSON(value.client === 'claude' ? result.content : result)) !== value.resultHash) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
-  }
+  // Check the exact stored reply against its recorded text and result hash.
+  // Re-delivery must replay that result without dispatching the action again.
+  if (value.response === null || typeof value.response !== 'object' || Array.isArray(value.response)) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
+  id(value.response.collectionId);
+  const result = { content: [{ type: 'text', text: canonicalJSON(value.response) }], isError: false };
+  if (value.response.statusText !== value.statusText ||
+      digest(canonicalJSON(value.client === 'claude' ? result.content : result)) !== value.resultHash) fail('INVALID_PROCESSING_CONTROL_RECEIPT');
   return value;
 }
 

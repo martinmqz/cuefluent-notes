@@ -50,25 +50,31 @@ test('published proposals release inspection slots but their queue cannot grow b
   const next = await processingFixture(t, { base: f });
   await assert.rejects(prepareProcessing(next.capability, { ...next.args, inputs: next.inputs }), /PROCESSING_PROPOSAL_QUEUE_FULL/);
   assert.equal((await prepareProcessing(sixth.capability, { ...sixth.args, inputs: sixth.inputs })).claimHash, b.claimHash);
-  // Simulate a valid pre-limit sixth publication through the canonical staging
-  // primitives. Current admission cannot create this state, but old users have it.
+  // Fabricate an over-cap publication that current admission cannot create.
+  // It must refuse without treating an existing intent as upgrade authority.
   const { withProcessingState, processingSnapshot, writeProcessingJSON } = await import('./processing-state.mjs');
   const { buildProcessingProposal, copyProcessingProposal, proposalHash } = await import('./processing-proposal.mjs');
   const { intakeJSON } = await import('./intake-io.mjs');
   const { digest } = await import('./workflow-values.mjs');
-  const contentPath = path.join(f.root, 'legacy-draft.md'), content = '# Subject\n\n## Decision\n\nKeep the decision.\n';
+  const contentPath = path.join(f.root, 'excess-draft.md'), content = '# Subject\n\n## Decision\n\nKeep the decision.\n';
   await fs.writeFile(contentPath, content, { mode: 0o600 });
-  const legacy = await withProcessingState(sixth.capability, sixth.selection, 'explicitProcess', async ctx => {
+  const excessClaimHash = await withProcessingState(sixth.capability, sixth.selection, 'explicitProcess', async ctx => {
     const name = `claims/${sixth.operationId}.json`, snapshot = await processingSnapshot(ctx, name), claim = intakeJSON(snapshot);
-    const proposal = await buildProcessingProposal(ctx, claim, { files: [{ path: 'legacy.md', expectedHash: null, contentPath, expectedContentHash: digest(content) }],
-      mappings: [{ identity: sixth.identity, paths: ['legacy.md'] }] });
+    const proposal = await buildProcessingProposal(ctx, claim, { files: [{ path: 'excess.md', expectedHash: null, contentPath, expectedContentHash: digest(content) }],
+      mappings: [{ identity: sixth.identity, paths: ['excess.md'] }] });
     claim.proposalIntent = { hash: proposalHash(proposal), value: proposal };
     const saved = await writeProcessingJSON(ctx, name, claim, snapshot.hash);
     await copyProcessingProposal(ctx, proposal);
     await writeProcessingJSON(ctx, `proposals/${sixth.operationId}/record.json`, proposal, null);
     return saved.hash;
   });
-  assert((await proposeProcessing(sixth.capability, { ...sixth.args, expectedClaimHash: legacy })).plan);
+  const claimFile = path.join(f.collection.notes.writerStateDir, 'claims', `${sixth.operationId}.json`);
+  const proposalFile = path.join(f.collection.notes.writerStateDir, 'proposals', sixth.operationId, 'record.json');
+  const beforeClaim = await fs.readFile(claimFile), beforeProposal = await fs.readFile(proposalFile);
+  await assert.rejects(proposeProcessing(sixth.capability, { ...sixth.args, expectedClaimHash: excessClaimHash }),
+    { code: 'PROCESSING_PROPOSAL_QUEUE_FULL' });
+  assert.deepEqual(await fs.readFile(claimFile), beforeClaim);
+  assert.deepEqual(await fs.readFile(proposalFile), beforeProposal);
   await fs.writeFile(path.join(f.collection.notes.writerStateDir, 'proposals', sixth.operationId, 'record.json'), '{');
   await assert.rejects(prepareProcessing(next.capability, { ...next.args, inputs: next.inputs }), error => {
     assert.equal(workflowErrorReport(error).operationId, sixth.operationId); return true;
@@ -267,7 +273,7 @@ test('over-ceiling batches return every measured input without creating a claim'
   assert.equal((await inspectProcessing(f.capability, f.operationId)).state, 'missing');
 });
 
-test('staged proposals reserve queue space and legacy staging resumes at the queue cap', async t => {
+test('staged proposals reserve queue space and refuse excess intents without changing their own state', async t => {
   const f = await processingFixture(t);
   for (let i = 0; i < 4; i++) await proposedClaim(i === 0 ? f : await processingFixture(t, { base: f }), { name: `queued-${i}.md` });
   const a = await processingFixture(t, { base: f }), b = await processingFixture(t, { base: f });
@@ -281,20 +287,29 @@ test('staged proposals reserve queue space and legacy staging resumes at the que
   let status = await inspectProcessing(a.capability, a.operationId);
   assert.equal(status.state, 'draft-staging');
   await assert.rejects(proposedClaim(b, { claim: second, name: 'sixth.md' }), /PROCESSING_PROPOSAL_QUEUE_FULL/);
-  // Simulate the old interleaving: a fifth other publication completed while A
-  // had durable intent but no record. Its owned staged bytes remain resumable.
+  // Fabricate a fifth other publication after A reserved its slot. Current
+  // admission refuses this state instead of supporting an over-cap replay.
   const { withProcessingState, processingSnapshot, writeProcessingJSON } = await import('./processing-state.mjs');
   const { buildProcessingProposal, copyProcessingProposal, proposalHash } = await import('./processing-proposal.mjs');
   const { intakeJSON } = await import('./intake-io.mjs');
-  await withProcessingState(b.capability, b.selection, 'explicitProcess', async ctx => {
+  const excessClaimHash = await withProcessingState(b.capability, b.selection, 'explicitProcess', async ctx => {
     const name = `claims/${b.operationId}.json`, snapshot = await processingSnapshot(ctx, name), claim = intakeJSON(snapshot);
     const proposal = await buildProcessingProposal(ctx, claim, { files: [{ path: 'other.md', expectedHash: null, contentPath: draft, expectedContentHash: digest(content) }],
       mappings: [{ identity: b.identity, paths: ['other.md'] }] });
     claim.proposalIntent = { hash: proposalHash(proposal), value: proposal };
-    await writeProcessingJSON(ctx, name, claim, snapshot.hash); await copyProcessingProposal(ctx, proposal);
+    const saved = await writeProcessingJSON(ctx, name, claim, snapshot.hash); await copyProcessingProposal(ctx, proposal);
     await writeProcessingJSON(ctx, `proposals/${b.operationId}/record.json`, proposal, null);
+    return saved.hash;
   });
   assert.equal(status.nextAction.command, 'processing-propose');
+  const before = await inspectProcessing(a.capability, a.operationId);
+  await assert.rejects(proposeProcessing(a.capability, { ...a.args, expectedClaimHash: status.claimHash }),
+    { code: 'PROCESSING_PROPOSAL_QUEUE_FULL' });
+  assert.deepEqual(await inspectProcessing(a.capability, a.operationId), before);
+  await assert.rejects(fs.stat(path.join(f.collection.notes.writerStateDir, 'proposals', a.operationId, 'record.json')), { code: 'ENOENT' });
+  // Once the excess operation is explicitly cancelled, the reserved fifth slot
+  // resumes normally without refreshing its hash or rebuilding the proposal.
+  await completeProcessing(b.capability, { ...b.args, expectedClaimHash: excessClaimHash, outcome: 'cancelled' });
   const resumed = await proposeProcessing(a.capability, { ...a.args, expectedClaimHash: status.claimHash });
   assert.equal(resumed.proposalHash, status.proposalHash);
   assert.equal((await inspectProcessing(a.capability, a.operationId)).state, 'awaiting-review');
@@ -388,11 +403,9 @@ test('explicit current-policy batches keep charged history and cannot reauthoriz
   const first = await prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: created.worksetHash, indexes: [0] });
   await assert.rejects(prepareWorksetBatch(f.capability, { worksetId, expectedWorksetHash: first.workset.worksetHash, indexes: [1], parallelism: 2 },
     { fault: () => { throw new Error('crash'); } }), /crash/);
-  // Older worksets omit per-attempt policy; that means their creation policy.
   const file = path.join(f.collection.notes.writerStateDir, 'processed', 'worksets', worksetId + '.json');
   const old = JSON.parse(await fs.readFile(file, 'utf8'));
-  for (const attempt of old.attempts) delete attempt.policyHash;
-  await fs.writeFile(file, JSON.stringify(old));
+  for (const attempt of old.attempts) assert.equal(attempt.policyHash, old.policyHash);
   const oldBytes = await fs.readFile(file);
   const before = await inspectProcessingWorkset(f.capability, { worksetId });
   const { digest } = await import('./workflow-values.mjs');
@@ -421,6 +434,48 @@ test('explicit current-policy batches keep charged history and cannot reauthoriz
   assert.equal(status.items[2].state, 'unread');
   assert.equal(status.items[0].conflict, 'WORKFLOW_POLICY_CHANGED');
   assert.equal(status.items[1].conflict, 'WORKFLOW_POLICY_CHANGED');
+});
+
+
+test('worksets without recorded admission policy refuse inspection and retries without mutation', async t => {
+  for (const phase of ['admission', 'claim']) await t.test(phase, async t => {
+    const f = await processingFixture(t), next = await processingFixture(t, { base: f });
+    const worksetId = randomUUID(), inputs = [...f.inputs, ...next.inputs];
+    const created = await createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs });
+    const args = { worksetId, expectedWorksetHash: created.worksetHash, indexes: [0] };
+    if (phase === 'admission') {
+      await assert.rejects(prepareWorksetBatch(f.capability, args,
+        { fault: () => { throw new Error('Interrupted admission'); } }), /Interrupted admission/);
+    } else await prepareWorksetBatch(f.capability, args);
+    const writer = f.collection.notes.writerStateDir;
+    const file = path.join(writer, 'processed', 'worksets', worksetId + '.json');
+    const original = await fs.readFile(file), stored = JSON.parse(original);
+    delete stored.attempts[0].policyHash;
+    const unsupported = JSON.stringify(stored);
+    await fs.writeFile(file, unsupported);
+    const { digest } = await import('./workflow-values.mjs');
+    const snapshotClaims = async () => {
+      const directory = path.join(writer, 'claims');
+      const names = await fs.readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+      return Promise.all(names.sort().map(async name => [name, await fs.readFile(path.join(directory, name))]));
+    };
+    const claims = await snapshotClaims();
+    const calls = [
+      () => inspectProcessingWorkset(f.capability, { worksetId }),
+      () => listProcessingWorksets(f.capability),
+      () => createProcessingWorkset(f.capability, { selection: f.selection, worksetId, inputs }),
+      ...[[0], [1]].map(indexes => () => prepareWorksetBatch(f.capability,
+        { worksetId, expectedWorksetHash: digest(unsupported), indexes, acceptPolicyChange: true, parallelism: 2 })),
+    ];
+    for (const call of calls) {
+      await assert.rejects(call(), { code: 'INVALID_WORKFLOW' });
+      assert.equal(await fs.readFile(file, 'utf8'), unsupported);
+      assert.deepEqual(await snapshotClaims(), claims);
+    }
+    await fs.writeFile(file, original);
+    const resumed = await prepareWorksetBatch(f.capability, { ...args, expectedWorksetHash: digest(original) });
+    assert.equal(resumed.workset.chargedBatches, 1);
+  });
 });
 
 
