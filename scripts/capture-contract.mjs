@@ -13,14 +13,12 @@ export function clientVersion(value) {
   catch { fail('INVALID_SESSION_CLIENT_VERSION'); }
 }
 
-// Preserve existing immutable captures without mistaking header provenance for
-// the version that emitted every record in a resumed session.
+// Header provenance is not the version that emitted every record in a resumed session.
 export function captureReader(reader) {
-  keys(reader, ['name', 'version'], ['clientVersion', 'headerClientVersion']);
+  keys(reader, ['name', 'version', 'headerClientVersion']);
   for (const field of ['name', 'version']) string(reader[field], 128);
-  if (Object.hasOwn(reader, 'clientVersion') === Object.hasOwn(reader, 'headerClientVersion')) fail('INVALID_CAPTURE_READER');
   return { name: reader.name, version: reader.version,
-    headerClientVersion: clientVersion(reader.headerClientVersion ?? reader.clientVersion) };
+    headerClientVersion: clientVersion(reader.headerClientVersion) };
 }
 
 export function logicalCaptureIdentity(value) {

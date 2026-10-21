@@ -202,8 +202,8 @@ handled. Inspect any surviving operation before continuing. Only a subsequent
 explicit run that passes admission with a new request ID creates a replacement
 native session; the abandoned request can never dispatch again.
 `offline: true` records the operator's confirmation that both the controller and
-native child are stopped, including for older records with no saved owner. It is
-not a model-selected retry flag.
+native child are stopped. The saved controller identity must be present and
+verified stopped; this is not a model-selected retry flag.
 
 The installed `cuefluent_control` MCP server exposes these strict tools:
 
@@ -755,7 +755,7 @@ conflict stops those input checks. Collection-wide transaction, writer, intake a
 blockers suppress actionable hints. A fully inspected packet asks for a proposal
 **or a disposition**; inspection alone implies no new knowledge. `selection`,
 `claimHash`, and exact public `inputs` are top-level fields. Inventory omits the
-legacy detailed `claim` projection returned by status; consumers should use the
+detailed `claim` projection returned by status; consumers should use the
 public fields, not depend on private packet layout.
 Malformed or changing metadata returns an error rather than a successful empty list.
 Errors from a selected operation include its validated `operationId` for targeted
@@ -1189,9 +1189,9 @@ is not included.
 
 | Setup error | Meaning and next step |
 | --- | --- |
-| `WORKFLOW_CONFIG_SELECTION_REQUIRED` | Both implicit defaults name different settings files. Inspect and select the intended settings for the command; hooks also need the client environment override described in [setup](setup.md#windows-storage-selection). Never merge or delete stores automatically. |
+| `WORKFLOW_CONFIG_SELECTION_REQUIRED` | Earlier default settings exist without the same profile-default identity. Inspect and select the intended settings for the command; hooks also need the client environment override described in [setup](setup.md#windows-storage-selection). Never merge or delete stores automatically. |
 | `WORKFLOW_CONFIG_UNAVAILABLE` | A selected/default path is unsafe, unreadable or changed during inspection. Do not treat it as absent and create another configuration. |
-| `LOCAL_STATE_LOCATION_REQUIRED` | Required local path facts are missing or the only fresh candidate is a network profile. No fallback store is selected. |
+| `LOCAL_STATE_LOCATION_REQUIRED` | Required local path facts are missing or the implicit profile is a network location. No fallback store is selected. |
 | `PRIVATE_PROFILE_UNVERIFIED` / `PRIVATE_PROFILE_UNSAFE` | Native profile policy cannot be established or is unsupported for the private location. Preserve settings and data; inspect profile policy rather than enabling capture or relaxing checks. |
 | `PRIVATE_CONTENT_INDEXING_REQUIRED` | A private profile path lacks NotContentIndexed. Verification does not repair existing files; review storage before continuing. This is separate from an optional raw-folder visibility warning. |
 | `WINDOWS_EXISTING_SETTINGS` | Implicit fresh setup found other settings. Inspect their paths before explicitly selecting an existing setup or a disjoint new one. |

@@ -36,8 +36,8 @@ function validate(value, ctx, worksetId) {
   references(value.inputs); budget(value.budget);
   if (value.unscannedRemainder !== null && typeof value.unscannedRemainder !== 'boolean') fail('INVALID_PROCESSING_WORKSET');
   list(value.attempts, value.budget.maxBatches).forEach(attempt => {
-    keys(attempt, ['operationId', 'indexes', 'packetHash', 'packetBytes'], ['policyHash']);
-    if (attempt.policyHash !== undefined) hash(attempt.policyHash);
+    keys(attempt, ['operationId', 'indexes', 'packetHash', 'packetBytes', 'policyHash']);
+    hash(attempt.policyHash);
     nativeId(attempt.operationId); hash(attempt.packetHash); integer(attempt.packetBytes);
     if (attempt.packetBytes < 1 || attempt.packetBytes > PROCESSING_PACKET_BYTES ||
         !equal(indexesOf(attempt.indexes, value.inputs), attempt.indexes) || attempt.operationId !== worksetOperationId(worksetId, attempt.indexes)) fail('INVALID_PROCESSING_WORKSET');
@@ -94,7 +94,7 @@ export async function prepareWorksetBatch(capability, { worksetId, expectedWorks
     const operationId = worksetOperationId(worksetId, indexes), attempt = value.attempts.find(item => item.operationId === operationId);
     // Only a genuinely new batch may accept fresh policy. Previously charged
     // admissions keep their exact policy even if no claim was published yet.
-    const admissionPolicyHash = attempt?.policyHash ?? value.policyHash;
+    const admissionPolicyHash = attempt ? attempt.policyHash : value.policyHash;
     if (admissionPolicyHash !== ctx.policyHash && (attempt || !acceptPolicyChange)) fail('WORKFLOW_POLICY_CHANGED');
     // A pre-claim crash retains the already selected workload as well as its hash.
     if (attempt && batchBudget === undefined) limits = { maxInputs: indexes.length, maxPacketBytes: attempt.packetBytes };
@@ -141,7 +141,7 @@ async function inspectInputStates(ctx, inputs, policyHash, operations = [], atte
     const changed = (await intakeSnapshot(ctx.store, 'state', `heads/${unitKey(input.identity)}.json`)).hash !== input.headHash;
     const pruned = Boolean(await readTombstone(ctx.store, input.identity));
     const attempt = attempts.find(item => item.indexes.includes(index));
-    const blocked = (attempt?.policyHash ?? policyHash) !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
+    const blocked = (attempt ? attempt.policyHash : policyHash) !== ctx.policyHash ? 'WORKFLOW_POLICY_CHANGED' : pruned ? 'CAPTURE_PRUNED' : changed ? 'PROCESSING_HEAD_CHANGED'
       : (owner ? owners[0].bindingChanged : bindingConflict) ? 'PROCESSING_BINDING_CHANGED' : owner && owner.operationId !== operation?.operationId ? 'PROCESSING_INPUT_CLAIMED' : null;
     const elsewhere = done && done.operationId !== operation?.operationId;
     // Input disposition is current; operation outcomes remain historical. A
@@ -171,7 +171,7 @@ export async function inspectProcessingWorkset(capability, { worksetId }) {
   const operations = [], collectionBlockers = await processingCollectionBlockers(ctx);
   for (const attempt of value.attempts) {
     const { claim, ...status } = await describeProcessingOperation(ctx, attempt.operationId, {
-      selection: value.selection, policyHash: attempt.policyHash ?? value.policyHash, inputs: attempt.indexes.map(index => value.inputs[index]),
+      selection: value.selection, policyHash: attempt.policyHash, inputs: attempt.indexes.map(index => value.inputs[index]),
       packetHash: attempt.packetHash, packetBytes: attempt.packetBytes,
     }, collectionBlockers);
     operations.push({ ...status, indexes: attempt.indexes, admissionPending: status.state === 'missing' });

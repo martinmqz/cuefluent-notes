@@ -26,12 +26,12 @@ async function fixture(t, { processed = true, terminal = 'completed', base = nul
     start: { id: 'start', startByte: 200, endByte: 220, hash: digest('x'.repeat(20)) },
     end: { id: 'end', startByte: 280, endByte: 300, hash: digest('x'.repeat(20)) }, nativeOrder: null };
   const request = { id: randomUUID(), operation: 'capture-current', client: 'codex', sessionId, unitId,
-    expectedRevision: 0, scope: { unitIds: [unitId], start: proof.start, end: null } };
+    expectedRevision: 0, scope: { unitIds: [unitId], start: proof.start, end: null, contentHash: proof.start.hash } };
   const selection = await withIntakeLock(store, tx => controlSelection(tx, { source, request, expectedHash: null, authorize: allow }));
   const identity = { client: 'codex', sessionId, unitId };
   const range = { startByte: 220, endByte: 280, recordIds: ['message'] };
   const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity, projectRoot: f.project,
-    source: { path: source.path, fileIdentity: source.fileIdentity, ranges: [range] }, reader: { name: 'fixture', version: '1', clientVersion: 'fixture' },
+    source: { path: source.path, fileIdentity: source.fileIdentity, ranges: [range] }, reader: { name: 'fixture', version: '1', headerClientVersion: 'fixture' },
     occurredAt: stamp, capturedAt: stamp, terminal, coverage: { partial: terminal !== 'completed', omissions: [] },
     evidence: [{ kind: 'user', recordId: 'message', range, text: 'Synthetic decision: keep private evidence.' }] });
   const scan = { from: { sourceIdentity: source.fileIdentity, offset: 200, anchor: null },
@@ -135,7 +135,7 @@ test('accounting can cite exact pruned revision ranges without recreating their 
   const selection = await readSelection(f.store, f.identity), id = randomUUID();
   const scoped = await withIntakeLock(f.store, tx => controlSelection(tx, { source: f.source, expectedHash: selection.hash, authorize: allow,
     request: { id, operation: 'capture-historical', client: 'codex', sessionId: S, expectedRevision: selection.state.revision,
-      scope: { unitIds: [U], start: f.args.proof.start, end: f.args.proof.end } } }));
+      scope: { unitIds: [U], start: f.args.proof.start, end: f.args.proof.end, contentHash: digest('x'.repeat(100)) } } }));
   const args = { identity: { client: 'codex', sessionId: S }, scopeId: id, selectionHash: scoped.hash, cursorHash: null, authorize: allow,
     scan: { ...f.args.scan, accounted: [{ kind: 'structural', startByte: 200, endByte: 220 },
       { kind: 'published', startByte: 220, endByte: 280, unitId: U, evidenceHash: f.capture.evidenceHash, fileHash: 'f'.repeat(64) },

@@ -32,7 +32,7 @@ paths:
 # Distribution and releases
 
 `scripts/install.mjs`, `scripts/package*.mjs`, `scripts/release*.mjs`,
-`scripts/publish-marketplace.sh`, `scripts/marketplace-notice.sh`,
+`scripts/publish-marketplace.sh`,
 `scripts/check-release-source.sh`, `packaging/`, and `.github/workflows/` implement
 installation, packages, releases, and CI.
 Follow [distribution](/references/distribution.md) and

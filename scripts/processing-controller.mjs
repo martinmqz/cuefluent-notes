@@ -161,7 +161,7 @@ export async function openProcessingController(context, dependencies = {}) {
       return { ...target, state: inspected.state, outcome: inspected.outcome, recoveryRequired: inspected.recoveryRequired === true };
     },
     verifyAbort: async target => abortProven && target.requestId === requestId,
-    verifyAbandon: async owner => !owner || !await ownerMayBeLive({ owner }),
+    verifyAbandon: async owner => !await ownerMayBeLive({ owner }),
     verifyRestart: async view => (await publicState(view)).state === 'idle',
     verifyAdvance: async target => {
       if (target.requestId !== requestId || target.worksetId !== requestWorksetId) return false;
@@ -188,7 +188,6 @@ export async function openProcessingController(context, dependencies = {}) {
   }
   async function ownerMayBeLive(active) {
     const owner = active.owner;
-    if (!owner) return true;
     const self = await ownProcessIdentity();
     if (owner.pid === process.pid && knownControllers.has(owner.controllerId) && owner.hostname === self.hostname && owner.boot === self.boot && owner.processStart === self.processStart) {
       return liveControllers.has(owner.controllerId);

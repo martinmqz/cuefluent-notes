@@ -85,20 +85,22 @@ The Markdown destination remains a separate user choice. The same resolver is us
 by setup, the CLI and hooks; installation does not create this storage.
 
 An explicit `--config` takes precedence over `CUEFLUENT_WORKFLOW_CONFIG`.
-Without either override, an existing old
-`%LOCALAPPDATA%\CuefluentNotes\workflow.json` stays selected when the new default
-is absent. If both default files exist as distinct objects, the helper reports
-`WORKFLOW_CONFIG_SELECTION_REQUIRED`; inspect them and explicitly select the
-intended settings. `--config` selects only that command, not future hooks.
-While both defaults exist, commands that need workflow settings and hook collection
-require an explicit selection. For hooks, `CUEFLUENT_WORKFLOW_CONFIG` must be present
-in the launching client's environment.
+Without either override, the only default is the local profile's
+`.cuefluent-notes\workflow.json`. Settings at the earlier
+`%LOCALAPPDATA%\CuefluentNotes\workflow.json` location are never selected
+automatically. If that file exists as a different object from the profile
+settings, including when the profile settings are absent, the helper reports
+`WORKFLOW_CONFIG_SELECTION_REQUIRED`. Inspect the settings and explicitly select
+the intended path. This prevents an implicit second setup while preserving the
+existing files; it does not import them.
+
+`--config` selects only that command, not future hooks. For hooks,
+`CUEFLUENT_WORKFLOW_CONFIG` must be present in the launching client's environment.
 Verify the value in that client context; setting it in a separate terminal does
-not establish what Desktop hooks inherit. Creating an explicit disjoint setup at
-the other default location introduces this ambiguity for existing hooks too.
-Equal contents do not make two stores interchangeable. Errors
-or unreadable paths are not treated as missing settings. A network profile cannot
-become the new default; an existing local setup remains selectable.
+not establish what Desktop hooks inherit. Equal contents do not make two stores
+interchangeable. Errors or unreadable paths are not treated as missing settings.
+A network profile cannot be the default; select an explicit supported local path
+instead. Custom paths still undergo the normal storage and overlap checks.
 
 Before a fresh setup or ownership change, the helper checks known old/new defaults
 and package-cache locations for conflicting settings. Incomplete discovery blocks
@@ -135,7 +137,7 @@ indexer or synchronization tool.
 Use the complete configuration described by [session-workflow](session-workflow.md)
 and the synthetic [example](../examples/workflow.json). `defaults` with a collection
 ID suggests platform-specific private paths for a fresh collection. Never use
-those defaults to replace existing bindings during an upgrade.
+those defaults to replace existing bindings.
 The user selects the Markdown location;
 private raw/intake/writer storage uses machine-local paths outside projects, notes,
 and the plugin. Do not place private state in a sync folder or the repository.
@@ -176,42 +178,27 @@ or per-session writers. A custom raw directory does not relocate intake state.
 
 ## Existing settings
 
-Keep all client plugins/helpers sharing a store on the same released version.
-Inspect the selected settings through `workflow.mjs status` before choosing a
-setup path:
+Inspect the selected settings through `workflow.mjs status`. A recognized
+configuration uses `format: "cuefluent-workflow"` with collections and routes.
+Preserve its paths and independent collection and processing choices. Missing,
+ambiguous, invalid or unsupported settings require inspection; do not infer from
+a filename or failed status command that fresh setup is appropriate.
 
-- **Recognized workflow settings** use `format: "cuefluent-workflow"` with
-  collections and routes. Preserve them and follow the upgrade steps below.
-- **Legacy capture settings only**, without a recognized workflow configuration,
-  require fresh setup with separate collection and processing consent. Preserve
-  the old settings and files without importing them.
+Only current formats are supported. There is no legacy import, migration, or
+mixed-version operation. Unsupported stored formats are refused; configuration
+recognition alone does not establish that every capture or processing record is
+supported. Preserve existing captures, drafts, notes, settings and active
+operations when a format is refused. Do not rewrite them, reset storage, or
+create another writer to bypass the refusal.
 
-An unexpectedly missing, ambiguous, invalid or unsupported configuration needs
-inspection before setup. A filename, installed plugin version or failed status
-command does not establish that the settings are legacy.
-
-For recognized workflow settings:
-
-1. Stop collection entrypoints and processing, close affected client sessions,
-   and let their running workers and processing clients finish before replacing
-   packages. Preserve unfinished operations; do not delete claims, locks or journals.
-2. Keep the inspected workflow settings, storage paths, notes and consent choices.
-   Do not rerun fresh setup or move storage unless the selected release explicitly
-   requires it.
-3. Update every client plugin and standalone helper using that collection to
-   the selected release before any of them resumes access, including Codex and
-   Claude when used. A worker can process registrations from either client.
-4. Start fresh client sessions. Review hook or `cuefluent_control` MCP registration
-   and permission changes when prompted, then inspect existing operations and
-   resume them through their supported processing/recovery commands.
-
-Review the [storage compatibility boundaries](#storage-compatibility) below and
-the selected release notes for any additional changes. Configuration recognition
-does not prove that older helpers can read newer captures, reader caches or
-processing state. A patch does not necessarily introduce a new storage boundary.
-Preserve existing immutable captures, packets and active operations; do not
-rebuild them or discard state to bypass a revision conflict. See
-[processing recovery](processing.md#outcomes-and-recovery).
+Before replacing a package, stop collection entrypoints and processing, close
+affected client sessions, and let running workers and processing clients finish.
+Keep every plugin and standalone helper sharing a collection on the same version
+before any resumes access. Preserve claims, locks, journals and unfinished work.
+Start fresh client sessions after replacement and inspect hook and MCP
+registration. Installation grants neither consent nor hook trust. For supported
+interrupted operations, use [processing recovery](processing.md#outcomes-and-recovery);
+that recovery does not migrate unsupported formats.
 
 Both hook and manual packages include the MCP server. It starts when loaded by
 the client; an explicit `process` request can launch or resume a restricted native
@@ -240,14 +227,12 @@ For Windows storage changes, follow
 [Windows storage selection](#windows-storage-selection) and preserve existing
 paths and consent; the profile default is not a migration.
 
-An upgrade does not rerun storage preparation. Existing Windows collections keep
-their visibility until an explicit `storage-prepare`; offer that operation when
-the user wants an existing raw folder hidden. Existing macOS/Linux `raw` folders
-keep their names and visibility. Do not replace an existing collection's paths
-with new defaults: preparation refuses a missing raw root paired with nonempty
-intake state (`PRIVATE_SETUP_CONFLICT`). Restore the original raw/state pairing
-after lost settings, or select fresh paths for a separate collection. Moving an
-existing collection needs a separately authorized migration.
+Package replacement does not rerun storage preparation or change visibility.
+Use an explicit `storage-prepare` only when requested, such as hiding a configured
+Windows raw folder. Keep existing names and paths: preparation refuses a missing
+raw root paired with nonempty intake state (`PRIVATE_SETUP_CONFLICT`). Preserve
+the original raw/state pairing after lost settings. Moving an existing
+collection is not supported; new paths do not recover its state.
 
 Preparation holds the shared intake lock through the empty-state check and raw
 folder setup. An active or unfamiliar owner blocks preparation (`INTAKE_BLOCKED`).
@@ -271,54 +256,15 @@ mixed-version operation. Old settings are not permission to enable new collectio
 
 ### Storage compatibility
 
-The following historical boundaries still matter when skipping releases. Keep
-all helpers sharing a collection on the same release, including both clients
-when used; a worker can process registrations from either client.
+The current capture readers are `codex-rollout/7` and `claude-transcript/2`.
+Extraction refuses other capture reader versions instead of replaying historical
+rules or silently reinterpreting evidence. Native transcript formats supported by
+those readers remain described in [session-workflow](session-workflow.md).
 
-The release after v0.15.1 publishes new Codex captures with reader version 5,
-which knows the `capture`, `pause chat` and `resume chat` actions. It also
-records a content hash with every explicit capture, typed or through the CLI, in
-either client. Helpers through v0.15.1 know neither: they fail when they re-read
-a turn captured with version 5, and fail on every read of a chat's capture state
-once that chat has such a capture, including status and collection visits.
-Upgrade every helper sharing the collection together; downgrading after either
-exists is unsupported.
-Version 1-4 captures keep their own rules and replay unchanged.
-
-v0.15.1 adds retained-draft transfer state and the shared writer's
-`reinspection.json` reservation. Helpers through v0.15.0 do not enforce that
-reservation and can write notes or perform maintenance during a pending transfer.
-Upgrade every shared helper before using
-[draft reinspection](processing.md#reinspect-a-retained-draft-after-storage-changes).
-Mixed-version access and downgrading after using this state are unsupported;
-preserve the reservation and finish or safely abandon the exact transfer with
-the matching helper.
-
-v0.15.0 adds private shortcut checkpoints and control receipts, plus collection-wide
-ownership checks for native processing. Earlier helpers do not implement these
-controls. Mixed-version access and downgrading after using them are unsupported.
-Plain `process` also changed from chat scope to bounded collection scope; use
-`process chat` for the previous scope and follow
-[shortcut continuation](processing-chat.md#shortcut-scopes-and-continuation)
-for unfinished selections and later backlog portions.
-
-v0.13.0 changed reader rules, including Claude reader-rules revision 2, Codex
-per-kind tool budgets and verified processing-control exclusions, and added
-processing state for worksets and reusable chats. Old and new helpers can produce
-different capture revisions or disagree about that state. Mixed-version access
-across this boundary, and downgrading a collection written by v0.13.0 or later to
-a version before v0.13.0, are unsupported.
-
-The v0.9.0 format change also applies when upgrading directly from v0.8.0.
-Current readers accept v0.8.0 captures, but write `reader.headerClientVersion`
-provenance and version-2 suspensions with `readerRulesRevision`; v0.8.0 rejects
-these formats. Mixed-version access and downgrading a collection used by v0.9.0
-or later to v0.8.0 are unsupported. Existing immutable capture bytes are preserved;
-reader caches can be replaced under the current reader's rules.
-
-Preserve immutable captures, packets and active operations across these upgrades.
-Do not rebuild or discard them to bypass a conflict; use
-[processing recovery](processing.md#outcomes-and-recovery).
+Stored hashes, paths, claims and writer reservations remain integrity boundaries.
+Use supported commands for interrupted processing and retained-draft reinspection;
+do not rebuild or discard state to bypass a conflict. This is current-operation
+recovery, not an upgrade or downgrade path.
 
 ## Boundaries and diagnostics
 

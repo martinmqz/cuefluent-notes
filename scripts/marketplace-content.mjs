@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { repositoryCommand } from './repository-command.mjs';
 import { archiveFiles, pluginZip } from './release-archives.mjs';
 import { MARKETPLACE_PATHS, MARKETPLACE_PLUGINS, isMarketplaceFile, isMarketplaceSnapshotFile } from './marketplace-layout.mjs';
-import { checkReleaseTag, stableVersionParts } from './release-policy.mjs';
+import { checkReleaseTag } from './release-policy.mjs';
 import { compare, isMain } from './file-io.mjs';
 import { INVENTORY_FILE, verifyPackageFiles } from './package-integrity.mjs';
 import { validateManifestPair } from './plugin-manifest.mjs';
@@ -59,8 +59,6 @@ function verifyMarketplace(files, tag, archiveMatches) {
   };
   const release = read('release.json');
   checkReleaseTag(release.version, tag ?? `v${release.version}`);
-  const [major, minor] = stableVersionParts(release.version);
-  const inventoryRequired = major > 0n || minor >= 11n; // Introduced in 0.11.0.
   const packages = [];
   for (const { client, root, catalog } of MARKETPLACE_PLUGINS) {
     const manifest = read(`${root}/.${client}-plugin/plugin.json`);
@@ -80,25 +78,18 @@ function verifyMarketplace(files, tag, archiveMatches) {
       throw new Error(`${client}: marketplace package does not match its published hooks-ZIP digest.`);
     }
     const inventory = pluginFiles.find(file => file.name === INVENTORY_FILE);
-    if (inventoryRequired || inventory || archives[0].inventorySha256 !== undefined) {
-      if (!inventory || typeof archives[0].inventorySha256 !== 'string') throw new Error(`${client}: invalid package inventory.`);
-      const verified = verifyPackageFiles(pluginFiles, { expectedInventorySha256: archives[0].inventorySha256 });
-      if (!verified.trustedReleaseVerified) throw new Error(`${client}: invalid package inventory.`);
-      if (verified.client !== client || verified.version !== release.version || verified.variant !== 'hooks') throw new Error(`${client}: package inventory identity differs from marketplace release.`);
-      if (client === 'claude' && entries[0].description !== manifest.description) throw new Error('Claude catalog description differs from plugin manifest.');
-      if (client === 'claude' && entries[0].license !== manifest.license) throw new Error('Claude catalog license differs from plugin manifest.');
-    }
-    packages.push({ manifest, files: pluginFiles, inventory: Boolean(inventory) });
+    if (!inventory || typeof archives[0].inventorySha256 !== 'string') throw new Error(`${client}: invalid package inventory.`);
+    const verified = verifyPackageFiles(pluginFiles, { expectedInventorySha256: archives[0].inventorySha256 });
+    if (!verified.trustedReleaseVerified) throw new Error(`${client}: invalid package inventory.`);
+    if (verified.client !== client || verified.version !== release.version || verified.variant !== 'hooks') throw new Error(`${client}: package inventory identity differs from marketplace release.`);
+    if (client === 'claude' && entries[0].description !== manifest.description) throw new Error('Claude catalog description differs from plugin manifest.');
+    if (client === 'claude' && entries[0].license !== manifest.license) throw new Error('Claude catalog license differs from plugin manifest.');
+    packages.push({ manifest, files: pluginFiles });
   }
-  // Releases before 0.11.0 without inventories keep their original digest contract.
-  // Do not reconstruct old releases using today's source-file selection policy.
-  if (packages.some(pkg => pkg.inventory)) {
-    if (!packages.every(pkg => pkg.inventory)) throw new Error('Both client packages must include inventories.');
-    validateManifestPair(packages[0].manifest, packages[1].manifest);
-    const shared = pkg => pkg.files.filter(file => file.name.startsWith('skills/cuefluent-notes/'));
-    const left = shared(packages[0]), right = shared(packages[1]);
-    if (left.length !== right.length || left.some((file, index) => file.name !== right[index].name || !file.bytes.equals(right[index].bytes))) throw new Error('Shared client package contents differ.');
-  }
+  validateManifestPair(packages[0].manifest, packages[1].manifest);
+  const shared = pkg => pkg.files.filter(file => file.name.startsWith('skills/cuefluent-notes/'));
+  const left = shared(packages[0]), right = shared(packages[1]);
+  if (left.length !== right.length || left.some((file, index) => file.name !== right[index].name || !file.bytes.equals(right[index].bytes))) throw new Error('Shared client package contents differ.');
   return release;
 }
 

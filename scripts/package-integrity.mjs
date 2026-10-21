@@ -93,7 +93,7 @@ export function verifyPackageFiles(files, { expectedInventorySha256 } = {}) {
     if (byName.has(file.name)) fail('Duplicate package file.');
     byName.set(file.name, file.bytes);
   }
-  if (!byName.has(INVENTORY_FILE)) fail('Package inventory is missing; older packages require their original release verification.');
+  if (!byName.has(INVENTORY_FILE)) fail('Package inventory is missing.');
   const bytes = byName.get(INVENTORY_FILE), inventory = parseInventory(bytes), inventorySha256 = sha(bytes);
   const missing = [], changed = [], unexpected = [];
   const expected = new Set(inventory.files.map(entry => entry.path));
@@ -157,7 +157,7 @@ export async function verifyPackage(root, options = {}) {
   // Validate the bounded record before enumerating a mistakenly selected notes,
   // settings or other non-package directory. No inventory means no payload reads.
   const inventory = await readBoundedBytes(path.join(root, INVENTORY_FILE), { missing: true, maxBytes: MAX_INVENTORY_BYTES, noFollow: true, utf8: false });
-  if (inventory === null) fail('Package inventory is missing; older packages require their original release verification.');
+  if (inventory === null) fail('Package inventory is missing.');
   parseInventory(inventory);
   const { files, ignored } = await readPackageFiles(root, { ignoreHostFiles: true });
   const after = await fs.lstat(root, { bigint: true });

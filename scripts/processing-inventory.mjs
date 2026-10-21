@@ -79,7 +79,7 @@ export async function pendingProcessing(capability, { selection, limit = 20, aft
   for (const { claim, hash: discoveredHash } of claims.filter(item => item.claim.inputs.some(input => selectionIncludesIdentity(selection, input.identity)))) {
     const detail = await describeProcessingOperation(ctx, claim.operationId, null, collectionBlockers);
     if (detail.claim?.claimHash !== discoveredHash) fail('PROCESSING_INVENTORY_CHANGED');
-    const { claim: legacyClaim, ...view } = detail;
+    const { claim: detailedClaim, ...view } = detail;
     operations.push({ ...view, acknowledgedPages: detail.inspection?.acknowledgedPages ?? null,
       totalPages: detail.inspection?.totalPages ?? null });
   }

@@ -10,16 +10,12 @@ const fields = (value, names) => object(value) && Object.keys(value).length === 
 
 /** Validate the manifest subset emitted by this package, not the full host schema. */
 export function validatePluginManifest(manifest, client) {
-  // Older published packages legitimately lack the controller. Validate their
-  // inventories without making them claim the new capability.
-  const hasMcp = object(manifest) && Object.hasOwn(manifest, 'mcpServers');
-  const hasLicense = object(manifest) && Object.hasOwn(manifest, 'license');
-  const common = ['name', 'version', 'description', 'author', ...(hasMcp ? ['mcpServers'] : []), ...(hasLicense ? ['license'] : [])];
+  const common = ['name', 'version', 'description', 'author', 'mcpServers', 'license'];
   const validCommon = CLIENTS.includes(client) && fields(manifest, client === 'codex' ? [...common, 'skills', 'interface'] : common) &&
     manifest.name === 'cuefluent-notes' && text(manifest.version) && manifest.version === manifest.version.trim() && semver.test(manifest.version) &&
     text(manifest.description) && fields(manifest.author, ['name']) && text(manifest.author.name) &&
-    (!hasMcp || manifest.mcpServers === './.mcp.json') &&
-    (!hasLicense || (text(manifest.license) && manifest.license === manifest.license.trim()));
+    manifest.mcpServers === './.mcp.json' &&
+    text(manifest.license) && manifest.license === manifest.license.trim();
   let validInterface = true;
   if (validCommon && client === 'codex') {
     const labels = ['displayName', 'shortDescription', 'longDescription', 'developerName', 'category'];

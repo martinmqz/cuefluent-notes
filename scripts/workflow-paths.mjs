@@ -50,16 +50,14 @@ async function defaultCandidate(file) {
 
 /** Native metadata only. Separate path facts keep this shared by hooks and CLI. */
 export async function resolveWindowsConfig({ oldConfig, newConfig }) {
+  // A network profile cannot become the default, and an earlier location is
+  // never silently adopted. An explicit local path remains a separate choice.
+  if (newConfig.startsWith('\\\\')) fail('LOCAL_STATE_LOCATION_REQUIRED');
   const old = await defaultCandidate(oldConfig);
-  // A network profile is not a fresh storage candidate. Keep a healthy old
-  // LocalAppData selection available without inspecting the network profile.
-  if (newConfig.startsWith('\\\\')) {
-    if (old) return oldConfig;
-    fail('LOCAL_STATE_LOCATION_REQUIRED');
-  }
   const current = await defaultCandidate(newConfig);
-  if (old && current && !sameFileIdentity(old.stat, current.stat)) fail('WORKFLOW_CONFIG_SELECTION_REQUIRED');
-  return current || !old ? newConfig : oldConfig;
+  // Earlier settings still prevent an implicit empty setup or another writer.
+  if (old && (!current || !sameFileIdentity(old.stat, current.stat))) fail('WORKFLOW_CONFIG_SELECTION_REQUIRED');
+  return newConfig;
 }
 
 export async function resolveWorkflowConfig({ platform = process.platform, home = os.homedir(), env = process.env, explicit } = {}) {
@@ -76,8 +74,8 @@ export async function workflowDefaults({ platform = process.platform, home = os.
   if (collectionId === undefined) return { configPath };
   let base;
   if (platform === 'win32') {
-    // Keep new suggestions with the selected settings, including aliases of an
-    // old store and explicit custom configs. Never create orphan default state
+    // Keep new suggestions with the selected settings, including aliases and
+    // explicit custom configs. Never create orphan default state
     // elsewhere merely because the caller selected a different settings path.
     base = api.dirname(configPath);
   } else {

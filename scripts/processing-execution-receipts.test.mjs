@@ -156,17 +156,30 @@ test('request lookup refuses mismatched native identity, altered metadata and co
   await fs.writeFile(requestFile, requestBytes);
   await fs.writeFile(unitFile, canonicalJSON({ ...JSON.parse(unitBytes), recordsHash: digest('altered native bytes') }) + '\n');
   await assert.rejects(find(), { code: 'PROCESSING_EXECUTION_CONFLICT' });
+  await assert.rejects(withIntakeLock(f.store, tx => createProcessingExecutionResolver(tx,
+    { source: f.source, authorize: async () => true })(f.query)), { code: 'PROCESSING_EXECUTION_CONFLICT' });
   assert.deepEqual(await fs.readFile(requestFile), requestBytes);
 });
 
-test('earlier unit-only receipts remain readable without migration or rewriting', async t => {
+test('unit-only receipts grant no recovery or collection exclusion and are never migrated', async t => {
   const f = await fixture(t); await f.callbacks.afterExecution({ ...f.context, result: { unitId: f.uid } });
   const requestFile = path.join(f.collection.intakeStateDir, 'processing-execution-requests', 'codex', f.sid, `${f.context.requestId}.json`);
   const unitFile = path.join(f.collection.intakeStateDir, 'processing-executions', 'codex', f.sid, `${f.uid}.json`);
   const bytes = await fs.readFile(unitFile); await fs.unlink(requestFile);
+  const directory = path.dirname(unitFile), opendir = fs.opendir;
+  t.mock.method(fs, 'opendir', (file, ...args) => {
+    assert.notEqual(file, directory, 'missing request authority must not trigger a unit-history scan');
+    return opendir(file, ...args);
+  });
   const recovered = await reconcileCompletedProcessingExecution({ capability: f.capability, session: f.context.session,
     request: { requestId: f.context.requestId, inputHash: f.context.inputHash, selection: f.selection } });
-  assert.equal(isProcessingExecutionProof(recovered.proof), true);
+  assert.equal(recovered, null);
+  await withIntakeLock(f.store, async tx => {
+    const resolver = createProcessingExecutionResolver(tx, { source: f.source, authorize: async () => true });
+    assert.equal(await resolver(f.query), null);
+    assert.equal(await verifyProcessingExecution(f.request, { resolveExecution: resolver }), null);
+  });
+  await assert.rejects(f.callbacks.afterExecution({ ...f.context, result: { unitId: f.uid } }), { code: 'PROCESSING_EXECUTION_CONFLICT' });
   assert.deepEqual(await fs.readFile(unitFile), bytes);
   await assert.rejects(fs.stat(requestFile), { code: 'ENOENT' });
 });
@@ -211,7 +224,8 @@ test('sealed execution is excluded on later selected collection while immutable 
   await withIntakeLock(selectedStore, async tx => {
     const selected = await controlSelection(tx, { source: f.source, expectedHash: null, authorize,
       request: { id: scopeId, client: 'codex', sessionId: f.sid, expectedRevision: 0, operation: 'capture-historical',
-        scope: { unitIds: [f.uid], start: f.anchors[0], end: f.anchors.at(-1) } } });
+        scope: { unitIds: [f.uid], start: f.anchors[0], end: f.anchors.at(-1),
+          contentHash: digest((await fs.readFile(f.source.path)).subarray(f.anchors[0].startByte, f.anchors.at(-1).endByte)) } } });
     const result = await readCodexSelection({ state: selected.state, scopeId,
       loadHead: unitId => readCaptureHead(selectedStore, { client: 'codex', sessionId: f.sid, unitId }),
       resolveProcessingExecution: createProcessingExecutionResolver(tx, { source: f.source, authorize }) });

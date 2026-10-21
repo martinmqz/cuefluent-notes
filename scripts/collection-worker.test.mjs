@@ -542,7 +542,8 @@ test('explicit historical and automatic selections survive a deterministic worke
   const explicitId = randomUUID(), store = await openWorkflowIntake(f.capability, { client: 'codex', sessionId: S, cwd: f.project }, 'collect');
   await withIntakeLock(store, tx => controlSelection(tx, { source: observed.source, expectedHash: null, authorize: async () => true,
     request: { id: explicitId, client: 'codex', sessionId: S, operation: 'capture-historical', expectedRevision: 0,
-      scope: { unitIds: [C], start: anchors[1], end: anchors.at(-1) } } }));
+      scope: { unitIds: [C], start: anchors[1], end: anchors.at(-1),
+        contentHash: digest(Buffer.from(content).subarray(anchors[1].startByte, anchors.at(-1).endByte)) } } }));
   await collectionIngress('codex', f.payload, f.options);
   await fs.appendFile(f.source, turn(A, 'New boundary') + turn(B, 'New automatic evidence'));
   // Expire the default ten-second budget after automatic publication, when the
@@ -1024,19 +1025,11 @@ test('hook routing and worker arming accept an existing project directory alias'
   assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state.source.projectRoot, f.project);
 });
 
-for (const staleCache of [
-  { version: 1 },
-  { version: 2 }, // Same shape, before reader-owned revisions were introduced.
-  { version: READER_SUSPENSION_VERSION, readerRulesRevision: 0 },
-  { version: READER_SUSPENSION_VERSION + 1, futureCacheField: true },
-]) test(`stale Claude suspension ${JSON.stringify(staleCache)} is retried inside the original pause ceiling`, async t => {
+async function pausedClaudeSuspensionFixture(t) {
   const { controlCapture } = await import('./test-support/capture-workflow.mjs');
-  const { suspendedPath, publishIngressMetadata } = await import('./collection-ingress.mjs');
-  const { replaceIntakeJSON } = await import('./intake-io.mjs');
-  const { CLAUDE_READER_RULES_REVISION } = await import('./claude-reader.mjs');
   const f = await fixture(t), P = randomUUID(), later = randomUUID(); let previous = null;
-  const message = (type, text, promptId, version = '2.1.280') => {
-    const record = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version,
+  const message = (type, text, promptId) => {
+    const record = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version: '2.1.280',
       isSidechain: false, cwd: f.project, message: { role: type, content: text }, ...(promptId ? { promptId } : {}) };
     previous = record.uuid; return JSON.stringify(record) + '\n';
   };
@@ -1044,41 +1037,82 @@ for (const staleCache of [
   await fs.writeFile(f.source, message('system', ''));
   await collectionIngress('claude', payload, f.options);
   await fs.appendFile(f.source, message('user', 'Boundary', A)); await f.run();
-  await fs.appendFile(f.source, message('user', 'Meeting decision after client update', B, '2.1.282') + message('user', 'Pause now', P, '2.1.282'));
+  await fs.appendFile(f.source, message('user', 'Meeting decision', B) + message('user', 'Pause now', P));
   const selected = await readSelection(f.store, identity);
   const paused = await controlCapture(f.capability, { selection: { ...identity, cwd: f.project, unitId: P }, sourcePath: f.source,
     expectedSourceIdentity: selected.state.source.fileIdentity, expectedSelectionHash: selected.hash,
     operationId: randomUUID(), operation: 'pause' });
   const scope = paused.state.intervals[0], ceiling = scope.upper.eofByte;
-  const progress = await intakeSnapshot(f.store, 'state', `progress/claude/${S}/${scope.id}.json`);
+  const progressName = `progress/claude/${S}/${scope.id}.json`;
+  const progress = await intakeSnapshot(f.store, 'state', progressName);
   const suspensionName = `reader-suspensions/claude/${S}/${scope.id}.json`;
-  // Persist the former worker's cache shape without altering its frozen source,
-  // selection or cursor. Neither cache is capture authority.
-  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, suspensionName, {
-    ...staleCache, sourceIdentity: paused.state.source.fileIdentity, intervalHash: digest(canonicalJSON(scope)),
-    cursorHash: progress.hash, ceilingByte: ceiling, reason: 'unresolved-boundary', diagnostic: 'UNSUPPORTED_CLAUDE_VERSION',
-  }, null));
-  await publishIngressMetadata(f.store, suspendedPath(identity), { ...staleCache, selectionHash: paused.hash });
-  await fs.appendFile(f.source, message('user', 'Late evidence', B, '2.1.282') + message('user', 'After pause', later, '2.1.282'));
+  await fs.appendFile(f.source, message('user', 'Late evidence', B) + message('user', 'After pause', later));
+  return { ...f, identity, payload, P, later, paused, scope, ceiling, progress, progressName, suspensionName, message };
+}
+
+for (const [name, patch] of [
+  ['older version', value => ({ ...value, version: 1 })],
+  ['missing rules revision', ({ readerRulesRevision: _rules, ...value }) => value],
+  ['older rules revision', value => ({ ...value, readerRulesRevision: 0 })],
+  ['newer version', value => ({ ...value, version: READER_SUSPENSION_VERSION + 1 })],
+  ['extra shape field', value => ({ ...value, futureCacheField: true })],
+  ['invalid binding hash', value => ({ ...value, cursorHash: 'invalid' })],
+  ['null metadata', () => null],
+]) test(`unsupported Claude suspension (${name}) refuses without changing retained state`, async t => {
+  const { suspendedPath, publishIngressMetadata } = await import('./collection-ingress.mjs');
+  const { replaceIntakeJSON } = await import('./intake-io.mjs');
+  const { CLAUDE_READER_RULES_REVISION } = await import('./claude-reader.mjs');
+  const f = await pausedClaudeSuspensionFixture(t);
+  const workerCache = patch({ version: READER_SUSPENSION_VERSION, readerRulesRevision: CLAUDE_READER_RULES_REVISION,
+    sourceIdentity: f.paused.state.source.fileIdentity, intervalHash: digest(canonicalJSON(f.scope)),
+    cursorHash: f.progress.hash, ceilingByte: f.ceiling, reason: 'unresolved-boundary', diagnostic: 'anchor-unresolved' });
+  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, f.suspensionName, workerCache, null));
+  const hint = patch({ version: READER_SUSPENSION_VERSION, readerRulesRevision: CLAUDE_READER_RULES_REVISION, selectionHash: f.paused.hash });
+  await publishIngressMetadata(f.store, suspendedPath(f.identity), hint);
+  const retained = async () => ({
+    suspension: (await intakeSnapshot(f.store, 'state', f.suspensionName)).hash,
+    hint: (await intakeSnapshot(f.store, 'state', suspendedPath(f.identity))).hash,
+    progress: (await intakeSnapshot(f.store, 'state', f.progressName)).hash,
+    selection: (await readSelection(f.store, f.identity)).hash,
+    heads: await Promise.all([A, B, f.P, f.later].map(async unitId => (await readCaptureHead(f.store, { ...f.identity, unitId })).hash)),
+  });
+  const before = await retained();
   let launches = 0;
-  await collectionIngress('claude', { ...payload, prompt_id: later }, { ...f.options, launch: () => { launches++; } });
-  assert.equal(launches, 1, 'an old ingress suspension must not suppress the upgraded reader');
+  await collectionIngress('claude', { ...f.payload, prompt_id: f.later }, { ...f.options, launch: () => { launches++; } });
+  assert.equal(launches, 1, 'invalid ingress hints never suppress the worker');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const reads = [], result = await f.run({ observeRead: row => reads.push(row) });
+    assert.equal(result.saved, 0); assert.deepEqual(result.pending, ['INVALID_READER_SUSPENSION']);
+    assert.deepEqual(reads, [], 'unsupported metadata does not read the frozen transcript');
+    assert.deepEqual(await retained(), before);
+  }
+});
+
+test('current Claude suspension binding mismatches reread only the frozen range and then reuse the current cache', async t => {
+  const { suspendedPath } = await import('./collection-ingress.mjs');
+  const { replaceIntakeJSON } = await import('./intake-io.mjs');
+  const { CLAUDE_READER_RULES_REVISION } = await import('./claude-reader.mjs');
+  const f = await pausedClaudeSuspensionFixture(t);
+  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, f.suspensionName, {
+    version: READER_SUSPENSION_VERSION, readerRulesRevision: CLAUDE_READER_RULES_REVISION,
+    sourceIdentity: f.paused.state.source.fileIdentity, intervalHash: digest(canonicalJSON(f.scope)),
+    cursorHash: '0'.repeat(64), ceilingByte: f.ceiling, reason: 'unresolved-boundary', diagnostic: 'anchor-unresolved',
+  }, null));
   const reads = [], result = await f.run({ observeRead: row => reads.push(row) });
   assert.equal(result.saved, 1); assert.deepEqual(result.pending, ['COLLECTION_PAUSED']);
-  assert(reads.length); assert(reads.every(row => row.offset + row.bytes <= ceiling));
-  const capture = (await readCaptureHead(f.store, { ...identity, unitId: B })).capture;
-  assert.deepEqual(capture.evidence.map(item => item.text), ['Meeting decision after client update']);
-  for (const unitId of [A, P, later]) assert.equal((await readCaptureHead(f.store, { ...identity, unitId })).head, null);
-  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspensionName)).version, READER_SUSPENSION_VERSION);
-  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspendedPath(identity))).version, READER_SUSPENSION_VERSION);
-  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspensionName)).readerRulesRevision, CLAUDE_READER_RULES_REVISION);
-  assert.equal(intakeJSON(await intakeSnapshot(f.store, 'state', suspendedPath(identity))).readerRulesRevision, CLAUDE_READER_RULES_REVISION);
-  // A later append misses the ordinary source ACK, so this proves that the
-  // refreshed reader suspension itself prevents further native reads.
-  await fs.appendFile(f.source, message('user', 'Still paused', randomUUID(), '2.1.282'));
+  assert(reads.length); assert(reads.every(row => row.offset + row.bytes <= f.ceiling));
+  const capture = (await readCaptureHead(f.store, { ...f.identity, unitId: B })).capture;
+  assert.deepEqual(capture.evidence.map(item => item.text), ['Meeting decision']);
+  for (const unitId of [A, f.P, f.later]) assert.equal((await readCaptureHead(f.store, { ...f.identity, unitId })).head, null);
+  const suspension = intakeJSON(await intakeSnapshot(f.store, 'state', f.suspensionName));
+  assert.equal(suspension.version, READER_SUSPENSION_VERSION);
+  assert.equal(suspension.readerRulesRevision, CLAUDE_READER_RULES_REVISION);
+  const hint = intakeJSON(await intakeSnapshot(f.store, 'state', suspendedPath(f.identity)));
+  assert.equal(hint.version, READER_SUSPENSION_VERSION); assert.equal(hint.readerRulesRevision, CLAUDE_READER_RULES_REVISION);
+  await fs.appendFile(f.source, f.message('user', 'Still paused', randomUUID()));
   const again = [], retry = await f.run({ observeRead: row => again.push(row) });
   assert.equal(retry.saved, 0); assert.deepEqual(again, []);
-  await collectionIngress('claude', { ...payload, prompt_id: later }, { ...f.options, launch: () => assert.fail('fresh suspension must not launch') });
+  await collectionIngress('claude', { ...f.payload, prompt_id: f.later }, { ...f.options, launch: () => assert.fail('current matching suspension must not launch') });
 });
 
 test('Claude pause freezes automatic reads and resumes only a new interval; late evidence needs explicit capture', async t => {
@@ -1242,7 +1276,7 @@ test('a scope result is a reader block when any turn is held on one, not only th
     assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', code] }), code);
   }
   // So is saved capture state that is malformed.
-  for (const code of ['INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+  for (const code of ['INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA',
     'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']) assert.equal(readerBlockOf({ pending: code }), code);
   // So is a turn whose capture would be larger than a capture may be, or
   // would hold what a capture cannot, or extends a final capture.

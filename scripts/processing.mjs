@@ -230,7 +230,7 @@ export async function proposeProcessing(capability, { selection, operationId, ex
     checkedInspection(claim); await currentInputs(ctx, claim);
     const active = await activeProcessingClaims(ctx, { allowBindingConflict: true });
     const queued = active.filter(item => item.claim.proposalIntent && item.claim.operationId !== operationId);
-    if (!claim.proposalIntent && queued.length >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued.length, limit: 5, operationIds: queued.map(item => item.claim.operationId) });
+    if (queued.length >= 5) budgetError('PROCESSING_PROPOSAL_QUEUE_FULL', { current: queued.length, limit: 5, operationIds: queued.map(item => item.claim.operationId) });
     let value;
     if (claim.proposalIntent) {
       value = validateProcessingProposal(claim.proposalIntent.value, claim);

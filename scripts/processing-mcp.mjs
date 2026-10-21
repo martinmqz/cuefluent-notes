@@ -305,7 +305,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           callId: source.callId, tool: source.tool, argsHash: source.argsHash });
       });
     });
-    if (!receipt?.response) return null;
+    if (receipt === null) return null;
     if (receipt.response.collectionId !== source.collectionId) fail('PROCESSING_CONTROL_RECEIPT_CONFLICT');
     // A review reply is recorded before its presentation is confirmed. When
     // that confirmation failed, the reply the chat received was the refusal;

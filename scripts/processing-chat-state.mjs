@@ -63,21 +63,22 @@ function nativeRunValue(value, client) {
   if (value.terminal !== undefined) choice(value.terminal, ['completed', 'interrupted', 'failed']);
   list(value.unitIds, 16, { empty: client === 'claude' }).forEach(nativeId); unique(value.unitIds);
 }
+function ownerValue(value) {
+  keys(value, ['pid', 'controllerId', 'hostname', 'boot', 'processStart', 'platform']);
+  integer(value.pid); if (value.pid < 1) fail('INVALID_PROCESSING_CHAT_STATE');
+  nativeId(value.controllerId); string(value.hostname); string(value.platform);
+  if (value.boot !== null) string(value.boot);
+  if (value.processStart !== null) string(value.processStart);
+}
 function requestValue(value) {
-  keys(value, ['requestId', 'inputHash', 'operationId', 'worksetId', 'selection'], ['owner', 'resumeOperationId']);
+  keys(value, ['requestId', 'inputHash', 'operationId', 'worksetId', 'selection', 'owner'], ['resumeOperationId']);
   nativeId(value.requestId); hash(value.inputHash); nullableId(value.operationId); nullableId(value.worksetId);
   if (value.selection !== null) validateProcessingSelection(value.selection);
   if (value.resumeOperationId !== undefined) {
     nativeId(value.resumeOperationId);
     if (value.worksetId !== null || value.operationId !== value.resumeOperationId) fail('INVALID_PROCESSING_CHAT_STATE');
   }
-  if (value.owner !== undefined) {
-    keys(value.owner, ['pid', 'controllerId', 'hostname', 'boot', 'processStart', 'platform']);
-    integer(value.owner.pid); if (value.owner.pid < 1) fail('INVALID_PROCESSING_CHAT_STATE');
-    nativeId(value.owner.controllerId); string(value.owner.hostname); string(value.owner.platform);
-    if (value.owner.boot !== null) string(value.owner.boot);
-    if (value.owner.processStart !== null) string(value.owner.processStart);
-  }
+  ownerValue(value.owner);
 }
 const requestEqual = (a, b) => { const { owner: _a, ...left } = a, { owner: _b, ...right } = b; return equal(left, right); };
 function runValue(run, client) {
@@ -93,8 +94,8 @@ function validateState(value, namespace, bindingHash) {
     keys(value, ['format', 'version', 'namespace', 'bindingHash', 'policyHash', 'generation', 'revision', 'state', 'creation', 'session', 'active', 'runs', 'block']);
     if (value.format !== 'cuefluent-processing-chat' || value.version !== PROCESSING_CHAT_STATE_VERSION) fail('INVALID_PROCESSING_CHAT_STATE');
     namespaceValue(value.namespace); hash(value.bindingHash); hash(value.policyHash); generation(value.generation); integer(value.revision);
-    choice(value.state, STATES); keys(value.creation, ['requestId', 'requestHash'], ['owner']);
-    if (value.creation.owner !== undefined) requestValue({ requestId: value.creation.requestId, inputHash: value.creation.requestHash, operationId: null, worksetId: null, selection: null, owner: value.creation.owner });
+    choice(value.state, STATES); keys(value.creation, ['requestId', 'requestHash', 'owner']);
+    ownerValue(value.creation.owner);
     nativeId(value.creation.requestId); hash(value.creation.requestHash);
     if (value.session !== null) {
       sessionValue(value.session, value.namespace);
@@ -468,7 +469,7 @@ export async function createProcessingChatState(options) {
     },
     async reserve(args) {
       args = structuredClone(args);
-      keys(args, ['expectedHash', 'requestId', 'requestHash'], ['owner']); expected(args.expectedHash); nativeId(args.requestId); hash(args.requestHash);
+      keys(args, ['expectedHash', 'requestId', 'requestHash', 'owner']); expected(args.expectedHash); nativeId(args.requestId); hash(args.requestHash); ownerValue(args.owner);
       return locked(async (tx, saved) => {
         if ((await intakeSnapshot(store, 'state', abandonedPath(args.requestId), { maxBytes: MAX_BYTES })).bytes) fail('PROCESSING_CHAT_REQUEST_CONFLICT');
         const retryable = processingChatRestartSupported(saved.value);
@@ -488,7 +489,7 @@ export async function createProcessingChatState(options) {
             await options.verifyRestart(view(saved)) !== true)) return view(saved, 'inspect-existing');
         return write(tx, saved, { format: 'cuefluent-processing-chat', version: PROCESSING_CHAT_STATE_VERSION,
           namespace: { ...namespace }, bindingHash: initial.hash, policyHash: initial.configHash, generation: (saved.value?.generation ?? 0) + 1, revision: saved.value?.revision ?? 0,
-          state: 'creating', creation: { requestId: args.requestId, requestHash: args.requestHash, ...(args.owner ? { owner: args.owner } : {}) }, session: null, active: null, runs: [], block: null }, 'create');
+          state: 'creating', creation: { requestId: args.requestId, requestHash: args.requestHash, owner: args.owner }, session: null, active: null, runs: [], block: null }, 'create');
       });
     },
     async bind(args) {
@@ -512,11 +513,11 @@ export async function createProcessingChatState(options) {
     },
     async begin(args) {
       args = structuredClone(args);
-      keys(args, ['expectedHash', 'generation', 'requestId', 'inputHash'], ['operationId', 'worksetId', 'selection', 'owner', 'resumeOperationId']);
+      keys(args, ['expectedHash', 'generation', 'requestId', 'inputHash', 'owner'], ['operationId', 'worksetId', 'selection', 'resumeOperationId']);
       expected(args.expectedHash); generation(args.generation);
       const request = { requestId: args.requestId, inputHash: args.inputHash, operationId: args.operationId ?? null,
-        worksetId: args.worksetId ?? null, selection: args.selection ?? null,
-        ...(args.resumeOperationId ? { resumeOperationId: args.resumeOperationId } : {}), ...(args.owner ? { owner: args.owner } : {}) }; requestValue(request);
+        worksetId: args.worksetId ?? null, selection: args.selection ?? null, owner: args.owner,
+        ...(args.resumeOperationId ? { resumeOperationId: args.resumeOperationId } : {}) }; requestValue(request);
       const before = await withStorageProbes(() => snapshot());
       if (!before.value?.session) fail('PROCESSING_CHAT_NOT_BOUND');
       if (before.value.generation !== args.generation) fail('PROCESSING_CHAT_GENERATION_CHANGED');

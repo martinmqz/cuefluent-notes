@@ -103,10 +103,11 @@ agree, as must the Claude catalog description. Client-specific interface details
 remain separate. Release verification compares the complete shared skill trees,
 both inventories and their recorded digests before producing the marketplace
 archive. Manual archives receive a new inventory for their own README and file set.
-Marketplace verification requires inventories for 0.11.0 and later, with identities
-matching the enclosing client, release version and hooks variant. Older published
-packages retain their original ZIP digests, without reconstructing them using
-today's shipping list. See [package verification](../references/distribution.md#verify-a-selected-package)
+Marketplace verification requires inventories with identities matching the
+enclosing client, release version and hooks variant, regardless of the declared
+version. Missing inventories are refused. Published package bytes and digests are
+immutable; never reconstruct them using today's shipping list.
+See [package verification](../references/distribution.md#verify-a-selected-package)
 for an explicit read-only check of a built or installed package.
 
 Keep the reviewed artifacts and `SHA256SUMS` together. If an asset is lost, a rebuild
@@ -232,8 +233,8 @@ not by a matching client version string.
    higher version so installed clients discover it. The project license is a
    publisher decision; dependency licenses do not license the project itself.
 2. Enable GitHub Actions and allow it to create pull requests. The publication
-   job uses `GITHUB_TOKEN` with `contents: write` for its temporary branch and the
-   old branch's README notice and `pull-requests: write` for the draft PR.
+   job uses `GITHUB_TOKEN` with `contents: write` for its temporary branch and
+   `pull-requests: write` for the draft PR.
    No main-branch bypass or extra secret is required. Keep the default branch as
    `main`.
 3. From the reviewed commit on `main`, create and push `v` followed by that exact
@@ -274,11 +275,9 @@ index are preserved. Never edit generated packages directly. Their installed
 version follows `release.json`, independently of unreleased source changes.
 Unexpected snapshot entries are rejected instead of silently discarded; the
 archive README is the sole deliberate omission. The package digests are checked
-against the actual staged Git bytes before creating a commit. The former
-`marketplace` branch receives a final README migration notice, retaining its
-existing packages and catalog bytes. Existing users must
-[switch their registration](../README.md#switch-an-older-marketplace-registration-to-main)
-to receive future releases.
+against the actual staged Git bytes before creating a commit. Publication writes
+only its package-update review branch; it does not update other distribution
+branches.
 
 Ordinary source PRs run checks and upload preview artifacts. Merging the generated
 package-update PR makes its already-published release installable from main.

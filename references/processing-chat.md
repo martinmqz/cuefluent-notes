@@ -849,7 +849,7 @@ If reconciliation cannot prove a terminal outcome, an operator can explicitly
 retire that run with `processing-chat-abandon`. First stop the owning controller
 and its native child client, inspect the exact chat hash and request ID, and
 confirm the offline window with `offline: true`. A known live or unverified owner
-is refused; older ownerless records require that explicit offline confirmation.
+is refused, and a binding without its saved controller identity is invalid.
 The command archives the prior binding without deleting captures, claims,
 proposals, writer transactions or native chats. Inspect any unfinished engine
 operation and use its ordinary resume, review or recovery commands. Abandonment
@@ -884,9 +884,9 @@ Rollover also preserves exact operation-to-request references to terminal runs,
 so shortcut resume and cancellation can verify stopped owners after active
 history is cleared. These references do not override a currently active or
 unresolved native owner. Missing or invalid proof remains a refusal.
-New sealed executions have a request-keyed recovery record, so recovery does not
-scan the session's lifetime history after rollover. Older unindexed receipts retain
-their bounded lookup and are never rewritten to infer missing authority.
+Sealed executions require a request-keyed recovery record, so recovery does not
+scan the session's lifetime history after rollover. An unindexed receipt grants
+no recovery or collection-exclusion authority and is not rewritten or backfilled.
 Do not edit the private registry, delete locks or create a replacement to bypass
 that state. The supported offline abandonment above is the explicit retirement
 path. Hostname changes preserve the unique binding in the machine-local store;

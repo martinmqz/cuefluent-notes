@@ -41,7 +41,7 @@ async function fixture(t, entries, { future = false, prefix = '', link = true, m
   await fs.writeFile(source.path, bytes); source.fileIdentity = stableSourceIdentity(await fs.lstat(source.path, { bigint: true }));
   const scopeId = randomUUID(), controlAnchor = future ? anchors.shift() : null;
   const request = { id: scopeId, client: 'claude', sessionId: S, expectedRevision: 0,
-    ...(future ? { operation: 'start', unitId: C } : { operation: 'capture-current', unitId: A, scope: { unitIds: [A], start: anchors[0], end: null } }) };
+    ...(future ? { operation: 'start', unitId: C } : { operation: 'capture-current', unitId: A, scope: { unitIds: [A], start: anchors[0], end: null, contentHash: anchors[0].hash } }) };
   const boundary = future ? { sourceIdentity: source.fileIdentity, eofByte: anchors[0].startByte, startsMidRecord: false, unitId: C, record: missingLower ? null : controlAnchor } : undefined;
   const state = applySelectionControl(newSelectionState(source), request, boundary), actualScope = future ? state.intervals[0].id : scopeId;
   const store = await privateIntakeFixture(t, source);
@@ -178,7 +178,7 @@ test('exact UUID duplicates do not duplicate evidence; changed mirrors block tha
 test('a partial trailing record waits and fixed-source mismatches refuse capture', async t => {
   const f = await fixture(t, [human()]); await fs.appendFile(f.source.path, '{"type":');
   const result = await readClaudeSelection(f.args); assert.equal(result.candidates.length, 1); assert.equal(result.diagnostics.pendingTail, true);
-  const unsupported = await fixture(t, [human()]);
+  const unsupported = await fixture(t, [human()], { future: true });
   const changed = unsupported.rows.map(row => ({ ...row, sessionId: B }));
   await fs.writeFile(unsupported.source.path, changed.map(row => JSON.stringify(row) + '\n').join(''));
   await assert.rejects(readClaudeSelection(unsupported.args), { code: 'SOURCE_IDENTITY_MISMATCH' });
@@ -202,10 +202,9 @@ test('compatible Claude formats register and extract across client release and p
 });
 
 test('Claude requires bounded version metadata at registration and extraction', async t => {
-  const f = await fixture(t, [human()]), { fileIdentity: _identity, ...selected } = f.source;
   for (const version of [undefined, null, 1, {}, '', ' ', 'v'.repeat(129), '\u0000', '\ud800']) {
-    const rows = [{ ...f.rows[0], version }, ...f.rows.slice(1)];
-    await fs.writeFile(f.source.path, rows.map(row => JSON.stringify(row) + '\n').join(''));
+    const f = await fixture(t, [human()], { headerChanges: { version } });
+    const { fileIdentity: _identity, ...selected } = f.source;
     await assert.rejects(inspectSourceBoundary(selected, { verifyHeader: claudeRegistrationHeader(selected) }), { code: 'INVALID_SESSION_CLIENT_VERSION' });
     await assert.rejects(readClaudeSelection(f.args), { code: 'INVALID_SESSION_CLIENT_VERSION' });
   }
@@ -366,10 +365,6 @@ test('native compaction logical parent preserves human ancestry while excluding 
 
 test('client updates within a Claude session preserve incremental capture and replay', async t => {
   const f = await fixture(t, [human(A)]), initial = await readClaudeSelection(f.args);
-  // An existing immutable capture uses the former header-version field name.
-  const initialCapture = initial.candidates[0].capture;
-  initialCapture.reader.clientVersion = initialCapture.reader.headerClientVersion;
-  delete initialCapture.reader.headerClientVersion;
   const first = await publish(f, initial);
   const head = await readCaptureHead(f.store, { client: 'claude', sessionId: S, unitId: A });
   await append(f, [assistant('UNOWNED RESPONSE', { version: '2.1.282' }), human(A, 'Additional supplied source.', { version: '999.0.0' })]);
@@ -622,47 +617,23 @@ test('nothing typed after the skill (the two-line envelope) is markup only, as o
   assert.deepEqual((await readClaudeSelection(mixed.args)).candidates[0].capture.evidence.map(item => item.reference), ['https://example.invalid/board.png']);
 });
 
-test('published heads that kept the two-line envelope verbatim replay unchanged at every reader version', async t => {
-  // Before this rule a reader captured the bare envelope as typed text. A held
-  // cursor rereads it: the published head covers it, nothing is re-captured.
-  const bare = `<command-message>${skillCommand}</command-message>\n<command-name>/${skillCommand}</command-name>`;
-  for (const version of ['1', '2']) await t.test(`version ${version}`, async t => {
-    const f = await fixture(t, [human(A, bare), assistant()]), [anchor] = f.anchors;
-    const range = { startByte: anchor.startByte, endByte: anchor.endByte, recordIds: [anchor.id] };
-    const old = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity: { client: 'claude', sessionId: S, unitId: A }, projectRoot: f.root,
-      source: { path: f.source.path, fileIdentity: f.source.fileIdentity, ranges: [{ ...range, hash: anchor.hash }] },
-      reader: { name: 'claude-transcript', version, headerClientVersion: '2.1.280' }, occurredAt: stamp, capturedAt: stamp, terminal: 'unconfirmed',
-      coverage: { partial: true, omissions: [] }, evidence: [{ kind: 'user', recordId: anchor.id, range, text: bare }] });
-    const head = { capture: old, head: { fileHash: 'f'.repeat(64) }, hash: 'e'.repeat(64) };
-    const replay = await readClaudeSelection({ ...f.args, heads: new Map([[A, head]]) });
-    assert.equal(replay.candidates.length, 0); assert.deepEqual(replay.pending, []); assert.equal(replay.blocked, null);
-    assert.deepEqual(replay.covered, [{ unitId: A, evidenceHash: old.evidenceHash, fileHash: 'f'.repeat(64) }]);
+test('retired and unknown Claude readers refuse without replaying or extending their evidence', async t => {
+  for (const version of ['1', 'future']) await t.test(version, async t => {
+    const f = await fixture(t, [human(A, envelope('review sav t7xb88'))]);
+    const result = await readClaudeSelection(f.args), current = result.candidates[0].capture;
+    const unsupported = createCapture({ ...current, reader: { ...current.reader, version },
+      evidence: current.evidence.map(item => ({ ...item, text: envelope('review sav t7xb88') })) });
+    const plan = claudePublicationPlan(result, A);
+    const first = await withIntakeLock(f.store, tx => publishCapture(tx, { ...result.candidates[0], ...plan, capture: unsupported,
+      selectionHash: f.selectionHash, cursorHash: null, authorize: async () => true }));
+    const head = await readCaptureHead(f.store, unsupported.identity), before = serializeCapture(head.capture);
+    const check = read => {
+      assert.equal(read.candidates.length, 0); assert.deepEqual(read.covered, []);
+      assert.deepEqual(read.pending, [{ unitId: A, reason: 'UNSUPPORTED_CLAUDE_READER' }]);
+    };
+    check(await readClaudeSelection({ ...f.args, heads: new Map([[A, head]]) }));
+    await append(f, [human(A, envelope('review skp t7xb88'))]);
+    check(await readClaudeSelection({ ...f.args, cursor: first.cursor, checkpoint: first.checkpoint, heads: new Map([[A, head]]) }));
+    assert.deepEqual(serializeCapture((await readCaptureHead(f.store, unsupported.identity)).capture), before);
   });
-});
-
-test('a version 1 head keeps its verbatim rules; an unknown reader version refuses explicitly', async t => {
-  const f = await fixture(t, [human(A, envelope('review sav t7xb88'))]);
-  const result = await readClaudeSelection(f.args), current = result.candidates[0].capture;
-  // A head published under version 1 copied the envelope verbatim.
-  const old = createCapture({ ...current, reader: { ...current.reader, version: '1' },
-    evidence: current.evidence.map(item => ({ ...item, text: envelope('review sav t7xb88') })) });
-  const plan = claudePublicationPlan(result, A);
-  const first = await withIntakeLock(f.store, tx => publishCapture(tx, { ...result.candidates[0], ...plan, capture: old,
-    selectionHash: f.selectionHash, cursorHash: null, authorize: async () => true }));
-  const head = await readCaptureHead(f.store, old.identity);
-  // Replay from the held start is covered by that exact head: nothing is re-captured.
-  const replay = await readClaudeSelection({ ...f.args, heads: new Map([[A, head]]) });
-  assert.equal(replay.candidates.length, 0); assert.deepEqual(replay.covered.map(item => item.unitId), [A]);
-  // A same-prompt extension stays under version 1 rules.
-  await append(f, [human(A, envelope('review skp t7xb88'))]);
-  const next = await readClaudeSelection({ ...f.args, cursor: first.cursor, checkpoint: first.checkpoint, heads: new Map([[A, head]]) });
-  const extended = next.candidates[0].capture;
-  assert.equal(extended.reader.version, '1');
-  assert.deepEqual(extended.evidence.map(item => item.text), [envelope('review sav t7xb88'), envelope('review skp t7xb88')]);
-  await publish(f, next, A, first.cursorHash);
-  assert.equal((await readCaptureHead(f.store, old.identity)).capture.evidenceHash, extended.evidenceHash);
-  // A reader version this code does not know is never reinterpreted.
-  const future = { ...head, capture: createCapture({ ...old, reader: { ...old.reader, version: 'future' } }) };
-  const refused = await readClaudeSelection({ ...f.args, heads: new Map([[A, future]]) });
-  assert.equal(refused.candidates.length, 0); assert.deepEqual(refused.pending, [{ unitId: A, reason: 'UNSUPPORTED_CLAUDE_READER' }]);
 });

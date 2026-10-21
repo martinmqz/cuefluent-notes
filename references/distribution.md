@@ -27,8 +27,7 @@ The catalogs and packages coexist with development source on `main`. The
 published package version is recorded in root `release.json` and can lag the
 source version during development. Updating the source does not update an
 installed plugin; follow the update procedure for its original installation
-method. Registrations selecting the former branch need the
-[one-time migration](../README.md#switch-an-older-marketplace-registration-to-main).
+method.
 
 Release assets also provide separate manual ZIPs without hook registration.
 Extract one and use the client-specific local installation instructions below;
@@ -190,8 +189,8 @@ remain usable.
 
 ## Verify a selected package
 
-Packages built with version 0.11.0 or later include an inventory of their exact
-files. From the source checkout or the packaged skill directory, explicitly select
+Packages require an inventory of their exact files; verification refuses packages
+without one. From the source checkout or the packaged skill directory, explicitly select
 the whole plugin root (the directory containing its client manifest):
 
 ```sh
@@ -351,7 +350,7 @@ enabling a plugin does not itself establish hook trust. Follow the
 Start a fresh task and say **“Set up Cuefluent Notes.”** The [setup flow](setup.md)
 saves reviewed settings with collection disabled and processing Manual, prepares
 private storage, then activates only separately authorized choices. It does not
-write notes or import v0.7.1 settings. Use [explicit controls](workflow-cli.md)
+write notes or import legacy settings. Use [explicit controls](workflow-cli.md)
 for one-time capture, pause/exclude, pending discovery and note processing.
 
 A route's `collection.enabled: false` stops ongoing collection. Processing mode
@@ -371,15 +370,14 @@ each host rather than assuming both update the same way. Both variants also
 register the `cuefluent_control` MCP server through `.mcp.json`; review its
 registration and permissions on update. The client may start that server when
 loading the plugin. Only an explicit processing request launches or resumes the
-restricted agent session. Follow the [coordinated upgrade](setup.md#existing-settings)
+restricted agent session. Follow the [package replacement](setup.md#existing-settings)
 and [processing chat](processing-chat.md) guidance before resuming shared storage.
 
 ## Compatibility limits
 
-The replacement has its own workflow configuration and no legacy migration or
-mixed-version support. Keep unfinished old journals with the v0.7.1 reference
-helper; this implementation does not adopt old policy, completion markers or
-session state. Existing user Markdown remains ordinary, reusable source material.
+Only current workflow formats are supported, with no legacy migration or
+mixed-version support. Unsupported stored formats are refused without being
+rewritten. Existing user Markdown remains ordinary, reusable source material.
 By-type writes preserve inspected directory identities and the collection's one
 writer state. Version-1 plans handle existing/custom parents and derived outputs;
 version-2 authored plans can create inspected immediate type folders. See

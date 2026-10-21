@@ -6,66 +6,25 @@ import { createCapture, validateCapture, clientVersion } from './capture-contrac
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals } from './capture-selection.mjs';
 import { absolutePath } from './workflow-paths.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
-import { verifyCodexProcessingControl, isProcessingControlProof } from './processing-control-proof.mjs';
+import { verifyCodexProcessingControl, isProcessingControlProof, processingControlText } from './processing-control-proof.mjs';
 import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
-// v2 allocates separate bounded call/result text pools and preserves native
-// descriptors after text exhaustion. v3 treats this plugin's own skill block as
-// command markup and leaves out this plugin's control-server exchanges in a
-// unit started with that skill. v4 adds the Codex 0.163 forms: a skill picked
-// from the `$` list (its selection item and leading mention are markup), a
-// mention typed out by hand (kept as typed) and control exchanges made in code
-// mode, and leaves out this plugin's control exchanges and the assistant's
-// repetition of their replies in every unit, with or without this skill,
-// comparing a reply and its relay in the form `codexReplyForm` gives both.
-// v5 keeps the v4 rules with the chat capture commands (`capture`, `pause
-// chat`, `resume chat`) in the command grammar it decides command-only messages
-// with. Published v1-v4 captures remain immutable under their own rules.
-// v6 also recognizes Desktop's literal Markdown mention bound to the same
-// message's selected skill path. Prior readers keep their exact evidence rules.
-// v7 strips that verified mention from ordinary Desktop input too, retaining
-// the text after its one separator and all line endings. v6 replay is unchanged.
+// Only the current extraction rules are supported. Older capture versions are
+// refused without replacing their immutable evidence.
 export const CODEX_READER_VERSION = '7';
-// Retain every supported historical reader independently of later reader bumps.
-export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2', '5': '2', '6': '2', '7': '2' });
-export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup', '4': 'mention', '5': 'mention-5', '6': 'mention-6', '7': 'mention-7' });
-const SKILL_MARKUP_RULES = Object.freeze(['markup', 'mention', 'mention-5', 'mention-6', 'mention-7']);
-// Which mentioned-skill message is only a command is decided with the command
-// grammar and draft-code alphabet as version 4 shipped them, frozen here: a
-// later grammar changes what a new reader version accepts, never the evidence
-// of a capture version 4 published. `#` stands for a draft code.
-export const CODEX_V4_CONTROL_FORMS = Object.freeze(['help', 'status', 'status --verbose', 'process', 'process repo', 'process chat',
-  'process resume', 'process cancel', 'review', 'review #', 'review cancel', 'review cancel #', 'save', 'save #', 'skip', 'skip #']
-  .map(form => Object.freeze(form.split(' '))));
-export const CODEX_V4_CODE = /^[a-hjkmnp-tv-z2-9]{6}$/;
-// The grammar version 5 shipped with, frozen the same way.
-export const CODEX_V5_CONTROL_FORMS = Object.freeze(['help', 'status', 'status --verbose', 'capture', 'pause chat', 'resume chat',
-  'process', 'process repo', 'process chat', 'process resume', 'process cancel', 'review', 'review #', 'review cancel', 'review cancel #',
-  'save', 'save #', 'skip', 'skip #'].map(form => Object.freeze(form.split(' '))));
-// Each mention rule set and the command forms it decides command-only messages with.
-const MENTION_FORMS = Object.freeze({ mention: CODEX_V4_CONTROL_FORMS, 'mention-5': CODEX_V5_CONTROL_FORMS, 'mention-6': CODEX_V5_CONTROL_FORMS, 'mention-7': CODEX_V5_CONTROL_FORMS });
-const mentionRules = rules => Object.hasOwn(MENTION_FORMS, rules);
-const commandOnly = (rules, text) => typeof text === 'string' && text.length <= 64 && MENTION_FORMS[rules].some(form => {
-  const words = text.split(' ');
-  return form.length === words.length && form.every((word, index) => word === '#' ? CODEX_V4_CODE.test(words[index]) : word === words[index]);
-});
+const commandOnly = text => processingControlText(text) !== null;
 const CONTROL_SERVER = 'cuefluent_control';
-// Evidence rules are a pure function of the transcript and the capture's reader
-// version, so a published unit replays to the same bytes after an upgrade or a
-// move. This plugin's skill block is therefore recognized by its exact native
-// shape and the skill name frozen with version 3, never by the installed path,
-// which changes with each plugin version. A renamed skill needs a new version.
+// The exact native skill shape identifies command markup independently of the
+// install path. The path is compared only against the same message's selection.
 const MARKUP_SKILL_NAME = 'cuefluent-notes';
 const pluginSkillBlock = part => part?.type === 'skill' && part.name === MARKUP_SKILL_NAME && typeof part.path === 'string' &&
   Object.keys(part).every(key => ['type', 'name', 'path'].includes(key));
 // Codex 0.163 records a skill picked from the `$` list as a user context item
 // of its own and the message as one text part starting with the mention the
-// list inserted. These shapes are frozen with reader version 4 and shared with
-// the binder and the exclusion proof; a changed shape or name needs a new
-// reader version. Versions 4 and 5 do not use the returned path; versions 6
-// and 7 compare it only to the same message's recorded Desktop link.
+// list inserted. The binder and exclusion proof share these native shapes.
+// A Desktop link must match this same message's recorded selection path.
 export const CODEX_SKILL_MENTIONS = Object.freeze([`$${MARKUP_SKILL_NAME}:${MARKUP_SKILL_NAME}`, `$${MARKUP_SKILL_NAME}`]);
 const SELECTION_NAMES = Object.freeze([`${MARKUP_SKILL_NAME}:${MARKUP_SKILL_NAME}`, MARKUP_SKILL_NAME]);
 const SELECTION_HEADER = /^<skill>\n<name>([^<\n]{1,128})<\/name>\n<path>([^<\n]{1,4096})<\/path>\n/;
@@ -173,11 +132,10 @@ function linkPieces(text, pieces) {
   }
   if (at < text.length) pieces.push({ prose: text.slice(at) });
 }
-/** The form in which reader version 4 compares a control reply with an
+/** The form in which the reader compares a control reply with an
  * assistant message that may relay it, so a relay Codex's model reformatted is
  * still recognized as that reply. Each rule changes only how the same words
- * are marked up, never which words appear, and is part of version 4's
- * evidence rules: changing one needs a new reader version.
+ * are marked up, never which words appear.
  * 1. CRLF and CR become LF.
  * 2. A code span (a run of backticks closed by the next run of the same
  *    length) is one unit: its content, with a line ending read as a space and
@@ -304,39 +262,37 @@ export async function verifyCodexHeader(line, source) {
 export const codexRegistrationHeader = selected => async io => verifyCodexHeader(await readSessionHeader(io),
   { ...selected, projectRoot: await fs.realpath(selected.projectRoot) });
 
-function blocks(collector, record, content, kind, syntax, skillRules = 'retain', selected = false, replies = null) {
+function blocks(collector, record, content, kind, syntax, selected = false, replies = null) {
   if (!Array.isArray(content)) fail('UNSUPPORTED_CODEX_RECORD');
-  if (mentionRules(skillRules)) {
-    // On the message that selected this skill from the `$` list, the leading
-    // mention the list inserted is markup; the words after it and one space
-    // stay, unless they are exactly one action: then the message is only the
-    // command. Other messages, and a mention typed by hand, stay as typed.
-    const desktop = syntax === 'user' && ['mention-6', 'mention-7'].includes(skillRules) && selected?.size === 1
-      ? codexDesktopMentionText(content, [...selected][0]) : null;
-    if (desktop === '' || (desktop?.startsWith(' ') && commandOnly(skillRules, desktop.slice(1)))) return;
-    if (desktop !== null && skillRules === 'mention-7') {
-      // Command recognition removes Desktop's final LF; ordinary evidence
-      // retains it. Remove only the verified link and one separator space.
-      const after = desktop + (content[0].text.endsWith('\n') ? '\n' : '');
-      collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
-    }
-    const after = syntax === 'user' && selected ? codexMentionText(content) : null;
-    if (after !== null) {
-      if (after.startsWith(' ') && commandOnly(skillRules, after.slice(1))) return;
-      collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
-    }
-    // The older skill part with exactly one action is only the command too.
-    if (syntax === 'user' && content.length === 2 && pluginSkillBlock(content[0]) && content[1]?.type === 'text' &&
-        commandOnly(skillRules, content[1].text)) return;
-    // An assistant message that only repeats this plugin's reply in this turn,
-    // compared in the form `codexReplyForm` gives both, is that reply, not the
-    // assistant's own text.
-    if (kind === 'assistant' && replies?.size && content.length && content.every(item => ['text', 'output_text', 'Text'].includes(item?.type) && typeof item.text === 'string') &&
-        replies.has(codexReplyForm(content.map(item => item.text).join('')))) return;
+  // On the message that selected this skill from the `$` list, the leading
+  // mention the list inserted is markup; the words after it and one space
+  // stay, unless they are exactly one action: then the message is only the
+  // command. Other messages, and a mention typed by hand, stay as typed.
+  const desktop = syntax === 'user' && selected?.size === 1
+    ? codexDesktopMentionText(content, [...selected][0]) : null;
+  if (desktop === '' || (desktop?.startsWith(' ') && commandOnly(desktop.slice(1)))) return;
+  if (desktop !== null) {
+    // Command recognition removes Desktop's final LF; ordinary evidence
+    // retains it. Remove only the verified link and one separator space.
+    const after = desktop + (content[0].text.endsWith('\n') ? '\n' : '');
+    collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
   }
+  const after = syntax === 'user' && selected ? codexMentionText(content) : null;
+  if (after !== null) {
+    if (after.startsWith(' ') && commandOnly(after.slice(1))) return;
+    collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
+  }
+  // The older skill part with exactly one action is only the command too.
+  if (syntax === 'user' && content.length === 2 && pluginSkillBlock(content[0]) && content[1]?.type === 'text' &&
+      commandOnly(content[1].text)) return;
+  // An assistant message that only repeats this plugin's reply in this turn,
+  // compared in the form `codexReplyForm` gives both, is that reply, not the
+  // assistant's own text.
+  if (kind === 'assistant' && replies?.size && content.length && content.every(item => ['text', 'output_text', 'Text'].includes(item?.type) && typeof item.text === 'string') &&
+      replies.has(codexReplyForm(content.map(item => item.text).join('')))) return;
   for (const item of content) {
     // Selecting this skill is command markup around the typed text, which stays.
-    if (syntax === 'user' && SKILL_MARKUP_RULES.includes(skillRules) && pluginSkillBlock(item)) continue;
+    if (syntax === 'user' && pluginSkillBlock(item)) continue;
     if (['text', 'input_text', 'output_text', 'Text'].includes(item?.type)) {
       collector.add(kind, record, { text: textValue(item.text) });
     } else if (['image', 'input_image'].includes(item?.type)) {
@@ -365,18 +321,14 @@ function toolText(collector, record, output) {
 
 const completedItem = value => value.type === 'event_msg' && value.payload?.type === 'item_completed' ? value.payload.item : null;
 // Calls to this plugin's control server are its own processing and review
-// activity: version 3 leaves them out in a unit the person started with this
-// skill, version 4 in every unit, whether the person picked the skill, typed a
+// activity in every unit, whether the person picked the skill, typed a
 // mention or asked in their own words. They are identified only by native
 // identity: the call's namespace and its native MCP item's server and tool,
 // never by text. Other tools and user text are unchanged; assistant text is
 // left out only when it repeats one of these calls' replies (see `blocks`).
-function controlExchanges(unit, skillRules) {
+function controlExchanges(unit) {
   const ids = new Set();
-  if (!SKILL_MARKUP_RULES.includes(skillRules)) return ids;
   const values = unit.records.map(record => record.value), item = completedItem;
-  if (skillRules === 'markup' && !values.some(value => item(value)?.type === 'UserMessage' && Array.isArray(item(value).content) &&
-    item(value).content.some(pluginSkillBlock))) return ids;
   const native = new Map();
   for (const value of values) {
     const call = item(value);
@@ -389,7 +341,7 @@ function controlExchanges(unit, skillRules) {
     if (value.type === 'response_item' && p?.type === 'function_call' && typeof p.call_id === 'string' &&
         p.namespace === `mcp__${CONTROL_SERVER}` && native.get(p.call_id) === `${CONTROL_SERVER}\0${p.name}`) ids.add(p.call_id);
   }
-  if (mentionRules(skillRules)) for (const id of codeModeExchanges(unit, values)) ids.add(id);
+  for (const id of codeModeExchanges(unit, values)) ids.add(id);
   return ids;
 }
 
@@ -488,12 +440,12 @@ function codeModeExchanges(unit, values) {
   return ids;
 }
 
-function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRules = 'retain') {
-  const collector = evidenceCollector(undefined, { toolRulesVersion }), calls = new Map(), seen = new Map(), outcomes = new Map(), collabIds = new Set(unit.collaborationIds);
-  const exchanges = controlExchanges(unit, skillRules);
-  const replies = mentionRules(skillRules) ? controlReplies(unit, exchanges) : null;
+function normalizeUnit(unit, historyMode, checkBudget) {
+  const collector = evidenceCollector(), calls = new Map(), seen = new Map(), outcomes = new Map(), collabIds = new Set(unit.collaborationIds);
+  const exchanges = controlExchanges(unit);
+  const replies = controlReplies(unit, exchanges);
   // Markup belongs only to the message the `$` list selection was made for.
-  const selectedMessage = id => mentionRules(skillRules) && unit.selectedMessages.get(id);
+  const selectedMessage = id => unit.selectedMessages.get(id);
   // Only structured native completion status can refine an observed tool outcome.
   for (const record of unit.records) {
     checkBudget();
@@ -538,7 +490,7 @@ function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRu
       if (ignoredItems.has(item?.type)) continue;
       if (item?.type === 'UserMessage' || item?.type === 'AgentMessage') {
         if (historyMode !== 'paginated') fail('UNSUPPORTED_CODEX_HISTORY');
-        blocks(collector, record, item.content, item.type === 'UserMessage' ? 'user' : 'assistant', item.type === 'UserMessage' ? 'user' : 'assistant', skillRules,
+        blocks(collector, record, item.content, item.type === 'UserMessage' ? 'user' : 'assistant', item.type === 'UserMessage' ? 'user' : 'assistant',
           item.type === 'UserMessage' && selectedMessage(item.id), replies);
       } else if (item?.type === 'CommandExecution') {
         // Status corroborates raw tool evidence; command output is not copied a second time.
@@ -743,15 +695,13 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
     if (!permitted) { if (selected.pendingScopes?.includes(scopeId)) pending.push({ unitId: unit.id, reason: 'anchor-unresolved' }); continue; }
     if (unit.end.endByte - unit.end.startByte > 64 * 1024) { pending.push({ unitId: unit.id, reason: 'SOURCE_ANCHOR_LIMIT' }); continue; }
     // An already-published unit may be reread while an earlier unit holds the
-    // cursor. Reproduce its original rules rather than replacing finalized data.
+    // cursor. Refuse retired readers instead of replacing finalized evidence.
     const loadedHead = await loadHead?.(unit.id), prior = loadedHead?.capture;
-    let readerVersion = CODEX_READER_VERSION;
     if (prior) {
+      if (prior.reader?.name !== 'codex-rollout' || prior.reader.version !== CODEX_READER_VERSION) fail('UNSUPPORTED_CODEX_READER');
       validateCapture(prior);
       if (prior.identity.client !== 'codex' || prior.identity.sessionId !== source.sessionId || prior.identity.unitId !== unit.id ||
           prior.source.fileIdentity !== source.fileIdentity || prior.source.path !== source.path || prior.projectRoot !== source.projectRoot) fail('SOURCE_IDENTITY_MISMATCH');
-      if (prior.reader.name !== 'codex-rollout') fail('UNSUPPORTED_CODEX_READER');
-      readerVersion = choice(prior.reader.version, Object.keys(CODEX_TOOL_RULES));
     }
     // Only a trusted native controller receipt plus a complete byte-level proof
     // can exclude a control-only turn. Published evidence keeps its old identity
@@ -784,15 +734,14 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
         processingControls.push(control); eligibility.set(unit.id, 'excluded'); continue;
       }
     }
-    const version = choice(readerVersion, Object.keys(CODEX_TOOL_RULES));
-    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget, CODEX_TOOL_RULES[version], CODEX_SKILL_RULES[version]);
+    const collected = normalizeUnit(unit, scan.metadata.historyMode, checkBudget);
     if (!collected.evidence.length && !collected.omissions.length) { noEvidence.push(unit.id); eligibility.set(unit.id, 'excluded'); continue; }
     const occurredAt = Number.isSafeInteger(unit.start.value.payload.started_at)
       ? new Date(unit.start.value.payload.started_at * 1000).toISOString() : unit.start.value.timestamp;
     const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2,
       identity: { client: 'codex', sessionId: source.sessionId, unitId: unit.id }, projectRoot: source.projectRoot,
       source: { path: source.path, fileIdentity: source.fileIdentity, ranges: compactRanges(unit.records) },
-      reader: { name: 'codex-rollout', version: readerVersion, headerClientVersion: scan.metadata.version },
+      reader: { name: 'codex-rollout', version: CODEX_READER_VERSION, headerClientVersion: scan.metadata.version },
       occurredAt, capturedAt, terminal: unit.terminal,
       coverage: { partial: unit.terminal !== 'completed' || collected.omissions.length > 0, omissions: collected.omissions }, evidence: collected.evidence });
     candidates.push({ capture, proof, scopeId });

@@ -609,7 +609,7 @@ for (const client of ['codex', 'claude']) test(`${client} frozen proposal handof
   assert.deepEqual(await fs.readdir(a.collection.notes.notesDir), []);
 });
 
-for (const client of ['codex', 'claude']) test(`${client} legacy-operation handoff preserves exact selection across invoking chats`, async t => {
+for (const client of ['codex', 'claude']) test(`${client} standalone-operation handoff preserves exact selection across invoking chats`, async t => {
   const a = await processingFixture(t), b = await processingFixture(t, { base: a });
   await prepareProcessing(a.capability, { ...a.args, inputs: a.inputs });
   const h = await harness(t, a, client);
@@ -631,14 +631,14 @@ for (const client of ['codex', 'claude']) test(`${client} legacy-operation hando
   assert.equal((await inspectProcessing(a.capability, b.operationId)).state, 'missing');
 });
 
-test('shortcut ownership survives rollover and exact replay for unfinished legacy and workset operations', async t => {
+test('shortcut ownership survives rollover and exact replay for unfinished standalone and workset operations', async t => {
   const { selectProcessingShortcut, cancelProcessingShortcut } = await import('./processing-shortcuts.mjs');
-  for (const kind of ['legacy', 'workset']) await t.test(kind, async t => {
+  for (const kind of ['standalone', 'workset']) await t.test(kind, async t => {
     const f = await processingFixture(t), h = await harness(t, f);
     let chosen, operationId = f.operationId;
     if (kind === 'workset') chosen = await selectProcessingShortcut(f.capability, { selection: f.selection, requestId: randomUUID() });
     h.script = async call => {
-      if (kind === 'legacy') await call('processing_prepare', { operationId, inputs: f.inputs });
+      if (kind === 'standalone') await call('processing_prepare', { operationId, inputs: f.inputs });
       else {
         const pending = await call('processing_pending', {});
         const batch = await call('processing_prepare', pending.nextPreparation);

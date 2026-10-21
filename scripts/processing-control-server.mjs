@@ -223,7 +223,7 @@ function changedText(reason, name, code, cmd, others) {
   if (reason === 'destination') return `Nothing was applied: a note at the destination of ${draft} changed after the draft was prepared. Restore that note, or process again for a new draft, then review it with ${cmd('review')}.`;
   if (reason === 'not-pending') return `Nothing was applied: ${draft} is not pending.${others ? ` ${next}` : ''}`;
   if (reason === 'stale') return `Nothing was applied: ${draft} needs a fresh review in this chat. Read it again with ${cmd(`review ${code ?? REVIEW_CODE_PLACEHOLDER}`)}.`;
-  return `Nothing was applied: ${draft} changed, its destination changed, or it is no longer pending. ${next} If a note changed, restore it or process again.`;
+  fail('PROCESSING_CONTROL_OUTPUT_INVALID');
 }
 // One short reply for the person: where to read the draft and what to type.
 // Hashes, operation IDs and diagnostics stay in the private files.
@@ -358,7 +358,7 @@ const COLLECTION_STOPS = Object.freeze({
   READER_CHECKPOINT_ALLOCATION_CAPACITY: 'its saved reading progress has used all the space Cuefluent Notes sets aside for one chat',
   INVALID_READER_CHECKPOINT: 'its saved reading progress is not valid',
   READER_PAGE_CONFLICT: 'its saved reading progress no longer matches itself',
-  UNSUPPORTED_CLAUDE_READER: 'a turn of it was captured by a newer version of Cuefluent Notes',
+  UNSUPPORTED_CLAUDE_READER: 'a turn of it was captured by a reader this version of Cuefluent Notes does not support',
   READER_CHECKPOINT_CONFLICT: 'its saved reading progress does not fit the stretch it was saved for',
   READER_CHECKPOINT_IDENTITY_MISMATCH: 'its saved reading progress belongs to another chat or transcript',
   READER_ALLOCATION_INCONSISTENT: 'its saved reading progress accounts for its space inconsistently',
@@ -375,7 +375,6 @@ const COLLECTION_STOPS = Object.freeze({
   CAPTURE_HEAD_CONFLICT: 'a saved capture of one of its turns is missing or no longer matches the record of it',
   INVALID_INTAKE_METADATA: 'its saved capture state is not valid',
   UNSUPPORTED_CAPTURE_SCHEMA: 'a saved capture of one of its turns uses a format this version of Cuefluent Notes does not support',
-  INVALID_CAPTURE_READER: 'a saved capture of one of its turns names a reader that is not valid',
   INVALID_CAPTURE_COVERAGE: 'a saved capture of one of its turns is not valid',
   INVALID_CAPTURE_RANGE: 'a saved capture of one of its turns is not valid',
   CAPTURE_HASH_MISMATCH: 'a saved capture of one of its turns no longer matches its own hash',
@@ -655,8 +654,8 @@ export function processingControlStatusView(value, args) {
         if (value.untyped !== true || draft?.folder === undefined || outcome.pending !== true) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
         result.untyped = true;
       }
-      // A refused decision can name its cause; older receipts have none.
-      if (value.reason !== undefined) {
+      // A refused decision must name its cause.
+      if (value.review === 'changed' || value.reason !== undefined) {
         if (value.review !== 'changed') fail('PROCESSING_CONTROL_OUTPUT_INVALID');
         result.reason = choice(value.reason, CHANGED_REASONS);
       }

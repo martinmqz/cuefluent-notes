@@ -41,11 +41,12 @@ clients. Resume the existing operation first. An explicit `parallelism` of 1–5
 changes only that admission check; logical-unit reservations still apply. Fully
 inspected published proposals release the inspection slot but reserve their inputs.
 At most five proposal intents may await disposition; interrupted staging reserves
-a slot as soon as its immutable intent is recorded. A new intent rechecks this
-bound, while resuming an existing intent never requires another queue slot.
-Existing excess claims and proposal intents remain resumable. Identical preparation
-retries do not reapply smaller defaults to an already reserved packet. No claim expires or is
-cancelled to make room. Admission errors identify blocking operation IDs when known.
+a slot as soon as its immutable intent is recorded. Both new and resumed intents
+recheck this bound; a valid retry reuses its reserved slot. An over-capacity queue
+refuses proposal staging until existing proposals are resolved. Existing claims
+remain available for exact preparation retries, which do not reapply smaller
+defaults to an already reserved packet. No claim expires or is cancelled to make
+room. Admission errors identify blocking operation IDs when known.
 
 For a backlog, freeze a finite [workset](workflow-cli.md#finite-processing-worksets)
 before preparing batches. Its exact selection, admission budget and operation IDs

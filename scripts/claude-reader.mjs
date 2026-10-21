@@ -14,13 +14,9 @@ import { loadClaudeProcessingSkill, claudeProcessingCommandKind, isClaudeProcess
 import { verifyProcessingExecution, isProcessingExecutionProof } from './processing-execution-proof.mjs';
 import { nativeId, timestamp, canonicalJSON, fail, integer, hash, keys, isNativeId } from './workflow-values.mjs';
 
-// The capture reader version names its evidence text rules. Every supported
-// version keeps a mapping, so a published head extends under its own rules:
-// 1 copies human text verbatim; 2 keeps the typed arguments of the trusted
-// skill command's envelope without its markup. The skill name each version
-// strips is frozen with it (2: `cuefluent-notes:cuefluent-notes`).
+// Only the current capture reader is supported. It keeps typed skill arguments
+// without command markup; unsupported capture versions are not reinterpreted.
 export const CLAUDE_READER_VERSION = '2';
-export const CLAUDE_EVIDENCE_RULES = Object.freeze({ '1': 'verbatim', '2': 'skill-arguments' });
 const MARKUP_SKILL_COMMAND = 'cuefluent-notes:cuefluent-notes';
 // Structural checkpoint metadata (record kinds, ancestry, units) has its own
 // version, unchanged by evidence text rules.
@@ -80,7 +76,7 @@ const human = row => row.type === 'user' && row.message?.role === 'user' && !too
   row.interruptedMessageId === undefined && row.interruptedByShutdown !== true;
 // The trusted skill command's envelope with nothing typed after the command
 // (which Claude records without an arguments element) is markup only. Like
-// empty text, it is structural input under every rule set.
+// empty text, it is structural input.
 const markupOnly = (row, text) => row.promptSource === undefined && claudeSkillArguments(text, MARKUP_SKILL_COMMAND) === '';
 const emptyHuman = row => row.message.content === '' || markupOnly(row, row.message.content) || (Array.isArray(row.message.content) &&
   row.message.content.every(block => (block.type === 'text' && (block.text === '' || markupOnly(row, block.text))) || ['thinking', 'redacted_thinking'].includes(block.type)));
@@ -148,14 +144,14 @@ export function claudeContinuedIn(row, source) {
   return row.continuedInSessionId;
 }
 
-function normalizeHuman(record, out, rules) {
+function normalizeHuman(record, out) {
   const content = record.value.message.content;
   const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : content;
   if (!Array.isArray(blocks)) fail('UNSUPPORTED_CLAUDE_CONTENT');
   // A typed text block that is exactly the trusted skill command's envelope is
   // client markup around what the person typed: keep those arguments, as
   // written. Any other text, another skill's envelope or SDK input is verbatim.
-  const typed = rules === 'skill-arguments' && record.value.promptSource === undefined;
+  const typed = record.value.promptSource === undefined;
   for (const block of blocks) {
     if (block.type === 'text' && typeof block.text === 'string') {
       const args = typed ? claudeSkillArguments(block.text, MARKUP_SKILL_COMMAND) : null;
@@ -406,15 +402,12 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       // intake lock; never substitute a refreshed expectation at publication.
       const previous = heads.get(unitId) ?? await loadHead?.(unitId), baseline = previous?.capture ?? null;
       if (baseline) {
+        if (baseline.reader?.version !== CLAUDE_READER_VERSION) fail('UNSUPPORTED_CLAUDE_READER');
         validateCapture(baseline);
         if (baseline.identity.client !== 'claude' || baseline.identity.sessionId !== source.sessionId || baseline.identity.unitId !== unitId ||
             baseline.source.fileIdentity !== source.fileIdentity || baseline.source.path !== source.path || baseline.projectRoot !== source.projectRoot ||
             baseline.reader.name !== 'claude-transcript' || captureReader(baseline.reader).headerClientVersion !== scan.metadata.version) fail('CAPTURE_REVISION_CONFLICT');
-        // An unknown (newer) rule set is never reinterpreted under these rules.
-        if (!Object.hasOwn(CLAUDE_EVIDENCE_RULES, baseline.reader.version)) fail('UNSUPPORTED_CLAUDE_READER');
       }
-      // A published head extends under the evidence rules it was captured with.
-      const readerVersion = baseline?.reader.version ?? CLAUDE_READER_VERSION;
       const provenInputs = new Set();
       if (!baseline && !previous?.head && typeof loadHead === 'function') {
         if (typeof resolveProcessingExecution === 'function') {
@@ -464,12 +457,12 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
       // observed frames, which the intake helper verifies against the live head.
       if (baseline?.source.ranges.some(range => range.startByte < floor || (scope.end && range.endByte > scope.end.endByte))) fail('CAPTURE_REVISION_SCOPE_CONFLICT');
       const out = evidenceCollector(baseline ? { evidence: baseline.evidence, omissions: baseline.coverage.omissions } : undefined);
-      for (const record of additions) { checkBudget(); normalizeHuman(record, out, CLAUDE_EVIDENCE_RULES[readerVersion]); }
+      for (const record of additions) { checkBudget(); normalizeHuman(record, out); }
       if (!out.evidence.length && !out.omissions.length) { noEvidence.push(unitId); eligibility.set(unitId, 'structural'); continue; }
       const capture = createCapture({ format: 'cuefluent-capture', schemaVersion: 2, identity: { client: 'claude', sessionId: source.sessionId, unitId },
         projectRoot: source.projectRoot, source: { path: source.path, fileIdentity: source.fileIdentity,
           ranges: [...(baseline?.source.ranges ?? []), ...additions.map(captureRange)] },
-        reader: { name: 'claude-transcript', version: readerVersion, headerClientVersion: scan.metadata.version },
+        reader: { name: 'claude-transcript', version: CLAUDE_READER_VERSION, headerClientVersion: scan.metadata.version },
         occurredAt: baseline?.occurredAt ?? carry.units.find(unit => unit.id === unitId).occurredAt, capturedAt, terminal: 'unconfirmed',
         coverage: { partial: true, omissions: out.omissions }, evidence: out.evidence });
       if (baseline) assertCaptureExtension(baseline, capture);

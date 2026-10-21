@@ -242,14 +242,11 @@ async function checkReplacementMetadata(file, target, current) {
     if (actual !== null) fail('Output appeared before replacement.');
     return;
   }
-  // Legacy journals did not record metadata. Preserve the current target mode
-  // on their remaining writes rather than assuming the former 0600 default.
-  if (file.metadata === undefined) return;
   const expected = file.metadata;
   if (!actual || (expected ? actual.mode !== expected.mode || actual.uid !== expected.uid || actual.gid !== expected.gid : actual.mode !== (process.platform === 'win32' ? 0o666 : 0o600))) fail('Output permissions or ownership changed; inspect before replacing.');
 }
-async function prepareStageMetadata(file, target) {
-  const desired = file.metadata === undefined ? await replacementMetadata(target) : file.metadata;
+async function prepareStageMetadata(file) {
+  const desired = file.metadata;
   const { handle, stat } = await openGuarded(file.stagePath, {
     flags: process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY, singleLink: true,
   });
@@ -770,8 +767,10 @@ async function validateJournal(value, stateDir, { checkStorage = true, allowVers
   const paths = new Set();
   for (const file of value.files) {
     if (!file || !validHash(file.oldHash, true) || !validHash(file.newHash)) fail('Invalid recovery fingerprints.');
-    if (file.metadata !== undefined && file.metadata !== null && (!Number.isInteger(file.metadata.mode) || file.metadata.mode < 0 || file.metadata.mode > 0o7777 ||
-      !Number.isSafeInteger(file.metadata.uid) || file.metadata.uid < 0 || !Number.isSafeInteger(file.metadata.gid) || file.metadata.gid < 0)) fail('Invalid recovery permission metadata.');
+    if (!Object.hasOwn(file, 'metadata')) fail('Recovery journal requires explicit permission metadata.');
+    if ((file.metadata !== null) !== (file.oldHash !== null && file.oldHash !== file.newHash) ||
+      (file.metadata !== null && (!Number.isInteger(file.metadata.mode) || file.metadata.mode < 0 || file.metadata.mode > 0o7777 ||
+      !Number.isSafeInteger(file.metadata.uid) || file.metadata.uid < 0 || !Number.isSafeInteger(file.metadata.gid) || file.metadata.gid < 0))) fail('Invalid recovery permission metadata.');
     const target = checkStorage ? await targetPath(root, file.path, stateDir) : path.join(root, relativeNote(file.path));
     if (paths.has(pathKey(target))) fail('Recovery journal repeats an output.');
     paths.add(pathKey(target));
@@ -786,9 +785,8 @@ async function validateJournal(value, stateDir, { checkStorage = true, allowVers
     if (paths.has(pathKey(target))) fail('Recovery cannot both retire and update an output.');
     paths.add(pathKey(target));
   }
-  if (value.previousManifest !== undefined) {
-    manifestSchema(value.previousManifest, root);
-  }
+  if (!Object.hasOwn(value, 'previousManifest')) fail('Recovery journal requires an explicit previous manifest.');
+  manifestSchema(value.previousManifest, root);
   if (value.mode === 'derived') {
     const manifest = manifestSchema(value.proposedManifest, root);
     if (!manifest) fail('Derived recovery needs a proposed manifest.');
@@ -843,7 +841,7 @@ async function finishJournal(journal, stateDir, options) {
     const { target, current } = await preflightFile(journal, file, stateDir);
     if (current === file.newHash) continue;
     await checkDirectories(journal.root, journal.directories);
-    await prepareStageMetadata(file, target);
+    await prepareStageMetadata(file);
     if (await fingerprint(file.stagePath) !== file.newHash) fail('Staged recovery content changed before replacement.');
     // Preserve the final output check adjacent to rename after metadata work.
     if (await fingerprint(target) !== file.oldHash) fail('Output changed before replacement.');
@@ -1062,14 +1060,14 @@ export async function abortUpdate(plan) {
     await expectedManifest(stateDir, journal.expectedManifestHash, journal.proposedManifest ? sha256(serialize(journal.proposedManifest)) : null);
     reviewedSet(plan.files, new Set(journal.files.map(file => file.path)), 'output');
     reviewedSet(plan.stages, new Set(journal.files.flatMap(file => file.stagePath ? [file.stagePath] : [])), 'stage');
-    const previous = journal.previousManifest ?? (current.hash === journal.expectedManifestHash ? current.value : null);
+    const previous = journal.previousManifest;
     let manifest = null;
     if (journal.mode === 'derived') {
       const records = new Map((previous?.files ?? []).map(file => [file.path, file]));
       for (const file of journal.files) {
         const reviewed = plan.files?.find(item => item.path === file.path);
         if (reviewed?.expectedHash === file.newHash) records.set(file.path, journal.proposedManifest.files.find(item => item.path === file.path));
-        else if (previous === null && file.oldHash !== null) fail('The previous manifest is unavailable for this legacy journal; preserve it for manual reconciliation.');
+        else if (previous === null && file.oldHash !== null) fail('Recovery journal has an existing output without its previous manifest.');
       }
       manifest = { version: 1, mode: 'derived', root: journal.root, guideVersion: GUIDE_VERSION, files: [...records.values()].sort((a, b) => compare(a.path, b.path)) };
     }

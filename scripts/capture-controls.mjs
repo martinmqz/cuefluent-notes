@@ -535,12 +535,12 @@ async function holds(source, offset, record = null) {
 // The record an explicit capture ends with.
 const scopeEnd = scope => scope.end ?? scope.start;
 // An earlier capture counts while the transcript still holds its last record
-// and, where its selection kept one, the hash of every byte it covers.
+// and the hash of every byte its selection covers.
 async function scopeHolds(source, scope) {
   const end = scopeEnd(scope);
   if (!await holds(source, end.endByte, end)) return false;
   if (scope.passed && !await stretchHolds(source, scope.passed.from, end.endByte, scope.passed.hash)) return false;
-  return scope.contentHash === undefined || stretchHolds(source, scope.start.startByte, end.endByte, scope.contentHash);
+  return stretchHolds(source, scope.start.startByte, end.endByte, scope.contentHash);
 }
 // The bytes a later capture passes when it starts at this scope's end, with
 // their hash: from where its capture began reading, when it kept that.
@@ -855,7 +855,7 @@ const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'P
 // revision (or was final), or is invalid, missing or changed.
 const WINDOW_HOLDS = new Set(READER_BLOCK_CODES.filter(code => !['SOURCE_ANCHOR_LIMIT', 'UNSUPPORTED_CLAUDE_READER',
   'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'FINAL_CAPTURE_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'UNSUPPORTED_CAPTURE_SCHEMA',
-  'INVALID_CAPTURE_READER', 'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH', 'CAPTURE_HEAD_CONFLICT'].includes(code)));
+  'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH', 'CAPTURE_HEAD_CONFLICT'].includes(code)));
 async function storedTurns(capability, chat, unitIds, now) {
   return bounded(now, async () => {
     const store = await openWorkflowIntake(capability);

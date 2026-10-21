@@ -190,47 +190,6 @@ test('formal native-call replay preserves its original receipt after completion 
   assert.deepEqual(await fs.readFile(receiptFile), bytes);
 });
 
-test('legacy status receipts replay unchanged after clearer status details are introduced', async t => {
-  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
-  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
-  await h.call('process_selected_captures', args); await closed;
-  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
-  const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
-  const legacy = receipt.dispatch.response;
-  delete legacy.statusDetail; delete legacy.scope; delete legacy.progress;
-  legacy.statusText = 'Cuefluent processing: busy.';
-  const result = { content: [{ type: 'text', text: canonicalJSON(legacy) }], isError: false };
-  receipt.dispatch.statusText = legacy.statusText;
-  receipt.dispatch.resultHash = digest(canonicalJSON(result));
-  const bytes = canonicalJSON(receipt) + '\n';
-  await fs.writeFile(file, bytes);
-  h.callId = 'call_1';
-  assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
-  assert.equal(h.dispatches, 1);
-  assert.equal(await fs.readFile(file, 'utf8'), bytes);
-});
-
-test('a receipt written with earlier reply wording replays byte-for-byte, never re-rendered', async t => {
-  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
-  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
-  await h.call('process_selected_captures', args); await closed;
-  const file = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
-  const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
-  // The same reply as an earlier release worded it, recorded consistently.
-  const earlier = receipt.dispatch.response;
-  assert.equal(earlier.statusDetail, 'accepted'); assert.equal(earlier.scope, 'collection');
-  earlier.statusText = 'Cuefluent: Processing request accepted. Scope: collection.';
-  const result = { content: [{ type: 'text', text: canonicalJSON(earlier) }], isError: false };
-  receipt.dispatch.statusText = earlier.statusText;
-  receipt.dispatch.resultHash = digest(canonicalJSON(result));
-  const bytes = canonicalJSON(receipt) + '\n';
-  await fs.writeFile(file, bytes);
-  h.callId = 'call_1';
-  assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
-  assert.equal(h.dispatches, 1);
-  assert.equal(await fs.readFile(file, 'utf8'), bytes);
-});
-
 test('formal replay rejects a changed stored response without changing its receipt or dispatching', async t => {
   const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
   const args = { collectionId: f.collection.id }, closed = h.whenClosed();

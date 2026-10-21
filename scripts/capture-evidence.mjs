@@ -1,5 +1,5 @@
-import { MAX_TOOL_BYTES, MAX_CAPTURE_TOOL_BYTES } from './capture-contract.mjs';
-import { string, choice } from './workflow-values.mjs';
+import { MAX_CAPTURE_TOOL_BYTES } from './capture-contract.mjs';
+import { string } from './workflow-values.mjs';
 import { CONTROLS } from './file-io.mjs';
 
 const serializedLimit = 1024 * 1024;
@@ -17,9 +17,7 @@ export function clipUTF8(value, limit) {
   while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
   return { text: bytes.subarray(0, end).toString('utf8'), omitted: bytes.length - end };
 }
-export function evidenceCollector(previous = { evidence: [], omissions: [] }, { toolRulesVersion = '2' } = {}) {
-  choice(toolRulesVersion, ['1', '2']);
-  const legacy = toolRulesVersion === '1';
+export function evidenceCollector(previous = { evidence: [], omissions: [] }) {
   const evidence = structuredClone(previous.evidence), omissions = structuredClone(previous.omissions);
   let emptyDescriptors = omissions.filter(item => item.reason === 'tool-text-omitted').length;
   let tools = evidence.filter(item => item.kind.startsWith('tool-')).reduce((sum, item) => sum + Buffer.byteLength(item.text), 0);
@@ -49,12 +47,12 @@ export function evidenceCollector(previous = { evidence: [], omissions: [] }, { 
   };
   const add = (kind, record, value) => {
     const isTool = Object.hasOwn(toolBudgets, kind);
-    // Validate v2 tool payloads even when no evidence capacity remains. NUL
+    // Validate tool payloads even when no evidence capacity remains. NUL
     // replacement still happens below; shape/Unicode failures are coded errors.
-    if (isTool && !legacy) string(typeof value.text === 'string' ? value.text.replaceAll('\0', '\ufffd') : value.text, 64 * 1024 * 1024, { empty: true });
+    if (isTool) string(typeof value.text === 'string' ? value.text.replaceAll('\0', '\ufffd') : value.text, 64 * 1024 * 1024, { empty: true });
     if (evidence.length >= 2048 || serializedBytes >= serializedLimit - 2048) {
-      omit(isTool && !legacy ? (evidence.length >= 2048 ? 'tool-evidence-record-limit' : 'tool-evidence-serialized-limit') : 'evidence-budget-exhausted', record,
-        isTool && !legacy ? { bytes: Buffer.byteLength(value.text) } : {}); return;
+      omit(isTool ? (evidence.length >= 2048 ? 'tool-evidence-record-limit' : 'tool-evidence-serialized-limit') : 'evidence-budget-exhausted', record,
+        isTool ? { bytes: Buffer.byteLength(value.text) } : {}); return;
     }
     const base = { kind, recordId: record.id, range: { startByte: record.startByte, endByte: record.endByte, recordIds: [record.id] } };
     if (kind === 'attachment') {
@@ -78,16 +76,14 @@ export function evidenceCollector(previous = { evidence: [], omissions: [] }, { 
       omit('control-characters-replaced', record, { bytes: value.text.split('\0').length - 1 });
       value = { ...value, text: value.text.replaceAll('\0', '\ufffd') };
     }
-    if (isTool && legacy && tools >= MAX_CAPTURE_TOOL_BYTES) { omit('tool-budget-exhausted', record, { bytes: Buffer.byteLength(value.text) }); return; }
-    const limit = isTool && !legacy ? [
+    const limit = isTool ? [
       { bytes: toolBudgets[kind].perCall - (callBytes.get(`${kind}:${value.callId}`) ?? 0), reason: `${kind}-call-limit` },
       { bytes: toolBudgets[kind].total - kindBytes[kind], reason: `${kind}-budget-exhausted` },
-      // Older retained evidence may exceed one v2 kind's allocation. Preserve
-      // those bytes without admitting new text above the shared format ceiling.
+      // Enforce the capture format ceiling as well as the individual pools.
       { bytes: MAX_CAPTURE_TOOL_BYTES - tools, reason: 'tool-budget-exhausted' }
-    ].sort((a, b) => a.bytes - b.bytes)[0] : { bytes: isTool ? Math.min(MAX_TOOL_BYTES, MAX_CAPTURE_TOOL_BYTES - tools) : serializedLimit, reason: 'text-truncated' };
+    ].sort((a, b) => a.bytes - b.bytes)[0] : { bytes: serializedLimit, reason: 'text-truncated' };
     let clipped = clipUTF8(value.text, Math.max(0, limit.bytes));
-    if (isTool && !legacy && clipped.omitted) omit(limit.reason, record, { bytes: clipped.omitted });
+    if (isTool && clipped.omitted) omit(limit.reason, record, { bytes: clipped.omitted });
     // JSON escaping and per-item provenance count against the same serialized budget.
     let low = 0, high = Buffer.byteLength(clipped.text);
     while (low < high) {
@@ -95,18 +91,18 @@ export function evidenceCollector(previous = { evidence: [], omissions: [] }, { 
       if (serializedBytes + Buffer.byteLength(JSON.stringify({ ...base, ...value, text: trial })) <= serializedLimit - 2048) low = mid;
       else high = mid - 1;
     }
-    clipped = clipUTF8(isTool && !legacy ? clipped.text : value.text, low);
-    const sizeLossReported = isTool && !legacy && clipped.omitted > 0;
-    if (clipped.omitted) omit(isTool ? (legacy ? 'tool-excerpt-truncated' : 'tool-evidence-serialized-limit') : 'text-truncated', record, { bytes: clipped.omitted });
+    clipped = clipUTF8(isTool ? clipped.text : value.text, low);
+    const sizeLossReported = isTool && clipped.omitted > 0;
+    if (clipped.omitted) omit(isTool ? 'tool-evidence-serialized-limit' : 'text-truncated', record, { bytes: clipped.omitted });
     // Retain native descriptors when only text allowance is exhausted. Omission
     // metadata distinguishes a clipped-to-empty result from an observed empty one.
-    if (clipped.text || (isTool && (!legacy || !clipped.omitted))) {
+    if (clipped.text || isTool) {
       const item = { ...base, ...value, text: clipped.text };
       const size = Buffer.byteLength(JSON.stringify(item));
-      if (!legacy && serializedBytes + size > serializedLimit - 2048) {
+      if (serializedBytes + size > serializedLimit - 2048) {
         if (!sizeLossReported) omit(isTool ? 'tool-evidence-serialized-limit' : 'evidence-budget-exhausted', record, { bytes: Buffer.byteLength(clipped.text) }); return;
       }
-      if (isTool && !legacy && !clipped.text && value.text) {
+      if (isTool && !clipped.text && value.text) {
         // A bounded, unaggregated record marker makes clipped-to-empty different
         // from genuinely empty output. Do not fill the envelope with descriptors.
         if (emptyDescriptors >= 32 || evidence.length >= 2016 || omissions.length >= 62) {
