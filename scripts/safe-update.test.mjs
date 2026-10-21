@@ -610,6 +610,25 @@ test('journals require recorded permission metadata and preserve unsupported rec
     });
   }
 });
+test('recovery checks private permissions for a new output already renamed into place', async t => {
+  const f = await fixture(t);
+  await assert.rejects(applyPlan(f.plan, { afterReplace() { throw new Error('Interrupted replacement'); } }), /Interrupted replacement/);
+  const journalPath = path.join(f.stateDir, 'journal.json'), bytes = await fs.readFile(journalPath);
+  const file = JSON.parse(bytes).files[0];
+  assert.equal(file.oldHash, null); assert.equal(file.metadata, null);
+  const note = await fs.readFile(f.target);
+  if (process.platform !== 'win32') {
+    await fs.chmod(f.target, 0o644);
+    await assert.rejects(recover(f.stateDir), /permissions or ownership changed/);
+    assert.deepEqual(await fs.readFile(journalPath), bytes);
+    assert.deepEqual(await fs.readFile(f.target), note);
+    await fs.chmod(f.target, 0o600);
+  }
+  await recover(f.stateDir);
+  assert.deepEqual(await fs.readFile(f.target), note);
+  assert.equal((await inspectState(f.stateDir)).recoveryPending, false);
+});
+
 test('recovery preserves permissions and refuses metadata drift or hard-linked replacements', async t => {
   const f = await fixture(t);
   await applyPlan(f.plan);

@@ -12,7 +12,8 @@ import { checkWorkflowBudget } from './workflow-budget.mjs';
 import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fail } from './workflow-values.mjs';
 
 // Only the current extraction rules are supported. Older capture versions are
-// refused without replacing their immutable evidence.
+// refused without replacing their immutable evidence. The test pins this
+// version's command grammar; changing extraction semantics requires a bump.
 export const CODEX_READER_VERSION = '7';
 const commandOnly = text => processingControlText(text) !== null;
 const CONTROL_SERVER = 'cuefluent_control';
@@ -43,10 +44,15 @@ export function codexSkillSelection(payload) {
  * the mention alone, else what follows it, starting with its separator. The
  * mention may be recorded as the list's one placeholder element covering
  * exactly it, or not at all. Anything else is null. */
-export function codexMentionText(content) {
+function codexTextPart(content) {
   if (!Array.isArray(content) || content.length !== 1) return null;
   const [part] = content;
   if (part?.type !== 'text' || typeof part.text !== 'string' || Object.keys(part).some(key => !['type', 'text', 'text_elements'].includes(key))) return null;
+  return part;
+}
+export function codexMentionText(content) {
+  const part = codexTextPart(content);
+  if (part === null) return null;
   const mention = CODEX_SKILL_MENTIONS.find(value => part.text === value || part.text.startsWith(`${value} `) ||
     (part.text.startsWith(value) && !/^[a-z0-9:_-]/i.test(part.text.slice(value.length))));
   if (mention === undefined) return null;
@@ -64,17 +70,24 @@ export function codexMentionText(content) {
  * native message. No URL decoding, Markdown interpretation or general trim.
  * Desktop appends one LF; remove exactly that LF only for this native shape. */
 export function codexDesktopMentionText(content, selectedPath) {
-  if (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath) || /[\r\n]/.test(selectedPath) ||
-      !Array.isArray(content) || content.length !== 1) return null;
-  const [part] = content;
-  if (part?.type !== 'text' || typeof part.text !== 'string' ||
-      Object.keys(part).some(key => !['type', 'text', 'text_elements'].includes(key)) ||
-      !Array.isArray(part.text_elements) || part.text_elements.length !== 0) return null;
+  if (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath) || /[\r\n]/.test(selectedPath)) return null;
+  const part = codexTextPart(content);
+  // Desktop's native link shape includes an explicitly empty elements array.
+  if (part === null || !Array.isArray(part.text_elements) || part.text_elements.length !== 0) return null;
   const link = CODEX_SKILL_MENTIONS.map(label => `[${label}](${selectedPath})`).find(value =>
     part.text === value || part.text.startsWith(`${value} `) || part.text.startsWith(`${value}\n`));
   if (link === undefined) return null;
   const after = part.text.slice(link.length);
   return after.endsWith('\n') ? after.slice(0, -1) : after;
+}
+/** Selected native markup has one command spelling and its original evidence
+ * suffix. Only Desktop's command spelling drops its single terminal LF. */
+export function codexSelectedMentionText(content, recordedPath) {
+  const mention = codexMentionText(content);
+  if (mention !== null) return { text: mention, evidenceText: mention };
+  const desktop = codexDesktopMentionText(content, recordedPath);
+  return desktop === null ? null : { text: desktop, linked: true,
+    evidenceText: desktop + (content[0].text.endsWith('\n') ? '\n' : '') };
 }
 // Code mode frames each cell's output with this host status line; what the
 // cell printed follows it. A cell still running has printed nothing yet here.
@@ -268,19 +281,11 @@ function blocks(collector, record, content, kind, syntax, selected = false, repl
   // mention the list inserted is markup; the words after it and one space
   // stay, unless they are exactly one action: then the message is only the
   // command. Other messages, and a mention typed by hand, stay as typed.
-  const desktop = syntax === 'user' && selected?.size === 1
-    ? codexDesktopMentionText(content, [...selected][0]) : null;
-  if (desktop === '' || (desktop?.startsWith(' ') && commandOnly(desktop.slice(1)))) return;
-  if (desktop !== null) {
-    // Command recognition removes Desktop's final LF; ordinary evidence
-    // retains it. Remove only the verified link and one separator space.
-    const after = desktop + (content[0].text.endsWith('\n') ? '\n' : '');
-    collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
-  }
-  const after = syntax === 'user' && selected ? codexMentionText(content) : null;
-  if (after !== null) {
-    if (after.startsWith(' ') && commandOnly(after.slice(1))) return;
-    collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
+  const mention = syntax === 'user' && selected
+    ? codexSelectedMentionText(content, selected.size === 1 ? [...selected][0] : null) : null;
+  if (mention !== null) {
+    if ((mention.linked && mention.text === '') || (mention.text.startsWith(' ') && commandOnly(mention.text.slice(1)))) return;
+    collector.add(kind, record, { text: textValue(mention.evidenceText.replace(/^ /, '')) }); return;
   }
   // The older skill part with exactly one action is only the command too.
   if (syntax === 'user' && content.length === 2 && pluginSkillBlock(content[0]) && content[1]?.type === 'text' &&

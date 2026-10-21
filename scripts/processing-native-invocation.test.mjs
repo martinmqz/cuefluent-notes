@@ -1099,6 +1099,24 @@ test('a continuation link or pointer changed after the binding first read it ref
   });
 });
 
+test('Desktop links use the recorded spelling after verifying the installed skill identity', async t => {
+  for (const nested of [false, true]) for (const exact of [true, false]) await t.test(`${nested ? 'code mode' : 'direct'} ${exact ? 'recorded path' : 'different link spelling'}`, async t => {
+    const f = await fixture(t);
+    const recorded = path.dirname(f.skillPath) + path.sep + path.sep + path.basename(f.skillPath);
+    assert.notEqual(recorded, f.skillPath); assert.equal(path.normalize(recorded), path.normalize(f.skillPath));
+    f.invocation.tool = 'processing_review'; f.invocation.arguments = { collectionId: f.collection.id };
+    const input = menuInput(f, `[$cuefluent-notes:cuefluent-notes](${exact ? recorded : f.skillPath}) save\n`,
+      { placeholder: false, skillPath: recorded });
+    if (nested) {
+      const rows = nestedRows(f, { content: [{ type: 'text', text: 'Synthetic challenge' }], isError: false });
+      await f.append([f.spacer(), ...input, rows.outer, rows.call, rows.output]);
+    } else await f.append([f.spacer(), ...input, f.nativeCall()]);
+    const bound = await f.resolve();
+    assert.equal(bound.nativeSkill, exact);
+    assert.equal(bound.typedControl, exact ? 'save' : undefined);
+  });
+});
+
 test('Desktop linked menu commands bind only to the selected installed skill and exact action', async t => {
   for (const control of ['review', 'save', 'save t7xb88', 'skip', 'review cancel', 'help']) for (const nested of [false, true]) {
     await t.test(`${control}${nested ? ' through code mode' : ' directly'}`, async t => {

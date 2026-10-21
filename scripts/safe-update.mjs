@@ -235,6 +235,7 @@ async function replacementMetadata(target) {
   if (process.platform === 'win32' && !(stat.mode & 0o200)) fail('Windows read-only notes must remain unchanged; review their permissions before replacement.');
   return { mode: stat.mode & 0o7777, uid: stat.uid, gid: stat.gid };
 }
+const replacesOutput = ({ oldHash, newHash }) => oldHash !== null && oldHash !== newHash;
 async function checkReplacementMetadata(file, target, current) {
   if (file.oldHash === file.newHash) return;
   const actual = await replacementMetadata(target);
@@ -242,7 +243,9 @@ async function checkReplacementMetadata(file, target, current) {
     if (actual !== null) fail('Output appeared before replacement.');
     return;
   }
-  const expected = file.metadata;
+  const expected = replacesOutput(file) ? file.metadata : null;
+  // A newly created output may already exist after an interrupted replacement.
+  // It has no previous metadata; its private creation mode still must match.
   if (!actual || (expected ? actual.mode !== expected.mode || actual.uid !== expected.uid || actual.gid !== expected.gid : actual.mode !== (process.platform === 'win32' ? 0o666 : 0o600))) fail('Output permissions or ownership changed; inspect before replacing.');
 }
 async function prepareStageMetadata(file) {
@@ -658,7 +661,7 @@ export async function applyPlan(plan, options = {}) {
       const sources = sourcesSchema(file.sources, { required: plan.mode === 'derived' });
       const entries = entriesSchema(file.entries, sources, checked.sections.map(section => section.heading));
       const newHash = sha256(bytes);
-      const metadata = currentHash !== newHash ? await replacementMetadata(target) : null;
+      const metadata = replacesOutput({ oldHash: currentHash, newHash }) ? await replacementMetadata(target) : null;
       prepared.push({ path: file.path, target, oldHash: currentHash, newHash, metadata, bytes, sources, entries, stagePath: null });
     }
     for await (const { target, bytes } of readRetainedOutputs({ ...plan, root, stateDir }, manifest)) {
@@ -768,7 +771,7 @@ async function validateJournal(value, stateDir, { checkStorage = true, allowVers
   for (const file of value.files) {
     if (!file || !validHash(file.oldHash, true) || !validHash(file.newHash)) fail('Invalid recovery fingerprints.');
     if (!Object.hasOwn(file, 'metadata')) fail('Recovery journal requires explicit permission metadata.');
-    if ((file.metadata !== null) !== (file.oldHash !== null && file.oldHash !== file.newHash) ||
+    if ((file.metadata !== null) !== replacesOutput(file) ||
       (file.metadata !== null && (!Number.isInteger(file.metadata.mode) || file.metadata.mode < 0 || file.metadata.mode > 0o7777 ||
       !Number.isSafeInteger(file.metadata.uid) || file.metadata.uid < 0 || !Number.isSafeInteger(file.metadata.gid) || file.metadata.gid < 0))) fail('Invalid recovery permission metadata.');
     const target = checkStorage ? await targetPath(root, file.path, stateDir) : path.join(root, relativeNote(file.path));

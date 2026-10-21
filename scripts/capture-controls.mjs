@@ -540,7 +540,8 @@ async function scopeHolds(source, scope) {
   const end = scopeEnd(scope);
   if (!await holds(source, end.endByte, end)) return false;
   if (scope.passed && !await stretchHolds(source, scope.passed.from, end.endByte, scope.passed.hash)) return false;
-  return stretchHolds(source, scope.start.startByte, end.endByte, scope.contentHash);
+  const stretch = chosenStretch(scope);
+  return stretchHolds(source, stretch.from, stretch.to, stretch.hash);
 }
 // The bytes a later capture passes when it starts at this scope's end, with
 // their hash: from where its capture began reading, when it kept that.
@@ -854,7 +855,7 @@ const RUN_BUDGET_CODES = new Set(['WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET', 'P
 // leaves out, and a turn whose earlier capture came from another reader or
 // revision (or was final), or is invalid, missing or changed.
 const WINDOW_HOLDS = new Set(READER_BLOCK_CODES.filter(code => !['SOURCE_ANCHOR_LIMIT', 'UNSUPPORTED_CLAUDE_READER',
-  'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'FINAL_CAPTURE_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'UNSUPPORTED_CAPTURE_SCHEMA',
+  'UNSUPPORTED_CODEX_READER', 'INVALID_CAPTURE_READER', 'CAPTURE_REVISION_CONFLICT', 'FINAL_CAPTURE_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'UNSUPPORTED_CAPTURE_SCHEMA',
   'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH', 'CAPTURE_HEAD_CONFLICT'].includes(code)));
 async function storedTurns(capability, chat, unitIds, now) {
   return bounded(now, async () => {

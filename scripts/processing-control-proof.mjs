@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { readBoundedBytes } from './file-io.mjs';
 import { readSessionRange } from './session-jsonl.mjs';
-import { verifyCodexHeader, codexSkillSelection, codexMentionText, codexDesktopMentionText, codexCellOutput, codexToolRenderings } from './codex-reader.mjs';
+import { verifyCodexHeader, codexSkillSelection, codexSelectedMentionText, codexCellOutput, codexToolRenderings } from './codex-reader.mjs';
 import { claudeRegistrationHeader, claudeSessionKinds } from './claude-reader.mjs';
 import { canonicalJSON, digest, integer, isNativeId, object } from './workflow-values.mjs';
 
@@ -517,7 +517,7 @@ export async function verifyCodexProcessingControl({ source, fromByte, endByte, 
   // this skill's selection item, or the text after the older skill part.
   let command, skillPath;
   if (selection) {
-    const after = codexMentionText(user.content) ?? codexDesktopMentionText(user.content, selection.skillPath);
+    const after = codexSelectedMentionText(user.content, selection.skillPath)?.text ?? null;
     if (after === null || !after.startsWith(' ') || userText !== user.content[0].text) return null;
     command = after.slice(1); skillPath = selection.skillPath;
   } else {

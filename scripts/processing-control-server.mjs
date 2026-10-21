@@ -326,6 +326,7 @@ const COLLECTION_STOPS = Object.freeze({
   CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE: 'its transcript has history before a compaction that cannot be traced',
   UNSUPPORTED_CLAUDE_CONTENT: 'its transcript has content Cuefluent Notes cannot read',
   INVALID_SESSION_CLIENT_VERSION: 'its transcript was written by a client version Cuefluent Notes does not support',
+  INVALID_CAPTURE_READER: 'a saved capture has reader metadata this version of Cuefluent Notes cannot read',
   INVALID_SESSION_RECORD: 'its transcript has a record that is not valid',
   SESSION_RECORD_LIMIT: 'its transcript has more records in one stretch than Cuefluent Notes reads',
   READER_CHECKPOINT_CAPACITY: 'its saved reading progress grew past what Cuefluent Notes keeps',

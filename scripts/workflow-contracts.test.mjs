@@ -316,7 +316,9 @@ test('capture reader requires current header provenance and rejects the retired 
     { name: 'fixture', version: '1', clientVersion: 'fixture' },
     { ...current.reader, clientVersion: 'fixture' },
     { name: 'fixture', version: '1' },
-  ]) assert.throws(() => createCapture({ ...current, reader }), { code: 'INVALID_WORKFLOW' });
+    { ...current.reader, name: '' },
+    { ...current.reader, version: 1 },
+  ]) assert.throws(() => createCapture({ ...current, reader }), { code: 'INVALID_CAPTURE_READER' });
 });
 
 test('capture validates ordered provenance, partial coverage and binary exclusions', () => {

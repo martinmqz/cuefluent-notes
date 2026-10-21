@@ -9,7 +9,7 @@ import { assertWorkflowStorage, workflowProcessingContext, workflowCollectionGra
 import { currentIntervals, inspectSourceBoundary } from './capture-selection.mjs';
 import { processingSourceDirectory, processingSourcePath, validateProcessingSource, readRegistration, registrationPath, registrationFloorPath } from './collection-ingress.mjs';
 import { readSessionRange } from './session-jsonl.mjs';
-import { verifyCodexHeader, codexRegistrationHeader, codexSkillSelection, codexMentionText, codexDesktopMentionText } from './codex-reader.mjs';
+import { verifyCodexHeader, codexRegistrationHeader, codexSkillSelection, codexMentionText, codexSelectedMentionText } from './codex-reader.mjs';
 import { claudeRegistrationHeader, isClaudeHumanRow } from './claude-reader.mjs';
 import { readContinuesLink, readContinuedLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
 import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, findClaudeSkillArguments, claudeProcessingCommandKind, processingControlAction,
@@ -373,7 +373,7 @@ async function readBoundCall(source, floor, context, invocation, { skillPath, sk
     const legacy = contents.some(content => Array.isArray(content) && content.some(trusted));
     const selected = !legacy && contents.length > 0 && picked.some(item => trustedSelection(item, skillPath));
     const after = selected && picked.length === 1 && contents.length === 1
-      ? mentionedText(contents[0]) ?? codexDesktopMentionText(contents[0], skillPath) : null;
+      ? codexSelectedMentionText(contents[0], codexSkillSelection(picked[0]))?.text ?? null : null;
     const exact = selected ? (after?.startsWith(' ') ? processingControlText(after.slice(1)) : null)
       : contents.length === 1 ? processingControlText(typedText(contents[0])) : null;
     if (exact !== null) {

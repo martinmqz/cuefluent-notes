@@ -189,7 +189,7 @@ export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUP
   'INVALID_READER_PROGRESS', 'INVALID_READER_SUSPENSION', 'READER_CHECKPOINT_REQUIRED', 'INVALID_INTAKE_CURSOR',
   // A turn whose earlier capture this reader cannot extend, or that conflicts
   // with the current transcript, is held on every pass.
-  'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
+  'UNSUPPORTED_CODEX_READER', 'INVALID_CAPTURE_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
   'SOURCE_IDENTITY_MISMATCH', 'FINAL_CAPTURE_CONFLICT',
   // A turn whose capture would be larger than a capture may be, or would hold
   // what a capture cannot: every pass refuses it the same way.
@@ -256,7 +256,7 @@ export async function processScope(transaction, store, selection, scopeId, autho
       if (suspensionSnapshot.bytes !== null) {
         try {
           keys(old, ['version', 'readerRulesRevision', 'sourceIdentity', 'intervalHash', 'cursorHash', 'ceilingByte', 'reason', 'diagnostic']);
-          if (old.version !== READER_SUSPENSION_VERSION || old.readerRulesRevision !== CLAUDE_READER_RULES_REVISION) fail('INVALID_READER_SUSPENSION');
+          if (old.version !== READER_SUSPENSION_VERSION || integer(old.readerRulesRevision) === 0) fail('INVALID_READER_SUSPENSION');
           hash(old.sourceIdentity); hash(old.intervalHash); if (old.cursorHash !== null) hash(old.cursorHash);
           integer(old.ceilingByte);
           choice(old.reason, ['pause-boundary', 'partial-tail', 'unresolved-boundary']);

@@ -190,6 +190,29 @@ test('formal native-call replay preserves its original receipt after completion 
   assert.deepEqual(await fs.readFile(receiptFile), bytes);
 });
 
+test('formal replay preserves retained wording byte for byte across a reconnect', async t => {
+  const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
+  const args = { collectionId: f.collection.id }, closed = h.whenClosed();
+  await h.call('process_selected_captures', args); await closed;
+  const receiptFile = path.join(f.collection.intakeStateDir, 'control-dispatch', 'codex', f.identity.sessionId, `${digest('call_1').slice(0, 24)}.json`);
+  const receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8'));
+  // Keep the complete current receipt shape, with wording the current renderer
+  // would not generate: replay must return the stored result, not rerender it.
+  receipt.dispatch.response.statusText = 'Cuefluent: Synthetic retained response wording.';
+  const result = { content: [{ type: 'text', text: canonicalJSON(receipt.dispatch.response) }], isError: false };
+  receipt.dispatch.statusText = receipt.dispatch.response.statusText;
+  receipt.dispatch.resultHash = digest(canonicalJSON(result));
+  const bytes = canonicalJSON(receipt) + '\n'; await fs.writeFile(receiptFile, bytes);
+  h.callId = 'call_1';
+  assert.deepEqual((await h.call('process_selected_captures', args)).result, result);
+  assert.equal(h.dispatches, 1); assert.equal(await fs.readFile(receiptFile, 'utf8'), bytes);
+  h.end(); await h.server;
+  const again = await harness(t, f); again.nativeSkill = true; again.callId = 'call_1';
+  assert.deepEqual((await again.call('process_selected_captures', args)).result, result);
+  assert.equal(again.dispatches, 0); assert.equal(again.opens, 0);
+  assert.equal(await fs.readFile(receiptFile, 'utf8'), bytes);
+});
+
 test('formal replay rejects a changed stored response without changing its receipt or dispatching', async t => {
   const f = await processingFixture(t), h = await harness(t, f); h.nativeSkill = true;
   const args = { collectionId: f.collection.id }, closed = h.whenClosed();

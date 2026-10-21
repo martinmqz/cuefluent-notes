@@ -15,8 +15,10 @@ export function clientVersion(value) {
 
 // Header provenance is not the version that emitted every record in a resumed session.
 export function captureReader(reader) {
-  keys(reader, ['name', 'version', 'headerClientVersion']);
-  for (const field of ['name', 'version']) string(reader[field], 128);
+  try {
+    keys(reader, ['name', 'version', 'headerClientVersion']);
+    for (const field of ['name', 'version']) string(reader[field], 128);
+  } catch { fail('INVALID_CAPTURE_READER'); }
   return { name: reader.name, version: reader.version,
     headerClientVersion: clientVersion(reader.headerClientVersion) };
 }

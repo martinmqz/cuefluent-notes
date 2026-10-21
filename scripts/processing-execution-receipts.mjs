@@ -52,13 +52,15 @@ export async function findCompletedProcessingExecution(transaction, { session, r
   if (typeof authorize !== 'function' || await authorize() !== true) fail('INTAKE_NOT_AUTHORIZED');
   const store = await assertIntakeTransaction(transaction);
   const requestName = requestFilename({ ...session, requestId });
-  const indexed = parse(await intakeSnapshot(store, 'state', requestName, { maxBytes: MAX_BYTES }));
+  const requestSnapshot = await intakeSnapshot(store, 'state', requestName, { maxBytes: MAX_BYTES });
+  const indexed = parse(requestSnapshot);
   if (indexed) {
     if (requestFilename(indexed) !== requestName || indexed.inputHash !== inputHash || indexed.inputId !== requestId ||
         indexed.profileId !== session.profileId || indexed.toolContractHash !== session.toolContractHash ||
         (session.client === 'codex' && indexed.sourcePath !== session.sourcePath)) fail('PROCESSING_EXECUTION_CONFLICT');
-    const unit = parse(await intakeSnapshot(store, 'state', filename(indexed), { maxBytes: MAX_BYTES }));
-    if (unit && canonicalJSON(unit) !== canonicalJSON(indexed)) fail('PROCESSING_EXECUTION_CONFLICT');
+    const unitSnapshot = await intakeSnapshot(store, 'state', filename(indexed), { maxBytes: MAX_BYTES });
+    const unit = parse(unitSnapshot);
+    if (unit && unitSnapshot.hash !== requestSnapshot.hash) fail('PROCESSING_EXECUTION_CONFLICT');
     // The proof-sealed request record is published first. If publication stopped
     // before its identical unit projection, recovery still has the exact bytes;
     // collection simply has no unit receipt to use until an authorized retry.
@@ -87,8 +89,9 @@ export async function recordProcessingExecution(transaction, receipt, proof) {
   const requestSnapshot = await intakeSnapshot(store, 'state', requestName, { maxBytes: MAX_BYTES }), indexed = parse(requestSnapshot);
   // Current publication writes the request first. A unit-only record cannot
   // result from that write order and must not be migrated by a retry.
-  if ((previous && (!indexed || canonicalJSON(previous) !== canonicalJSON(value))) ||
-      (indexed && canonicalJSON(indexed) !== canonicalJSON(value))) fail('PROCESSING_EXECUTION_CONFLICT');
+  const valueHash = digest(canonicalJSON(value) + '\n');
+  if ((previous && (!indexed || snapshot.hash !== valueHash)) ||
+      (indexed && requestSnapshot.hash !== valueHash)) fail('PROCESSING_EXECUTION_CONFLICT');
   if (!indexed) await replaceIntakeJSON(transaction, requestName, value, null);
   if (previous) return snapshot.hash;
   return replaceIntakeJSON(transaction, name, value, null);
@@ -102,12 +105,14 @@ export function createProcessingExecutionResolver(transaction, { source, authori
     if (query.client !== source.client || query.sessionId !== source.sessionId) return null;
     if (typeof authorize !== 'function' || await authorize() !== true) fail('INTAKE_NOT_AUTHORIZED');
     const store = await assertIntakeTransaction(transaction);
-    const value = parse(await intakeSnapshot(store, 'state', filename(query), { maxBytes: MAX_BYTES }));
+    const unitSnapshot = await intakeSnapshot(store, 'state', filename(query), { maxBytes: MAX_BYTES });
+    const value = parse(unitSnapshot);
     if (!value || value.sourcePath !== source.path || value.sourceIdentity !== source.fileIdentity ||
         Object.entries(query).some(([key, item]) => value[key] !== item)) return null;
-    const indexed = parse(await intakeSnapshot(store, 'state', requestFilename(value), { maxBytes: MAX_BYTES }));
+    const requestSnapshot = await intakeSnapshot(store, 'state', requestFilename(value), { maxBytes: MAX_BYTES });
+    const indexed = parse(requestSnapshot);
     if (!indexed) return null;
-    if (canonicalJSON(indexed) !== canonicalJSON(value)) fail('PROCESSING_EXECUTION_CONFLICT');
+    if (requestSnapshot.hash !== unitSnapshot.hash) fail('PROCESSING_EXECUTION_CONFLICT');
     if (await authorize() !== true) fail('INTAKE_NOT_AUTHORIZED');
     return Object.freeze({ ...value, allowedTools: Object.freeze([...value.allowedTools]) });
   };

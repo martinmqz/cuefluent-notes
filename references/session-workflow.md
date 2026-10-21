@@ -299,6 +299,8 @@ These allocations cannot recover omitted bytes. Existing captures, processing
 packets and acknowledgements are not rewritten. Capture extraction accepts only
 `codex-rollout/7` and `claude-transcript/2`; unsupported capture reader versions
 refuse with `UNSUPPORTED_CODEX_READER` or `UNSUPPORTED_CLAUDE_READER`.
+Invalid capture reader metadata refuses with `INVALID_CAPTURE_READER`; the
+capture is preserved without importing or converting it.
 The metadata-only checkpoint labels are independent of capture reader versions:
 `codex-rollout/1` and `claude-transcript/1` remain the current checkpoint formats.
 Budget changes do not move selection boundaries or rewind an advanced cursor.
@@ -882,14 +884,15 @@ eligible records within that ceiling, then persists a source/interval/cursor-bou
 inspection suspension. Matching suspensions are checked before hydrating carry pages.
 Reader suspensions and the `ingress/suspended` hook hint are bound to the Claude
 reader's rules revision. The worker refuses unsupported suspension shapes,
-versions or rules revisions with `INVALID_READER_SUSPENSION`, without reading
-the transcript or replacing the suspension, cursor or captures. An invalid
+versions or invalid rules revisions with `INVALID_READER_SUSPENSION`, without
+reading the transcript or replacing the suspension, cursor or captures. An invalid
 ingress hint cannot suppress a worker wake.
 The `ingress/drained` hint instead represents committed terminal progress and
 does not expire with the reader's rules revision.
-A valid current-format suspension with changed source, interval, cursor or ceiling
-bindings is a cache miss. Reinspection stays within the authorized frozen pause
-range and preserves selection, capture and checkpoint identities.
+A valid current-format suspension with changed rules revision, source, interval,
+cursor or ceiling bindings is a cache miss. Reinspection stays within the
+authorized frozen pause range and preserves selection, capture and checkpoint
+identities.
 Completed explicit windows also stop at their committed end. Transient head/storage
 errors remain retryable instead of becoming permanent suspensions. A partial tail or unresolved boundary retains its backlog
 and diagnostic; it never reads future bytes to resolve it. This is a suspension,

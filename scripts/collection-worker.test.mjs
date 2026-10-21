@@ -1053,7 +1053,7 @@ async function pausedClaudeSuspensionFixture(t) {
 for (const [name, patch] of [
   ['older version', value => ({ ...value, version: 1 })],
   ['missing rules revision', ({ readerRulesRevision: _rules, ...value }) => value],
-  ['older rules revision', value => ({ ...value, readerRulesRevision: 0 })],
+  ['invalid rules revision', value => ({ ...value, readerRulesRevision: 0 })],
   ['newer version', value => ({ ...value, version: READER_SUSPENSION_VERSION + 1 })],
   ['extra shape field', value => ({ ...value, futureCacheField: true })],
   ['invalid binding hash', value => ({ ...value, cursorHash: 'invalid' })],
@@ -1088,15 +1088,17 @@ for (const [name, patch] of [
   }
 });
 
-test('current Claude suspension binding mismatches reread only the frozen range and then reuse the current cache', async t => {
+for (const mismatch of ['cursor', 'earlier rules revision', 'later rules revision']) test(`current Claude suspension ${mismatch} mismatch rereads only the frozen range and then reuses the current cache`, async t => {
   const { suspendedPath } = await import('./collection-ingress.mjs');
   const { replaceIntakeJSON } = await import('./intake-io.mjs');
   const { CLAUDE_READER_RULES_REVISION } = await import('./claude-reader.mjs');
   const f = await pausedClaudeSuspensionFixture(t);
   await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, f.suspensionName, {
-    version: READER_SUSPENSION_VERSION, readerRulesRevision: CLAUDE_READER_RULES_REVISION,
+    version: READER_SUSPENSION_VERSION,
+    readerRulesRevision: CLAUDE_READER_RULES_REVISION + (mismatch.startsWith('earlier') ? -1 : mismatch.startsWith('later') ? 1 : 0),
     sourceIdentity: f.paused.state.source.fileIdentity, intervalHash: digest(canonicalJSON(f.scope)),
-    cursorHash: '0'.repeat(64), ceilingByte: f.ceiling, reason: 'unresolved-boundary', diagnostic: 'anchor-unresolved',
+    cursorHash: mismatch === 'cursor' ? '0'.repeat(64) : f.progress.hash,
+    ceilingByte: f.ceiling, reason: 'unresolved-boundary', diagnostic: 'anchor-unresolved',
   }, null));
   const reads = [], result = await f.run({ observeRead: row => reads.push(row) });
   assert.equal(result.saved, 1); assert.deepEqual(result.pending, ['COLLECTION_PAUSED']);

@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm, codexDesktopMentionText, CODEX_READER_VERSION } from './codex-reader.mjs';
-import { PROCESSING_CONTROL_FORMS, REVIEW_CODE_PLACEHOLDER } from './processing-control-proof.mjs';
+import { PROCESSING_CONTROL_FORMS, REVIEW_CODE_PLACEHOLDER, REVIEW_CODE, SKILL_NAME } from './processing-control-proof.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { newSelectionState, applySelectionControl, stableSourceIdentity, inspectSourceBoundary } from './capture-selection.mjs';
 import { digest } from './workflow-values.mjs';
@@ -29,6 +29,14 @@ const assistant = (turn, text = 'The rollout is pending.') => item(turn, 'AgentM
 const response = (turn, type, rest) => ({ type: 'response_item', payload: { type, id: randomUUID(), ...rest,
   internal_chat_message_metadata_passthrough: { turn_id: turn } } });
 const ordinary = () => [start(A), user(A), assistant(A), end(A)];
+test('Codex reader version pins its command extraction grammar', () => {
+  // A new command changes evidence for the same native bytes. Bump the reader
+  // before updating this fingerprint; old captures must never be reinterpreted.
+  assert.equal(CODEX_READER_VERSION, '7');
+  assert.equal(digest(JSON.stringify({ forms: PROCESSING_CONTROL_FORMS, code: REVIEW_CODE.source, skill: SKILL_NAME })),
+    'b70b76be9e47790eb6b49d55cefdaba8ea3d045d0bba491d1db601cb818c7626',
+    'the command grammar changed: add a Codex reader version');
+});
 async function fixture(t, entries = ordinary(), { mode = 'paginated', prefix = '', future = false, missingLower = false, headerChanges = {} } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-codex-reader-')));
   t.after(() => fs.rm(root, { force: true, recursive: true }));
