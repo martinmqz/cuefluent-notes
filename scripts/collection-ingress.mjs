@@ -196,7 +196,20 @@ export async function collectionIngress(client, payload, { configPath, launch = 
   configPath ??= await workflowConfigPath();
   const envelope = nativeContextEnvelope(client, payload), snapshot = await readWorkflowSnapshot(configPath);
   const route = await resolveWorkflowRoute(snapshot.config, envelope);
-  if (!route.intended?.collect && !route.intended?.process) return { status: route.status === 'selected' ? 'disabled' : route.status, context: null };
+  // Unconfigured and excluded projects write nothing. Any other configured
+  // project records at least the metadata-only session start below, so a typed
+  // capture or processing command can verify its chat with capture mode Manual.
+  if (!route.intended?.collect && !route.intended?.explicitCollect) return { status: route.status === 'selected' ? 'disabled' : route.status, context: null };
+  // With processing mode Manual too, nothing runs on its own: the session start
+  // is recorded quietly, for a typed command to verify its chat. Storage that is
+  // not prepared or not available yet leaves such a hook silent, never failing.
+  if (!route.intended.collect && !route.intended.process) {
+    try {
+      const store = await inspectIntakeStore(route.collection);
+      if (!await lstatOrNull(await intakePath(store, 'state', '.intake-maintenance'))) await registerProcessingSource(store, envelope, snapshot, configPath);
+    } catch { /* no binding this time: typed commands answer with setup help */ }
+    return { status: 'manual', context: null };
+  }
   const store = await inspectIntakeStore(route.collection);
   if (await lstatOrNull(await intakePath(store, 'state', '.intake-maintenance'))) return { status: 'offline-maintenance', context: null };
   const notice = intakeJSON(await intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 }));

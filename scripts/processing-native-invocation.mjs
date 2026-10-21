@@ -13,7 +13,7 @@ import { verifyCodexHeader, codexRegistrationHeader, codexSkillSelection, codexM
 import { claudeRegistrationHeader, isClaudeHumanRow } from './claude-reader.mjs';
 import { readContinuesLink, readContinuedLink, continuationTarget, continuesPath, continuedPath } from './claude-continuation.mjs';
 import { loadClaudeProcessingSkill, findClaudeProcessingControlInput, findClaudeSkillArguments, claudeProcessingCommandKind, processingControlAction,
-  processingControlText, processingControlMatches, processingControlSuggestions, SKILL_NAME } from './processing-control-proof.mjs';
+  processingControlText, processingControlMatches, processingControlSuggestions, SKILL_NAME, CAPTURE_TOOLS } from './processing-control-proof.mjs';
 import { canonicalJSON, digest, fail, object, isNativeId, keys, hash, integer } from './workflow-values.mjs';
 
 const MAX_PREFIX = 2 * 1024 * 1024, SETTLE_ATTEMPTS = 5, FALLBACK_SOURCES = 32;
@@ -89,7 +89,9 @@ function codexNestedCall(records, context, invocation, argsHash) {
  * The exact current registration and its saved floor pin the native file; the
  * registration's own grant must still be current collection consent. This
  * binds a call only; it creates no selection and moves no floor. */
-async function registeredSource(capability, store, identity, sessionKinds) {
+// `staleGrant` accepts a registration whose grant the current settings no
+// longer match, still within the current route and collection.
+async function registeredSource(capability, store, identity, sessionKinds, { staleGrant = false } = {}) {
   const { snapshot, registration } = await readRegistration(store, identity, { mismatchCode: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' });
   if (!registration) throw new MissingNativeInvocation();
   const { collection } = await workflowProcessingContext(capability);
@@ -98,7 +100,7 @@ async function registeredSource(capability, store, identity, sessionKinds) {
   let grant;
   try { grant = await workflowCollectionGrant(capability, selection); }
   catch (error) { if (['WORKFLOW_NOT_AUTHORIZED', 'COLLECTION_GRANT_REQUIRES_SETUP'].includes(error.code)) throw new UnavailableNativeSource(); throw error; }
-  if (grant !== registration.grantHash) throw new UnavailableNativeSource();
+  if (!staleGrant && grant !== registration.grantHash) throw new UnavailableNativeSource();
   const records = [{ name: registrationPath(identity), hash: snapshot.hash }];
   let frozen = registration.snapshot;
   if (!frozen) {
@@ -133,7 +135,9 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   const store = await settle(() => openWorkflowIntake(capability));
   const identity = { client: context.client, sessionId: context.sessionId };
   const selected = await settle(() => readSelection(store, identity));
-  if (selected.state?.safetyStop) throw new UnavailableNativeSource();
+  // A safety stop binds only the typed capture commands, which report it and
+  // capture nothing; every other control refuses before reading the source.
+  if (selected.state?.safetyStop && !CAPTURE_TOOLS.includes(invocation.tool)) throw new UnavailableNativeSource();
   // A verified continuation of a registered root session: its background kind
   // is accepted, its re-homed prefix is never read, and it shares the
   // predecessor's chat lineage. Unverified or changed links bind nothing.
@@ -178,14 +182,21 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
       pinned.push({ name, hash: snapshot.hash });
       // No collection, so no capture to exclude: a typed control on either side of the boundary binds.
       registered = { unitId: null, preFloorControlsOnly: false };
-    } else if (context.client === 'claude' && selected.state === null) {
-      // Only a session with no selection state at all; an exclusion-only or
-      // retired selection keeps its existing refusal, also as a fallback candidate.
-      const found = await settle(() => registeredSource(capability, store, identity, sessionKinds), MissingRegistrationFloor);
+    } else if (context.client === 'claude' && (selected.state === null || (!selected.state.intervals.length && !selected.state.active))) {
+      // Only a session the worker has not armed: with no selection state at
+      // all, or one holding only what typed commands recorded before arming
+      // (their own turns left out, or a pause); a retired selection keeps its
+      // existing refusal, also as a fallback candidate.
+      // A selection typed commands already recorded binds even after the
+      // settings changed: a pause, an opt-out, still applies, and a paused
+      // chat can be captured by hand or resumed under the current settings.
+      const found = await settle(() => registeredSource(capability, store, identity, sessionKinds, { staleGrant: selected.state !== null }), MissingRegistrationFloor);
       source = found.source; floor = found.floor; pinned.push(...found.records);
       // Collection is on but not armed: a later typed control needs the armed
       // selection, whose exclusion receipt keeps it out of captured evidence.
-      registered = { unitId: found.unitId, preFloorControlsOnly: true };
+      // A chat paused before arming is never armed while paused and takes a
+      // typed control's exclusion, so any typed control binds.
+      registered = { unitId: found.unitId, preFloorControlsOnly: selected.state?.paused !== true };
     } else throw new MissingNativeInvocation();
   }
   const selection = { client: context.client, sessionId: context.sessionId, cwd: source.projectRoot, unitId: null };
@@ -233,8 +244,13 @@ async function resolveBoundInvocation(capability, context, invocation, { skillPa
   // the nearest exact commands and is never authority. typedHelp marks the
   // skill typed with nothing after it: nothing applies either, and the reply
   // is the command list.
+  // captureFloor is where a typed capture may read this chat from: its own
+  // start, after any re-homed prefix of the chat it continues. It does not
+  // depend on the policy-bound hook floor, so a settings change cannot move it
+  // past turns not yet captured.
   const result = Object.freeze({ source: Object.freeze(structuredClone(source)), selection: Object.freeze(selection),
     configHash, selectionHash: selected.hash, captureActive: selected.state?.active === true && !selected.state.paused, nativeSkill,
+    captureFloor: Object.freeze({ eofByte: target?.prefix.endByte ?? 0, startsMidRecord: false }),
     unitId, argsHash, ...call,
     ...(nativeSkill ? { typedControl } : {}),
     ...(typedSuggestions ? { typedSuggestions } : {}),

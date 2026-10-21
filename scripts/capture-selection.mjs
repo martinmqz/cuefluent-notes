@@ -10,12 +10,22 @@ export const SOURCE_HEADER_BYTES = 1024 * 1024;
 
 export const MAX_SELECTION_BYTES = 1024 * 1024;
 const ACTIVE_SELECTION_BYTES = MAX_SELECTION_BYTES - 16 * 1024;
+// An explicit capture stops this far short of the active ceiling, so `pause
+// chat` and `resume chat` keep room after captures fill the record.
+const CAPTURE_SELECTION_BYTES = ACTIVE_SELECTION_BYTES - 16 * 1024;
 export const stableSourceIdentity = stat => digest(canonicalJSON([stat.dev, stat.ino, stat.birthtimeNs].map(String)));
 const optionalId = value => value === null ? null : nativeId(value);
 function record(value) {
   keys(value, ['id', 'startByte', 'endByte', 'hash']); string(value.id, 256);
   integer(value.startByte); integer(value.endByte); hash(value.hash);
   if (value.endByte <= value.startByte) fail('INVALID_SOURCE_ANCHOR');
+}
+// A typed window's `passed` stretch: from where its capture began reading,
+// before its first turn, to its end, with the hash of those bytes.
+function passedStretch(scope) {
+  if (scope.passed === undefined) return;
+  keys(scope.passed, ['from', 'hash']); integer(scope.passed.from); hash(scope.passed.hash);
+  if (scope.passed.from >= scope.start.startByte) fail('INVALID_SELECTION');
 }
 function boundary(value) {
   keys(value, ['sourceIdentity', 'eofByte', 'startsMidRecord', 'unitId', 'record']);
@@ -96,9 +106,10 @@ export function validateSelectionState(value) {
   if (open !== Number(value.active) || (value.active && (!currentInterval(value, value.intervals.at(-1)) || value.intervals.at(-1)?.upper !== null))) fail('INVALID_SELECTION');
   list(value.exclusions, 4096).forEach(nativeId); unique(value.exclusions);
   list(value.explicitScopes, 4096).forEach(item => {
-    keys(item, ['id', 'kind', 'unitIds', 'start', 'end']); nativeId(item.id); choice(item.kind, ['current', 'historical']);
+    keys(item, ['id', 'kind', 'unitIds', 'start', 'end'], ['contentHash', 'passed']); nativeId(item.id); choice(item.kind, ['current', 'historical']);
+    if (item.contentHash !== undefined) hash(item.contentHash);
     list(item.unitIds, 4096, { empty: false }).forEach(nativeId); unique(item.unitIds);
-    record(item.start);
+    record(item.start); passedStretch(item);
     if (item.end !== null) { record(item.end); if (item.end.endByte < item.start.endByte) fail('INVALID_SELECTION'); }
     if (item.kind === 'historical' && item.end === null) fail('INVALID_SELECTION');
   });
@@ -169,7 +180,9 @@ export function applySelectionControl(state, request, trustedBoundary, { grantHa
     nativeId(request.unitId);
     addExclusion(next, request.unitId);
   } else {
-    keys(request.scope, ['unitIds', 'start', 'end']);
+    keys(request.scope, ['unitIds', 'start', 'end'], ['contentHash', 'passed']);
+    if (request.scope.contentHash !== undefined) hash(request.scope.contentHash);
+    record(request.scope.start); passedStretch(request.scope);
     list(request.scope.unitIds, 4096, { empty: false }).forEach(nativeId);
     if (request.scope.unitIds.some(unit => deniedUnit(state, unit))) fail('EXCLUDED_CAPTURE_REQUEST');
     if (request.operation === 'capture-current' && (request.scope.unitIds.length !== 1 || request.scope.unitIds[0] !== request.unitId)) fail('SELECTION_IDENTITY_MISMATCH');
@@ -177,7 +190,8 @@ export function applySelectionControl(state, request, trustedBoundary, { grantHa
   }
   next.revision++;
   next.lastRequest = { id: request.id, inputHash };
-  if (!restrictive && Buffer.byteLength(canonicalJSON(next)) > ACTIVE_SELECTION_BYTES) fail('SELECTION_CAPACITY_EXCEEDED');
+  const ceiling = request.operation.startsWith('capture-') ? CAPTURE_SELECTION_BYTES : ACTIVE_SELECTION_BYTES;
+  if (!restrictive && Buffer.byteLength(canonicalJSON(next)) > ceiling) fail('SELECTION_CAPACITY_EXCEEDED');
   return validateSelectionState(next);
 }
 

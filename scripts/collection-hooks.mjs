@@ -12,7 +12,7 @@ async function input(stream) {
 }
 
 export function collectionHookOutput(result, event) {
-  if (!['UserPromptSubmit', 'SessionStart'].includes(event) || ['disabled', 'unconfigured', 'excluded'].includes(result.status)) return null;
+  if (!['UserPromptSubmit', 'SessionStart'].includes(event) || ['disabled', 'unconfigured', 'excluded', 'manual'].includes(result.status)) return null;
   const identity = result.selection ? { client: result.selection.client, sessionId: result.selection.sessionId, unitId: result.selection.unitId } : null;
   const blocked = result.intakeBlocked === true || result.status === 'intake-blocked';
   const diagnostics = Array.isArray(result.notice?.diagnostics) ? result.notice.diagnostics : [];
@@ -23,7 +23,7 @@ export function collectionHookOutput(result, event) {
   const excluded = result.notice?.boundaryExcluded?.find(item => item?.client === identity?.client && item?.sessionId === identity?.sessionId);
   const boundary = typeof excluded?.unitId === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(excluded.unitId) ? excluded.unitId : null;
   const text = `Cuefluent Notes: ${blocked ? 'intake busy or blocked; retry after the current operation finishes. Inspect workflow status if it persists' : `capture status ${result.status}`}.
-Use explicit session selection for capture controls; this client transport has no verified current-turn binding. Processing remains independent and must use an explicit command until live prompt delivery is verified.${reason ? ` ${own ? 'Session diagnostic' : 'Diagnostic for all captured sessions'}: ${reason}.` : ''}${boundary ? ` Initial boundary prompt ${boundary} was excluded; later eligible full turns can be captured.` : ''}${identity ? ` Native identity data: ${JSON.stringify(identity)}.` : ''}`;
+Capture controls act only on the person's typed command, verified against its own turn; a capture tool call made without one applies nothing. Processing remains independent and runs only on an explicit command.${reason ? ` ${own ? 'Session diagnostic' : 'Diagnostic for all captured sessions'}: ${reason}.` : ''}${boundary ? ` Initial boundary prompt ${boundary} was excluded; later eligible full turns can be captured.` : ''}${identity ? ` Native identity data: ${JSON.stringify(identity)}.` : ''}`;
   return { hookSpecificOutput: { hookEventName: event, additionalContext: text } };
 }
 

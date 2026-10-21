@@ -1,15 +1,20 @@
 import test from './test-support/storage-test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { constants, openSync, writeSync, closeSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { digest } from './workflow-values.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { openWorkflowIntake, openExplicitCaptureIntake, withIntakeLock, assertIntakePrivacy, replaceIntakeJSON } from './intake-io.mjs';
-import { readCaptureHead, readReaderProgress } from './intake-store.mjs';
+import { readCaptureHead, readReaderProgress, readSelection, publishCapture, inspectPendingPublication } from './intake-store.mjs';
+import { readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
+import { runCollectionWorker } from './test-support/capture-workflow.mjs';
+import { readReaderBlock, readerBlockPath } from './collection-worker.mjs';
+import { publishIngressMetadata, collectionIngress } from './collection-ingress.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, typedCaptureDeadline, typedCommandDeadline, reserveChatCommand, recordChatCommandReply } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
 const row = (type, payload) => JSON.stringify({ timestamp: '2026-09-24T00:00:00.000Z', type, payload }) + '\n';
@@ -242,6 +247,536 @@ test('one-time capture with collection disabled reads the selected window and pu
   assert.equal(JSON.parse(await fs.readFile(f.options.configPath)).routes[0].collection.enabled, false);
 });
 
+test('an explicit capture chosen from an earlier read refuses a window whose records changed since', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
+  // The window's first record is the selected turn's first; its last ends the read.
+  const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
+  // The last record is rewritten in place, at the same offsets.
+  await fs.writeFile(f.sourcePath, text.slice(0, -lines.at(-1).length) + lines.at(-1).replace('00:00:00.000Z', '00:00:01.000Z'));
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B], bounds };
+  await assert.rejects(selectExplicitCapture(f.capability, request), { code: 'SOURCE_ANCHOR_CONFLICT' });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  // With the bytes the window was chosen from, it is selected.
+  await fs.writeFile(f.sourcePath, text);
+  const chosen = await selectExplicitCapture(f.capability, request);
+  const scope = chosen.state.explicitScopes.find(item => item.id === f.request.operationId);
+  assert.deepEqual([scope.start.hash, scope.end.hash], [bounds.start, bounds.end]);
+});
+
+test('an explicit capture refuses a window whose bytes changed after the reader read them', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), last = text.slice(text.lastIndexOf('\n', text.length - 2) + 1);
+  // The last record changes in place, at the same offsets, once the reader has
+  // read the window and before anything opens the transcript again.
+  let read = false, rewrites = 0;
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (read && !rewrites && String(file) === f.sourcePath) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+'), changed = Buffer.from(last.replace('00:00:00.000Z', '00:00:01.000Z'));
+      try { writeSync(handle, changed, 0, changed.length, Buffer.byteLength(text) - changed.length); } finally { closeSync(handle); }
+    }
+    return open.call(fs, file, ...rest);
+  });
+  await assert.rejects(selectExplicitCapture(f.capability, f.request, { observeRead: item => { if (item.purpose === 'range') read = true; } }), { code: 'SOURCE_CHANGED' });
+  assert.equal(rewrites, 1);
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+});
+
+test('explicit capture stops hashing a long stretch when its time budget expires', async t => {
+  const f = await fixture(t), original = await fs.readFile(f.sourcePath, 'utf8');
+  const end = row('event_msg', { type: 'task_complete', turn_id: A });
+  const padding = row('event_msg', { type: 'agent_message', message: 'x'.repeat(32 * 1024) }).repeat(100);
+  await fs.writeFile(f.sourcePath, original.replace(end, padding + end));
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B],
+    readRange: { ...f.request.readRange, endByte: (await fs.stat(f.sourcePath)).size } };
+  // These are valid bounded native records; without a delayed disk the same
+  // public preview succeeds and establishes the positive control.
+  assert.equal((await previewExplicitCapture(f.capability, request, { now: () => 0 })).status, 'selection-verified');
+  let elapsed = 0, reads = 0;
+  const open = fs.open;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    const handle = await open(file, ...rest);
+    if (String(file) === f.sourcePath) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...args) => {
+        const result = await read(...args);
+        if (args[2] === 1024 * 1024) { reads++; elapsed += 6_000; }
+        return result;
+      };
+    }
+    return handle;
+  });
+  await assert.rejects(previewExplicitCapture(f.capability, request, { now: () => elapsed }), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal(reads, 2, 'stop after the chunk that expires the budget, without hashing the remaining stretch');
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+});
+
+test('a selected window refuses to run once a byte it covers changed, even with its records and offsets kept', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B] };
+  const chosen = await selectExplicitCapture(f.capability, request);
+  const args = { selection: f.selection, scopeId: request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A, B] };
+  // Inside the window, between its first and last records, one byte changes in place.
+  const at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  assert(at > Buffer.byteLength(lines[0] + lines[1]) && at < Buffer.byteLength(text) - Buffer.byteLength(lines.at(-1)));
+  const handle = openSync(f.sourcePath, 'r+');
+  try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+  await assert.rejects(runSelectedCapture(f.capability, args), { code: 'SOURCE_CHANGED' });
+  for (const unitId of [A, B]) assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head, null);
+  // With the bytes it was chosen from, the window runs.
+  await fs.writeFile(f.sourcePath, text);
+  assert.equal((await runSelectedCapture(f.capability, args)).saved, 2);
+});
+
+test('a selected window rewritten just before its reader opens the transcript publishes nothing', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8');
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B] };
+  const chosen = await selectExplicitCapture(f.capability, request);
+  const args = { selection: f.selection, scopeId: request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A, B] };
+  // One byte inside the window changes in place as the reader opens the
+  // transcript, after any check made through another handle.
+  const at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (!rewrites && String(file) === f.sourcePath && new Error().stack.includes('readSessionRange')) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return open.call(fs, file, ...rest);
+  });
+  await assert.rejects(runSelectedCapture(f.capability, args), { code: 'SOURCE_CHANGED' });
+  assert.equal(rewrites, 1);
+  for (const unitId of [A, B]) assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head, null);
+});
+
+test('a selected window rewritten while the transcript grows during its read publishes nothing', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8');
+  const request = { ...f.request, kind: 'historical', unitIds: [A, B] };
+  const chosen = await selectExplicitCapture(f.capability, request);
+  const args = { selection: f.selection, scopeId: request.operationId, expectedSelectionHash: chosen.hash, unitIds: [A, B] };
+  // Once the reader has hashed the window, one byte inside it changes in place
+  // and the transcript grows, so its size no longer shows the rewrite.
+  const at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  let rewrites = 0;
+  const observeRead = read => {
+    if (read.purpose !== 'stretch' || rewrites++) return;
+    const handle = openSync(f.sourcePath, 'r+');
+    try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+    appendFileSync(f.sourcePath, turn(randomUUID(), 'Later turn.'));
+  };
+  await assert.rejects(runSelectedCapture(f.capability, args, { observeRead }), { code: 'SOURCE_CHANGED' });
+  assert(rewrites >= 1);
+  for (const unitId of [A, B]) assert.equal((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head, null);
+});
+
+test('a position past left-out turns is kept only for the bytes the capture read', async t => {
+  const f = await fixture(t), X = randomUUID(), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  // Turns A and B are left out, and a turn larger than a window follows them:
+  // with one read, the capture stores where it got to.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: X }) + row('event_msg', { type: 'user_message', message: 'Write a long report.' }) +
+    Array.from({ length: 9 }, () => row('event_msg', { type: 'agent_message', message: 'x'.repeat(1024 * 1024) })).join('') +
+    row('event_msg', { type: 'task_complete', turn_id: X }) + row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const chat = { ...f.selection, unitId: null }, source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity };
+  for (const unitId of [A, B]) await excludeChatTurn(f.capability, { selection: chat, source, unitId });
+  const command = { selection: chat, source, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  const cursor = path.join(f.collection.intakeStateDir, 'chat-capture', 'codex', `${S}.json`);
+  // Once the capture has read past the turns, one byte of turn A changes in
+  // place, keeping every byte at the stored position's end.
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('decision Alpha') + 'decision Alph'.length));
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    const stack = new Error().stack;
+    if (!rewrites && String(file) === f.sourcePath && stack.includes('captureChatTurns') && !stack.includes('chatWindow')) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('b'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return open.call(fs, file, ...rest);
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0, scanWindows: 1 }), { turns: 0, more: true, leftOut: 0 });
+  assert.equal(rewrites, 1);
+  await assert.rejects(fs.stat(cursor), { code: 'ENOENT' });
+  assert.equal((await readSelection(f.store, identity)).state.explicitScopes.length, 0);
+});
+
+test('a turn left out is recorded only while the bytes that judged it are unchanged', async t => {
+  const f = await fixture(t), BIG = randomUUID(), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  // A turn too large to anchor after turns A and B.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: BIG }) + row('event_msg', { type: 'user_message', message: 'Write the report.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: BIG, last_agent_message: 'r'.repeat(70 * 1024) }) +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  // Once the window is read, the long turn is rewritten in place, keeping its
+  // ID, as its bytes are checked before it is left out.
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Write the report')));
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (!rewrites && String(file) === f.sourcePath && new Error().stack.includes('readsHold')) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('w'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return open.call(fs, file, ...rest);
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 0, more: true, leftOut: 0 });
+  assert.equal(rewrites, 1);
+  assert.equal((await readSelection(f.store, identity)).state, null);
+});
+
+test('a turn left out is checked against the bytes that judged it as its exclusion is written', async t => {
+  const f = await fixture(t), BIG = randomUUID(), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: BIG }) + row('event_msg', { type: 'user_message', message: 'Write the report.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: BIG, last_agent_message: 'r'.repeat(70 * 1024) }) +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  // The long turn is rewritten in place, keeping its ID, as its exclusion is
+  // about to be written: after any earlier check of the bytes.
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Write the report')));
+  const lstat = fs.lstat, depth = Error.stackTraceLimit; let rewrites = 0;
+  Error.stackTraceLimit = 50; t.after(() => { Error.stackTraceLimit = depth; });
+  t.mock.method(fs, 'lstat', async (file, ...rest) => {
+    const stack = new Error().stack;
+    if (!rewrites && path.basename(String(file)) === path.basename(f.sourcePath) && stack.includes('snapshotSourceMetadata') && !stack.includes('chatWindow')) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('w'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return lstat.call(fs, file, ...rest);
+  });
+  const result = await captureChatTurns(f.capability, command, { now: () => 0 }).catch(error => ({ error: error.code }));
+  assert.equal(rewrites, 1);
+  assert.deepEqual(result, { turns: 0, more: true, leftOut: 0 });
+  assert.equal((await readSelection(f.store, identity)).state, null);
+});
+
+test('a capture does not pass an earlier window rewritten since its start was checked', async t => {
+  const f = await fixture(t), [C1, C2, D, NEW] = Array.from({ length: 4 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const started = id => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: 'capture' });
+  await fs.appendFile(f.sourcePath, started(C1));
+  const command = async commandUnitId => {
+    const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+    return { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId };
+  };
+  const first = await command(C1);
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_complete', turn_id: C1 }) + turn(D, 'Decision: later.') + started(C2));
+  const second = await command(C2);
+  // Once the next capture has checked the first window's bytes to start after
+  // them, turn A is rewritten in place as a turn never captured.
+  const open = fs.open; let armed = true;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (armed && String(file) === f.sourcePath && new Error().stack.includes('scanChat')) {
+      armed = false;
+      const text = await fs.readFile(f.sourcePath, 'utf8');
+      await fs.writeFile(f.sourcePath, text.replaceAll(A, NEW));
+    }
+    return open.call(fs, file, ...rest);
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, second, { now: () => 0 }), { turns: 0, more: true, leftOut: 0 });
+  assert.equal(armed, false);
+  // The next capture starts before the rewritten window and takes the new turn.
+  assert.deepEqual(await captureChatTurns(f.capability, second, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
+  for (const unitId of [NEW, D]) assert((await readCaptureHead(f.store, { ...identity, unitId })).head, unitId);
+});
+
+test('a turn left out is not recorded when its bytes change while they are being checked', async t => {
+  const f = await fixture(t), [C1, C2, X, D] = Array.from({ length: 4 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const started = id => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: 'capture' });
+  const command = async commandUnitId => {
+    const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+    return { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId };
+  };
+  await fs.appendFile(f.sourcePath, started(C1));
+  const first = await command(C1);
+  assert.equal((await captureChatTurns(f.capability, first, { now: () => 0 })).turns, 2);
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  // A turn larger than a window, which the next capture leaves out, then turn D.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_complete', turn_id: C1 }) +
+    row('event_msg', { type: 'task_started', turn_id: X }) + row('event_msg', { type: 'user_message', message: 'Write a long report.' }) +
+    Array.from({ length: 9 }, () => row('event_msg', { type: 'agent_message', message: 'x'.repeat(1024 * 1024) })).join('') +
+    row('event_msg', { type: 'task_complete', turn_id: X }) + turn(D, 'Decision: later.') + started(C2));
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Write a long report')));
+  // While the left-out turn's bytes are being checked, a part already read changes in place.
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    const handle = await open.call(fs, file, ...rest);
+    if (!rewrites && String(file) === f.sourcePath && new Error().stack.includes('readsHold')) {
+      const read = handle.read.bind(handle); let chunks = 0;
+      handle.read = async (...args) => {
+        const result = await read(...args);
+        if (chunks++ === 1 && !rewrites) {
+          rewrites++;
+          const other = openSync(f.sourcePath, 'r+');
+          try { writeSync(other, Buffer.from('W'), 0, 1, at); } finally { closeSync(other); }
+        }
+        return result;
+      };
+    }
+    return handle;
+  });
+  const result = await captureChatTurns(f.capability, await command(C2), { now: () => 0 });
+  assert.equal(rewrites, 1);
+  assert.deepEqual(result, { turns: 0, more: true, leftOut: 0 });
+  assert(!(await readSelection(f.store, identity)).state.exclusions.includes(X));
+});
+
+test('a turn left out is not recorded when the transcript grows and an already read part changes while it is checked again', async t => {
+  const f = await fixture(t), [C1, C2, X, D] = Array.from({ length: 4 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const started = id => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: 'capture' });
+  const command = async commandUnitId => {
+    const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+    return { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId };
+  };
+  await fs.appendFile(f.sourcePath, started(C1));
+  const first = await command(C1);
+  assert.equal((await captureChatTurns(f.capability, first, { now: () => 0 })).turns, 2);
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  // A turn larger than a window, which the next capture leaves out, then turn D.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_complete', turn_id: C1 }) +
+    row('event_msg', { type: 'task_started', turn_id: X }) + row('event_msg', { type: 'user_message', message: 'Write a long report.' }) +
+    Array.from({ length: 9 }, () => row('event_msg', { type: 'agent_message', message: 'x'.repeat(1024 * 1024) })).join('') +
+    row('event_msg', { type: 'task_complete', turn_id: X }) + turn(D, 'Decision: later.') + started(C2));
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Write a long report')));
+  // While the left-out turn's bytes are being checked, a part already read changes in place.
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    const handle = await open.call(fs, file, ...rest);
+    if (!rewrites && String(file) === f.sourcePath && new Error().stack.includes('readsHold')) {
+      // The transcript grows during the first read, so it is read again; during
+      // that second read, a part it has already read changes in place.
+      const read = handle.read.bind(handle), seen = new Set(); let grown = false, again = 0;
+      handle.read = async (...args) => {
+        const result = await read(...args), position = args[3];
+        if (!grown) { grown = true; appendFileSync(f.sourcePath, row('event_msg', { type: 'agent_message', message: 'Working.' })); }
+        else if (seen.has(position) && again++ === 1 && !rewrites) {
+          rewrites++;
+          const other = openSync(f.sourcePath, 'r+');
+          try { writeSync(other, Buffer.from('W'), 0, 1, at); } finally { closeSync(other); }
+        }
+        seen.add(position);
+        return result;
+      };
+    }
+    return handle;
+  });
+  const result = await captureChatTurns(f.capability, await command(C2), { now: () => 0 });
+  assert.equal(rewrites, 1);
+  assert.deepEqual(result, { turns: 0, more: true, leftOut: 0 });
+  assert(!(await readSelection(f.store, identity)).state.exclusions.includes(X));
+});
+
+test('each left-out turn is checked against its bytes right before its exclusion is written', async t => {
+  const f = await fixture(t), [BIG1, BIG2, C] = Array.from({ length: 3 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const long = (id, text) => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: text }) +
+    row('event_msg', { type: 'task_complete', turn_id: id, last_agent_message: 'r'.repeat(70 * 1024) });
+  await fs.appendFile(f.sourcePath, long(BIG1, 'First report.') + long(BIG2, 'Second report.') +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  // As the first exclusion is written, the second long turn is rewritten in place.
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Second report')));
+  const rename = fs.rename; let rewrites = 0;
+  t.mock.method(fs, 'rename', async (from, to, ...rest) => {
+    const result = await rename.call(fs, from, to, ...rest);
+    if (!rewrites && String(to).endsWith(path.join('sessions', 'codex', `${S}.json`))) {
+      rewrites++;
+      const handle = openSync(f.sourcePath, 'r+');
+      try { writeSync(handle, Buffer.from('W'), 0, 1, at); } finally { closeSync(handle); }
+    }
+    return result;
+  });
+  const result = await captureChatTurns(f.capability, command, { now: () => 0 });
+  assert.equal(rewrites, 1);
+  assert.deepEqual(result, { turns: 0, more: true, leftOut: 1 });
+  const { exclusions } = (await readSelection(f.store, identity)).state;
+  assert(exclusions.includes(BIG1)); assert(!exclusions.includes(BIG2));
+});
+
+test('a capture never moves past turns a window passed before its own once they are rewritten', async t => {
+  const f = await fixture(t), [C1, C2, NEW] = Array.from({ length: 3 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const started = id => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: 'capture' });
+  const command = async commandUnitId => {
+    const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+    return { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId };
+  };
+  await fs.appendFile(f.sourcePath, started(C1));
+  const first = await command(C1);
+  // Turn A is left out, so the window passes it and takes B alone.
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: A });
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: () => 0 }), { turns: 1, more: false, leftOut: 0 });
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [scope] = (await readSelection(f.store, identity)).state.explicitScopes;
+  assert.deepEqual(scope.unitIds, [B]); assert.equal(scope.passed.from, 0);
+  // Turn A is rewritten in place as a turn never captured; B's own bytes stay.
+  const text = await fs.readFile(f.sourcePath, 'utf8');
+  await fs.writeFile(f.sourcePath, text.replaceAll(A, NEW) + row('event_msg', { type: 'task_complete', turn_id: C1 }) + started(C2));
+  assert.deepEqual(await captureChatTurns(f.capability, await command(C2), { now: () => 0 }), { turns: 1, more: false, leftOut: 0 });
+  assert((await readCaptureHead(f.store, { ...identity, unitId: NEW })).head);
+});
+
+test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
+  const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
+  const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
+  // The window's bytes hold turn B as well, which it does not name.
+  await assert.rejects(selectExplicitCapture(f.capability, { ...f.request, kind: 'historical', bounds }), { code: 'SOURCE_ANCHOR_CONFLICT' });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  const chosen = await selectExplicitCapture(f.capability, { ...f.request, kind: 'historical', unitIds: [A, B], bounds });
+  assert.deepEqual(chosen.state.explicitScopes.map(scope => scope.unitIds), [[A, B]]);
+});
+
+test('a Codex turn before one whose last record is too large to anchor is captured, not left out with it', async t => {
+  const f = await fixture(t), BIG = randomUUID(), C = randomUUID();
+  // Nothing but the long turn lies between turn B and the command, still in progress.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: BIG }) + row('event_msg', { type: 'user_message', message: 'Write the report.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: BIG, last_agent_message: 'r'.repeat(70 * 1024) }) +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: false, leftOut: 1 });
+  for (const unitId of [A, B]) assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId })).head);
+  assert.deepEqual((await readSelection(f.store, { client: 'codex', sessionId: S })).state.exclusions, [BIG]);
+});
+
+test('typed capture and its pause wait for an intake lock another pass holds briefly', async t => {
+  const f = await fixture(t), C = randomUUID(), P = randomUUID();
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity };
+  // Each lock is held by another pass at the first attempt to take it.
+  const mkdir = fs.mkdir; let attempts = 0;
+  t.mock.method(fs, 'mkdir', async (target, ...rest) => {
+    if (String(target).endsWith('.intake-lock') && attempts++ % 2 === 0) throw Object.assign(new Error('held'), { code: 'EEXIST' });
+    return mkdir.call(fs, target, ...rest);
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: { ...f.selection, unitId: null }, source,
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C }, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_complete', turn_id: C }) +
+    row('event_msg', { type: 'task_started', turn_id: P }) + row('event_msg', { type: 'user_message', message: 'pause chat' }));
+  const paused = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const result = await controlChatCapture(f.capability, { selection: f.selection, source: { path: f.sourcePath, fileIdentity: paused.source.fileIdentity },
+    unitId: P, operation: 'pause' }, { now: () => 0 });
+  assert.equal(result.state.paused, true);
+  // The window's selection and run and the pause each waited once.
+  assert(attempts >= 6 && attempts % 2 === 0, `${attempts} lock attempts`);
+});
+
+test('a typed capture ends by the deadline of the command that started it', async t => {
+  const f = await fixture(t), C = randomUUID();
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  // A command that started 15 s ago has no time left to read and record a window.
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0, deadline: typedCaptureDeadline(performance.now() - 15_000) }),
+    { turns: 0, more: true, leftOut: 0 });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
+});
+
+test('a turn that starts exactly where a window-sized read ends is captured', async t => {
+  const f = await fixture(t), X = randomUUID(), T = randomUUID(), C = randomUUID();
+  // A turn larger than a window that ends exactly 8 MiB after turn B, so the
+  // next turn starts exactly where the read past it stops.
+  const head = row('event_msg', { type: 'task_started', turn_id: X }) + row('event_msg', { type: 'user_message', message: 'Write a long report.' });
+  const tail = row('event_msg', { type: 'task_complete', turn_id: X }), fillers = Array.from({ length: 7 }, () => row('event_msg', { type: 'agent_message', message: 'x'.repeat(1024 * 1024) }));
+  const used = Buffer.byteLength(head + fillers.join('') + tail), pad = row('event_msg', { type: 'agent_message', message: '' });
+  const last = row('event_msg', { type: 'agent_message', message: 'y'.repeat(8 * 1024 * 1024 - used - Buffer.byteLength(pad)) });
+  const long = head + fillers.join('') + last + tail;
+  assert.equal(Buffer.byteLength(long), 8 * 1024 * 1024);
+  await fs.appendFile(f.sourcePath, long + turn(T, 'Decision: at the boundary.') +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const command = { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity },
+    floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 2, more: true, leftOut: 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 1, more: false, leftOut: 1 });
+  assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: T })).head);
+});
+
+test('a turn left out without room to record it does not stop the window around it', async t => {
+  const f = await fixture(t), BIG = randomUUID(), D = randomUUID(), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  // A turn too large to anchor between turn B and turn D, in a chat whose
+  // selection has no housekeeping room left to record it as left out.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: BIG }) + row('event_msg', { type: 'user_message', message: 'Write the report.' }) +
+    row('event_msg', { type: 'task_complete', turn_id: BIG, last_agent_message: 'r'.repeat(70 * 1024) }) + turn(D, 'Owner: Dana.') +
+    row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'capture' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, chat = { ...f.selection, unitId: null };
+  await excludeChatTurn(f.capability, { selection: chat, source, unitId: randomUUID() });
+  const current = await readSelection(f.store, identity);
+  await withIntakeLock(f.store, tx => replaceIntakeJSON(tx, `sessions/codex/${S}.json`,
+    { ...current.state, exclusions: [...current.state.exclusions, ...Array.from({ length: 2047 }, () => randomUUID())] }, current.hash));
+  const command = { selection: chat, source, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId: C };
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: () => 0 }), { turns: 3, more: false, leftOut: 1 });
+  for (const unitId of [A, B, D]) assert((await readCaptureHead(f.store, { ...identity, unitId })).head, unitId);
+  assert.equal((await readCaptureHead(f.store, { ...identity, unitId: BIG })).head, null);
+});
+
+test('a typed or CLI capture stopped mid-publication is finished by the next collection pass', async t => {
+  // Collection is on, but this chat has no registration: only its explicit capture is pending.
+  const f = await fixture(t, { enabled: true });
+  const chosen = await selectExplicitCapture(f.capability, f.request), scopeId = f.request.operationId;
+  const result = await readCodexSelection({ state: chosen.state, scopeId });
+  const plan = codexPublicationPlan(result, A), store = await openExplicitCaptureIntake(f.capability, f.selection, { scopeId, unitIds: [A] });
+  await assert.rejects(withIntakeLock(store, tx => publishCapture(tx, { ...result.candidates[0], selectionHash: chosen.hash, cursorHash: null,
+    scan: plan.scan, checkpoint: codexCheckpoint(result, plan.scan.to.offset), authorize: async () => true,
+    fault: async point => { if (point === 'intent') throw new Error('simulated interruption'); } })), /simulated interruption/);
+  assert.equal((await inspectPendingPublication(f.store)).committed, false);
+  // The pass finishes it under the explicit capture's own authority instead
+  // of stopping every chat of the collection.
+  const pass = await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  assert(!pass.pending.includes('INTAKE_RECOVERY_REQUIRED'), JSON.stringify(pass));
+  assert.equal(await inspectPendingPublication(f.store), null);
+  assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head);
+});
+
+test('an interrupted typed or CLI capture is finished even when the Automatic grant of its chat changed', async t => {
+  const f = await fixture(t, { enabled: true });
+  // The chat is registered for Automatic capture, and its explicit capture stops mid-publication.
+  await collectionIngress('codex', { session_id: S, turn_id: A, cwd: f.project, transcript_path: f.sourcePath, hook_event_name: 'UserPromptSubmit',
+    prompt: 'Not persisted by ingress' }, { configPath: f.options.configPath, launch: async () => {} });
+  const chosen = await selectExplicitCapture(f.capability, f.request), scopeId = f.request.operationId;
+  const result = await readCodexSelection({ state: chosen.state, scopeId });
+  const plan = codexPublicationPlan(result, A), store = await openExplicitCaptureIntake(f.capability, f.selection, { scopeId, unitIds: [A] });
+  await assert.rejects(withIntakeLock(store, tx => publishCapture(tx, { ...result.candidates[0], selectionHash: chosen.hash, cursorHash: null,
+    scan: plan.scan, checkpoint: codexCheckpoint(result, plan.scan.to.offset), authorize: async () => true,
+    fault: async point => { if (point === 'intent') throw new Error('simulated interruption'); } })), /simulated interruption/);
+  // Capture settings saved again: the registration's grant needs review.
+  f.config.routes[0].collection.generation = randomUUID();
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  const pass = await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  assert(!pass.pending.includes('INTAKE_RECOVERY_REQUIRED'), JSON.stringify(pass));
+  assert.equal(await inspectPendingPublication(f.store), null, JSON.stringify(pass));
+  assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head);
+});
+
+test('a typed command\'s bookkeeping after its capture runs only within the command\'s deadline', async t => {
+  const f = await fixture(t), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const chat = { ...f.selection, unitId: null }, source = { path: f.sourcePath, fileIdentity: status.source.fileIdentity };
+  const call = { unitId: C, callId: 'call_1', tool: 'capture_turns', argsHash: 'a'.repeat(64) };
+  assert.equal((await reserveChatCommand(f.capability, chat, call)).acting, true);
+  // A command that started 50 s ago has no time left for either write.
+  const late = typedCommandDeadline(performance.now() - 50_000);
+  await assert.rejects(excludeChatTurn(f.capability, { selection: chat, source, unitId: C }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(recordChatCommandReply(f.capability, chat, call, { capture: 'nothing-new' }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal((await readSelection(f.store, identity)).state, null);
+  // Within it, both run.
+  const on = typedCommandDeadline(performance.now());
+  assert.equal((await excludeChatTurn(f.capability, { selection: chat, source, unitId: C }, { deadline: on })).excluded, true);
+  await recordChatCommandReply(f.capability, chat, call, { capture: 'nothing-new' }, { deadline: on });
+  assert.deepEqual((await reserveChatCommand(f.capability, chat, call)).reply, { capture: 'nothing-new' });
+});
+
 test('each capture control enforces its budget and preserves selection for retry', async t => {
   const f = await fixture(t, { enabled: true });
   const expiredClock = () => { let ticks = 0; return { now: () => ticks++ === 0 ? 0 : 10000 }; };
@@ -291,6 +826,99 @@ test('future controls seek after EOF and exclude the first proven boundary; paus
   assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: D })).head);
   state = await controlCapture(f.capability, { ...control, selection: { ...f.selection, unitId: D }, expectedSelectionHash: run.hash, operation: 'pause', operationId: randomUUID() });
   assert.equal(state.state.active, false); assert.equal(state.state.intervals[0].upper.unitId, D);
+});
+
+test('pause chat and resume chat take each step only within their command\'s time', async t => {
+  const f = await fixture(t, { enabled: true }), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+    expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+  const started = await controlCapture(f.capability, control);
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'pause chat' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const pause = { selection: f.selection, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, unitId: C, operation: 'pause' };
+  // A command that started 50 s ago has no time left: nothing is applied, and
+  // not even the project path is looked up.
+  const realpath = fs.realpath; let lookups = 0;
+  const mock = t.mock.method(fs, 'realpath', async (...args) => { lookups++; return realpath.call(fs, ...args); });
+  const late = typedCaptureDeadline(performance.now() - 50_000);
+  await assert.rejects(controlChatCapture(f.capability, pause, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(captureChatTurns(f.capability, { selection: { ...f.selection, unitId: null }, source: pause.source, floor: { eofByte: 0, startsMidRecord: false },
+    commandUnitId: C }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(excludeChatTurn(f.capability, { selection: f.selection, source: pause.source, unitId: C }, { deadline: typedCommandDeadline(performance.now() - 50_000) }), { code: 'WORKER_TIME_BUDGET' });
+  await assert.rejects(reserveChatCommand(f.capability, f.selection, { unitId: C, callId: 'call_1', tool: 'pause_capture', argsHash: 'a'.repeat(64) }, { deadline: late }), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal(lookups, 0); mock.mock.restore();
+  await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'chat-capture', 'codex', S, 'replies')), { code: 'ENOENT' });
+  assert.equal((await readSelection(f.store, identity)).hash, started.hash);
+  assert.equal((await controlChatCapture(f.capability, pause, { deadline: typedCaptureDeadline(performance.now()) })).state.paused, true);
+});
+
+test('pause and resume stop before publishing when cancelled during their checks or lock wait', async t => {
+  for (const operation of ['pause', 'resume']) for (const phase of ['storage', 'source', 'lock', 'publication']) await t.test(`${operation}: ${phase}`, async t => {
+    const f = await fixture(t, { enabled: true }), identity = { client: 'codex', sessionId: S }, command = randomUUID();
+    const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+      expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+    let before = await controlCapture(f.capability, control);
+    if (operation === 'resume') before = await controlCapture(f.capability, { ...control,
+      selection: { ...f.selection, unitId: B }, expectedSelectionHash: before.hash, operationId: randomUUID(), operation: 'pause' });
+    await fs.appendFile(f.sourcePath, turn(command, `${operation} chat`));
+    const controller = new AbortController(); let cancelled = false;
+    const cancel = () => { cancelled = true; controller.abort(); };
+    const realpath = fs.realpath, mkdir = fs.mkdir, open = fs.open;
+    if (phase === 'storage') t.mock.method(fs, 'realpath', async (...args) => {
+      const result = await realpath(...args); if (!cancelled) cancel(); return result;
+    });
+    if (phase === 'lock') t.mock.method(fs, 'mkdir', async (file, ...args) => {
+      if (!cancelled && path.basename(file) === '.intake-lock') { cancel(); throw Object.assign(new Error('busy'), { code: 'EEXIST' }); }
+      return mkdir(file, ...args);
+    });
+    if (phase === 'source' || phase === 'publication') t.mock.method(fs, 'open', async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (!cancelled && (phase === 'source' ? file === f.sourcePath : path.basename(file).startsWith('.metadata-') && args[0] === 'wx')) cancel();
+      return handle;
+    });
+    await assert.rejects(controlChatCapture(f.capability, { selection: f.selection,
+      source: { path: f.sourcePath, fileIdentity: f.request.expectedSourceIdentity }, unitId: command, operation }, { signal: controller.signal }), { name: 'AbortError' });
+    assert(cancelled, 'the test reached the selected asynchronous boundary');
+    assert.equal((await readSelection(f.store, identity)).hash, before.hash, 'the selection remains byte-for-byte unchanged');
+    await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, '.intake-lock')), { code: 'ENOENT' });
+    assert.deepEqual(await fs.readdir(path.join(f.collection.intakeStateDir, 'metadata-stages')), [], 'owned staging files are cleaned up after cancellation');
+  });
+});
+
+test('a resume clears the stop kept for the earlier stretch in the same locked step', async t => {
+  const f = await fixture(t, { enabled: true }), identity = { client: 'codex', sessionId: S };
+  const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+    expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+  let state = await controlCapture(f.capability, control);
+  state = await controlCapture(f.capability, { ...control, selection: { ...f.selection, unitId: B }, expectedSelectionHash: state.hash, operation: 'pause', operationId: randomUUID() });
+  await publishIngressMetadata(f.store, readerBlockPath(identity), { version: 1, code: 'EVIDENCE_AFTER_CODEX_TERMINAL' });
+  assert.equal(await readReaderBlock(f.store, identity), 'EVIDENCE_AFTER_CODEX_TERMINAL');
+  // A pause keeps it; the resume that starts a new stretch clears it, under its own lock.
+  await controlCapture(f.capability, { ...control, expectedSelectionHash: state.hash, operation: 'resume', operationId: randomUUID() });
+  assert.equal(await readReaderBlock(f.store, identity), null);
+});
+
+test('a resume started at its command turn refuses a turn record rewritten since it was read', async t => {
+  const f = await fixture(t, { enabled: true }), D = randomUUID(), R = randomUUID();
+  const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+    expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+  const started = await controlCapture(f.capability, control);
+  await fs.appendFile(f.sourcePath, turn(D, 'Paused here'));
+  const paused = await controlCapture(f.capability, { ...control, selection: { ...f.selection, unitId: D }, expectedSelectionHash: started.hash, operation: 'pause', operationId: randomUUID() });
+  // The resume command's turn, as read where it starts.
+  const startByte = (await fs.stat(f.sourcePath)).size, first = row('event_msg', { type: 'task_started', turn_id: R });
+  await fs.appendFile(f.sourcePath, turn(R, 'resume chat'));
+  const resumeAt = { eofByte: startByte, unitId: R, record: { startByte, endByte: startByte + Buffer.byteLength(first), hash: digest(first) } };
+  const resume = { ...control, selection: { ...f.selection, unitId: R }, expectedSelectionHash: paused.hash, operation: 'resume', operationId: randomUUID() };
+  // That record is rewritten in place, at the same offsets.
+  const text = await fs.readFile(f.sourcePath, 'utf8');
+  await fs.writeFile(f.sourcePath, text.slice(0, startByte) + first.replace('00:00:00.000Z', '00:00:01.000Z') + text.slice(startByte + first.length));
+  await assert.rejects(controlCapture(f.capability, resume, { resumeAt }), { code: 'SOURCE_CHANGED' });
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).hash, paused.hash);
+  // With the record as it was read, the new interval starts at that turn.
+  await fs.writeFile(f.sourcePath, text);
+  const resumed = await controlCapture(f.capability, resume, { resumeAt });
+  assert.deepEqual([resumed.state.intervals.at(-1).lower.eofByte, resumed.state.intervals.at(-1).lower.unitId], [startByte, R]);
 });
 
 test('restrictive CLI controls remain available when capture privacy is unavailable and read no source text', async t => {

@@ -65,7 +65,7 @@ request UUID; it does not substitute for native source identity.
 | `capture-control` | `{selection, sourcePath, expectedSourceIdentity, expectedSelectionHash, operationId, operation}` with start/resume/pause/exclude |
 | `capture-preview` | `{selection, sourcePath, expectedSourceIdentity, expectedSelectionHash, operationId, kind, unitIds, readRange}` |
 | `capture-select` | Same as preview; durably selects one bounded scope without enabling collection |
-| `capture-run` | `{selection, scopeId, expectedSelectionHash, unitIds?}`; runs exactly one inspected scope |
+| `capture-run` | `{selection, scopeId, expectedSelectionHash, unitIds?}`; runs exactly one inspected scope, refusing with `SOURCE_CHANGED` once a byte it was selected from changed |
 
 Use `capture-status` to obtain source file identity and the existing selection hash
 (null for absent selection). `capture-control` start/resume requires ongoing collection
@@ -249,14 +249,39 @@ excluded boundary, so collection starts with the prompt after that. With
 collection on, a typed control that is itself that first prompt after the floor
 binds before the selection is armed (it can never be collected), provided the
 bounded read still reaches the floor; any later typed control, or one past a
-longer unarmed tail, binds only once the selection is armed.
+longer unarmed tail, binds only once the selection is armed. A typed `capture`,
+`pause chat` or `resume chat` before arming leaves its own turn out, since a
+first prompt precedes the floor and the worker's boundary does not cover it;
+that selection still binds and arms as before, and one paused before arming
+binds every typed control.
 Omitted collection selection must resolve uniquely from bounded registration
 metadata; no new source is discovered. The optional `selection` must match the
 verified caller; it is not the default evidence boundary. Evidence `scope` is
 `collection` (default), `repo` or `chat`. A mismatched exact formal action and tool
 scope is refused. Narrower scopes still require existing per-input policy. MCP dispatch identity derives from the verified native
 session and call ID: redelivery replays, while another invocation is new even if
-the model repeats its optional `requestId` hint. The returned `requestId` is the
+the model repeats its optional `requestId` hint. A typed `capture`, `pause chat`
+or `resume chat` keeps its reply as well, so its redelivery answers as the first
+delivery did and acts once. Its call is reserved before it acts: a delivery
+that finds the call reserved without a kept reply, because another delivery is
+acting or stopped before keeping its reply, reports `PROCESSING_CONTROL_FAILED`
+without acting or leaving out its turn. A delivery that fails before it can
+tell does not leave out its turn either; its refusal reports
+`PROCESSING_EXCLUSION_UNVERIFIED`. Capture and resume read processing status
+before acting, so unreadable status refuses those commands with nothing applied.
+A verified `pause chat` applies independently, then reads processing status for
+its reply; if that status is unavailable, the reply confirms the pause with
+`PROCESSING_CHAT_OUTCOME_UNKNOWN`. Native binding, collection/storage checks and
+the original command deadline still apply. Cancellation before a pause or resume
+starts durable publication leaves its capture policy unchanged; once publication
+starts, its result and reply finish together. A command whose reply cannot be kept reports
+`PROCESSING_CONTROL_FAILED` too, after acting. The kept reply says whether the
+command left out its own turn. A `pause chat` that paused Automatic capture is
+the exception: the chat's binding then starts after that call, so its
+redelivery is refused before acting and the pause stays. Each step of these
+commands waits up to two seconds for the collection lock before refusing with
+`INTAKE_BLOCKED`; the `capture-control`, `capture-select` and `capture-run`
+helpers refuse at once. The returned `requestId` is the
 authoritative controller identity. CLI request IDs remain explicit as described
 above. Native tool namespaces can add client-specific prefixes.
 
@@ -268,7 +293,8 @@ reports `PROCESSING_CONTROL_SOURCE_UNVERIFIED`. A failure after the action start
 reports `PROCESSING_CONTROL_FAILED` unless it is a known code, and its message
 says the outcome is not certain and to check `status`; a refusal for the native
 client's sign-in or launch settings, or an unconfirmed cancel, names that cause
-instead.
+instead. When a typed command fails and its own turn could not be left out of
+later captures, `data.diagnostics` also lists `PROCESSING_EXCLUSION_UNVERIFIED`.
 
 Source-binding failures use bounded MCP error codes. An exact Codex ingress
 registration with current collection authority but without a selection or

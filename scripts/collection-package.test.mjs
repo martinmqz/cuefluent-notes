@@ -45,7 +45,7 @@ for (const client of ['codex', 'claude']) test(`${client}: shipped lifecycle com
   assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
   assert.equal(await exists(absentConfig), false);
   const registration = invoke(payload); assert.equal(registration.stderr, '');
-  assert.match(JSON.parse(registration.stdout).hookSpecificOutput.additionalContext, /no verified current-turn binding/);
+  assert.match(JSON.parse(registration.stdout).hookSpecificOutput.additionalContext, /act only on the person's typed command, verified against its own turn/);
   const lock = path.join(f.collection.intakeStateDir, '.intake-lock'), statusFile = path.join(f.collection.intakeStateDir, 'ingress/status/record.json');
   const diagnostics = async () => ({ locked: await exists(lock),
     status: await fs.readFile(statusFile, 'utf8').then(JSON.parse, error => ({ error: error.code })) });

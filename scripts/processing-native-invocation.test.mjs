@@ -856,7 +856,7 @@ test('a verified Claude skill invocation that is not an exact action binds as a 
     ['Review', {}, ['review']], [' review', {}, ['review']], ['review ', {}, ['review']],
     // Old spellings are near misses that name the new forms.
     ['review save t7xb88', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
-    ['resume', {}, ['process resume']],
+    ['resume', {}, ['resume chat', 'process resume']],
     ['save t7xbo8', { decision: 'save' }, ['save <draft code>']],
     // A control with more words or lines is not a control: nothing applies.
     ['save t7xb88 and tag it urgent', { decision: 'save', draft: 't7xb88' }, ['save t7xb88']],
@@ -910,7 +910,7 @@ test('Codex binds this skill with anything but one exact action as a typed non-c
   for (const [name, users, suggestions] of [
     ['case', [['SAVE T7XB88']], ['save t7xb88']],
     ['old spelling', [['review save t7xb88']], ['save t7xb88']],
-    ['old resume', [['resume']], ['process resume']],
+    ['old resume', [['resume']], ['resume chat', 'process resume']],
     ['extra words', [['please save t7xb88']], ['save t7xb88']],
     ['second line', [['save t7xb88\nAlso tag it urgent.']], ['save t7xb88']],
     ['extra content', [['save t7xb88', { type: 'text', text: 'Also tag it urgent.' }]], ['save t7xb88']],

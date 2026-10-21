@@ -8,7 +8,7 @@ import { isMain, lstatOrNull } from './file-io.mjs';
 import { readWorkflowSnapshot } from './workflow-config.mjs';
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
-import { inspectIntakeStore, openWorkflowIntake, intakePath, intakeSnapshot, intakeJSON, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
+import { inspectIntakeStore, openWorkflowIntake, openExplicitCaptureIntake, intakePath, intakeSnapshot, intakeJSON, withIntakeLock, replaceIntakeJSON } from './intake-io.mjs';
 import { readSelection, controlSelection, resolveStoredSelectionAnchor, readCaptureHead, publishCapture, commitReaderProgress, recoverPendingPublication, inspectPendingPublication, readReaderProgress } from './intake-store.mjs';
 import { newSelectionState, inspectSourceBoundary, currentIntervals, stableSourceIdentity } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexProgressPlan, codexCheckpoint } from './codex-reader.mjs';
@@ -166,6 +166,66 @@ async function claudeContinuation(transaction, store, source, link, authorize, o
   return from || into ? { from, into } : null;
 }
 
+// Claude reader blocks a paused interval may be suspended at.
+const CLAUDE_FROZEN_BLOCKS = Object.freeze(['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
+  'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
+  'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
+  'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW']);
+// Reader blocks no later pass can get past, in either client: a record the
+// reader stops at, or a turn it can never read or publish, such as one whose
+// records break the turn's own order. Automatic capture of that chat has
+// stopped until the cause is reviewed.
+export const READER_BLOCK_CODES = Object.freeze([...CLAUDE_FROZEN_BLOCKS, 'UNSUPPORTED_SESSION_OWNERSHIP',
+  'UNSUPPORTED_CODEX_RECORD', 'UNSUPPORTED_CODEX_ORDER', 'UNSUPPORTED_CODEX_HISTORY', 'UNSUPPORTED_CODEX_CONTENT',
+  'UNSUPPORTED_CODEX_TOOL_OUTPUT', 'UNSUPPORTED_CODEX_ITEM', 'UNSUPPORTED_CODEX_ROLE', 'UNSUPPORTED_CODEX_RESPONSE',
+  'AMBIGUOUS_CODEX_ATTRIBUTION', 'CONFLICTING_CODEX_MIRROR', 'CONFLICTING_CODEX_CALL', 'CODEX_ROLLBACK_REQUIRES_REVIEW',
+  'SESSION_UNIT_LIMIT', 'SOURCE_ANCHOR_LIMIT', 'EVIDENCE_AFTER_CODEX_TERMINAL', 'DUPLICATE_CODEX_START',
+  'EVIDENCE_BEFORE_CODEX_START', 'CONFLICTING_CODEX_TERMINAL', 'LATE_NATIVE_EVIDENCE_REQUIRES_REVIEW',
+  'UNSUPPORTED_CODEX_HEADER', 'UNSUPPORTED_CLAUDE_HEADER', 'READER_CHECKPOINT_ALLOCATION_CAPACITY',
+  'INVALID_READER_CHECKPOINT', 'READER_PAGE_CONFLICT', 'UNSUPPORTED_CLAUDE_READER',
+  // Saved reader state that is malformed or no longer fits its scope fails
+  // every visit the same way until it is repaired.
+  'READER_CHECKPOINT_CONFLICT', 'READER_CHECKPOINT_IDENTITY_MISMATCH', 'READER_ALLOCATION_INCONSISTENT',
+  'INVALID_READER_PROGRESS', 'INVALID_READER_SUSPENSION', 'READER_CHECKPOINT_REQUIRED', 'INVALID_INTAKE_CURSOR',
+  // A turn whose earlier capture this reader cannot extend, or that conflicts
+  // with the current transcript, is held on every pass.
+  'UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED',
+  'SOURCE_IDENTITY_MISMATCH', 'FINAL_CAPTURE_CONFLICT',
+  // A turn whose capture would be larger than a capture may be, or would hold
+  // what a capture cannot: every pass refuses it the same way.
+  'CAPTURE_SIZE_LIMIT', 'CAPTURE_TOOL_LIMIT', 'UNSUPPORTED_ATTACHMENT',
+  // Saved capture state that is malformed, or a head whose saved capture is
+  // missing or changed, fails every visit that reads it.
+  'INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+  'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']);
+
+// The reader block a visit of a chat last ended on, kept per chat: a later
+// pass that does not visit the chat cannot erase it the way it rebuilds the
+// collection-wide status notice. A visit that ends without one clears it. The
+// visit keeps it under its own intake lock, so visits replace it in order. The
+// marker is the visit's own record, so one that cannot be read is replaced.
+export const readerBlockPath = identity => `reader-blocks/${identity.client}/${nativeId(identity.sessionId)}.json`;
+async function recordReaderBlock(store, identity, code) {
+  const next = READER_BLOCK_CODES.includes(code) ? code : null, name = readerBlockPath(identity);
+  let previous;
+  try { previous = intakeJSON(await intakeSnapshot(store, 'state', name, { maxBytes: 4096 })); } catch { previous = undefined; }
+  if (previous !== undefined && (previous?.code ?? null) === next) return;
+  await publishIngressMetadata(store, name, { version: 1, code: next });
+}
+/** The reader block a scope's result holds a turn on, if any: any of its hold
+ * reasons, not only the first. */
+export function readerBlockOf(result) {
+  return (result.holds ?? []).find(code => READER_BLOCK_CODES.includes(code)) ??
+    (READER_BLOCK_CODES.includes(result.pending) ? result.pending : null);
+}
+/** The reader block this chat's last visit ended on, if any. */
+/** `resume chat` starts a new stretch, which no block of an earlier one stops. */
+export const clearReaderBlock = (store, identity) => recordReaderBlock(store, identity, null);
+export async function readReaderBlock(store, identity) {
+  const value = intakeJSON(await intakeSnapshot(store, 'state', readerBlockPath(identity), { maxBytes: 4096 }));
+  return value !== null && READER_BLOCK_CODES.includes(value.code) ? value.code : null;
+}
+
 // `link` carries the registration and policy for creating a session link; its
 // `attempted` flag is shared by all scopes of one registration visit.
 export async function processScope(transaction, store, selection, scopeId, authorize, observeRead, link = null) {
@@ -284,17 +344,16 @@ export async function processScope(transaction, store, selection, scopeId, autho
         ...(scope?.upper ? { ceiling: scope.upper.eofByte } : {}) });
       if (linked) { link.successor = linked.to.sessionId; continue; }
     }
-    const frozenBlock = !result.blocked || ['UNSUPPORTED_CLAUDE_RECORD', 'CLAUDE_HISTORY_REQUIRES_REVIEW',
-      'CONFLICTING_CLAUDE_MIRROR', 'CLAUDE_PARENT_CYCLE', 'CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE',
-      'UNSUPPORTED_CLAUDE_CONTENT', 'INVALID_SESSION_CLIENT_VERSION', 'INVALID_SESSION_RECORD', 'SESSION_RECORD_LIMIT',
-      'READER_CHECKPOINT_CAPACITY', 'INVALID_WORKFLOW'].includes(result.blocked.code);
+    const frozenBlock = !result.blocked || CLAUDE_FROZEN_BLOCKS.includes(result.blocked.code);
     if (suspensionBinding && result.diagnostics.automaticCeilingReached && frozenBlock &&
         result.pending.every(item => item.reason === 'anchor-unresolved')) {
       const unresolved = result.blocked?.code ?? result.pending[0]?.reason ?? plan.heldReason ?? pending;
       return suspend(unresolved ? 'unresolved-boundary' : result.diagnostics.pendingTail ? 'partial-tail' : 'pause-boundary',
         unresolved ?? (result.diagnostics.pendingTail ? 'CLAUDE_PAUSED_PARTIAL_TAIL' : null));
     }
+    // `holds` names every reason a unit of the scope was held, not only the first.
     return { saved, pending: result.blocked?.code ?? result.pending[0]?.reason ?? plan.heldReason ?? pending,
+      holds: [...new Set([result.blocked?.code, ...result.pending.map(item => item.reason)].filter(Boolean))],
       incomplete: result.diagnostics.pendingTail || result.diagnostics.limited };
   }
   return { saved, pending: 'WORKER_PASS_LIMIT', incomplete: true };
@@ -311,7 +370,16 @@ async function runRegistration(capability, registration, registrationHash, route
   const authorize = async () => { await assertWorkflowStorage(capability, selectionIdentity, 'collect'); return true; };
   // Outside the intake lock: waiting for a file holds no other session up.
   const settleBy = awaitSource ? await awaitPromptSource(store, registration) : null;
+  const keepBlock = async code => { try { await recordReaderBlock(store, identity, code); } catch { /* the notice still reports this pass */ } };
   const visit = link => withIntakeLock(store, async transaction => {
+    let result;
+    try { result = await visitChat(transaction, link); }
+    catch (error) { if (READER_BLOCK_CODES.includes(error.code)) await keepBlock(error.code); throw error; }
+    // Any scope's reader block counts, not only the first reason one reported.
+    await keepBlock(result.readerBlock !== undefined ? result.readerBlock : result.pending);
+    return result;
+  });
+  const visitChat = async (transaction, link) => {
     if (await lstatOrNull(await intakePath(store, 'state', '.intake-maintenance'))) fail('INTAKE_OFFLINE_MAINTENANCE');
     // Another worker may have left an intent after this pass's initial recovery.
     // Never reconcile it through the registration currently being visited.
@@ -338,11 +406,23 @@ async function runRegistration(capability, registration, registrationHash, route
     // The native source cwd is distinct from the broader configured route root.
     // Keep the excluded initial boundary visible on later visits as well.
     boundaryExcluded ??= currentIntervals(selection.state)[0]?.lower.unitId ?? null;
-    let saved = 0, pending = null, incomplete = false, drained = true, suspended = true;
+    let saved = 0, pending = null, readerBlock = null, incomplete = false, drained = true, suspended = true;
+    // Only the latest interval, the stretch Automatic capture extends, can stop
+    // it: a block in an earlier pause's stretch or in a typed or CLI capture
+    // leaves later turns to Automatic capture. Such a block thrown by another
+    // scope holds that scope only, and the visit goes on to the rest.
+    const latest = currentIntervals(selection.state).at(-1)?.id;
     for (const scope of [...currentIntervals(selection.state), ...selection.state.explicitScopes]) {
       await authorize();
-      const result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link);
+      let result;
+      try { result = await processScope(transaction, store, selection, scope.id, authorize, observeRead, link); }
+      catch (error) {
+        if (scope.id === latest || !READER_BLOCK_CODES.includes(error?.code)) throw error;
+        pending ??= error.code; drained = false; suspended = false;
+        selection = await readSelection(store, identity); continue;
+      }
       saved += result.saved; pending ??= result.pending; incomplete ||= Boolean(result.incomplete);
+      if (scope.id === latest) readerBlock ??= readerBlockOf(result);
       drained &&= result.drained === true; suspended &&= result.suspended === true || result.drained === true;
       selection = await readSelection(store, identity);
     }
@@ -365,8 +445,8 @@ async function runRegistration(capability, registration, registrationHash, route
       await publishIngressMetadata(store, suspendedPath(identity), { version: READER_SUSPENSION_VERSION,
         readerRulesRevision: CLAUDE_READER_RULES_REVISION, selectionHash: selection.hash });
     }
-    return { saved, pending: pending ?? (selection.state.paused ? 'COLLECTION_PAUSED' : null), incomplete, boundaryExcluded };
-  });
+    return { saved, pending: pending ?? (selection.state.paused ? 'COLLECTION_PAUSED' : null), readerBlock, incomplete, boundaryExcluded };
+  };
   for (let attempt = 0; ; attempt++) {
     const link = { registration, config, attempted: false, successor: null };
     try { return { ...await visit(link), linked: link.successor }; }
@@ -392,12 +472,18 @@ async function recoverOwner(capability, store, snapshot, collectionId) {
       await assertWorkflowStorage(capability, null, 'maintenance'); return true;
     };
   } else {
-    // Exact lookup precedes the bounded registration batch. Missing/revoked
-    // ongoing authority leaves explicit or foreign intent untouched for recovery.
-    const { registration } = await readRegistration(store, pending.identity, { mismatchCode: 'INTAKE_RECOVERY_REQUIRED' });
-    if (registration === null) fail('INTAKE_RECOVERY_REQUIRED');
-    const route = await resolveWorkflowRoute(snapshot.config, registration);
-    if (!route.intended?.collect || route.collection.id !== collectionId) fail('INTAKE_RECOVERY_REQUIRED');
+    // An explicit capture's own intent is finished under its explicit
+    // authority, whatever the chat's Automatic registration and grant. Exact
+    // lookup precedes the bounded registration batch. Missing/revoked ongoing
+    // authority leaves any other intent untouched for recovery.
+    const explicit = (await readSelection(store, pending.identity)).state?.explicitScopes.some(scope => scope.id === pending.scopeId);
+    const { registration } = explicit ? { registration: null } : await readRegistration(store, pending.identity, { mismatchCode: 'INTAKE_RECOVERY_REQUIRED' });
+    const route = registration && await resolveWorkflowRoute(snapshot.config, registration);
+    if (explicit || !registration || !route.intended?.collect || route.collection.id !== collectionId) {
+      ({ recoveryStore, authorize } = await explicitRecovery(capability, store, pending));
+      await withIntakeLock(recoveryStore, transaction => recoverPendingPublication(transaction, { expectedHash: pending.hash, authorize }));
+      return;
+    }
     const selected = await readSelection(store, pending.identity);
     await assertRegistrationGrant(store, registration, selected.state, await collectionGrantHash(snapshot.config, route.route.id, registration), route);
     if (!selected.state || ![...currentIntervals(selected.state), ...selected.state.explicitScopes].some(scope => scope.id === pending.scopeId) || selected.state.source.path !== registration.sourcePath ||
@@ -410,6 +496,28 @@ async function recoverOwner(capability, store, snapshot, collectionId) {
     };
   }
   await withIntakeLock(recoveryStore, transaction => recoverPendingPublication(transaction, { expectedHash: pending.hash, authorize }));
+}
+
+// An explicit capture (a typed `capture` or the CLI) stopped mid-publication
+// has no ongoing owner. While its chat's route still allows explicit capture it
+// is finished under that same authority, so one chat's interrupted capture
+// never stops a pass for every chat; any other intent stays untouched.
+async function explicitRecovery(capability, store, pending) {
+  const selected = await readSelection(store, pending.identity);
+  const scope = selected.state?.explicitScopes.find(item => item.id === pending.scopeId);
+  if (!scope) fail('INTAKE_RECOVERY_REQUIRED');
+  const identity = { client: pending.identity.client, sessionId: pending.identity.sessionId, cwd: selected.state.source.projectRoot };
+  const explicit = async () => {
+    try { await assertWorkflowStorage(capability, identity, 'explicitCollect'); }
+    catch (error) { if (error.code === 'WORKFLOW_NOT_AUTHORIZED') fail('INTAKE_RECOVERY_REQUIRED'); throw error; }
+  };
+  await explicit();
+  const recoveryStore = await openExplicitCaptureIntake(capability, identity, { scopeId: scope.id, unitIds: scope.unitIds });
+  const authorize = async context => {
+    if (context.identity.client !== identity.client || context.identity.sessionId !== identity.sessionId || context.scopeId !== pending.scopeId) fail('INTAKE_RECOVERY_REQUIRED');
+    await explicit(); return true;
+  };
+  return { recoveryStore, authorize };
 }
 
 const passStopCodes = new Set(['INTAKE_BLOCKED', 'INTAKE_RECOVERY_REQUIRED', 'WORKER_TIME_BUDGET', 'WORKER_READ_BUDGET']);
@@ -484,7 +592,10 @@ export async function runCollectionWorker({ configPath, collectionId, millisecon
           output.saved += result.saved;
           if (result.pending) {
             output.pending.push(result.pending);
-            if (!passStopCodes.has(result.pending)) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code: result.pending });
+            // A reader block names this chat's stop only where it stops
+            // Automatic capture, as the chat's kept marker does.
+            const code = result.readerBlock !== undefined && READER_BLOCK_CODES.includes(result.pending) ? result.readerBlock : result.pending;
+            if (code && !passStopCodes.has(code)) output.diagnostics.push({ client: job.client, sessionId: job.sessionId, code });
           }
           if (result.boundaryExcluded) output.boundaryExcluded.push({ client: registration.client, sessionId: registration.sessionId, unitId: result.boundaryExcluded });
           if (result.linked) {

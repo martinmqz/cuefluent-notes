@@ -1,7 +1,7 @@
 import test from './test-support/storage-test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, openSync, writeSync, closeSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { storageFixture } from './test-support/storage-fixture.mjs';
@@ -10,9 +10,10 @@ import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { collectionIngress, registrationFloorPath } from './collection-ingress.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock } from './intake-io.mjs';
 import { schedulerPath } from './collection-scheduler.mjs';
-import { readSelection, readCaptureHead, controlSelection } from './intake-store.mjs';
+import { readSelection, readCaptureHead, controlSelection, readReaderProgress } from './intake-store.mjs';
 import { resolveProcessingInvocation } from './processing-native-invocation.mjs';
 import { readContinuedLink, readContinuesLink } from './claude-continuation.mjs';
+import { captureChatTurns, excludeChatTurn, selectExplicitCapture, controlChatCapture, runSelectedCapture } from './capture-controls.mjs';
 import { verifyWorkflowStorage } from './workflow-storage.mjs';
 import { digest } from './workflow-values.mjs';
 
@@ -26,13 +27,16 @@ const CONTROLS = {
   help: { tool: 'processing_status', arguments: { help: true } },
   'status --verbose': { tool: 'processing_status', arguments: { verbose: true } },
   'save k2mn9p': { tool: 'processing_review', arguments: { decision: 'save', draft: 'k2mn9p' } },
+  capture: { tool: 'capture_turns', arguments: {} },
+  'pause chat': { tool: 'pause_capture', arguments: {} },
+  'resume chat': { tool: 'resume_capture', arguments: {} },
 };
 
-async function claudeFixture(t, { collect = true } = {}) {
+async function claudeFixture(t, { collect = true, processing = 'prompted' } = {}) {
   const f = await storageFixture(t, { privateConfig: true });
   if (!collect) {
-    // Processing-only: hooks register a processing source only for a non-manual mode.
-    f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'prompted';
+    // Collection off: hooks record only the session start, with any processing mode.
+    f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = processing;
     const bytes = JSON.stringify(f.config);
     await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
     f.options.expectedConfigHash = digest(bytes);
@@ -233,6 +237,76 @@ test('stale, replaced or out-of-scope registrations and later or older prompts n
   });
 });
 
+test('pause chat as the first prompt of a new Automatic chat leaves later typed commands able to bind', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = [randomUUID(), randomUUID(), randomUUID()];
+  const typed = async (control, promptId) => {
+    const call = A.call(control); await A.append([...A.control(control, promptId)]); await A.hook('UserPromptSubmit', promptId);
+    await A.append([call]); return A.resolve(call);
+  };
+  // The pause is applied before the worker has armed the chat.
+  const pause = await typed('pause chat', P1);
+  assert.equal(pause.unitId, P1); assert.equal(pause.typedControl, 'pause chat');
+  await controlChatCapture(f.capability, { selection: pause.selection, source: pause.source, unitId: P1, operation: 'pause' });
+  await f.run(); await A.append([A.reply('Paused.')]);
+  const resume = await typed('resume chat', P2);
+  assert.equal(resume.unitId, P2); assert.equal(resume.typedControl, 'resume chat');
+  await controlChatCapture(f.capability, { selection: resume.selection, source: resume.source, unitId: P2, operation: 'resume' });
+  await A.append([A.reply('Resumed.'), A.prompt('Decision: ship on Friday.', P3), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P3); await f.run();
+  assert((await A.head(P3)).head);
+  for (const unitId of [P1, P2]) assert.equal((await A.head(unitId)).head, null);
+});
+
+test('a chat paused before arming still binds after its capture settings changed, and resumes under them', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3] = Array.from({ length: 3 }, () => randomUUID());
+  const typed = async (control, promptId, capability) => {
+    const call = A.call(control); await A.append([...A.control(control, promptId)]); await A.hook('UserPromptSubmit', promptId);
+    await A.append([call]); return A.resolve(call, capability);
+  };
+  const pause = await typed('pause chat', P1);
+  await controlChatCapture(f.capability, { selection: pause.selection, source: pause.source, unitId: P1, operation: 'pause' });
+  await A.append([A.reply('Paused.')]);
+  // Capture settings saved again: the chat's registration grant is now stale.
+  f.config.routes[0].collection.generation = randomUUID();
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  const capability = await verifyWorkflowStorage({ ...f.options, expectedConfigHash: digest(bytes) });
+  const resume = await typed('resume chat', P2, capability);
+  assert.equal(resume.unitId, P2); assert.equal(resume.typedControl, 'resume chat');
+  await controlChatCapture(capability, { selection: resume.selection, source: resume.source, unitId: P2, operation: 'resume' });
+  await A.append([A.reply('Resumed.'), A.prompt('Decision: ship on Friday.', P3), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P3); await f.run();
+  assert((await A.head(P3)).head);
+});
+
+test('a typed command before the frozen session start is left out and its chat still binds and arms', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, P4, P5, P6] = Array.from({ length: 6 }, () => randomUUID());
+  const typed = async (control, promptId) => {
+    const call = A.call(control); await A.append([...A.control(control, promptId)]); await A.hook('UserPromptSubmit', promptId);
+    await A.append([call]); return { call, bound: await A.resolve(call) };
+  };
+  // `capture` as the first prompt precedes the floor its hook froze, so the
+  // worker's boundary is a later prompt: the command leaves its own turn out.
+  const first = await typed('capture', P1);
+  assert.equal(first.bound.unitId, P1); assert.equal(first.bound.selectionHash, null);
+  assert.equal((await excludeChatTurn(f.capability, { selection: first.bound.selection, source: first.bound.source, unitId: P1 })).excluded, true);
+  // A redelivery still binds to it before the worker arms the chat.
+  assert.equal((await A.resolve(first.call)).unitId, P1);
+  await A.append([A.reply('Automatic capture already covers this chat.'), A.prompt('Opening context.', P2), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.prompt('Decision: ship on Friday.', P3), A.reply('Noted.')]);
+  await A.hook('UserPromptSubmit', P3); await f.run();
+  assert((await A.head(P3)).head);
+  // Paused, a typed capture reads the chat from its start and never takes the first command.
+  const pause = await typed('pause chat', P4);
+  await controlChatCapture(f.capability, { selection: pause.bound.selection, source: pause.bound.source, unitId: P4, operation: 'pause' });
+  await A.append([A.reply('Paused.'), A.prompt('Decision: taken by hand.', P5), A.reply('Noted.')]);
+  const capture = await typed('capture', P6);
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: capture.bound.selection, source: capture.bound.source, floor: capture.bound.captureFloor,
+    commandUnitId: P6 }), { turns: 1, more: false, leftOut: 0 });
+  assert((await A.head(P5)).head);
+  for (const unitId of [P1, P2, P4]) assert.equal((await A.head(unitId)).head, null, unitId);
+});
+
 test('a processing-only route also verifies a first-prompt control before its hook boundary', async t => {
   const f = await claudeFixture(t, { collect: false }), A = f.session(), P1 = randomUUID();
   await A.append([...A.control('review', P1), A.snapshot()]);
@@ -240,6 +314,554 @@ test('a processing-only route also verifies a first-prompt control before its ho
   const call = A.call('review'); await A.append([call]);
   const bound = await A.resolve(call);
   assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, P1); assert.equal(bound.captureActive, false);
+});
+
+test('typed capture in a Manual Claude chat captures its turns since the last capture, never a command turn', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, C1, P3, C2] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]);
+  assert.equal((await A.hook('SessionStart')).status, 'manual');
+  const typedCapture = async (rows, promptId) => {
+    const call = A.call('capture'); await A.append([...rows, ...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    assert.equal(bound.nativeSkill, true); assert.equal(bound.unitId, promptId);
+    const chat = { selection: bound.selection, source: bound.source };
+    const captured = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId });
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return captured;
+  };
+  assert.deepEqual(await typedCapture([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'),
+    A.prompt('Owner: Dana.', P2), A.reply('Noted.')], C1), { turns: 2, more: false, leftOut: 0 });
+  assert((await A.head(P1)).head); assert((await A.head(P2)).head); assert.equal((await A.head(C1)).head, null);
+  assert.deepEqual(await typedCapture([A.reply('Captured.'), A.prompt('Correction: ship on Monday.', P3), A.reply('Noted.')], C2), { turns: 1, more: false, leftOut: 0 });
+  assert.match((await A.head(P3)).capture.evidence[0].text, /ship on Monday/);
+  for (const unitId of [C1, C2]) assert.equal((await A.head(unitId)).head, null);
+  assert.deepEqual((await A.selection()).state.exclusions, [C1, C2]);
+});
+
+test('capture never rereads a finished window and stops on cancellation before reading', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, C1, C2, C3] = Array.from({ length: 4 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+  const first = await bind(C1);
+  assert.equal((await captureChatTurns(f.capability, first)).turns, 1);
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  // A later capture reads only past the finished window.
+  const scope = (await A.selection()).state.explicitScopes.at(-1), reads = [];
+  await A.append([A.reply('Captured.')]);
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2), { observeRead: read => reads.push(read) }), { turns: 0, more: false, leftOut: 0 });
+  const ranges = reads.filter(read => read.purpose === 'range');
+  assert(ranges.length && ranges.every(read => read.offset >= scope.end.endByte), JSON.stringify(ranges));
+  // A cancelled command stops before reading or selecting anything.
+  const controller = new AbortController(); controller.abort();
+  const before = await A.selection(), cancelled = await bind(C3), late = [];
+  await assert.rejects(captureChatTurns(f.capability, cancelled, { signal: controller.signal, observeRead: read => late.push(read) }), { name: 'AbortError' });
+  assert.equal((await A.selection()).hash, before.hash); assert.deepEqual(late, []);
+});
+
+test('a turn larger than one capture can read is passed over later captures, never restarted', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, P3, C1, C2, C3] = Array.from({ length: 6 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // P2's reply is longer than one 8 MiB read; each capture here may read only one.
+  await A.append([A.prompt('Before the long reply.', P1), A.reply('Noted.'), A.prompt('Paste the whole log.', P2),
+    ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))), A.prompt('After the long reply.', P3), A.reply('Noted.')]);
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call), chat = { selection: bound.selection, source: bound.source };
+    const result = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId }, { scanWindows: 1 });
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return result;
+  };
+  assert.deepEqual(await capture(C1), { turns: 1, more: true, leftOut: 0 });
+  // This capture's one read ends inside P2: P2 is left out and the next one resumes there.
+  assert.deepEqual(await capture(C2), { turns: 0, more: true, leftOut: 1 });
+  assert.deepEqual(await capture(C3), { turns: 1, more: false, leftOut: 0 });
+  assert((await A.head(P1)).head); assert.equal((await A.head(P2)).head, null); assert((await A.head(P3)).head);
+});
+
+test('a stored scan position is dropped when the transcript changed under it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, C1, C2, C3] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
+    A.prompt('After the long reply.', P2), A.reply('Noted.')]);
+  const reads = [];
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call), chat = { selection: bound.selection, source: bound.source };
+    reads.length = 0;
+    // Two reads per capture: up to the long turn, then into it.
+    const result = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId }, { scanWindows: 2, observeRead: read => reads.push(read) });
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return result;
+  };
+  assert.deepEqual(await capture(C1), { turns: 0, more: true, leftOut: 1 });
+  const saved = JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir, 'chat-capture', 'claude', `${A.sessionId}.json`), 'utf8'));
+  // Rewrite one byte just before the saved position, in place: same file, other contents.
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('#'), 0, 1, saved.offset - 10); } finally { await handle.close(); }
+  // The position is not trusted: this capture reads from the chat's start again.
+  assert.deepEqual(await capture(C2), { turns: 0, more: true, leftOut: 0 });
+  assert(reads.some(read => read.purpose === 'range' && read.offset < saved.offset), JSON.stringify(reads.slice(0, 3)));
+  assert.deepEqual(await capture(C3), { turns: 1, more: false, leftOut: 0 });
+  assert((await A.head(P2)).head);
+});
+
+test('capture does not trust where an earlier capture ended once the transcript was cut back and regrown', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' });
+  const bind = async (A, promptId) => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // Cut the transcript back in place to `size`, then grow it past `end` with a replacement turn.
+  const regrow = async (A, size, end, P) => {
+    await fs.truncate(A.file, size);
+    await A.append([A.prompt('Replacement: ship on Monday.', P), A.reply('Noted. '.repeat(64))]);
+    assert((await fs.stat(A.file)).size > end);
+  };
+  await t.test('a finished capture', async () => {
+    const A = f.session(), [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
+    await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+    const size = (await fs.stat(A.file)).size;
+    await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+    const first = await bind(A, C1);
+    assert.deepEqual(await captureChatTurns(f.capability, first), { turns: 1, more: false, leftOut: 0 });
+    await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+    await regrow(A, size, (await A.selection()).state.explicitScopes.at(-1).end.endByte, P2);
+    assert.deepEqual(await captureChatTurns(f.capability, await bind(A, C2)), { turns: 1, more: false, leftOut: 0 });
+    assert.match((await A.head(P2)).capture.evidence[0].text, /ship on Monday/);
+  });
+  await t.test('an unfinished capture', async () => {
+    const A = f.session(), [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
+    await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+    const size = (await fs.stat(A.file)).size;
+    await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+    const end = (await fs.stat(A.file)).size, first = await bind(A, C1);
+    // A window selected but never run, as when a capture runs out of time.
+    await selectExplicitCapture(f.capability, { selection: first.selection, sourcePath: first.source.path,
+      expectedSourceIdentity: first.source.fileIdentity, expectedSelectionHash: (await A.selection()).hash,
+      operationId: randomUUID(), kind: 'historical', unitIds: [P1], readRange: { fromByte: size, endByte: end } });
+    await regrow(A, size, end, P2);
+    assert.deepEqual(await captureChatTurns(f.capability, await bind(A, C2)), { turns: 1, more: false, leftOut: 0 });
+    assert.equal((await A.head(P1)).head, null);
+    assert.match((await A.head(P2)).capture.evidence[0].text, /ship on Monday/);
+  });
+});
+
+test('capture does not trust where Automatic capture began once the transcript was cut back and regrown', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, P4, C1] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]);
+  const size = (await fs.stat(A.file)).size;
+  await A.append([A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const lower = (await A.selection()).state.intervals.at(-1).lower;
+  assert.notEqual(lower.record, null);
+  // The project switches to Manual; the transcript is cut back in place to
+  // before Automatic capture began, then grows past where it began and past
+  // the binding window.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  await fs.truncate(A.file, size);
+  await A.append([A.prompt('Replacement: ship on Monday.', P4),
+    ...Array.from({ length: 3 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))), A.reply('Noted.')]);
+  assert((await fs.stat(A.file)).size > lower.record.endByte);
+  await A.hook('UserPromptSubmit', C1);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call, f.capability);
+  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId });
+  assert.match((await A.head(P4)).capture.evidence[0].text, /ship on Monday/);
+});
+
+test('a typed resume leaves out its own turn, not the first turn after it', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, X1, X2, P4] = Array.from({ length: 6 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const typed = async (promptId, operation) => {
+    await A.hook('UserPromptSubmit', promptId);
+    const call = A.call('status'); await A.append([...A.control('status', promptId), call]);
+    const bound = await A.resolve(call);
+    await controlChatCapture(f.capability, { selection: bound.selection, source: bound.source, unitId: promptId, operation });
+    await A.append([A.reply(`Capture ${operation}d.`)]); await f.run();
+  };
+  await typed(X1, 'pause'); await typed(X2, 'resume');
+  assert.equal((await A.selection()).state.intervals.at(-1).lower.unitId, X2);
+  await A.append([A.prompt('Decision after the resume', P4), A.reply('Noted.')]); await A.hook('UserPromptSubmit', P4);
+  await f.run();
+  assert.deepEqual((await A.head(P4)).capture.evidence.map(item => item.text), ['Decision after the resume']);
+  for (const unitId of [X1, X2]) assert.equal((await A.head(unitId)).head, null);
+});
+
+test('typed capture in a background continuation takes its own turns, never the re-homed history', async t => {
+  const { f, B, P: [P1, P2, P3] } = await continued(t);
+  await f.run(); await f.run();
+  // Capture mode Manual.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  const [Q1, C1] = [randomUUID(), randomUUID()];
+  await B.append([B.prompt('Synthetic decision after the move', Q1), B.reply('Noted.')]);
+  await B.hook('UserPromptSubmit', C1);
+  const call = B.call('capture'); await B.append([...B.control('capture', C1), call]);
+  const bound = await B.resolve(call, f.capability);
+  assert.equal(bound.unitId, C1); assert(bound.captureFloor.eofByte > 0);
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }),
+    { turns: 1, more: false, leftOut: 0 });
+  assert.deepEqual((await B.head(Q1)).capture.evidence.map(item => item.text), ['Synthetic decision after the move']);
+  for (const unitId of [P1, P2, P3]) assert.equal((await B.head(unitId)).head, null);
+});
+
+test('capture finishes the latest unfinished capture of either kind before reading further', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, C1, C2] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  const size = (await fs.stat(A.file)).size;
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+  const end = (await fs.stat(A.file)).size;
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // A capture of the current turn selected by another route, never run.
+  const first = await bind(C1);
+  await selectExplicitCapture(f.capability, { selection: { ...first.selection, unitId: P1 }, sourcePath: first.source.path,
+    expectedSourceIdentity: first.source.fileIdentity, expectedSelectionHash: (await A.selection()).hash,
+    operationId: randomUUID(), kind: 'current', unitIds: [P1], readRange: { fromByte: size, endByte: end } });
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 1, more: true, leftOut: 0 });
+  assert.match((await A.head(P1)).capture.evidence[0].text, /ship on Friday/);
+});
+
+test('capture does not trust a pause once the transcript was cut back and regrown', async t => {
+  const paused = async (t, { anchored }) => {
+    const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, X1, P4, C1] = Array.from({ length: 6 }, () => randomUUID());
+    await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+    await A.hook('UserPromptSubmit', P1); await f.run();
+    await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+    await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+    assert.equal((await f.run()).saved, 1);
+    const size = (await fs.stat(A.file)).size;
+    // The chat is paused at a typed command; the worker may read up to the
+    // pause and anchor its turn.
+    await A.hook('UserPromptSubmit', X1);
+    const pause = A.call('status'); await A.append([...A.control('status', X1), pause]);
+    const bound = await A.resolve(pause);
+    await controlChatCapture(f.capability, { selection: bound.selection, source: bound.source, unitId: X1, operation: 'pause' });
+    if (anchored) await f.run();
+    const upper = (await A.selection()).state.intervals.at(-1).upper;
+    assert.equal(upper.unitId, X1); assert.equal(upper.record !== null, anchored);
+    // Cut back in place to before the pause, then grown past it and past the
+    // binding window, which never reads from before a stale floor.
+    await fs.truncate(A.file, size);
+    await A.append([A.prompt('Replacement: ship on Monday.', P4),
+      ...Array.from({ length: 3 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))), A.reply('Noted.')]);
+    assert((await fs.stat(A.file)).size > upper.eofByte);
+    await A.hook('UserPromptSubmit', C1);
+    const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+    const command = await A.resolve(call);
+    await captureChatTurns(f.capability, { selection: command.selection, source: command.source, floor: command.captureFloor, commandUnitId: command.unitId });
+    assert.match((await A.head(P4)).capture.evidence[0].text, /ship on Monday/);
+    // The boundary turn Automatic capture left out stays out.
+    assert.equal((await A.head(P2)).head, null);
+  };
+  await t.test('before the worker anchored the pause', t => paused(t, { anchored: false }));
+  await t.test('after the worker anchored the pause', t => paused(t, { anchored: true }));
+});
+
+// A command clock that jumps forward on every transcript read, as if each
+// read ran long; storage budgets keep the unshifted clock. Logical correctness
+// fixtures can supply a fixed clock so host load cannot create partial runs.
+function slowReads(t, { clock = performance.now.bind(performance) } = {}) {
+  const state = { skew: 0, jump: 0 };
+  t.mock.method(performance, 'now', () => clock() + state.skew);
+  return { clock, state, observeRead: () => { state.skew = state.jump; } };
+}
+
+test('another call of the same typed capture never takes a second window', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  const prompts = Array.from({ length: 12 }, () => randomUUID()), C1 = randomUUID();
+  await A.append(prompts.flatMap((promptId, index) => [A.prompt(`Decision ${index}.`, promptId), A.reply('Noted.')]));
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  const command = { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  const { clock } = slowReads(t, { clock: () => 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: clock }), { turns: 10, more: true, leftOut: 0 });
+  await excludeChatTurn(f.capability, { selection: bound.selection, source: bound.source, unitId: C1 });
+  // The model calls the tool again in the same command turn.
+  assert.deepEqual(await captureChatTurns(f.capability, command, { now: clock }), { turns: 0, more: true, leftOut: 0 });
+  assert.equal((await A.selection()).state.explicitScopes.length, 1);
+  for (const promptId of prompts.slice(10)) assert.equal((await A.head(promptId)).head, null);
+});
+
+test('a read cut short by its record limit still captures the turns it finished', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // More short records than one read takes, well under its byte limit; one
+  // long record after them keeps the command's own binding read short.
+  const prompts = Array.from({ length: 8300 }, () => randomUUID()), C1 = randomUUID();
+  await A.append(prompts.flatMap((promptId, index) => [A.prompt(`Note ${index}.`, promptId), A.reply('Ok.')]));
+  assert((await fs.stat(A.file)).size < 8 * 1024 * 1024);
+  await A.append([A.reply('x'.repeat(2.2 * 1024 * 1024))]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  const { clock } = slowReads(t, { clock: () => 0 });
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }, { now: clock }),
+    { turns: 10, more: true, leftOut: 0 });
+  for (const promptId of prompts.slice(0, 10)) assert((await A.head(promptId)).head);
+});
+
+test('capture reads the stretch Automatic capture covered and skips the turns it took, even once where it began was rewritten', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, C1] = Array.from({ length: 4 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const lower = (await A.selection()).state.intervals.at(-1).lower;
+  assert.equal(lower.unitId, P2); assert.notEqual(lower.record, null);
+  // Capture mode Manual; then the record where Automatic capture began changes
+  // in place, while the worker's progress after it still matches.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  const text = await fs.readFile(A.file), at = text.indexOf('Boundary prompt', lower.record.startByte);
+  assert(at > 0 && at < lower.record.endByte);
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('X'), 0, 1, at); } finally { await handle.close(); }
+  await A.hook('UserPromptSubmit', C1);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call, f.capability), taken = (await A.head(P3)).head, reads = [];
+  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { observeRead: read => reads.push(read) });
+  // The stretch is read, not skipped as covered; the turn Automatic capture
+  // took is recognized by its capture and stays as it was.
+  const decision = (await fs.readFile(A.file)).indexOf('Synthetic decision');
+  assert(reads.some(read => read.purpose === 'range' && read.offset <= decision && read.offset + read.bytes > decision));
+  assert(!(await A.selection()).state.explicitScopes.some(scope => scope.unitIds.includes(P3)));
+  assert.deepEqual((await A.head(P3)).head, taken);
+});
+
+test('turns before Automatic capture began, which it never covered, stay capturable', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, G, K, B, D, C1, C2] = Array.from({ length: 7 }, () => randomUUID());
+  const mode = async collect => {
+    f.config.routes[0].collection.enabled = collect; f.config.routes[0].processing.mode = collect ? 'prompted' : 'manual';
+    const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+    f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  };
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call, f.capability), chat = { selection: bound.selection, source: bound.source };
+    const result = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId });
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return result;
+  };
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.')]);
+  assert.deepEqual(await capture(C1), { turns: 1, more: false, leftOut: 0 });
+  // A turn no capture took, then Automatic capture for a while, then Manual again.
+  await A.append([A.reply('Captured.'), A.prompt('Gap decision: owner Dana.', G), A.reply('Noted.')]);
+  await mode(true);
+  await A.append([A.prompt('Kickoff context', K), A.snapshot()]); await A.hook('UserPromptSubmit', K); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', B)]); await A.hook('UserPromptSubmit', B); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', D), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', D);
+  assert.equal((await f.run()).saved, 1); assert.equal((await A.head(G)).head, null);
+  const automatic = (await A.head(D)).head;
+  await mode(false);
+  // The turns before Automatic capture began are captured; the ones it took
+  // or left out stay as they were.
+  assert.deepEqual(await capture(C2), { turns: 2, more: false, leftOut: 0 });
+  assert.match((await A.head(G)).capture.evidence[0].text, /owner Dana/);
+  assert((await A.head(K)).head); assert.equal((await A.head(B)).head, null);
+  assert.deepEqual((await A.head(D)).head, automatic);
+});
+
+test('a scan position after a record too large to anchor whole is stored', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [X, Y, C1] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // A turn already left out whose last record is over 64 KiB, then a turn
+  // larger than a window.
+  await A.append([A.prompt('An earlier command.', X), A.reply('x'.repeat(100 * 1024)),
+    A.prompt('Paste the whole log.', Y), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024)))]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  await excludeChatTurn(f.capability, { selection: bound.selection, source: bound.source, unitId: X });
+  // One read: only the excluded turn comes before the long one, so the next
+  // read starts at the long turn, right after the large record.
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { scanWindows: 1 }), { turns: 0, more: true, leftOut: 0 });
+  const text = await fs.readFile(A.file, 'utf8');
+  const turnStart = Buffer.byteLength(text.slice(0, text.lastIndexOf('\n', text.indexOf(`"promptId":"${Y}"`)) + 1));
+  const saved = JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir, 'chat-capture', 'claude', `${A.sessionId}.json`), 'utf8'));
+  assert.equal(saved.offset, turnStart); assert.equal(saved.anchor.endByte, turnStart);
+  assert(saved.anchor.endByte - saved.anchor.startByte <= 4096);
+});
+
+test('a scan position is not stored when the transcript changed after the read that reached it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
+    A.prompt('After the long reply.', P2), A.reply('Noted.')]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  // The second read starts at the long turn and stops 8 MiB into it. After
+  // the reads, while the long turn is left out, one byte just before where the
+  // second read stopped changes in place.
+  const text = await fs.readFile(A.file, 'utf8');
+  const turnStart = Buffer.byteLength(text.slice(0, text.lastIndexOf('\n', text.indexOf(`"promptId":"${P1}"`)) + 1));
+  const rename = fs.rename, selectionDir = path.join('sessions', 'claude');
+  let rewrites = 0;
+  t.mock.method(fs, 'rename', async (from, to, ...rest) => {
+    const result = await rename.call(fs, from, to, ...rest);
+    if (String(to).includes(selectionDir) && rewrites++ === 0) {
+      const handle = openSync(A.file, 'r+');
+      try { writeSync(handle, Buffer.from('x'), 0, 1, turnStart + 8 * 1024 * 1024 - 10); } finally { closeSync(handle); }
+    }
+    return result;
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { scanWindows: 2 }), { turns: 0, more: true, leftOut: 1 });
+  assert.equal(rewrites, 1);
+  // Its position would vouch for bytes that read never saw: it is not stored.
+  await assert.rejects(fs.stat(path.join(f.collection.intakeStateDir, 'chat-capture', 'claude', `${A.sessionId}.json`)), { code: 'ENOENT' });
+});
+
+test('a capture whose read ran long still selects its window, so the next capture runs it first', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, P3, C1, C2, C3] = Array.from({ length: 6 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Owner: Dana.', P2), A.reply('Noted.')]);
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  const first = await bind(C1), slow = slowReads(t);
+  // The read takes 22 of the 40 seconds a capture keeps of its command's 50:
+  // enough left to select the window, not to run it.
+  slow.state.jump = 22_000;
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
+  assert.deepEqual((await A.selection()).state.explicitScopes.map(scope => scope.unitIds), [[P1, P2]]);
+  slow.state.skew = slow.state.jump = 0;
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  // Finishing that window is the next command's one window, even with a
+  // later turn waiting; the command after it takes that turn.
+  await A.append([A.reply('Captured.'), A.prompt('Correction: ship on Monday.', P3), A.reply('Noted.')]);
+  const second = await bind(C2);
+  assert.deepEqual(await captureChatTurns(f.capability, second, { now: slow.clock }), { turns: 2, more: true, leftOut: 0 });
+  assert((await A.head(P1)).head); assert((await A.head(P2)).head); assert.equal((await A.head(P3)).head, null);
+  await excludeChatTurn(f.capability, { selection: second.selection, source: second.source, unitId: C2 });
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C3), { now: slow.clock }), { turns: 1, more: false, leftOut: 0 });
+  assert.match((await A.head(P3)).capture.evidence[0].text, /ship on Monday/);
+});
+
+test('a window rewritten in place after it was selected is selected again as a new window', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [C1, C2] = [randomUUID(), randomUUID()], prompts = Array.from({ length: 12 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // Twelve turns: each window takes ten and ends where the eleventh begins.
+  await A.append(prompts.flatMap((promptId, index) => [A.prompt(`Decision ${index}.`, promptId), A.reply('Noted.')]));
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // The first capture selects the window but runs out of time to run it.
+  const first = await bind(C1), slow = slowReads(t, { clock: () => 0 });
+  slow.state.jump = 22_000;
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
+  slow.state.skew = slow.state.jump = 0;
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [selected] = (await A.selection()).state.explicitScopes;
+  assert.equal(selected.unitIds.length, 10);
+  // Its last record changes in place: same turns, same byte offsets.
+  const text = await fs.readFile(A.file), at = text.indexOf('Noted.', selected.end.startByte);
+  assert(at > 0 && at < selected.end.endByte);
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('X'), 0, 1, at); } finally { await handle.close(); }
+  // The same window is selected again, as a new one, and captured.
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2), { now: slow.clock }), { turns: 10, more: true, leftOut: 0 });
+  const scopes = (await A.selection()).state.explicitScopes;
+  assert.equal(scopes.length, 2); assert.notEqual(scopes[1].id, selected.id);
+  assert.deepEqual(scopes[1].unitIds, selected.unitIds);
+  assert.deepEqual([scopes[1].start.startByte, scopes[1].end.endByte], [selected.start.startByte, selected.end.endByte]);
+});
+
+test('a capture records the turns it left out before it moves past them', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, C1, C2, C3] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Paste the whole log.', P1), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024))),
+    A.prompt('After the long reply.', P2), A.reply('Noted.')]);
+  const slow = slowReads(t);
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call), chat = { selection: bound.selection, source: bound.source };
+    // Two reads per capture: up to the long turn, then into it.
+    const result = await captureChatTurns(f.capability, { ...chat, floor: bound.captureFloor, commandUnitId: bound.unitId },
+      { scanWindows: 2, now: slow.clock, observeRead: slow.observeRead });
+    slow.state.skew = slow.state.jump = 0;
+    await excludeChatTurn(f.capability, { ...chat, unitId: bound.unitId });
+    return result;
+  };
+  // The reads take 45 seconds, past the 40 a capture keeps of its command's
+  // 50: no time is left to record the long turn as left out, so the scan
+  // position stays where it was.
+  slow.state.jump = 45_000;
+  assert.deepEqual(await capture(C1), { turns: 0, more: true, leftOut: 0 });
+  assert(!(await A.selection()).state?.exclusions.includes(P1));
+  assert.deepEqual(await capture(C2), { turns: 0, more: true, leftOut: 1 });
+  assert((await A.selection()).state.exclusions.includes(P1));
+  assert.deepEqual(await capture(C3), { turns: 1, more: false, leftOut: 0 });
+  assert.equal((await A.head(P1)).head, null); assert((await A.head(P2)).head);
+});
+
+test('capture does not trust Automatic progress once the transcript changed under it', async t => {
+  const f = await claudeFixture(t), A = f.session(), [P1, P2, P3, C1] = Array.from({ length: 4 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' }), A.prompt('Kickoff context', P1), A.snapshot()]);
+  await A.hook('UserPromptSubmit', P1); await f.run();
+  await A.append([A.reply('Ready.'), A.prompt('Boundary prompt', P2)]); await A.hook('UserPromptSubmit', P2); await f.run();
+  await A.append([A.reply('Okay.'), A.prompt('Synthetic decision', P3), A.reply('Recorded.')]); await A.hook('UserPromptSubmit', P3);
+  assert.equal((await f.run()).saved, 1);
+  const state = (await A.selection()).state, interval = state.intervals.at(-1);
+  const { cursor } = await readReaderProgress(f.store, { client: 'claude', sessionId: A.sessionId }, interval.id, state.source.fileIdentity, { metadataOnly: true });
+  // The project switches to Manual; then bytes under the worker's progress change in place.
+  f.config.routes[0].collection.enabled = false; f.config.routes[0].processing.mode = 'manual';
+  const bytes = JSON.stringify(f.config); await fs.writeFile(f.options.configPath, bytes, { mode: 0o600 });
+  f.options.expectedConfigHash = digest(bytes); f.capability = await verifyWorkflowStorage(f.options);
+  const handle = await fs.open(A.file, 'r+'), at = cursor.anchor.startByte;
+  try {
+    const anchored = Buffer.alloc(cursor.anchor.endByte - cursor.anchor.startByte);
+    await handle.read(anchored, 0, anchored.length, cursor.anchor.startByte);
+    const text = anchored.toString('utf8'), index = text.indexOf('Recorded.');
+    assert(index >= 0, text.slice(0, 200));
+    await handle.write(Buffer.from('X'), 0, 1, at + Buffer.byteLength(text.slice(0, index)));
+  } finally { await handle.close(); }
+  await A.hook('UserPromptSubmit', C1);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call, f.capability), reads = [];
+  await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId },
+    { observeRead: read => reads.push(read) });
+  // It read from where Automatic capture began, not from the stale progress.
+  assert(reads.some(read => read.purpose === 'range' && read.offset < cursor.offset), JSON.stringify(reads.slice(0, 3)));
+  // The boundary turn Automatic capture left out stays out.
+  assert.equal((await A.head(P2)).head, null);
 });
 
 // A session the CLI moved into a background session: the origin ends with
@@ -891,4 +1513,155 @@ test('a paused origin links only when nothing lies past its saved EOF', async t 
     assert(tailEnds.every(value => value <= eofByte), `tail reads ended at ${tailEnds}, past the saved EOF ${eofByte}`);
     assert.equal(await readContinuesLink(f.store, B.sessionId), null);
   });
+});
+
+// Rewrites a turn's prompt in place to another turn of the same length.
+const renameTurn = (file, from, to) => {
+  const text = readFileSync(file, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf(`"promptId":"${from}"`)));
+  const handle = openSync(file, 'r+');
+  try { writeSync(handle, Buffer.from(`"promptId":"${to}"`), 0, Buffer.byteLength(`"promptId":"${to}"`), at); } finally { closeSync(handle); }
+};
+
+test('a capture moves past an earlier window only while every byte of it is unchanged', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, P3, Z, C1, C2] = Array.from({ length: 6 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Owner: Dana.', P2), A.reply('Noted.'),
+    A.prompt('Budget: ten.', P3), A.reply('Noted.')]);
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  const first = await bind(C1);
+  assert.deepEqual(await captureChatTurns(f.capability, first), { turns: 3, more: false, leftOut: 0 });
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  // A turn inside that window is rewritten in place as another turn; its first
+  // and last records are unchanged.
+  renameTurn(A.file, P2, Z);
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2)), { turns: 1, more: false, leftOut: 0 });
+  assert.match((await A.head(Z)).capture.evidence[0].text, /Owner: Dana/);
+});
+
+test('a window selected but never run is run, not passed on turns another capture took', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Owner: Dana.', P2), A.reply('Noted.')]);
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // The first capture selects its window but runs out of time to run it.
+  const first = await bind(C1), slow = slowReads(t);
+  slow.state.jump = 22_000;
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
+  slow.state.skew = slow.state.jump = 0;
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [selected] = (await A.selection()).state.explicitScopes;
+  // Another capture of the same turns, selected and run on its own, takes them.
+  const selection = { ...first.selection, unitId: null }, current = await A.selection();
+  const other = await selectExplicitCapture(f.capability, { selection, sourcePath: A.file, expectedSourceIdentity: current.state.source.fileIdentity,
+    expectedSelectionHash: current.hash, operationId: randomUUID(), kind: 'historical', unitIds: [P1, P2],
+    readRange: { fromByte: selected.start.startByte, endByte: selected.end.endByte } });
+  await runSelectedCapture(f.capability, { selection, scopeId: other.state.explicitScopes.at(-1).id, expectedSelectionHash: other.hash, unitIds: [P1, P2] });
+  assert((await A.head(P1)).head); assert((await A.head(P2)).head);
+  // The typed window never ran: its turns' captures came from another one, so
+  // it is read and run, not passed as finished.
+  const reads = [];
+  await captureChatTurns(f.capability, await bind(C2), { now: slow.clock, observeRead: read => reads.push(read) });
+  assert(reads.some(read => read.purpose === 'range' && read.offset >= selected.start.startByte && read.offset < selected.end.endByte));
+});
+
+test('a capture moves past turns it left out only while every byte it passed is unchanged', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [X, Y, Z, C1, C2] = Array.from({ length: 5 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // A turn left out, then a turn larger than a window.
+  await A.append([A.prompt('Kept out.', X), A.reply('Noted.'),
+    A.prompt('Paste the whole log.', Y), ...Array.from({ length: 9 }, (_, index) => A.reply(`${index}`.repeat(1024 * 1024)))]);
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  const first = await bind(C1);
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: X });
+  // One read passes only the left-out turn: the next capture would resume at the long turn.
+  assert.deepEqual(await captureChatTurns(f.capability, first, { scanWindows: 1 }), { turns: 0, more: true, leftOut: 0 });
+  assert(JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir, 'chat-capture', 'claude', `${A.sessionId}.json`), 'utf8')).offset > 0);
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  // The left-out turn is rewritten in place as another turn: the stretch the
+  // stored position passed no longer holds, so the capture reads it again.
+  renameTurn(A.file, X, Z);
+  await captureChatTurns(f.capability, await bind(C2), { scanWindows: 1 });
+  assert.match((await A.head(Z)).capture.evidence[0].text, /Kept out/);
+});
+
+test('a window re-chosen after a change only inside it is a new window, not the earlier one again', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session();
+  const [C1, C2] = [randomUUID(), randomUUID()], prompts = Array.from({ length: 12 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // Twelve turns: each window takes ten and ends where the eleventh begins.
+  await A.append(prompts.flatMap((promptId, index) => [A.prompt(`Decision ${index}.`, promptId), A.reply('Noted.')]));
+  const bind = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    return { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId };
+  };
+  // The first capture selects the window but runs out of time to run it.
+  const first = await bind(C1), slow = slowReads(t, { clock: () => 0 });
+  slow.state.jump = 22_000;
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: slow.clock, observeRead: slow.observeRead }), { turns: 0, more: true, leftOut: 0 });
+  slow.state.skew = slow.state.jump = 0;
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  const [selected] = (await A.selection()).state.explicitScopes;
+  // A record inside it changes in place: same turns, offsets, first and last records.
+  const text = await fs.readFile(A.file), at = text.indexOf('Decision 4.');
+  assert(at > selected.start.endByte && at < selected.end.startByte);
+  const handle = await fs.open(A.file, 'r+');
+  try { await handle.write(Buffer.from('Z'), 0, 1, at + 'Decision '.length); } finally { await handle.close(); }
+  // The same window is chosen again, as a new one with its own identity, and captured.
+  assert.deepEqual(await captureChatTurns(f.capability, await bind(C2), { now: slow.clock }), { turns: 10, more: true, leftOut: 0 });
+  const scopes = (await A.selection()).state.explicitScopes;
+  assert.equal(scopes.length, 2); assert.notEqual(scopes[1].id, selected.id); assert.notEqual(scopes[1].contentHash, selected.contentHash);
+  assert.deepEqual([scopes[1].unitIds, scopes[1].start, scopes[1].end], [selected.unitIds, selected.start, selected.end]);
+});
+
+test('a turn with an attachment reference a capture cannot record is captured without it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1] = Array.from({ length: 3 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // An image link with a C1 control character, which no capture may hold.
+  await A.append([A.root('user', { promptId: P1, message: { role: 'user', content: [{ type: 'text', text: 'See the chart.' },
+    { type: 'image', source: { type: 'url', url: 'https://example.com/chart\u0085.png' } }] } }), A.reply('Noted.'),
+  A.prompt('Decision: ship on Friday.', P2), A.reply('Noted.')]);
+  const call = A.call('capture'); await A.append([...A.control('capture', C1), call]);
+  const bound = await A.resolve(call);
+  assert.deepEqual(await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId }),
+    { turns: 2, more: false, leftOut: 0 });
+  const { capture } = await A.head(P1);
+  assert.match(capture.evidence[0].text, /See the chart/);
+  assert(capture.coverage.omissions.some(item => item.reason === 'unsupported-attachment-reference'));
+});
+
+test('a Claude turn whose last record is too large to anchor is captured, as is the turn before it', async t => {
+  const f = await claudeFixture(t, { collect: false, processing: 'manual' }), A = f.session(), [P1, P2, C1, C2] = Array.from({ length: 4 }, () => randomUUID());
+  await A.append([A.meta('mode', { mode: 'normal' })]); await A.hook('SessionStart');
+  // Nothing but the long turn lies between the small turn and the command.
+  await A.append([A.prompt('Decision: ship on Friday.', P1), A.reply('Noted.'), A.prompt('Write the report.', P2), A.reply('r'.repeat(70 * 1024))]);
+  const capture = async promptId => {
+    const call = A.call('capture'); await A.append([...A.control('capture', promptId), call]);
+    const bound = await A.resolve(call);
+    const result = await captureChatTurns(f.capability, { selection: bound.selection, source: bound.source, floor: bound.captureFloor, commandUnitId: bound.unitId });
+    await excludeChatTurn(f.capability, { selection: bound.selection, source: bound.source, unitId: promptId });
+    await A.append([A.reply('Captured.')]); return result;
+  };
+  assert.deepEqual(await capture(C1), { turns: 1, more: true, leftOut: 0 });
+  assert((await A.head(P1)).head); assert.equal((await A.head(P2)).head, null);
+  // The Claude reader anchors the long record by its last bytes: the long turn
+  // is never left out, and the next capture, whose window the first command's
+  // own records close, takes it whole.
+  assert.deepEqual(await capture(C2), { turns: 1, more: false, leftOut: 0 });
+  assert.match((await A.head(P2)).capture.evidence[0].text, /Write the report/);
+  assert.deepEqual((await A.selection()).state.exclusions, [C1, C2]);
 });

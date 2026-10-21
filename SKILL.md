@@ -15,7 +15,7 @@ one-file-per-turn rule, activity feed, or parallel recap system is required.
 | Request | Action and reference |
 | --- | --- |
 | Setup, “Use Cuefluent Notes”, or configuration status | Inspect existing settings; follow [setup](references/setup.md). Installation and hook trust enable neither process. |
-| Capture selected session work | Use the deterministic [capture commands](references/workflow-cli.md#collection-controls). Native identity and bounded source selection are required; collection does not create Markdown. |
+| Capture selected session work | In the chat itself, the person types `capture` (see the actions below). For other sessions use the deterministic [capture commands](references/workflow-cli.md#collection-controls). Native identity and bounded source selection are required; capturing does not create Markdown. |
 | Process selected captures | Prefer the [reusable processing chat](references/processing-chat.md). Standalone agents can use [processing](references/processing.md) and [the command sequence](references/workflow-cli.md#processing-selected-captures) from an uncaptured context. |
 | Save or update supplied material | Use selected sources directly and the [direct-save commands](references/workflow-cli.md#direct-saves). No session capture, native identity, or onboarding is required. |
 | Assess, check, or retrieve knowledge | Read only selected material and relevant candidate notes; return findings without writes or setup. |
@@ -64,6 +64,9 @@ by hand does not attach the skill and is no command:
 | `setup` | Not a processing control: follow [setup](references/setup.md). | none |
 | `status` | Show execution, bounded collection inventory, unfinished operations and drafts awaiting review. | `processing_status` |
 | `status --verbose` | The same, plus diagnostics, identifiers and each draft's exact revision. | `processing_status`; in Claude with `verbose: true` |
+| `capture` | In a chat Automatic capture does not cover, or has paused: capture its finished turns not captured yet, oldest first from the chat's start (in a paused chat, also turns from before Automatic capture began, never those of an earlier pause), a bounded window per command; the reply says when more are waiting. In a chat Automatic capture covers, it captures nothing. Never processes or saves. | `capture_turns` |
+| `pause chat` | Stop Automatic capture of this chat from this turn on; turns already captured stay. | `pause_capture` |
+| `resume chat` | Restart Automatic capture of a chat that was paused. | `resume_capture` |
 | `process` | Draft from pending retained captures across the existing collection, including its configured repos and clients. Resume unfinished work first. | `process_selected_captures` with no scope argument |
 | `process repo` | Draft from the current verified Git checkout; separate nested repositories are excluded. | `process_selected_captures` with `scope: "repo"` |
 | `process chat` | Draft from the invoking native chat. | `process_selected_captures` with `scope: "chat"` |
@@ -156,6 +159,7 @@ processing captured turns still needs an explicit request, and each affected
 route's capture mode and session selection are reported separately.
 
 Future collection preserves the registered EOF and never imports earlier history.
+A typed `capture` is explicit and reads the chat from its start instead.
 Without a proven boundary at that floor, the first later full native unit establishes
 the boundary and is excluded; subsequent eligible units can be collected. Report
 that coverage limit. Current/historical capture instead needs explicit authorization

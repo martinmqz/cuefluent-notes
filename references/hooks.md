@@ -11,9 +11,10 @@ Both packages register SessionStart, UserPromptSubmit, Stop and SessionEnd.
 Codex also registers Interrupt; Claude registers StopFailure. There is no
 SubagentStop, startup-only matcher, Stop completion marker or recovery continuation.
 The synchronous handler never scans transcripts, calls models, writes Markdown,
-or blocks a prompt. Unconfigured and entirely disabled projects cause zero
-filesystem writes. Processing-only routes may register bounded metadata but
-never launch collection.
+or blocks a prompt. Unconfigured and excluded projects cause zero filesystem
+writes. Other configured projects without Automatic capture for the session,
+including capture mode Manual, register only bounded session-start metadata so a
+typed command can verify its chat; they never launch collection.
 
 After fresh collection permission, ingress freezes the native source's identity
 and current EOF, records bounded metadata and queues a worker. The first verified

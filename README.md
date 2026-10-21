@@ -115,7 +115,10 @@ saving to this notes folder or file. One request takes at most 100 of them, so a
 can need another `process` later; use
 `process repo` or `process chat` to narrow it, `process resume` for saved
 unfinished work, `status` for progress, and `process cancel` to stop owned work
-while keeping captured turns pending. Processing prepares drafts; only your exact typed
+while keeping captured turns pending. With capture mode Manual, type `capture` in a
+chat to capture its finished turns not captured yet, from the chat's start; with Automatic, type
+`pause chat` or `resume chat` to stop or restart capturing that chat. Processing
+prepares drafts; only your exact typed
 `save` (or Save in the Codex form) saves them.
 The controller uses the existing native client and processing engine; it does not
 require the Cuefluent app. See [processing chats](references/processing-chat.md)
@@ -278,9 +281,10 @@ helpers, runtime dependencies and license notices. Packaged helpers require
 Node 22+, with no npm install or development checkout at runtime. See
 [package layout and installation](references/distribution.md#package-layout).
 
-Choose one variant per client. Manual packages register no hooks; hook-enabled
-packages provide automatic capture that still requires separate consent and
-client trust. Both variants use the same plugin identity.
+Choose one variant per client. Manual packages register no hooks, so they record
+no session start for typed commands such as `capture` to verify their chat;
+hook-enabled packages do, and provide automatic capture that still requires
+separate consent and client trust. Both variants use the same plugin identity.
 
 Repository maintainers can use the
 [build and publishing guide](https://github.com/martinmqz/cuefluent-notes/blob/main/.agents/publishing.md).
@@ -290,7 +294,8 @@ Repository maintainers can use the
 Hook packages register SessionStart, UserPromptSubmit, Stop, SessionEnd, and
 Codex Interrupt or Claude StopFailure. Ingress stores bounded native metadata
 and launches a short-lived local worker only with fresh capture permission.
-Unconfigured and fully disabled projects cause zero filesystem writes.
+Unconfigured and excluded projects cause zero filesystem writes; with capture mode
+Manual, hooks record only where each session starts, so typed commands can verify it.
 Synchronous hooks never scan source text, call models, write Markdown, block a
 prompt, or request a recovery continuation. There is no old Stop completion check.
 

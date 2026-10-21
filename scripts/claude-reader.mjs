@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { absolutePath } from './workflow-paths.mjs';
 import { validateReaderCheckpoint, MAX_READER_CHECKPOINT_BYTES, checkpointPageBuilder } from './reader-checkpoint.mjs';
-import { readSessionRange, decodeSessionRecord } from './session-jsonl.mjs';
+import { readSessionRange, decodeSessionRecord, chosenStretch } from './session-jsonl.mjs';
 import { validateSelectionState, evaluateUnitSelection, resolveSelectionAnchor, currentIntervals, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
 import { verifySourceCursor } from './intake-store.mjs';
 import { checkWorkflowBudget } from './workflow-budget.mjs';
@@ -219,7 +219,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   const pager = checkpointPageBuilder(carry);
   let checkpointBytes = Buffer.byteLength(canonicalJSON(carry));
   const checkBudget = () => { checkWorkflowBudget(); if (now() >= deadline) fail('SESSION_READ_BUDGET'); };
-  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, readHeader: readClaudeHeader,
+  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, readHeader: readClaudeHeader, stretch: chosenStretch(scope) ?? limits.stretch ?? null,
     verifyHeader: (row, source) => verifyClaudeIdentity(row, source, { header: true, sessionKinds }), ...(stops.length ? { endByte: Math.min(...stops) } : {}),
     startsMidRecord: from.offset === floor && Boolean(scope.lower?.startsMidRecord) });
   let continuedIn = null, terminal = false;
@@ -479,7 +479,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   return { candidates, covered, pending, noEvidence, processingControls, unanchoredUnits: [], blocked, anchorUpdates, selection, from, to, frames, eligibility, checkpoint: carry,
     continuedIn: blocked?.code === 'CLAUDE_HISTORY_REQUIRES_REVIEW' && continuedIn?.record.startByte === blocked.offset ? continuedIn : null, terminal,
     nativeAnchors: carry.units.map(unit => ({ unitId: unit.id, record: anchor(rows.get(unit.recordId)) })), recordAnchors: scan.records.filter(record => record.id && record.endByte <= to.offset).map(anchor),
-    diagnostics: { pendingTail: scan.pendingTail || markerTailPending, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd,
+    diagnostics: { pendingTail: scan.pendingTail || markerTailPending, limited: scan.limited, bytesRead: scan.bytesRead, snapshotEnd: scan.snapshotEnd, consumed: scan.consumed,
       automaticCeilingReached: Boolean(scope.upper && scan.snapshotEnd >= ceiling && !scan.limited && !scan.blocked),
       unownedRecords: carry.records.filter(row => row.kind === 'unowned').length, coverage: 'proven-human-input-only' } };
 }

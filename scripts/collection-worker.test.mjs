@@ -5,6 +5,7 @@ import path from 'node:path';
 import { storageFixture } from './test-support/storage-fixture.mjs';
 import { collectionIngress, snapshotSourceMetadata, registrationPath, READER_SUSPENSION_VERSION } from './collection-ingress.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
+import { readerBlockOf, readReaderBlock } from './collection-worker.mjs';
 import { inspectIntakeStore, intakeSnapshot, intakeJSON, withIntakeLock, openWorkflowIntake } from './intake-io.mjs';
 import { readSelection, readCaptureHead, controlSelection, publishCapture, inspectPendingPublication, recoverPendingPublication } from './intake-store.mjs';
 import { codexRegistrationHeader, readCodexSelection, codexPublicationPlan, codexCheckpoint, CODEX_READER_VERSION } from './codex-reader.mjs';
@@ -13,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { withWorkflowBudget, consumeWorkflowBytes, workflowTimeout } from './workflow-budget.mjs';
 import { collectionHookOutput } from './collection-hooks.mjs';
 import { canonicalJSON, digest } from './workflow-values.mjs';
-import { createCapture, serializeCapture } from './capture-contract.mjs';
+import { createCapture, serializeCapture, captureRelativePath } from './capture-contract.mjs';
 
 const S = '10000000-0000-4000-8000-000000000001';
 const A = '20000000-0000-4000-8000-000000000001', B = '20000000-0000-4000-8000-000000000002';
@@ -39,15 +40,45 @@ test('shared budget covers repeated reads and native probe deadlines', async () 
   });
 });
 
-test('unconfigured and fully disabled ingress do not touch source or create storage', async t => {
+test('unconfigured and excluded ingress do not touch source or create storage', async t => {
   const f = await fixture(t); await fs.rm(f.source); const before = await fs.readdir(f.collection.intakeStateDir);
   for (const config of [{ format: 'cuefluent-workflow', schemaVersion: 1, collections: [], routes: [] },
-    { ...f.config, routes: f.config.routes.map(r => ({ ...r, collection: { enabled: false } })) }]) {
+    { ...f.config, routes: f.config.routes.map(r => ({ ...r, excluded: true })) }]) {
     await fs.writeFile(f.options.configPath, JSON.stringify(config));
     const result = await collectionIngress('codex', f.payload, { ...f.options, launch: () => assert.fail('must not launch') });
-    assert(['unconfigured', 'disabled'].includes(result.status));
+    assert(['unconfigured', 'excluded'].includes(result.status));
     assert.deepEqual(await fs.readdir(f.collection.intakeStateDir), before);
   }
+});
+
+test('capture mode Manual records only the metadata-only session start, so typed commands can verify the chat', async t => {
+  const f = await fixture(t);
+  f.config.routes[0].collection = { enabled: false }; f.config.routes[0].processing = { mode: 'manual' };
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  const result = await collectionIngress('codex', f.payload, { ...f.options, launch: () => assert.fail('must not launch') });
+  assert.equal(result.status, 'manual');
+  // Nothing runs on its own, so the hook adds nothing to the chat.
+  assert.equal(collectionHookOutput(result, 'UserPromptSubmit'), null);
+  // A session start, not a selection: nothing is armed or captured.
+  assert.equal((await readSelection(f.store, { client: 'codex', sessionId: S })).state, null);
+  const files = (await fs.readdir(f.collection.intakeStateDir, { recursive: true })).filter(name => name.endsWith('.json'));
+  assert.equal(files.length, 1);
+  const saved = JSON.parse(await fs.readFile(path.join(f.collection.intakeStateDir, files[0]), 'utf8'));
+  assert.equal(saved.format, 'cuefluent-processing-source');
+  assert.deepEqual(Object.keys(saved.snapshot).sort(), ['eofByte', 'fileIdentity', 'path']);
+  assert.deepEqual(await fs.readdir(f.collection.rawDir), []);
+});
+
+test('capture mode Manual stays silent when private storage is not available yet', async t => {
+  const f = await fixture(t);
+  f.config.routes[0].collection = { enabled: false }; f.config.routes[0].processing = { mode: 'manual' };
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  // For example before storage preparation: the hook neither fails nor creates storage.
+  await fs.rm(f.collection.intakeStateDir, { recursive: true, force: true });
+  const result = await collectionIngress('codex', f.payload, { ...f.options, launch: () => assert.fail('must not launch') });
+  assert.deepEqual(result, { status: 'manual', context: null });
+  assert.equal(collectionHookOutput(result, 'UserPromptSubmit'), null);
+  await assert.rejects(fs.stat(f.collection.intakeStateDir), { code: 'ENOENT' });
 });
 
 test('processing-only and paused notices expose a fresh blocked intake without a stored diagnostic', async t => {
@@ -775,7 +806,7 @@ test('adding a selected session preserves the existing tail and gives the new se
   await fs.appendFile(f.source, turn(C, 'Must retain uncollected tail through widening'));
   await fs.writeFile(sourcePath, row('session_meta', { id: other, session_id: other, cwd: f.project, cli_version: '0.156.1', source: 'cli', history_mode: 'legacy' }) + turn(A, 'Prior history'));
   const otherPayload = { ...f.payload, session_id: other, transcript_path: sourcePath };
-  assert.equal((await collectionIngress('codex', otherPayload, f.options)).status, 'disabled');
+  assert.equal((await collectionIngress('codex', otherPayload, f.options)).status, 'manual');
   const expectedFloor = (await fs.stat(sourcePath)).size;
   await update(c => { c.routes[0].clients.push('claude'); c.routes[0].collection.selection.sessionIds.push(other); });
   assert.equal((await collectionIngress('codex', f.payload, f.options)).status, 'queued');
@@ -1150,6 +1181,30 @@ test('a temporary head read failure is retried inside the frozen Claude pause wi
   assert.match(JSON.stringify(head.capture.evidence), /Additional human evidence/);
 });
 
+test('a turn whose capture head no longer matches its saved capture stops Automatic capture of the chat', async t => {
+  const f = await fixture(t), identity = { client: 'claude', sessionId: S }; let previous = null;
+  const message = (type, text, promptId) => {
+    const value = { type, uuid: randomUUID(), parentUuid: previous, timestamp: stamp, sessionId: S, version: '2.1.280',
+      isSidechain: false, cwd: f.project, message: { role: type, content: text }, ...(promptId ? { promptId } : {}) };
+    previous = value.uuid; return JSON.stringify(value) + '\n';
+  };
+  await fs.writeFile(f.source, message('system', '')); await collectionIngress('claude', { ...f.payload, prompt_id: A }, f.options);
+  await fs.appendFile(f.source, message('user', 'Boundary', A) + message('user', 'Initial human evidence', B));
+  assert.equal((await f.run()).saved, 1);
+  // The saved capture the head names is changed on disk.
+  const { head } = await readCaptureHead(f.store, { ...identity, unitId: B }, { metadataOnly: true });
+  const raw = path.join(f.collection.rawDir, captureRelativePath(head.identity, head.evidenceHash));
+  const headFile = path.join(f.collection.intakeStateDir, 'heads/claude', S, `${B}.json`);
+  await fs.writeFile(raw, canonicalJSON({ ...JSON.parse(await fs.readFile(raw, 'utf8')), capturedAt: '2026-05-01T00:00:00.000Z' }) + '\n');
+  const before = [await fs.readFile(headFile), await fs.readFile(raw)];
+  // The turn goes on, so the next pass reads its saved capture to extend it.
+  await fs.appendFile(f.source, message('user', 'Additional human evidence', B));
+  assert((await f.run()).pending.includes('CAPTURE_HEAD_CONFLICT'));
+  assert.equal(await readReaderBlock(f.store, identity), 'CAPTURE_HEAD_CONFLICT');
+  // Nothing reads past or rewrites the conflict.
+  assert.deepEqual([await fs.readFile(headFile), await fs.readFile(raw)], before);
+});
+
 test('workers that encounter a live lock or offline maintenance preserve the existing notice', async t => {
   const f = await fixture(t), { collectionStatusPath, publishIngressMetadata } = await import('./collection-ingress.mjs');
   await collectionIngress('codex', f.payload, f.options);
@@ -1169,6 +1224,35 @@ test('workers that encounter a live lock or offline maintenance preserve the exi
   try { const result = await f.run(); assert(result.pending.includes('INTAKE_OFFLINE_MAINTENANCE')); assert.deepEqual(writes, []); }
   finally { Object.assign(fs, { open, mkdir, rename, unlink }); }
   assert.equal((await intakeSnapshot(f.store, 'state', collectionStatusPath)).hash, before.hash);
+});
+
+test('a scope result is a reader block when any turn is held on one, not only the first', () => {
+  assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_CONTENT'] }), 'UNSUPPORTED_CLAUDE_CONTENT');
+  assert.equal(readerBlockOf({ pending: 'INVALID_SESSION_RECORD', holds: ['INVALID_SESSION_RECORD'] }), 'INVALID_SESSION_RECORD');
+  assert.equal(readerBlockOf({ pending: 'CLAUDE_HISTORY_REQUIRES_REVIEW' }), 'CLAUDE_HISTORY_REQUIRES_REVIEW');
+  // A page reservation at its limit fails every later visit the same way.
+  assert.equal(readerBlockOf({ pending: 'READER_CHECKPOINT_ALLOCATION_CAPACITY' }), 'READER_CHECKPOINT_ALLOCATION_CAPACITY');
+  // So does saved reader progress that is malformed or no longer matches its root.
+  for (const code of ['INVALID_READER_CHECKPOINT', 'READER_PAGE_CONFLICT']) assert.equal(readerBlockOf({ pending: code }), code);
+  // So does saved reader state that no longer fits its scope.
+  for (const code of ['READER_CHECKPOINT_CONFLICT', 'READER_CHECKPOINT_IDENTITY_MISMATCH', 'READER_ALLOCATION_INCONSISTENT',
+    'INVALID_READER_PROGRESS', 'INVALID_READER_SUSPENSION', 'READER_CHECKPOINT_REQUIRED', 'INVALID_INTAKE_CURSOR']) assert.equal(readerBlockOf({ pending: code }), code);
+  // So is a turn whose earlier capture conflicts with the current reader or transcript.
+  for (const code of ['UNSUPPORTED_CODEX_READER', 'CAPTURE_REVISION_CONFLICT', 'CAPTURE_REVISION_SCOPE_CONFLICT', 'CAPTURE_BASELINE_REQUIRED', 'SOURCE_IDENTITY_MISMATCH']) {
+    assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', code] }), code);
+  }
+  // So is saved capture state that is malformed.
+  for (const code of ['INVALID_CAPTURE_HEAD', 'CAPTURE_HEAD_CONFLICT', 'INVALID_INTAKE_METADATA', 'UNSUPPORTED_CAPTURE_SCHEMA', 'INVALID_CAPTURE_READER',
+    'INVALID_CAPTURE_COVERAGE', 'INVALID_CAPTURE_RANGE', 'CAPTURE_HASH_MISMATCH']) assert.equal(readerBlockOf({ pending: code }), code);
+  // So is a turn whose capture would be larger than a capture may be, or
+  // would hold what a capture cannot, or extends a final capture.
+  for (const code of ['CAPTURE_SIZE_LIMIT', 'CAPTURE_TOOL_LIMIT', 'UNSUPPORTED_ATTACHMENT', 'FINAL_CAPTURE_CONFLICT']) {
+    assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', code] }), code);
+  }
+  // A turn captured by a newer reader version is held on every pass.
+  assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted', 'UNSUPPORTED_CLAUDE_READER'] }), 'UNSUPPORTED_CLAUDE_READER');
+  assert.equal(readerBlockOf({ pending: 'terminal-not-persisted', holds: ['terminal-not-persisted'] }), null);
+  assert.equal(readerBlockOf({ saved: 1, pending: null, drained: true }), null);
 });
 
 test('hook notices scope session diagnostics and do not revive historical lock contention', () => {

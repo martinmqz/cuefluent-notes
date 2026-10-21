@@ -54,9 +54,11 @@ completed decision that has diagnostics says to type `status --verbose`; that
 reply adds the status, next action, diagnostics, request and chat identifiers,
 scope, counts and each draft's exact revision. The review folder's `summary.txt`
 also records the revision. A status reply also says when automatic collection has
-stopped for this chat, as the latest collection pass reported it, for example at
-a Claude Desktop Remote Control record (see
-[capture prevention](#capture-prevention-and-limits)).
+stopped for this chat, as its last collection visit or the latest pass reported
+it, for example at a Claude Desktop Remote Control record (see
+[capture prevention](#capture-prevention-and-limits)). Only a stop in the stretch
+Automatic capture is extending counts: one in the stretch before a pause, or in a
+typed capture, does not, and `resume chat` ends the earlier stretch's stop at once.
 
 A refused or failed control answers with a plain sentence the assistant returns
 as its reply. A refusal before the requested action started says that nothing was
@@ -74,6 +76,72 @@ action mixed with other words, is not a command. When its typed input verifies
 from the native transcript, no control applies anything and the reply names the
 nearest exact commands to type. That text stays evidence, as described under
 [capture prevention](#capture-prevention-and-limits).
+
+### Capture commands
+
+`capture` captures the chat it is typed in: every finished turn since that
+chat's last capture, or since the chat started, oldest first, and never a turn
+Automatic capture already took; turns from before Automatic capture began, which
+it never covered, stay capturable. Like every typed command, it verifies its chat
+through the session start the hook package records; a manual package records
+none, so there it works only in a chat already selected by explicit capture. A
+chat continued from another (Claude `/bg`) starts after the history it
+re-homed. One command takes a bounded window (at most 10 turns or 8 MiB of
+transcript; a read that reaches its record limit ends there) and publishes what
+it can within its operation budget; the whole command, with its own checks and
+bookkeeping, ends within about 50 seconds of starting; another call
+of the same typed command takes no second window. The reply says when more turns
+are waiting, and typing `capture` again first finishes the chat's latest capture,
+if unfinished; a command that captures turns that way stops there, and the next
+one reads further. That capture may be one selected another way, such as through
+the CLI, which can hold up to 100 turns: it is finished whole. A turn whose records break the transcript's rules keeps its window
+waiting, as it keeps Automatic capture waiting, so no later window passes it;
+the reply names why and does not say more turns are waiting. An
+earlier capture, or the point a capture last passed left-out turns to, that the
+transcript no longer matches (cut back or rewritten in place) is not trusted:
+capture starts from an earlier point the transcript still matches. Before moving past the latest window or the turns a
+capture last passed as left out, capture checks every byte of that stretch
+against a hash kept when it was passed, including the turns a
+window passed before its own. Turns Automatic capture took are
+recognized by their captures, never skipped by where they lie: capture reads the
+stretch Automatic capture covered and passes only turns already captured or left
+out, so in a long chat the first capture may need more than one command to read
+past it. A window chosen but never run is run before a later window, even when
+its turns were captured before. A turn that cannot be captured within those limits (larger than a window, or
+in Codex ending in a record too large to anchor) is left out, and the reply says so; it
+never blocks the chat's later turns. A Claude turn ending in such a record is
+captured whole once a later record follows it, so when it is the last turn before
+`capture`, the next `capture` takes it. Turns already left out stay out. When
+the capture settings changed since Automatic capture began for a chat, its
+capture waits for review: `capture` and `resume chat` refuse with
+`REGISTRATION_REQUIRES_REVIEW`, `pause chat` still applies, and in the paused
+chat `capture` works by hand and `resume chat` restarts Automatic capture under
+the current settings. In a chat
+Automatic capture covers it captures nothing and says so, and in a chat whose
+Automatic capture has stopped it says so and that `pause chat`, then `capture`,
+take its later turns by hand. In a paused chat it works as in Manual mode,
+except that the turns of an earlier pause that `resume chat` ended stay out, as
+Automatic capture left them. A record capture cannot read stops each later
+capture of the chat at the same place, and the reply names why instead of
+failing; a stop in Automatic capture's own saved progress never reaches a typed
+capture. After a safety stop, which
+a full capture record causes, `capture`, `pause chat` and `resume chat` say the
+record is full in either capture mode, and other commands, `status` included,
+no longer bind in that chat. `pause chat` and `resume chat` are the
+[pause and resume controls](session-workflow.md) at the command turn, for a chat
+Automatic capture covers; elsewhere they say there is nothing to pause or
+resume. Only the person's typed command acts: a call the model makes on its own
+applies nothing. Each command turn, like any typed command in a chat Automatic
+capture does not cover, leaves itself out of later captures by an exclusion
+instead of a receipt. These housekeeping exclusions stop well before the chat's
+selection capacity, so they never cause a safety stop; a turn that could not be
+left out stays capturable, and that reply (or refusal) carries a
+`PROCESSING_EXCLUSION_UNVERIFIED` diagnostic. Each `capture` adds to the chat's capture record, so a chat captured
+by command many hundreds of times can fill it; `capture` then refuses, while
+Automatic capture and the other commands keep working: captures stop short of
+the record's limit to keep room for `pause chat` and `resume chat`. Many pauses
+and resumes after that can still fill the rest; `resume chat` then refuses, and
+`pause chat`, an opt-out that always applies, makes a safety stop.
 
 ## Claude launch settings
 
@@ -385,11 +453,12 @@ Pausing collection preserves the registered source for independently authorized
 processing, status and review. Verifying a new native control does not resume
 collection, extend its saved boundary or create a capture of the paused input.
 Sources selected only through explicit capture also support these controls.
-When processing is enabled but collection is off, hooks register only source
-metadata and its current byte boundary. The explicit control request verifies
-the source and reads at most its recent 2 MiB after that boundary. No capture
-interval or worker is created. A policy change requires a fresh applicable hook
-binding. Unconfigured and entirely disabled hooks still write nothing; explicit
+When Automatic capture does not cover a session, hooks register only source
+metadata and its current byte boundary, whatever the processing mode. The explicit control request verifies
+the source and reads at most its recent 2 MiB after that boundary. A typed
+`capture` is the exception: it reads the chat's finished turns from the chat's
+start, one bounded window per command. No capture interval or worker is created. A policy change requires a fresh applicable hook
+binding. Hooks in unconfigured and excluded projects still write nothing; explicit
 CLI processing remains available without a native source-chat binding.
 
 Return only the tool's `statusText` for an exact formal control invocation. Do not

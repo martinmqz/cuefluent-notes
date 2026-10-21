@@ -27,11 +27,15 @@ Explain the choices in ordinary terms, using the
 [words people see](../SKILL.md#words-people-see):
 
 - **Capture mode: Manual or Automatic.** Manual, the default, captures nothing on
-  its own. Automatic lets the hooks capture later turns of the route's clients'
+  its own: typing `capture` in a chat captures its finished turns not captured
+  yet, from the chat's start. Automatic lets the hooks capture later turns of the route's clients'
   sessions in the project folder (a narrower excluded folder stays out), or of
-  listed sessions only. Capturing makes sensitive local JSON copies using scripts,
-  with no model calls. It starts from its saved boundary, never earlier history:
-  each session's first prompt after that boundary marks it and is not captured.
+  listed sessions only; `pause chat` stops it for one chat and `resume chat`
+  restarts it. Capturing makes sensitive local JSON copies using scripts, with no
+  model calls. It starts from its saved boundary, never earlier history: each
+  session's first prompt after that boundary marks it and is not captured. A
+  typed `capture` in a paused chat is explicit and also takes turns from before
+  that boundary.
   Captured sessions can include secrets and private remarks; there is no automatic
   redaction. They are not finished Cuefluent notes.
 - **Processing mode: Manual or Prompted.** Manual runs only when requested.
@@ -41,10 +45,9 @@ Explain the choices in ordinary terms, using the
 - **Automatic processing is not offered.** Its live trigger is unverified
   (`status.transport.automaticProcessing: false`): processing in a chat still
   needs an explicit request, and the drafts it prepares still go to review. It is
-  not the same as Manual: hooks record session starts for it as for Prompted, and
-  a standalone CLI processing run may save without a review question (see
-  [processing](processing.md)). Save it only when the user explicitly asks, and
-  then confirm it as below.
+  not the same as Manual: a standalone CLI processing run may save without a
+  review question (see [processing](processing.md)). Save it only when the user
+  explicitly asks, and then confirm it as below.
 - **Current limit:** live processing context transport is unverified. Processing
   requires an explicit request and native selection in every mode. Trusted hooks
   can capture automatically, but no mode makes Markdown processing run on its own.
@@ -212,10 +215,12 @@ rebuild them or discard state to bypass a revision conflict. See
 
 Both hook and manual packages include the MCP server. It starts when loaded by
 the client; an explicit `process` request can launch or resume a restricted native
-client session using its normal authentication and model resolution. When
-processing is enabled with collection off, trusted hooks may still store source
-identity and byte-boundary metadata. Explicit native controls can read bounded
-recent source records to verify their call. This creates no collection interval or
+client session using its normal authentication and model resolution. In every
+configured, non-excluded project where Automatic capture does not cover a
+session, whatever the processing mode, trusted hooks still store its source
+identity and byte-boundary metadata (the session start), so a typed command can
+verify its chat. Explicit native controls can read bounded recent source records
+to verify their call. This creates no collection interval or
 worker. Review [processing chat prerequisites and privacy boundaries](processing-chat.md)
 before using the handoff. Installation grants neither collection nor processing
 consent, and Automatic still needs an explicit processing request.
@@ -269,6 +274,16 @@ mixed-version operation. Old settings are not permission to enable new collectio
 The following historical boundaries still matter when skipping releases. Keep
 all helpers sharing a collection on the same release, including both clients
 when used; a worker can process registrations from either client.
+
+The release after v0.15.1 publishes new Codex captures with reader version 5,
+which knows the `capture`, `pause chat` and `resume chat` actions. It also
+records a content hash with every explicit capture, typed or through the CLI, in
+either client. Helpers through v0.15.1 know neither: they fail when they re-read
+a turn captured with version 5, and fail on every read of a chat's capture state
+once that chat has such a capture, including status and collection visits.
+Upgrade every helper sharing the collection together; downgrading after either
+exists is unsupported.
+Version 1-4 captures keep their own rules and replay unchanged.
 
 v0.15.1 adds retained-draft transfer state and the shared writer's
 `reinspection.json` reservation. Helpers through v0.15.0 do not enforce that

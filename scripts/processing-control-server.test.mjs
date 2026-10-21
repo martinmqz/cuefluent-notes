@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Writable } from 'node:stream';
 import { canonicalJSON, digest } from './workflow-values.mjs';
 import { runProcessingControlServer, processingControlStatusView, processingControlRefusalText, reviewPathLink,
-  PROCESSING_STATUS_DETAILS, PROCESSING_REVIEW_OUTCOMES, PROCESSING_REFUSAL_CODES, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
+  PROCESSING_STATUS_DETAILS, PROCESSING_REVIEW_OUTCOMES, PROCESSING_REFUSAL_CODES, PROCESSING_CAPTURE_OUTCOMES, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
 import { collectionHookOutput } from './collection-hooks.mjs';
 import { PROCESSING_SCOPES } from './workflow-values.mjs';
 import MarkdownIt from 'markdown-it';
@@ -54,7 +54,10 @@ test('source adapter exposes explicit versioned tools without save, approval or 
   const result = await server([initialize, { jsonrpc: '2.0', id: 1, method: 'tools/list' }]);
   assert.equal(result.rows[0].result.serverInfo.name, 'cuefluent_control');
   const tools = result.rows[1].result.tools;
-  assert.deepEqual(tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_resume', 'processing_cancel', 'processing_review']);
+  assert.deepEqual(tools.map(tool => tool.name), ['processing_status', 'process_selected_captures', 'processing_resume', 'processing_cancel',
+    'capture_turns', 'pause_capture', 'resume_capture', 'processing_review']);
+  // The chat capture commands take no fields of their own.
+  for (const tool of tools.slice(4, 7)) assert.deepEqual(Object.keys(tool.inputSchema.properties), ['collectionId', 'retryToken']);
   for (const tool of tools) assert.equal(tool.inputSchema.additionalProperties, false);
   assert.equal(tools[0].annotations.readOnlyHint, true); assert.equal(tools[1].annotations.readOnlyHint, false);
   assert.equal(tools[1].inputSchema.properties.selection.additionalProperties, false);
@@ -626,6 +629,9 @@ test('the command list is built from the grammar in the client spelling and carr
       : 'Cuefluent: Type one of these yourself, exactly as written:', '',
       `- ${command} setup: choose the capture and processing modes.`,
       `- ${command} status: show processing, captured turns and drafts (also: status --verbose).`,
+      `- ${command} capture: capture this chat's finished turns not captured yet.`,
+      `- ${command} pause chat: stop Automatic capture of this chat from now on.`,
+      `- ${command} resume chat: restart Automatic capture of this chat.`,
       `- ${command} process: draft notes from captured turns (also: process repo, process chat, process resume, process cancel).`,
       `- ${command} review: write a pending draft to a private review folder (also: review <draft code>, review cancel, review cancel <draft code>).`,
       `- ${command} save: save the draft your last typed review showed, exactly as shown (also: save <draft code>).`,
@@ -678,6 +684,15 @@ test('plain status lists drafts as code and path; status --verbose adds every de
     assert.throws(() => processingControlStatusView({ ...base, collection }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
   }
   assert.throws(() => processingControlStatusView({ ...base, help: true, collection: stopped.collection }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  // A capture stopped at a record names the reason, which only that reply carries.
+  const blocked = processingControlStatusView({ ...base, capture: 'blocked', reason: 'INVALID_SESSION_RECORD' }, { collectionId: 'example' });
+  assert.equal(blocked.reason, 'INVALID_SESSION_RECORD'); assert(!blocked.statusText.includes('INVALID_SESSION'));
+  const after = processingControlStatusView({ ...base, capture: 'captured', turns: 1, more: false, reason: 'EVIDENCE_AFTER_CODEX_TERMINAL' }, { collectionId: 'example' });
+  assert.match(after.statusText, /^Cuefluent: Captured 1 turn of this chat\. Capture stopped at a record of this chat: .+, so typing \/cuefluent-notes capture cannot capture its later turns\. Type /);
+  for (const value of [{ capture: 'blocked' }, { capture: 'blocked', reason: 'SOURCE_BOUNDARY_PENDING' }, { capture: 'stopped', reason: 'INVALID_SESSION_RECORD' },
+    { capture: 'captured', turns: 1, more: true, reason: 'INVALID_SESSION_RECORD' }, { capture: 'nothing-new', reason: 'INVALID_SESSION_RECORD' }]) {
+    assert.throws(() => processingControlStatusView({ ...base, ...value }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
+  }
   // Revisions belong to the verbose reply only, and the verbose reply stays bounded.
   assert.throws(() => processingControlStatusView({ ...base, drafts: revisions }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
   assert.throws(() => processingControlStatusView({ ...base, verbose: true, drafts }, { collectionId: 'example' }), { code: 'PROCESSING_CONTROL_OUTPUT_INVALID' });
@@ -1303,6 +1318,11 @@ test('replies people read never say collection', () => {
       assert(shown, code); texts.push(shown.statusText);
     }
     texts.push(view({ ...base, status: 'missing', help: true }).statusText);
+    for (const capture of PROCESSING_CAPTURE_OUTCOMES) {
+      const counts = capture === 'captured' ? { turns: 2, more: true } : capture === 'nothing-new' ? { more: true } : capture === 'blocked' ? { reason: 'INVALID_SESSION_RECORD' } : {};
+      const shown = view({ ...base, status: 'idle', capture, ...counts });
+      assert(shown, capture); texts.push(shown.statusText);
+    }
   }
   for (const code of PROCESSING_REFUSAL_CODES) for (const client of ['claude', 'codex']) for (const stage of ['binding', 'action']) {
     for (const tool of ['processing_status', 'process_selected_captures', 'processing_review']) texts.push(processingControlRefusalText(code, { client, stage, tool }));

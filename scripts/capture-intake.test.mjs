@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { newSelectionState, validateSelectionState, applySelectionControl, evaluateUnitSelection, resolveSelectionAnchor, inspectSourceBoundary, stableSourceIdentity, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
+import { newSelectionState, validateSelectionState, applySelectionControl, evaluateUnitSelection, resolveSelectionAnchor, inspectSourceBoundary, stableSourceIdentity, SOURCE_HEADER_BYTES, MAX_SELECTION_BYTES } from './capture-selection.mjs';
 import { inspectIntakeStore, withIntakeLock, intakeSnapshot, intakeJSON, intakePath, writeIntakeStage, assertIntakeTransaction } from './intake-io.mjs';
 import { controlSelection, readSelection, publishCapture, recoverPendingPublication, verifySourceCursor, resolveStoredSelectionAnchor, readCaptureHead } from './intake-store.mjs';
 import { createCapture, captureRelativePath } from './capture-contract.mjs';
@@ -36,6 +36,23 @@ async function temp(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-intake-'));
   t.after(() => fs.rm(root, { recursive: true, force: true })); return fs.realpath(root);
 }
+
+test('captures that fill a selection leave room to pause and resume', () => {
+  let state = newSelectionState(source());
+  state = applySelectionControl(state, request(state, 'start', U[1]), boundary(U[1], 100));
+  state = applySelectionControl(state, request(state, 'pause', U[3]), boundary(U[3], 150));
+  // Captures fill the record to just short of where captures stop.
+  const captureCeiling = MAX_SELECTION_BYTES - 32 * 1024;
+  const scope = () => ({ id: randomUUID(), kind: 'historical', unitIds: Array.from({ length: 8 }, () => randomUUID()), start: anchor('s', 200, 220), end: anchor('e', 280, 300) });
+  while (Buffer.byteLength(canonicalJSON(state)) < captureCeiling - 200) state.explicitScopes.push(scope());
+  state = validateSelectionState(state);
+  const capture = request(state, 'capture-historical', undefined, { scope: { unitIds: [U[5]], start: proof().start, end: proof().end } });
+  assert.throws(() => applySelectionControl(state, capture, null), { code: 'SELECTION_CAPACITY_EXCEEDED' });
+  // Resuming and pausing again still fit, without a safety stop.
+  state = applySelectionControl(state, request(state, 'resume', U[4]), boundary(U[4], 500));
+  state = applySelectionControl(state, request(state, 'pause', U[6]), boundary(U[6], 600));
+  assert.equal(state.safetyStop, null); assert.equal(state.paused, true);
+});
 
 test('future selection needs native order and exact anchors, not byte offsets or other UUIDs', () => {
   let state = newSelectionState(source());

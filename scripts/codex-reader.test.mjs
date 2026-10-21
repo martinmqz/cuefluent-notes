@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm, CODEX_V4_CONTROL_FORMS, CODEX_V4_CODE } from './codex-reader.mjs';
+import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm, CODEX_V4_CONTROL_FORMS, CODEX_V5_CONTROL_FORMS, CODEX_V4_CODE } from './codex-reader.mjs';
 import { PROCESSING_CONTROL_FORMS, REVIEW_CODE, REVIEW_CODE_PLACEHOLDER } from './processing-control-proof.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { newSelectionState, applySelectionControl, stableSourceIdentity, inspectSourceBoundary } from './capture-selection.mjs';
@@ -485,7 +485,7 @@ test('fair tool budgets retain later native failures identically after a bounded
   const resumed = await readCodexSelection({ ...f.args, cursor });
   const full = await readCodexSelection(f.args), capture = resumed.candidates[0].capture;
   assert.deepEqual(serializeCapture(capture), serializeCapture(full.candidates[0].capture));
-  assert.equal(capture.reader.version, '4'); // Version 4 keeps the version 2 tool allocation.
+  assert.equal(capture.reader.version, '5'); // Version 5 keeps the version 2 tool allocation.
   const result = capture.evidence.find(item => item.kind === 'tool-result' && item.callId === 'late');
   assert.equal(result.text, 'Failure: unchanged caller crashes.'); assert.equal(result.outcome, 'failed');
   assert(capture.evidence.some(item => item.kind === 'user' && item.text.startsWith('Correction:')));
@@ -566,7 +566,7 @@ test('a Codex unit started with this skill keeps what the person typed and leave
     const f = await fixture(t, [start(A), skillUser(A, typed), ...controlExchange(A, 'cue-1'), ...otherWork(A),
       assistant(A, 'Nothing was applied.'), end(A)]);
     const capture = (await readCodexSelection(f.args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '4');
+    assert.equal(capture.reader.version, '5');
     assert.deepEqual(capture.evidence.map(item => [item.kind, item.callId ?? null, item.text]), [
       ['user', null, typed], ['tool-call', 'work', '{"cmd":"git status"}'], ['tool-result', 'work', 'Working tree clean.'],
       ['assistant', null, 'Nothing was applied.']]);
@@ -630,7 +630,7 @@ test('Codex 0.163: a skill picked from the list is markup, and its code-mode con
   ]) await t.test(name, async t => {
     const { rows } = turn(options), f = await fixture(t, rows);
     const capture = (await readCodexSelection(f.args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '4');
+    assert.equal(capture.reader.version, '5');
     // The typed words stay; the mention, the selection item, the cells, their
     // nested calls and outputs and any wait are left out, and so is the
     // assistant's repetition of this plugin's reply.
@@ -778,7 +778,7 @@ test('Codex: a plain-language request keeps its words while this plugin\'s contr
     ['a refusal of several lines', refused(plain({ calledTool: 'processing_status' }).rows, `${refusalReply}\n\nType $cuefluent-notes status.`, 'code')],
   ]) await t.test(name, async t => {
     const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '4');
+    assert.equal(capture.reader.version, '5');
     // The person's words stay exactly as typed; the cells, calls, outputs,
     // nested items, waits and the assistant's repetition of the reply do not.
     assert.deepEqual(kept(capture), [['user', typed]]);
@@ -960,7 +960,7 @@ test('Codex reader v4: a control reply the model reformatted is left out like an
   ];
   for (const [name, options] of cases) await t.test(name, async t => {
     const capture = (await readCodexSelection((await fixture(t, turn({ commentary, ...options }).rows)).args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '4');
+    assert.equal(capture.reader.version, '5');
     assert.deepEqual(kept(capture), [['assistant', commentary[0]]]);
     assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
     assert.doesNotMatch(serializeCapture(capture).toString(), /a42ksb|x3x499|Review folder|Pending drafts|Type one of these|cuefluent_control/);
@@ -1020,18 +1020,19 @@ test('Codex reader v4: a control reply the model reformatted is left out like an
     assert.deepEqual(kept(read.candidates.find(entry => entry.capture.identity.unitId === B).capture), [['user', 'What did it say?'], ['assistant', laterRelay('a42ksb')]]);
   });
   // Published version 1-3 heads keep the reformatted relay and replay to the
-  // same bytes; a version 4 head replays to the same bytes too. The older
+  // same bytes; version 4 and 5 heads replay to the same bytes too. The older
   // skill part, direct, is where version 3 already leaves the exchange out.
   const options = { control: 'review', commentary, statusText: later('a42ksb'), reply: laterRelay('a42ksb') };
-  for (const [form, mode] of [['menu', 'code'], ['menu', 'direct'], ['block', 'direct']]) for (const version of ['1', '2', '3', '4']) {
+  for (const [form, mode] of [['menu', 'code'], ['menu', 'direct'], ['block', 'direct']]) for (const version of ['1', '2', '3', '4', '5']) {
     await t.test(`a published v${version} head replays unchanged (${form}, ${mode})`, async t => {
       const f = await fixture(t, turn({ ...options, form, mode }).rows);
       const current = (await readCodexSelection(f.args)).candidates[0].capture;
       const head = { ...current, reader: { ...current.reader, version } };
       const replayed = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: head }) })).candidates[0].capture;
       assert.equal(replayed.reader.version, version);
-      assert.equal(kept(replayed).some(([kind, text]) => kind === 'assistant' && text === laterRelay('a42ksb')), version !== '4');
-      if (version === '4') assert.deepEqual(serializeCapture(replayed), serializeCapture(current));
+      const mention = ['4', '5'].includes(version);
+      assert.equal(kept(replayed).some(([kind, text]) => kind === 'assistant' && text === laterRelay('a42ksb')), !mention);
+      if (mention) assert.deepEqual(serializeCapture(replayed), serializeCapture(head));
       const again = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: replayed }) })).candidates[0].capture;
       assert.equal(again.evidenceHash, replayed.evidenceHash); assert.deepEqual(serializeCapture(again), serializeCapture(replayed));
     });
@@ -1060,11 +1061,11 @@ test('reader version 3 replays a published 0.163 unit unchanged: its mention and
   }
 });
 
-test('the version 3 and 4 skill rules ignore the install path, so a published unit replays unchanged after an upgrade', async t => {
+test('the version 3, 4 and 5 skill rules ignore the install path, so a published unit replays unchanged after an upgrade', async t => {
   // Each plugin version installs at its own path and a transcript keeps the
   // path of the version that ran; neither is this reader's location.
   const installs = ['0.15.1', '0.16.0'].map(version => path.resolve('plugins', 'cache', 'cuefluent-notes', version, 'SKILL.md'));
-  for (const ran of installs) for (const version of ['3', '4']) await t.test(`${path.basename(path.dirname(ran))} v${version}`, async t => {
+  for (const ran of installs) for (const version of ['3', '4', '5']) await t.test(`${path.basename(path.dirname(ran))} v${version}`, async t => {
     const f = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88', { path: ran }), ...controlExchange(A, 'cue-1'), assistant(A, 'Nothing was applied.'), end(A)]);
     const read = (await readCodexSelection(f.args)).candidates[0].capture;
     const published = { ...read, reader: { ...read.reader, version } };
@@ -1079,7 +1080,7 @@ test('the version 3 and 4 skill rules ignore the install path, so a published un
 
 test('published version 2 Codex captures keep their skill-block omission and control exchange on replay', async t => {
   const { CODEX_SKILL_RULES, CODEX_READER_VERSION } = await import('./codex-reader.mjs');
-  assert.equal(CODEX_SKILL_RULES[CODEX_READER_VERSION], 'mention'); assert.equal(CODEX_SKILL_RULES['3'], 'markup');
+  assert.equal(CODEX_SKILL_RULES[CODEX_READER_VERSION], 'mention-5'); assert.equal(CODEX_SKILL_RULES['4'], 'mention'); assert.equal(CODEX_SKILL_RULES['3'], 'markup');
   const f = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1'), end(A)]);
   const args = f.args, current = (await readCodexSelection(args)).candidates[0].capture;
   for (const version of ['1', '2']) {
@@ -1094,10 +1095,22 @@ test('published version 2 Codex captures keep their skill-block omission and con
   }
 });
 
-test('reader version 4 decides command-only messages with the grammar it shipped with', () => {
-  // Today the live grammar matches. When it changes, v4 keeps these forms and
-  // the new grammar goes into a new reader version, so v4 captures replay unchanged.
-  assert.deepEqual(CODEX_V4_CONTROL_FORMS.map(form => form.map(word => word === '#' ? REVIEW_CODE_PLACEHOLDER : word)),
+test('reader version 5 decides command-only messages with the grammar it shipped with; version 4 keeps its own', async t => {
+  // Today the live grammar matches version 5. When it changes, v5 keeps these
+  // forms and the new grammar goes into a new reader version, so v5 captures
+  // replay unchanged.
+  assert.deepEqual(CODEX_V5_CONTROL_FORMS.map(form => form.map(word => word === '#' ? REVIEW_CODE_PLACEHOLDER : word)),
     PROCESSING_CONTROL_FORMS.map(form => [...form]), 'the command grammar changed: add a Codex reader version');
+  // Version 4's forms are the grammar without the chat capture commands.
+  const capture = new Set(['capture', 'pause chat', 'resume chat']);
+  assert.deepEqual(CODEX_V4_CONTROL_FORMS.map(form => form.join(' ')), CODEX_V5_CONTROL_FORMS.map(form => form.join(' ')).filter(form => !capture.has(form)));
+  // A typed capture is only the command from version 5; version 4 kept it as typed.
+  const f = await fixture(t, [start(A), skillUser(A, 'capture'), ...controlExchange(A, 'cue-1'), assistant(A, 'Nothing was applied.'), end(A)]);
+  const current = (await readCodexSelection(f.args)).candidates[0].capture;
+  assert.equal(current.reader.version, '5');
+  assert.deepEqual(current.evidence.map(item => [item.kind, item.text]), [['assistant', 'Nothing was applied.']]);
+  const v4 = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: { ...current, reader: { ...current.reader, version: '4' } } }) })).candidates[0].capture;
+  assert.equal(v4.reader.version, '4');
+  assert.deepEqual(v4.evidence.map(item => [item.kind, item.text]), [['user', 'capture'], ['assistant', 'Nothing was applied.']]);
   assert.equal(CODEX_V4_CODE.source, REVIEW_CODE.source, 'the draft-code alphabet changed: add a Codex reader version');
 });

@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { openGuarded, sameFileIdentity } from './file-io.mjs';
 import { stableSourceIdentity, SOURCE_HEADER_BYTES } from './capture-selection.mjs';
 import { integer, digest, fail } from './workflow-values.mjs';
@@ -25,9 +26,16 @@ export async function readSessionHeader({ readHeader, size }) {
 /** Read one fixed snapshot with positional I/O. Caller supplies an authorized floor.
  * Header reads are bounded independently; no discovery or historical prefix scan.
  */
+/** The bytes an explicit capture was chosen from, when its selection kept their hash. */
+export const chosenStretch = scope => scope.contentHash === undefined ? null
+  : { from: scope.start.startByte, to: (scope.end ?? scope.start).endByte, hash: scope.contentHash };
+/** `stretch` ({from, to, hash}) names bytes chosen by their hash. They are
+ * hashed through this read's own handle before any record is read and again
+ * after, so the records read come from the bytes that hashed, also when the
+ * file grew meanwhile. */
 export async function readSessionRange({ source, from, endByte, startsMidRecord = false,
   verifyHeader, readHeader = readSessionHeader, maxBytes = SESSION_READ_LIMIT, maxRecords = 16384, deadline = Infinity,
-  observeRead = () => {}, now = Date.now }) {
+  observeRead = () => {}, now = Date.now, stretch = null }) {
   integer(from); integer(maxBytes); integer(maxRecords);
   if (maxBytes < 1 || maxBytes > SESSION_READ_LIMIT || maxRecords < 1 || maxRecords > 16384 ||
       (deadline !== Infinity && !Number.isFinite(deadline))) fail('INVALID_READER_LIMIT');
@@ -38,7 +46,9 @@ export async function readSessionRange({ source, from, endByte, startsMidRecord 
     if (stableSourceIdentity(stat) !== source.fileIdentity || snapshotEnd < from) fail('SOURCE_CHANGED');
     const stop = endByte === undefined ? snapshotEnd : Math.min(integer(endByte), snapshotEnd);
     if (stop < from) fail('SOURCE_CHANGED');
+    // A hash of every byte the range read consumed, from `from` on.
     let bytesRead = 0;
+    const consumed = createHash('sha256');
     const read = async (offset, length, purpose) => {
       checkWorkflowBudget();
       if (purpose === 'range') consumeWorkflowBytes(length);
@@ -46,9 +56,22 @@ export async function readSessionRange({ source, from, endByte, startsMidRecord 
       const bytes = Buffer.alloc(length), result = await handle.read(bytes, 0, length, offset);
       if (result.bytesRead !== length) fail('SOURCE_CHANGED');
       observeRead({ offset, bytes: result.bytesRead, purpose });
-      if (purpose === 'range') bytesRead += result.bytesRead;
+      if (purpose === 'range') { bytesRead += result.bytesRead; consumed.update(bytes); }
       return bytes;
     };
+    const stretchHolds = async () => {
+      const hasher = createHash('sha256');
+      for (let at = stretch.from; at < stretch.to;) {
+        const length = Math.min(1024 * 1024, stretch.to - at);
+        hasher.update(await read(at, length, 'stretch')); at += length;
+      }
+      if (hasher.digest('hex') !== stretch.hash) fail('SOURCE_CHANGED');
+    };
+    if (stretch) {
+      integer(stretch.from); integer(stretch.to);
+      if (stretch.to < stretch.from || stretch.to > snapshotEnd) fail('SOURCE_CHANGED');
+      await stretchHolds();
+    }
     const metadata = await verifyHeader(await readHeader({ size: stop, readHeader: (offset, length) => {
       if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 1 || offset + length > Math.min(stop, SOURCE_HEADER_BYTES)) fail('SESSION_HEADER_LIMIT');
       return read(offset, length, 'header');
@@ -87,7 +110,10 @@ export async function readSessionRange({ source, from, endByte, startsMidRecord 
     if (!sameFileIdentity(stat, after) || !sameFileIdentity(stat, current) || after.size < stat.size ||
         after.nlink !== 1n || current.nlink !== 1n ||
         (after.size === stat.size && (after.mtimeNs !== stat.mtimeNs || after.ctimeNs !== stat.ctimeNs))) fail('SOURCE_CHANGED');
-    return { metadata, records, discarded, from, snapshotEnd, readEnd: lineStart, bytesRead,
+    // A file that grew can also have been rewritten in place: the chosen
+    // stretch must still hash as it did.
+    if (stretch) await stretchHolds();
+    return { metadata, records, discarded, from, snapshotEnd, readEnd: lineStart, bytesRead, consumed: { from, to: offset, hash: consumed.digest('hex') },
       pendingTail: lineStart < stop, limited, blocked, startsMidRecord: skipping };
   } finally { await handle.close(); }
 }

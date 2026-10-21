@@ -1,7 +1,13 @@
 name: Checks
 
 on:
+  # Draft pull requests skip every job, so their matrix checks do not exist
+  # and their other jobs report as skipped; a draft cannot merge, and marking
+  # it ready runs them all. The draft package-update PR that publication opens
+  # (chore/publish-*) still runs, so marking it ready runs its checks again.
+  # Converting one back to draft starts a skipped run that cancels its checks.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches: [main]
   workflow_call:
@@ -10,8 +16,17 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes its running checks. A re-run of an
+# earlier run, such as one from its draft days, waits for them instead. Other
+# runs (main, tags, manual and release-called) get their own group, so they are
+# never queued or cancelled.
+concurrency:
+  group: checks-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}
+
 jobs:
   scope:
+    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft || startsWith(github.head_ref, 'chore/publish-')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -72,7 +87,7 @@ jobs:
   guidance:
     # Maintenance tooling cannot suppress product checks or run in a job that
     # produces release assets. A tag uses the already-reviewed source guidance.
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ !startsWith(github.ref, 'refs/tags/') && (github.event_name != 'pull_request' || !github.event.pull_request.draft || startsWith(github.head_ref, 'chore/publish-')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -87,11 +102,23 @@ jobs:
       - run: npm run check:guidance
   test:
     needs: scope
-    name: test (${{ matrix.os }})
+    # macOS and Windows run four duration-weighted shards. The first keeps
+    # the required check name and builds the release preview; every shard is
+    # gated through `reproducibility`, which needs the entire matrix.
+    name: test (${{ matrix.os }}${{ matrix.suffix }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2025]
+        include:
+          - { os: ubuntu-24.04, shard: '', suffix: '', primary: true }
+          - { os: macos-14, shard: '1/4', suffix: '', primary: true }
+          - { os: macos-14, shard: '2/4', suffix: ', 2/4', primary: false }
+          - { os: macos-14, shard: '3/4', suffix: ', 3/4', primary: false }
+          - { os: macos-14, shard: '4/4', suffix: ', 4/4', primary: false }
+          - { os: windows-2025, shard: '1/4', suffix: '', primary: true }
+          - { os: windows-2025, shard: '2/4', suffix: ', 2/4', primary: false }
+          - { os: windows-2025, shard: '3/4', suffix: ', 3/4', primary: false }
+          - { os: windows-2025, shard: '4/4', suffix: ', 4/4', primary: false }
     # Required contexts always test on their named platform. The package path
     # checks committed files there without repeating the full source suite.
     runs-on: ${{ matrix.os }}
@@ -110,14 +137,14 @@ jobs:
         run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,os:require('os').release(),parallelism:require('os').availableParallelism()})"
       - run: npm ci --ignore-scripts
       - name: Test committed marketplace packages on the native platform
-        if: needs.scope.outputs.mode == 'packages'
+        if: needs.scope.outputs.mode == 'packages' && matrix.primary
         run: node --test scripts/published-marketplace.test.mjs
       - name: Verify Windows privacy probe before the full suite
-        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.primary
         timeout-minutes: 2
         run: node scripts/windows-probe-smoke.mjs
       - name: Verify private storage under a real standard-user token
-        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows'
+        if: needs.scope.outputs.mode == 'full' && runner.os == 'Windows' && matrix.primary
         shell: powershell
         run: ./scripts/test-windows-standard-user.ps1
       - name: Run tests
@@ -125,6 +152,8 @@ jobs:
         run: npm test
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
+          CUEFLUENT_TEST_SHARD: ${{ matrix.shard }}
+          CUEFLUENT_TEST_TIMINGS: .local/ci-test-timings
       # Raise Node's default on small runners without lowering it on larger ones.
       # Files are isolated; tests inside a file remain sequential for fault injection.
       - name: Run Windows tests
@@ -135,12 +164,23 @@ jobs:
           npm test -- --test-concurrency=$testConcurrency
         env:
           CUEFLUENT_REQUIRE_SHELLS: '1'
+          CUEFLUENT_TEST_SHARD: ${{ matrix.shard }}
+          CUEFLUENT_TEST_TIMINGS: .local/ci-test-timings
+      - name: Upload per-file test timings
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always() && needs.scope.outputs.mode == 'full'
+        with:
+          name: test-timings-${{ matrix.os }}-${{ strategy.job-index }}
+          path: .local/ci-test-timings/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
       - run: npm run check:examples
-        if: needs.scope.outputs.mode == 'full'
+        if: needs.scope.outputs.mode == 'full' && matrix.primary
       - run: npm run release:build
-        if: needs.scope.outputs.mode == 'full'
+        if: needs.scope.outputs.mode == 'full' && matrix.primary
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: needs.scope.outputs.mode == 'full'
+        if: needs.scope.outputs.mode == 'full' && matrix.primary
         with:
           name: release-preview-${{ matrix.os }}
           path: dist/release/artifacts/
@@ -171,8 +211,10 @@ jobs:
         run: node scripts/client-smoke.mjs
   reproducibility:
     # Required by branch protection. Selection/verification failures must not
-    # turn omitted native suites into a passing package-update PR.
-    if: ${{ always() }}
+    # turn omitted native suites into a passing package-update PR, so it runs
+    # after a failure of the others; a cancelled run, superseded by a newer
+    # one, does not run it. A draft run reports it as skipped.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft || startsWith(github.head_ref, 'chore/publish-')) }}
     needs: [scope, test, client-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 10

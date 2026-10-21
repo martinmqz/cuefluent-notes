@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { workflowConfigPath, readWorkflowSnapshot } from './workflow-config.mjs';
-import { verifyWorkflowStorage, assertWorkflowStorage } from './workflow-storage.mjs';
+import { verifyWorkflowStorage, assertWorkflowStorage, workflowCollectionGrant } from './workflow-storage.mjs';
 import { withStorageProbes } from './storage-platform.mjs';
 import { openWorkflowIntake, withIntakeLockWaiting, intakeSnapshot, intakeJSON } from './intake-io.mjs';
 import { readSelection, selectionPath } from './intake-store.mjs';
@@ -14,7 +14,10 @@ import { resolveProcessingInvocation, isProcessingInvocation, isPendingProcessin
 import { inspectProcessingShortcut, selectProcessingShortcut, cancelProcessingShortcut, beginProcessingShortcutControl, readProcessingShortcutControl, finishProcessingShortcutControl } from './processing-shortcuts.mjs';
 import { inspectProcessing, processingProposalPaths } from './processing.mjs';
 import { stablePendingCollectionProcessing } from './processing-collection.mjs';
-import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES } from './processing-control-server.mjs';
+import { runProcessingControlServer, processingControlStatusView, reviewNotePath, replayedView, COLLECTION_STOP_CODES, CAPTURE_TOOLS } from './processing-control-server.mjs';
+import { captureChatTurns, controlChatCapture, excludeChatTurn, reserveChatCommand, recordChatCommandReply, typedCaptureDeadline, typedCommandDeadline } from './capture-controls.mjs';
+import { readReaderBlock, READER_BLOCK_CODES } from './collection-worker.mjs';
+import { withWorkflowBudget, checkWorkflowBudget } from './workflow-budget.mjs';
 import { openProcessingController } from './processing-controller.mjs';
 import { assertClaudeProcessingAuthentication } from './processing-claude-settings.mjs';
 import { reviewProcessingProposal, readReviewPreview, applyReviewDecision } from './processing-host-review.mjs';
@@ -530,10 +533,16 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // Why automatic collection stopped for this chat, as the latest worker pass
   // reported it for exactly this session while collection still applies to it.
   // Display only: a missing or unreadable record shows nothing.
+  // Why Automatic capture of this chat stopped: the reader block its last visit
+  // ended on, kept per chat, or else a stop the latest pass reported.
   async function collectionStop(capability, source) {
     try {
       await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect'));
       const store = await withStorageProbes(() => openWorkflowIntake(capability));
+      // A marker that cannot be read leaves the latest pass's report to say it.
+      let block = null;
+      try { block = await withStorageProbes(() => readReaderBlock(store, { client, sessionId: source.selection.sessionId })); } catch { /* the notice below */ }
+      if (block) return { collection: { state: 'stopped', code: block } };
       const notice = intakeJSON(await intakeSnapshot(store, 'state', collectionStatusPath, { maxBytes: 16384 }));
       const found = Array.isArray(notice?.diagnostics) ? notice.diagnostics.find(item => item?.client === source.selection.client &&
         item.sessionId === source.selection.sessionId && COLLECTION_STOP_CODES.includes(item.code)) : undefined;
@@ -716,6 +725,155 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     }
     return response;
   }
+  // A typed chat capture command. Whether Automatic capture covers this chat
+  // is policy (its route and session list) plus the chat's own pause. Only the
+  // person's typed command acts; a model's own call is refused before acting.
+  // Sources of capture-command deliveries that reserved their call: only these
+  // act, and only these keep the command turn's bookkeeping.
+  const reserving = new WeakMap();
+  // Sources whose dispatch receipt was recorded: their command turn is kept out
+  // of Automatic capture.
+  const receipted = new WeakSet();
+  async function requestCapture({ source, tool, signal, commitResponse }) {
+    // The command's time runs from here, so its capture and the steps around
+    // it end within it.
+    const started = performance.now();
+    signal?.throwIfAborted();
+    if (!source.nativeSkill || !source.unitId) fail('PROCESSING_CONTROL_SELECTION_MISMATCH');
+    const { capability } = selected(source);
+    // A redelivered call answers with the reply it already gave; the command
+    // does not act again. A delivery that finds its call reserved without a
+    // reply (another delivery is acting, or could not keep its reply) cannot
+    // tell the outcome, so it is refused as uncertain without acting.
+    const call = { unitId: source.unitId, callId: source.callId, tool, argsHash: source.argsHash };
+    const reserved = await withStorageProbes(() => reserveChatCommand(capability, source.selection, call, { signal, deadline: typedCaptureDeadline(started) }));
+    if (!reserved.acting) { if (reserved.reply) return reserved.reply; fail('PROCESSING_CONTROL_FAILED'); }
+    reserving.set(source, { started });
+    // Capture and resume require readable processing status before acting.
+    // A pause is an independent opt-out: its status is optional, read after.
+    const remaining = Math.min(10_000, Math.floor(typedCaptureDeadline(started) - performance.now()));
+    if (remaining <= 0) fail('WORKER_TIME_BUDGET');
+    let { view, automatic, state, paused, stop } = await withWorkflowBudget({ milliseconds: remaining }, async () => {
+      // Controller and privacy probes share one bounded preflight step and the
+      // command's absolute deadline. Check after each await too: a slow final
+      // probe must never admit an action after its budget has expired.
+      const inspect = async run => {
+        signal?.throwIfAborted(); checkWorkflowBudget();
+        const value = await run();
+        signal?.throwIfAborted(); checkWorkflowBudget(); return value;
+      };
+      const view = tool === 'pause_capture' ? null : await inspect(() => currentView(source));
+      const automatic = await inspect(() => automaticCapture(capability, source));
+      const store = await inspect(() => withStorageProbes(() => openWorkflowIntake(capability)));
+      const state = (await inspect(() => withStorageProbes(() => readSelection(store, { client, sessionId: source.selection.sessionId })))).state;
+      const paused = state?.paused === true;
+      // A changed Automatic grant waits for review. Paused, the chat can be
+      // captured by hand and resumed under current settings; a pause always
+      // remains available as an opt-out.
+      if (automatic && !paused && !state?.safetyStop && tool !== 'pause_capture' && await inspect(() => grantChanged(capability, source, store, state))) fail('REGISTRATION_REQUIRES_REVIEW');
+      const stop = tool === 'capture_turns' && automatic && !paused && !state?.safetyStop
+        ? (await inspect(() => collectionStop(capability, source))).collection?.code : undefined;
+      return { view, automatic, state, paused, stop };
+    });
+    const chat = { selection: source.selection, source: source.source };
+    let outcome;
+    // After a safety stop nothing of the chat is captured, in either capture
+    // mode, and there is nothing to pause or resume.
+    if (state?.safetyStop) outcome = { capture: 'full' };
+    else if (tool === 'capture_turns') {
+      // A chat Automatic capture covers but has stopped is not covered. A
+      // paused chat is captured by hand: a record its own windows cannot read
+      // past stops them and the reply says why, while a stop in Automatic
+      // capture's own saved progress never reaches them.
+      if (automatic && !paused) outcome = { capture: stop ? 'stopped' : 'automatic' };
+      else {
+        let captured = null;
+        // A record the reader cannot read stops every capture of the chat at
+        // the same place: the reply names why rather than failing uncertain.
+        try { captured = await withStorageProbes(() => captureChatTurns(capability, { ...chat, floor: source.captureFloor, commandUnitId: source.unitId }, { signal, deadline: typedCaptureDeadline(started) })); }
+        catch (error) { if (!READER_BLOCK_CODES.includes(error.code) || !COLLECTION_STOP_CODES.includes(error.code)) throw error; outcome = { capture: 'blocked', reason: error.code }; }
+        if (captured) {
+          const left = captured.leftOut ? { leftOut: captured.leftOut } : {}, held = captured.held ? { reason: captured.held } : {};
+          outcome = captured.turns ? { capture: 'captured', turns: captured.turns, more: captured.more, ...left, ...held }
+            : captured.held ? { capture: 'blocked', ...held, ...left } : { capture: 'nothing-new', more: captured.more, ...left };
+        }
+      }
+    } else if (!automatic) outcome = { capture: 'not-automatic' };
+    else if (tool === 'pause_capture') {
+      if (paused) outcome = { capture: 'already-paused' };
+      else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'pause' }, { deadline: typedCaptureDeadline(started), signal, beforePublish: commitResponse })); outcome = { capture: 'paused' }; }
+    } else if (!paused) outcome = { capture: 'already-active' };
+    else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' }, { deadline: typedCaptureDeadline(started), signal, beforePublish: commitResponse })); outcome = { capture: 'resumed' }; }
+    signal?.throwIfAborted();
+    if (tool === 'pause_capture') {
+      try {
+        const remaining = Math.min(10_000, Math.floor(typedCaptureDeadline(started) - performance.now()));
+        if (remaining <= 0) fail('WORKER_TIME_BUDGET');
+        view = await withWorkflowBudget({ milliseconds: remaining }, async () => {
+          const view = await currentView(source); checkWorkflowBudget(); return view;
+        });
+      } catch {
+        signal?.throwIfAborted();
+        view = { status: 'blocked', statusDetail: 'blocked', requestId: null, chat: null,
+          nextAction: 'inspect', diagnostics: ['PROCESSING_CHAT_OUTCOME_UNKNOWN'] };
+      }
+    }
+    let response = { ...view, ...outcome };
+    // The command leaves out its own turn, so a later capture skips it, before
+    // its reply is kept: a redelivery then replays whether that worked. In an
+    // Automatic chat the worker has not armed yet, the command may precede
+    // where its hook froze the session's start, so the worker's boundary does
+    // not cover it: it is left out the same way. When the exclusion fails, or
+    // the selection has no room for it, the turn stays capturable and the reply
+    // says so in its diagnostics.
+    let excluded = false;
+    try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal, deadline: typedCommandDeadline(started) }))).excluded; }
+    catch { /* reported below */ }
+    if (!excluded) response = { ...response, diagnostics: [...new Set([...response.diagnostics ?? [], 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+    // The command has acted. Without its kept reply a redelivery would act
+    // again, so no reply is given unless it is kept: the outcome is reported
+    // as not certain, and status shows it.
+    // The command's own two bookkeeping writes share the time left before its
+    // deadline, so the whole command ends within it.
+    try { await withStorageProbes(() => recordChatCommandReply(capability, source.selection, call, response, { signal, deadline: typedCommandDeadline(started) })); }
+    catch { signal?.throwIfAborted(); fail('PROCESSING_CONTROL_FAILED'); }
+    return response;
+  }
+  // A typed command that failed leaves its own turn out under the same rule
+  // as one that succeeded, so a later capture never takes it. Housekeeping:
+  // the refusal stands whatever happens here. It answers whether the turn is
+  // left out as it should be, so a refusal can say when it may not be.
+  async function afterFailure({ source, invocation }) {
+    if (!source?.nativeSkill || !source.unitId || !owners.has(source)) return true;
+    // A capture command that did not reserve its call changes nothing, however
+    // it failed: another delivery may hold the call and own the turn's
+    // bookkeeping, and an exclusion here would change the selection it is using.
+    if (CAPTURE_TOOLS.includes(invocation.tool) && !reserving.has(source)) return false;
+    try {
+      const { capability } = selected(source);
+      // In a chat Automatic capture covers, a command turn is kept out by its
+      // dispatch receipt, and an exclusion here would change the selection a
+      // redelivery replays under. Without that receipt the turn stays
+      // capturable, which the refusal reports.
+      const command = reserving.get(source);
+      if (!command && source.captureActive !== false && await automaticCapture(capability, source)) return receipted.has(source);
+      // Cancellation stops the action, not the command turn's opt-out. Its
+      // housekeeping can still finish within the original command deadline.
+      const options = command ? { deadline: typedCommandDeadline(command.started) } : {};
+      return (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, options))).excluded;
+    } catch { return false; }
+  }
+  // Whether the grant the chat's Automatic capture was given, kept with its
+  // selection or else its registration, is no longer the current settings'.
+  async function grantChanged(capability, source, store, state) {
+    const granted = state?.currentGrantHash ?? (await withStorageProbes(() => readRegistration(store, { client, sessionId: source.selection.sessionId },
+      { mismatchCode: 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' }))).registration?.grantHash;
+    return granted != null && granted !== await withStorageProbes(() => workflowCollectionGrant(capability, source.selection));
+  }
+  async function automaticCapture(capability, source) {
+    try { await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'collect')); return true; }
+    catch (error) { if (error.code === 'WORKFLOW_NOT_AUTHORIZED') return false; throw error; }
+  }
   async function beforeResponse({ source, context, invocation, view, result, signal, commitResponse }) {
     const { capability, options } = selected(source);
     const job = ['process_selected_captures', 'processing_resume'].includes(invocation.tool) ? jobs.get(keyFor(options)) : null;
@@ -741,7 +899,28 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
         // separate call; redelivery cannot rewrite immutable proof or dispatch.
         return;
       }
-      if (!source.nativeSkill || !source.unitId || source.captureActive === false) {
+      // A chat capture command left out its own turn before its reply was
+      // kept, so its reply, first or replayed, already says whether it did.
+      if (CAPTURE_TOOLS.includes(invocation.tool)) { await release(); return; }
+      // Any other typed command with no receipt to exclude it (in a chat
+      // Automatic capture does not cover) leaves out its own turn by an
+      // exclusion, so a later capture skips it.
+      // An unarmed Automatic chat has no selection to add one to: its first
+      // prompt is the boundary the worker excludes. It cannot undo the command:
+      // when it fails, or the selection has no room for it, the turn stays
+      // capturable and the reply says so in its diagnostics.
+      const typed = Boolean(source.nativeSkill && source.unitId);
+      const leaveOut = async () => {
+        let excluded = false;
+        try { excluded = (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }, { signal }))).excluded; }
+        catch { /* reported below */ }
+        if (excluded) { await release(); return undefined; }
+        const replacement = { ...view, diagnostics: [...new Set([...view.diagnostics, 'PROCESSING_EXCLUSION_UNVERIFIED'])].slice(0, 8) };
+        await release(processingControlStatusView(replacement, { collectionId: source.collectionId }));
+        return replacement;
+      };
+      if (!typed || source.captureActive === false) {
+        if (typed && (source.selectionHash !== null || !await automaticCapture(capability, source))) return leaveOut();
         await release();
         return;
       }
@@ -752,7 +931,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       catch (error) {
         if (error.code !== 'WORKFLOW_NOT_AUTHORIZED') throw error;
         await withStorageProbes(() => assertWorkflowStorage(capability, source.selection, 'explicitProcess'));
-        await release(); return;
+        return leaveOut();
       }
       // A code-mode control was bound through the handshake's first cell; this
       // retry's own native metadata names its cell and nested call.
@@ -772,6 +951,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           ...(client === 'claude' ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand']
             .map(key => [key, source[key]])) : {}) },
       }, { authorize, beforePublish: commitAdmission }), { signal }));
+      receipted.add(source);
       await release();
     } catch (error) {
       if (error.code === 'STALE_SELECTION' && !signal?.aborted) {
@@ -822,7 +1002,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
       diagnostics: ['PROCESSING_CONTROL_SOURCE_UNVERIFIED'], help: true, commandPrefix });
     await runProcessingControlServer({ client, input, output, env, resolveSource, unboundStatus, getStatus: exactOnly(getStatus),
       requestProcessing: exactOnly(requestProcessing), requestResume: exactOnly(requestResume), requestCancel: exactOnly(requestCancel),
-      requestReview: exactOnly(requestReview), beforeResponse, afterResponse, afterDelivery });
+      requestReview: exactOnly(requestReview), requestCapture: exactOnly(requestCapture), beforeResponse, afterResponse, afterDelivery, afterFailure });
   } finally {
     // No automatic dispatch retry, cancellation, claim cleanup or new source read.
     for (const job of jobs.values()) job.rejectDispatch(Object.assign(new Error('PROCESSING_CONTROL_FAILED'), { code: 'PROCESSING_CONTROL_FAILED' }));

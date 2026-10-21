@@ -253,15 +253,15 @@ export async function assertIntakeTransaction(transaction) {
   await metadata.guard(); return metadata.store;
 }
 
-export async function replaceIntakeJSON(transaction, name, value, expectedHash) {
+export async function replaceIntakeJSON(transaction, name, value, expectedHash, options) {
   const bytes = Buffer.from(canonicalJSON(value) + '\n');
   if (bytes.length > META_LIMIT) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
-  return replaceIntakeBytes(transaction, name, bytes, expectedHash);
+  return replaceIntakeBytes(transaction, name, bytes, expectedHash, options);
 }
 
 /** Atomically replace one private state file with exact bytes. The expected
  * hash (null for absent) is checked before staging and again before rename. */
-export async function replaceIntakeBytes(transaction, name, bytes, expectedHash, { maxBytes = META_LIMIT } = {}) {
+export async function replaceIntakeBytes(transaction, name, bytes, expectedHash, { maxBytes = META_LIMIT, beforePublish } = {}) {
   checkWorkflowBudget();
   if (!Buffer.isBuffer(bytes) || bytes.length > maxBytes) fail('INTAKE_METADATA_CAPACITY_EXCEEDED');
   const store = await assertIntakeTransaction(transaction);
@@ -276,6 +276,7 @@ export async function replaceIntakeBytes(transaction, name, bytes, expectedHash,
       if ((await intakeSnapshot(store, 'state', name, { maxBytes })).hash !== expectedHash) fail('INTAKE_STATE_CONFLICT');
       if (!await isOwnedStage(stage.file, stage.identity, bytes, { guard })) fail('INTAKE_STAGE_CHANGED');
       await guard(); await guardStore(store, [stage.file, target]);
+      beforePublish?.();
     } });
     await syncDirectory(path.dirname(target));
     return digest(bytes);
@@ -290,12 +291,14 @@ export async function replaceIntakeBytes(transaction, name, bytes, expectedHash,
 export async function withIntakeLockWaiting(store, operation, { waitMs = 2000, signal } = {}) {
   const deadline = performance.now() + waitMs;
   for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
     let started = false;
-    try { return await withIntakeLock(store, transaction => { started = true; return operation(transaction); }); }
+    try { return await withIntakeLock(store, transaction => { signal?.throwIfAborted(); started = true; return operation(transaction); }); }
     catch (error) {
+      signal?.throwIfAborted();
       const remaining = deadline - performance.now();
       if (started || error?.code !== 'INTAKE_BLOCKED' || remaining <= 0 || signal?.aborted) throw error;
-      await delay(Math.min(25 * 2 ** attempt, 200, remaining));
+      await delay(Math.min(25 * 2 ** attempt, 200, remaining), undefined, { signal });
       signal?.throwIfAborted();
     }
   }

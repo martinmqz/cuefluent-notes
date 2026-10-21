@@ -205,7 +205,11 @@ test('bounded exact source inspection refuses truncated, replaced and oversized 
   await assert.rejects(verifyCodexProcessingControl({ ...f.request, source: { ...f.source, fileIdentity: 'b'.repeat(64) } }, f), { code: 'SOURCE_CHANGED' });
 });
 
-for (const control of PROCESSING_CONTROL_FORMS.map(form => form.map(word => word === REVIEW_CODE_PLACEHOLDER ? 't7xb88' : word).join(' '))) {
+// Chat capture commands record no receipt: each leaves its own turn out of
+// captured turns by an exclusion instead, so they have no receipt proof.
+const CAPTURE_COMMANDS = new Set(['capture', 'pause chat', 'resume chat']);
+for (const control of PROCESSING_CONTROL_FORMS.map(form => form.map(word => word === REVIEW_CODE_PLACEHOLDER ? 't7xb88' : word).join(' '))
+  .filter(control => !CAPTURE_COMMANDS.has(control))) {
   test(`exact ${control} has bounded proof in both clients; mixed corrections remain evidence`, async t => {
     const codex = await fixture(t, () => {}, control);
     const claude = await claudeFixture(t, () => {}, control);
@@ -223,6 +227,7 @@ test('typed grammar accepts only the exact forms and maps each to one tool call'
   // Each form, its exact tool and fields, and the action the tool call names.
   const table = [
     ['help', 'processing_status', { help: true }], ['status', 'processing_status', {}], ['status --verbose', 'processing_status', { verbose: true }],
+    ['capture', 'capture_turns', {}], ['pause chat', 'pause_capture', {}], ['resume chat', 'resume_capture', {}],
     ['process', 'process_selected_captures', {}], ['process repo', 'process_selected_captures', { scope: 'repo' }],
     ['process chat', 'process_selected_captures', { scope: 'chat' }], ['process resume', 'processing_resume', {}], ['process cancel', 'processing_cancel', {}],
     ['review', 'processing_review', {}], ['review t7xb88', 'processing_review', { draft: 't7xb88' }],
@@ -244,7 +249,8 @@ test('typed grammar accepts only the exact forms and maps each to one tool call'
     'review t7xbl8', 'review t7xbo8', 'review t7xb88 2', 'review approve t7xb88', 'save t7xb88 2', 'review t7xb88 save',
     'save  t7xb88', 'save t7xb88\n', 'save later', 'save save', 'status -v', 'status verbose', 'help me', 'Help',
     'setup', 'resume', 'cancel', 'later', 'later t7xb88', 'review save t7xb88', 'review skip t7xb88', 'review later t7xb88',
-    'review save', 'review skip', 'review later', 'process status', '']) assert.equal(processingControlText(text), null, text);
+    'review save', 'review skip', 'review later', 'process status', 'Capture', 'capture chat', 'pause', 'pause capture', 'resume capture',
+    'capture t7xb88', '']) assert.equal(processingControlText(text), null, text);
   for (const text of ['status', 'process repo', 'process cancel', 'help', 'setup']) assert.equal(reviewControlFields(text), null, text);
   assert.equal(reviewControl({ draft: 't7xb88', decision: 'approve' }), null); assert.equal(reviewControl({ draft: 'T7XB88' }), null);
   assert.equal(reviewControl({ decision: 'later' }), null);
@@ -285,8 +291,10 @@ test('Claude mirrors typed fields exactly; Codex binds typed text to a field-fre
 });
 
 test('the help list is derived from the grammar: every form appears once under its first word', () => {
-  assert.deepEqual(PROCESSING_HELP.map(item => item.word), ['setup', 'status', 'process', 'review', 'save', 'skip', 'help']);
-  const listed = PROCESSING_HELP.flatMap(item => [item.word, ...item.also]);
+  assert.deepEqual(PROCESSING_HELP.map(item => item.word), ['setup', 'status', 'capture', 'pause', 'resume', 'process', 'review', 'save', 'skip', 'help']);
+  // A first word that is no command alone is listed as its one form.
+  assert.deepEqual(PROCESSING_HELP.filter(item => item.text !== item.word).map(item => item.text), ['pause chat', 'resume chat']);
+  const listed = PROCESSING_HELP.flatMap(item => [item.text, ...item.also]);
   const forms = [...PROCESSING_CONTROL_FORMS.map(form => form.join(' ')), 'setup'];
   assert.deepEqual([...listed].sort(), [...forms].sort());
   assert.deepEqual(PROCESSING_HELP.find(item => item.word === 'process').also, ['process repo', 'process chat', 'process resume', 'process cancel']);
@@ -305,7 +313,8 @@ test('nearest-command suggestions cover every grammar form and its near misses',
       'trailing newline': `${exact}\n`, punctuation: `${exact}.`, 'extra words': `${exact} and keep the rest pending`,
       'second line': `${exact}\nAlso: the launch moved to Friday.`,
       misspelling: form.map(word => word === REVIEW_CODE_PLACEHOLDER ? code : word === last ? misspell(word) : word).join(' '),
-      ...(['process', 'review'].includes(form[0]) && form.length > 1 ? { 'missing first word': exact.slice(form[0].length + 1) } : {}),
+      ...(['process', 'review'].includes(form[0]) && form.length > 1 && exact !== 'process resume' ? { 'missing first word': exact.slice(form[0].length + 1) } : {}),
+      ...(exact === 'pause chat' ? { 'missing last word': 'pause' } : {}),
       ...(form.includes(REVIEW_CODE_PLACEHOLDER) ? { 'confusable code': form.map(word => word === REVIEW_CODE_PLACEHOLDER ? 't7xbo8' : word).join(' '),
         'short code': form.map(word => word === REVIEW_CODE_PLACEHOLDER ? 't7xb8' : word).join(' ') } : {}),
     };
@@ -329,9 +338,10 @@ test('nearest-command suggestions cover every grammar form and its near misses',
   assert.deepEqual(processingControlSuggestions('process my repo'), ['process repo']);
   assert.deepEqual(processingControlSuggestions('process this chat'), ['process chat']);
   assert.deepEqual(processingControlSuggestions('review the t7xb88 draft'), ['review t7xb88']);
-  // Old spellings name the new forms.
-  assert.deepEqual(processingControlSuggestions('resume'), ['process resume']);
-  assert.deepEqual(processingControlSuggestions('resume my work'), ['process resume']);
+  // Old spellings name the new forms. `resume` alone is as near resuming
+  // capture as resuming processing.
+  assert.deepEqual(processingControlSuggestions('resume'), ['resume chat', 'process resume']);
+  assert.deepEqual(processingControlSuggestions('resume my work'), ['resume chat', 'process resume']);
   assert.deepEqual(processingControlSuggestions('cancel'), ['process cancel', 'review cancel']);
   assert.deepEqual(processingControlSuggestions('cancel t7xb88'), ['review cancel t7xb88']);
   assert.deepEqual(processingControlSuggestions('review save t7xb88'), ['save t7xb88']);

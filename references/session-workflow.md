@@ -149,7 +149,9 @@ message before the item), its leading mention (`$cuefluent-notes:cuefluent-notes
 or `$cuefluent-notes`) plus one space are the markup; any other message in the
 turn keeps its text, even one that starts with the mention. From version 4, a
 message whose text after that markup (or after the block) is exactly one action
-is only the command and leaves no evidence. The installed path, which changes
+is only the command and leaves no evidence. Each version decides that with the
+actions it shipped with: version 5 adds `capture`, `pause chat` and
+`resume chat`, which version 4 keeps as typed text. The installed path, which changes
 with each plugin version, is not consulted, so a published unit replays
 unchanged after an upgrade.
 
@@ -201,16 +203,16 @@ reply, while a paraphrase, added or changed words, changed spacing inside a line
 or a path, a link named otherwise, a path shown as a link on one side and as
 text or a code span on the other, emphasis or joined lines keep the message; a
 refusal relayed in other words, for example without its `Cuefluent:` prefix,
-therefore stays as assistant text. These rules belong to reader version 4;
-changing one needs a new reader version.
+therefore stays as assistant text. These rules belong to reader versions 4 and
+5; changing one needs a new reader version.
 Text alone never identifies anything: the person's words stay as typed, even an
 exact action typed without the skill, and commentary, any other assistant text,
 a reply with words added and other tools stay. Legacy history records MCP calls
 without native MCP items, so its control calls and replies stay. Published
 captures keep the rules of their reader version: versions 1 and 2 keep the
 block as an omission and the exchanges, version 3 applies the block rules and
-leaves out exchanges only in units started with this skill, version 4 the rules
-above.
+leaves out exchanges only in units started with this skill, versions 4 and 5
+the rules above, each with its own actions.
 
 The configuration-independent `processing-capabilities` command exposes this
 implementation limit; `status.transport.generatedOutput` reports the same
@@ -817,7 +819,8 @@ processing. Standalone agent use with explicit skill/CLI operations remains
 available through [workflow-cli](workflow-cli.md).
 
 Hook packages use `collection-hooks.mjs` and `collection-hook-definition.mjs`.
-Unconfigured and entirely disabled routes perform zero filesystem writes.
+Unconfigured and excluded routes perform zero filesystem writes; other routes
+without Automatic capture for the session record only session-start metadata.
 Synchronous ingress reads bounded settings and native metadata, freezes the
 source file identity and EOF using filesystem metadata, and publishes a durable
 notification. It never opens transcript bytes, calls a model, writes Markdown,
@@ -865,7 +868,11 @@ identity. Retired intervals and progress remain recorded but cannot be read or
 published; explicit scopes and exclusions remain intact. An own-session pending publication must
 be reconciled or explicitly restricted first. Another session can record its own
 start boundary while a foreign intent remains unchanged; publication still waits
-for the collection-wide pending intent to be handled. Exact retries under the same grant
+for the collection-wide pending intent to be handled. A collection pass finishes
+an explicit capture's interrupted intent (a typed `capture` or the CLI) under
+that capture's own explicit authority while its route still allows it, so one
+chat's interrupted capture does not stop the pass for every chat; an intent
+without such authority stays unchanged. Exact retries under the same grant
 reuse the saved boundary; a new grant requires a new operation and inspected hash.
 Configuration must be changed through the configure helper: restoring an identical
 old file by hand cannot establish an observed revocation history. This replacement

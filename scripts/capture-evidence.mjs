@@ -1,5 +1,6 @@
 import { MAX_TOOL_BYTES, MAX_CAPTURE_TOOL_BYTES } from './capture-contract.mjs';
 import { string, choice } from './workflow-values.mjs';
+import { CONTROLS } from './file-io.mjs';
 
 const serializedLimit = 1024 * 1024;
 // Text allowances only. Native descriptors still share the serialized/record
@@ -63,7 +64,9 @@ export function evidenceCollector(previous = { evidence: [], omissions: [] }, { 
         const mime = /^data:([^;,]{1,128})[,;]/i.exec(reference)?.[1];
         omit('inline-attachment-not-copied', record, { ...(mime ? { mimeType: mime } : {}), ...(value.caption ? { caption: value.caption } : {}) }); return;
       }
-      if (/^(?:javascript|vbscript):/i.test(reference.trim()) || /[\x00-\x1f\x7f]/.test(reference) || reference.length > 8192) {
+      // The capture contract's own rules, so an attachment it refuses is left
+      // out here rather than refusing the whole turn on every pass.
+      if (/^(?:data|javascript|vbscript):/i.test(reference.trim()) || CONTROLS.test(reference) || reference.length > 8192) {
         omit('unsupported-attachment-reference', record); return;
       }
       if (typeof value.caption === 'string') value = { ...value, caption: sanitizeCaption(record, value.caption) };

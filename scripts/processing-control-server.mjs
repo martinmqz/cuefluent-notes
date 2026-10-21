@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { CLIENTS, PROCESSING_SCOPES, canonicalJSON, digest, choice, fail, hash, id, keys, list, nativeId, object, string, unique, integer } from './workflow-values.mjs';
 import { DISPLAY_CONTROLS, displayEscape, displayScalar } from './file-io.mjs';
 import { REVIEW_CODE, REVIEW_COMMANDS, REVIEW_DECISIONS, REVIEW_CODE_PLACEHOLDER, REVIEW_CODE_EXCLUDED, PROCESSING_HELP, reviewControl,
-  isProcessingControlSuggestion } from './processing-control-proof.mjs';
+  isProcessingControlSuggestion, CAPTURE_TOOLS } from './processing-control-proof.mjs';
 
 const INPUT_BYTES = 64 * 1024, OUTPUT_BYTES = 16 * 1024;
 const FORM_BYTES = 256 * 1024, QUEUED_REQUESTS = 16;
@@ -64,6 +64,37 @@ const REVIEW_OUTCOMES = Object.freeze({
   unverified: { pending: null, text: null },
   changed: { pending: null, text: null },
   unresolved: { pending: null, text: null },
+});
+// A typed capture command's outcome. `turns` counts the turns captured now;
+// `more` says earlier finished turns are still waiting for another capture;
+// `leftOut` counts turns too large to capture, now left out.
+const tooLarge = leftOut => leftOut ? ` ${counted(leftOut, 'turn')} too large to capture ${leftOut === 1 ? 'was' : 'were'} left out.` : '';
+// `reason` names the record a typed capture stopped at, which every later
+// capture of the chat stops at too.
+const stoppedAt = (cmd, reason) => ` Capture stopped at a record of this chat: ${COLLECTION_STOPS[reason]}, so typing ${cmd('capture')} cannot capture its later turns.`;
+const CAPTURE_OUTCOMES = Object.freeze({
+  captured: (cmd, turns, more, leftOut, reason) => `Captured ${counted(turns, 'turn')} of this chat.${tooLarge(leftOut)}${more
+    ? ` More finished turns are waiting; type ${cmd('capture')} again to capture them.` : reason ? stoppedAt(cmd, reason) : ''} Type ${cmd('process')} to draft notes from captured turns.`,
+  'nothing-new': (cmd, turns, more, leftOut) => (more
+    ? `Nothing was captured this time; type ${cmd('capture')} again to continue with this chat's later turns.`
+    : 'Nothing new to capture: every finished turn of this chat is already captured or left out.') + tooLarge(leftOut),
+  automatic: cmd => `Automatic capture already covers this chat, so there is nothing to capture by hand. To stop it for this chat, type ${cmd('pause chat')}.`,
+  // Automatic capture of this chat stopped at a record or a fault its reader
+  // cannot pass. Paused, the chat is captured by hand, whose own windows get
+  // past what they do not meet and say why where they meet it.
+  stopped: cmd => `Automatic capture has stopped for this chat, so its later turns are not captured. To capture them by hand, type ${cmd('pause chat')}, then ${cmd('capture')}. Type ${cmd('status --verbose')} to see where things stand.`,
+  // A typed capture stopped at a record it cannot read or pass, which every
+  // later capture of the chat reaches too: the reply names why.
+  blocked: (cmd, turns, more, leftOut, reason) => `${stoppedAt(cmd, reason).trim()}${tooLarge(leftOut)}`,
+  // A safety stop, in either capture mode: the chat's capture record is full,
+  // and only these capture commands still bind in the chat, so the reply names
+  // no other command.
+  full: cmd => `This chat's capture record is full, so its later turns are not captured, either automatically or by typing ${cmd('capture')}.`,
+  paused: cmd => `Automatic capture is paused for this chat from this turn on; turns captured before it are kept. To restart it, type ${cmd('resume chat')}.`,
+  'already-paused': cmd => `Automatic capture is already paused for this chat. To restart it, type ${cmd('resume chat')}.`,
+  resumed: () => 'Automatic capture is on again for this chat; turns after this one are captured.',
+  'already-active': () => 'Automatic capture is already on for this chat.',
+  'not-automatic': cmd => `Automatic capture does not cover this chat, so there is nothing to pause or resume. To capture its finished turns, type ${cmd('capture')}.`,
 });
 const REVIEW_FILES_SHOWN = 5, REVIEW_DRAFTS_SHOWN = 4, REVIEW_PATH_BYTES = 160, REVIEW_FOLDER_BYTES = 1024, REVIEW_NOTE_PATH_BYTES = 512;
 /** A note path bounded for a review reply, which must fit the transport and its
@@ -260,7 +291,7 @@ function helpText({ commandPrefix: command, statusDetail }) {
     : 'Type one of these yourself, exactly as written:';
   const intro = statusDetail === 'unbound' ? `${STATUS_DETAILS.unbound.text(words => `${command} ${words}`)} ${how}` : how;
   return [`Cuefluent: ${intro}`, '',
-    ...PROCESSING_HELP.map(item => `- ${command} ${item.word}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
+    ...PROCESSING_HELP.map(item => `- ${command} ${item.text}: ${item.summary}${item.also.length ? ` (also: ${item.also.join(', ')})` : ''}.`)].join('\n');
 }
 const counted = (value, one, many = `${one}s`) => `${value} ${value === 1 ? one : many}`;
 // How a reply names each processing scope; the field keeps its internal name.
@@ -283,14 +314,75 @@ function verboseText(result) {
     `- ${listingLine(item)}: operation ${item.operationId}; proposal ${item.proposalHash}; claim ${item.claimHash}`)].join('\n'));
   return blocks.join('\n\n');
 }
-// Why automatic collection stopped for the invoking chat, in plain words. The
-// status callback reports only these codes.
+// Why automatic collection stopped for the invoking chat, in plain words: the
+// reader blocks a visit of the chat can end on, and a session it cannot own.
+// The status callback reports only these codes.
 const COLLECTION_STOPS = Object.freeze({
   CLAUDE_HISTORY_REQUIRES_REVIEW: 'its transcript has a record Cuefluent Notes does not read past, for example a Remote Control connection in Claude Desktop or a session moved elsewhere',
   UNSUPPORTED_SESSION_OWNERSHIP: 'its transcript belongs to a background, agent or forked session that is not linked to a captured chat',
+  UNSUPPORTED_CLAUDE_RECORD: 'its transcript has a record Cuefluent Notes cannot read',
+  CONFLICTING_CLAUDE_MIRROR: 'its transcript has two different copies of the same record',
+  CLAUDE_PARENT_CYCLE: 'its transcript has records that refer to each other in a loop',
+  CLAUDE_COMPACTION_ANCESTRY_UNAVAILABLE: 'its transcript has history before a compaction that cannot be traced',
+  UNSUPPORTED_CLAUDE_CONTENT: 'its transcript has content Cuefluent Notes cannot read',
+  INVALID_SESSION_CLIENT_VERSION: 'its transcript was written by a client version Cuefluent Notes does not support',
+  INVALID_SESSION_RECORD: 'its transcript has a record that is not valid',
+  SESSION_RECORD_LIMIT: 'its transcript has more records in one stretch than Cuefluent Notes reads',
+  READER_CHECKPOINT_CAPACITY: 'its saved reading progress grew past what Cuefluent Notes keeps',
+  INVALID_WORKFLOW: 'its capture settings or saved progress are not valid',
+  UNSUPPORTED_CODEX_RECORD: 'its transcript has a record Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_ORDER: 'its transcript has records out of their recorded order',
+  UNSUPPORTED_CODEX_HISTORY: 'its transcript uses a history format Cuefluent Notes does not support',
+  UNSUPPORTED_CODEX_CONTENT: 'its transcript has content Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_TOOL_OUTPUT: 'its transcript has tool output Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_ITEM: 'its transcript has an item Cuefluent Notes cannot read',
+  UNSUPPORTED_CODEX_ROLE: 'its transcript has a message role Cuefluent Notes does not support',
+  UNSUPPORTED_CODEX_RESPONSE: 'its transcript has a response Cuefluent Notes cannot read',
+  AMBIGUOUS_CODEX_ATTRIBUTION: 'its transcript has records that cannot be tied to a single turn',
+  CONFLICTING_CODEX_MIRROR: 'its transcript has two different copies of the same item',
+  CONFLICTING_CODEX_CALL: 'its transcript reuses one tool call for two different calls',
+  CODEX_ROLLBACK_REQUIRES_REVIEW: 'its transcript rolls back turns that were already recorded',
+  SESSION_UNIT_LIMIT: 'its transcript has more turns in one stretch than Cuefluent Notes reads',
+  SOURCE_ANCHOR_LIMIT: 'its transcript has a turn whose last record is too large for Cuefluent Notes to track',
+  CAPTURE_SIZE_LIMIT: 'its transcript has a turn with more records than one capture can hold',
+  CAPTURE_TOOL_LIMIT: 'its transcript has a turn with more tool output than one capture can hold',
+  UNSUPPORTED_ATTACHMENT: 'its transcript has an attachment whose details Cuefluent Notes cannot record',
+  FINAL_CAPTURE_CONFLICT: 'its transcript has changed a turn whose capture was already final',
+  EVIDENCE_AFTER_CODEX_TERMINAL: 'its transcript has a turn with records after the turn ended',
+  DUPLICATE_CODEX_START: 'its transcript starts the same turn twice',
+  EVIDENCE_BEFORE_CODEX_START: 'its transcript has a turn with records before the turn started',
+  CONFLICTING_CODEX_TERMINAL: 'its transcript ends the same turn in two different ways',
+  LATE_NATIVE_EVIDENCE_REQUIRES_REVIEW: 'its transcript has a new record for a turn that was already captured',
+  UNSUPPORTED_CODEX_HEADER: 'its transcript starts in a form Cuefluent Notes does not support',
+  UNSUPPORTED_CLAUDE_HEADER: 'its transcript starts in a form Cuefluent Notes does not support',
+  READER_CHECKPOINT_ALLOCATION_CAPACITY: 'its saved reading progress has used all the space Cuefluent Notes sets aside for one chat',
+  INVALID_READER_CHECKPOINT: 'its saved reading progress is not valid',
+  READER_PAGE_CONFLICT: 'its saved reading progress no longer matches itself',
+  UNSUPPORTED_CLAUDE_READER: 'a turn of it was captured by a newer version of Cuefluent Notes',
+  READER_CHECKPOINT_CONFLICT: 'its saved reading progress does not fit the stretch it was saved for',
+  READER_CHECKPOINT_IDENTITY_MISMATCH: 'its saved reading progress belongs to another chat or transcript',
+  READER_ALLOCATION_INCONSISTENT: 'its saved reading progress accounts for its space inconsistently',
+  INVALID_READER_PROGRESS: 'its saved reading position is not valid',
+  INVALID_READER_SUSPENSION: 'its saved pause state is not valid',
+  READER_CHECKPOINT_REQUIRED: 'its saved reading position has lost the progress it depends on',
+  INVALID_INTAKE_CURSOR: 'its saved reading position does not fit its transcript',
+  UNSUPPORTED_CODEX_READER: 'a turn of it was captured by a reader this version of Cuefluent Notes does not support',
+  CAPTURE_REVISION_CONFLICT: 'a turn of it was captured under a different transcript or client version',
+  CAPTURE_REVISION_SCOPE_CONFLICT: 'a turn of it was captured from outside the stretch now selected',
+  CAPTURE_BASELINE_REQUIRED: 'a turn of it has earlier records that no capture covers',
+  SOURCE_IDENTITY_MISMATCH: 'its transcript no longer matches the chat it was selected for',
+  INVALID_CAPTURE_HEAD: 'the saved record of a captured turn is not valid',
+  CAPTURE_HEAD_CONFLICT: 'a saved capture of one of its turns is missing or no longer matches the record of it',
+  INVALID_INTAKE_METADATA: 'its saved capture state is not valid',
+  UNSUPPORTED_CAPTURE_SCHEMA: 'a saved capture of one of its turns uses a format this version of Cuefluent Notes does not support',
+  INVALID_CAPTURE_READER: 'a saved capture of one of its turns names a reader that is not valid',
+  INVALID_CAPTURE_COVERAGE: 'a saved capture of one of its turns is not valid',
+  INVALID_CAPTURE_RANGE: 'a saved capture of one of its turns is not valid',
+  CAPTURE_HASH_MISMATCH: 'a saved capture of one of its turns no longer matches its own hash',
 });
 export const COLLECTION_STOP_CODES = Object.freeze(Object.keys(COLLECTION_STOPS));
 export const PROCESSING_STATUS_DETAILS = Object.freeze(Object.keys(STATUS_DETAILS));
+export const PROCESSING_CAPTURE_OUTCOMES = Object.freeze(Object.keys(CAPTURE_OUTCOMES));
 export const PROCESSING_REVIEW_OUTCOMES = Object.freeze(Object.keys(REVIEW_OUTCOMES));
 // Which review fields each outcome carries: a draft with its folder, a draft
 // code with or without its note path, or either ('?' marks an optional
@@ -331,7 +423,7 @@ const ERRORS = new Set([...DIAGNOSTICS, 'PROCESSING_CONTROL_PROTOCOL', 'PROCESSI
   'PROCESSING_STATE_CHANGED', 'PROCESSING_CONTROL_SOURCE_DISCOVERY_INCOMPLETE',
   'PROCESSING_CONTROL_REGISTRATION_UNVERIFIED', 'REGISTRATION_REQUIRES_REVIEW',
   'UNSAFE_INTAKE_PATH', 'UNSAFE_PRIVATE_STORAGE', 'STORAGE_NOT_PRIVATE', 'INTAKE_ROOT_CHANGED', 'PRIVATE_STORAGE_CHANGED',
-  'UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
+  'UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH', 'SELECTION_CAPACITY_EXCEEDED']);
 const codexSourceErrors = new Set(['UNSUPPORTED_SESSION_OWNERSHIP', 'UNSUPPORTED_CODEX_HISTORY', 'SOURCE_IDENTITY_MISMATCH']);
 // A refused tool call answers with plain text the chat can relay; its code
 // stays machine-readable in `error.data.code`. Before the requested action
@@ -370,6 +462,9 @@ const ACTION_REFUSALS = Object.freeze({
   PROCESSING_REVIEW_SUPERSEDED: 'the draft was decided, replaced or shown again before this review was confirmed, so this chat cannot decide on it yet',
   PROCESSING_REVIEW_BLOCKED: 'another Cuefluent Notes step had not finished, or needs recovery, so nothing was shown or decided; type the command again in a moment',
   INTAKE_BLOCKED: 'Cuefluent Notes was busy with another operation; type the command again in a moment',
+  // Every capture adds to the chat's capture record; a very long-used chat
+  // can fill it. Automatic capture and the other commands keep working.
+  SELECTION_CAPACITY_EXCEEDED: 'this chat has captured so much by command that its capture record is full, so no more of its turns can be captured by command',
 });
 // Busy names its cause only for a review, whose steps run entirely under the
 // lock or not at all; another action, such as a cancel, may already have
@@ -388,6 +483,7 @@ export function processingControlRefusalText(code, { client, stage, tool }) {
   }
   return `Cuefluent: Nothing was applied${tool === 'processing_review' ? ' and nothing was saved' : ''}: ${Object.hasOwn(REFUSALS, code) ? REFUSALS[code]() : unconfirmed(command)}`;
 }
+export { CAPTURE_TOOLS };
 const uuidSchema = { type: 'string', pattern: '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$' };
 const retrySchema = { ...uuidSchema, description: 'Opaque token returned for native verification. End the current exec, then repeat the same tool and arguments with this token. Never invent one.' };
 const collectionSchema = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' };
@@ -412,6 +508,13 @@ const toolsFor = client => [
   ...[
     ['processing_resume', 'Resume the saved unfinished evidence selection without adding new captures. Never saves notes.'],
     ['processing_cancel', 'Stop the owned processing run and release unapplied operations after verified termination. Keeps captures pending and settings unchanged.']
+  ].map(([name, description]) => ({ name, description,
+    inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } })),
+  ...[
+    ['capture_turns', 'Capture this chat\'s finished turns since its last capture, only when the user typed capture. The command turn itself is never captured. Never processes or saves notes.'],
+    ['pause_capture', 'Stop Automatic capture of this chat from this turn on, only when the user typed pause chat. Keeps turns already captured.'],
+    ['resume_capture', 'Restart Automatic capture of this chat after the user paused it, only when the user typed resume chat.']
   ].map(([name, description]) => ({ name, description,
     inputSchema: { type: 'object', additionalProperties: false, properties: { collectionId: collectionSchema, retryToken: retrySchema } },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } })),
@@ -457,7 +560,7 @@ function argumentsFor(name, args, client) {
     // verified typed text alone names the draft, decision, verbosity or help.
     if (name === 'processing_review' && client === 'claude') keys(args, [], ['collectionId', 'retryToken', 'draft', 'decision']);
     else if (name === 'processing_status' && client === 'claude') keys(args, [], ['collectionId', 'retryToken', 'verbose', 'help']);
-    else if (['processing_status', 'processing_review', 'processing_resume', 'processing_cancel'].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
+    else if (['processing_status', 'processing_review', 'processing_resume', 'processing_cancel', ...CAPTURE_TOOLS].includes(name)) keys(args, [], ['collectionId', 'retryToken']);
     else if (name === 'process_selected_captures') keys(args, [], ['requestId', 'collectionId', 'selection', 'retryToken', 'scope']);
     else fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
     if (args.collectionId !== undefined) id(args.collectionId);
@@ -536,7 +639,7 @@ export function processingControlStatusView(value, args) {
     }
     // A reply of its own: a review outcome, a typed non-command, the command
     // list, or every detail; at most one of them.
-    const kinds = ['review', 'command', 'help', 'verbose'].filter(key => value[key] !== undefined);
+    const kinds = ['review', 'command', 'help', 'verbose', 'capture'].filter(key => value[key] !== undefined);
     if (kinds.length > 1 || (value.help !== undefined && value.help !== true) || (value.verbose !== undefined && value.verbose !== true)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
     let reviewReply = false, ownReply = false;
     if (value.review !== undefined) {
@@ -581,11 +684,28 @@ export function processingControlStatusView(value, args) {
       result.help = true; result.statusText = helpText(result); ownReply = true;
     }
     if (value.verbose !== undefined) result.verbose = true;
+    if (value.capture !== undefined) {
+      choice(value.capture, Object.keys(CAPTURE_OUTCOMES));
+      // A reason comes with every stopped capture and with turns captured
+      // before one, never with more turns waiting.
+      if ((value.capture === 'blocked' && value.reason === undefined) || (value.reason !== undefined &&
+          (!['blocked', 'captured'].includes(value.capture) || value.more === true || !Object.hasOwn(COLLECTION_STOPS, value.reason)))) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (value.reason !== undefined) result.reason = value.reason;
+      const counts = value.capture === 'captured' || value.capture === 'nothing-new';
+      if (result.commandPrefix === undefined || (value.capture === 'captured') !== (value.turns !== undefined) ||
+          (!counts && (value.more !== undefined || (value.leftOut !== undefined && value.capture !== 'blocked'))) ||
+          (value.more !== undefined && typeof value.more !== 'boolean')) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+      if (value.leftOut !== undefined) { integer(value.leftOut); if (value.leftOut > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); if (value.leftOut) result.leftOut = value.leftOut; }
+      if (value.turns !== undefined) { integer(value.turns); if (value.turns < 1 || value.turns > 10000) fail('PROCESSING_CONTROL_OUTPUT_INVALID'); result.turns = value.turns; }
+      if (value.more !== undefined) result.more = value.more;
+      result.capture = value.capture;
+      result.statusText = `Cuefluent: ${CAPTURE_OUTCOMES[value.capture](cmd, value.turns, value.more === true, value.leftOut ?? 0, value.reason)}`; ownReply = true;
+    }
     // A status reply can say that automatic collection stopped for this chat.
     if (value.collection !== undefined) {
       keys(value.collection, ['state', 'code']);
       if (value.collection.state !== 'stopped' || !Object.hasOwn(COLLECTION_STOPS, value.collection.code) ||
-          ['review', 'command', 'help'].some(key => value[key] !== undefined)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
+          ['review', 'command', 'help', 'capture'].some(key => value[key] !== undefined)) fail('PROCESSING_CONTROL_OUTPUT_INVALID');
       result.collection = { state: 'stopped', code: value.collection.code };
     }
     // A listing of drafts awaiting review belongs to a status reply.
@@ -639,7 +759,7 @@ export function processingControlStatusView(value, args) {
  * skill/control provenance for a dispatch. Its opaque result is never accepted
  * from JSON or returned to the model. No transcript discovery exists here. */
 export async function runProcessingControlServer({ client, input = process.stdin, output = process.stdout,
-  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, beforeResponse, afterResponse, afterDelivery,
+  env = process.env, resolveSource, getStatus, requestProcessing, requestResume, requestCancel, requestReview, requestCapture, beforeResponse, afterResponse, afterDelivery, afterFailure,
   unboundStatus } = {}) {
   choice(client, CLIENTS);
   if ([resolveSource, getStatus, requestProcessing].some(value => typeof value !== 'function')) fail('PROCESSING_CONTROL_INVALID_REQUEST');
@@ -702,7 +822,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
     const commitResponse = () => { signal.throwIfAborted(); request.complete = true; };
     // A tool call is checked and bound to its native source first; only then
     // does its action start. Other methods are protocol traffic.
-    let stage = null;
+    let stage = null, acting = null;
     try {
       if (request.cancelled) fail('PROCESSING_REVIEW_INTERRUPTED');
       let result, afterCommit = null, delivered = null;
@@ -770,7 +890,7 @@ export async function runProcessingControlServer({ client, input = process.stdin
           try { id(collectionId); } catch { fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED'); }
           if (source.collectionId !== undefined && source.collectionId !== collectionId) fail('PROCESSING_CONTROL_SOURCE_UNVERIFIED');
           const resolvedArgs = Object.freeze({ ...args, collectionId });
-          stage = 'action';
+          stage = 'action'; acting = { source, invocation };
           let elicited = 0, selectedForm = false;
           const elicit = async proposal => {
             const selecting = proposal.choices !== undefined;
@@ -831,6 +951,9 @@ export async function runProcessingControlServer({ client, input = process.stdin
             // when the host supports one.
             else response = await requestReview({ source, context, ...resolvedArgs, clientCapabilities,
               elicit: client === 'codex' && formSupported ? elicit : undefined, signal, commitResponse });
+          } else if (CAPTURE_TOOLS.includes(row.params.name)) {
+            if (typeof requestCapture !== 'function') fail('PROCESSING_CONTROL_METHOD_UNSUPPORTED');
+            response = await requestCapture({ source, context, ...resolvedArgs, tool: row.params.name, signal, commitResponse });
           } else {
             const action = { processing_status: getStatus, process_selected_captures: requestProcessing,
               processing_resume: requestResume, processing_cancel: requestCancel }[row.params.name];
@@ -862,6 +985,11 @@ export async function runProcessingControlServer({ client, input = process.stdin
       if (delivered) { try { await delivered(); } catch { /* reply already written */ } }
     } catch (error) {
       request.complete = true;
+      // A command whose action failed still gets its bookkeeping; a command
+      // turn it could not leave out stays capturable, which the refusal's data
+      // reports as for a reply.
+      let unverified = false;
+      if (acting && typeof afterFailure === 'function') { try { unverified = await afterFailure(acting) === false; } catch { unverified = true; } }
       if (request.cancelled) return;
       // Claude may have rejected an unrelated registered source during /clear
       // fallback, so an ownership or identity failure there is not attributed
@@ -870,7 +998,8 @@ export async function runProcessingControlServer({ client, input = process.stdin
       const known = ERRORS.has(error?.code) && !(client === 'claude' && codexSourceErrors.has(error.code));
       const code = known ? error.code : stage === 'binding' ? 'PROCESSING_CONTROL_SOURCE_UNVERIFIED' : 'PROCESSING_CONTROL_FAILED';
       const message = stage === null ? code : processingControlRefusalText(code, { client, stage, tool: row.params?.name });
-      await reply({ jsonrpc: '2.0', id: rpcId, error: { code: code === 'PROCESSING_CONTROL_METHOD_UNSUPPORTED' ? -32601 : -32600, message, data: { code } } });
+      await reply({ jsonrpc: '2.0', id: rpcId, error: { code: code === 'PROCESSING_CONTROL_METHOD_UNSUPPORTED' ? -32601 : -32600, message,
+        data: { code, ...(unverified ? { diagnostics: ['PROCESSING_EXCLUSION_UNVERIFIED'] } : {}) } } });
     } finally { requests.delete(rpcId); rejectForms('PROCESSING_REVIEW_INTERRUPTED', rpcId); }
   };
   const processLine = async line => {

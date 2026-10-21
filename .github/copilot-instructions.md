@@ -35,8 +35,11 @@ and check its frontmatter against the affected repository paths.
   processing-only bindings. Launch deterministic collection workers only after
   fresh collection consent. Synchronous hooks must never scan transcripts, call
   models, write notes, block a prompt, or request a continuation. Automatic ingress
-  for unconfigured projects and entirely disabled workflows must produce zero
-  filesystem writes.
+  for unconfigured or excluded projects must produce zero filesystem writes.
+  Configured projects that Automatic capture does not cover, including those with
+  capture mode Manual, may record only the metadata-only session start (the source
+  identity and byte boundary the first hook of the session observes, written once
+  per settings version) that lets a typed command verify its chat.
 - Validate complete proposed settings on writes and refuse unsupported newer
   schemas. The replacement workflow has no legacy migration or mixed-version
   compatibility requirement; do not restore obsolete policy or completion-marker
