@@ -8,7 +8,7 @@ import { canonicalWorkflowProject, validateWorkflowPlacement } from './workflow-
 import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { readContinuesLink, readContinuedLink, continuationTarget, continuationOrigin } from './claude-continuation.mjs';
 import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom, readCaptureHead, readReaderProgress, verifySourceCursor } from './intake-store.mjs';
-import { openGuarded, lstatOrNull } from './file-io.mjs';
+import { openGuarded, lstatOrNull, sameFileIdentity } from './file-io.mjs';
 import { chosenStretch } from './session-jsonl.mjs';
 import { inspectSourceBoundary, newSelectionState, currentIntervals, stableSourceIdentity, MAX_SELECTION_BYTES } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
@@ -410,37 +410,17 @@ async function readChatCursor(store, chat, source, { stretch = false } = {}) {
 // did when it was first passed; end anchors alone vouch for nothing between.
 const STRETCH_READ_BYTES = 1024 * 1024;
 async function stretchHash(source, from, to) {
-  const { handle, stat } = await openGuarded(source.path, { singleLink: true });
-  try {
-    if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(to)) fail('SOURCE_CHANGED');
-    const hasher = createHash('sha256'), buffer = Buffer.alloc(Math.max(1, Math.min(STRETCH_READ_BYTES, to - from)));
-    for (let offset = from; offset < to;) {
-      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, to - offset), offset);
-      if (!bytesRead) fail('SOURCE_CHANGED');
-      hasher.update(buffer.subarray(0, bytesRead)); offset += bytesRead;
-    }
-    return hasher.digest('hex');
-  } finally { await handle.close(); }
+  const hashes = await rangeHashes(source, [{ from, to }]);
+  if (!hashes) fail('SOURCE_CHANGED');
+  return hashes[0];
 }
 // The hashes of `from`..`to` and of the stretch `innerFrom`..`innerTo` inside
 // it, from one read.
 async function stretchHashes(source, from, to, innerFrom, innerTo) {
   if (innerFrom < from || innerTo > to || innerFrom > innerTo) fail('INVALID_WORKFLOW');
-  const { handle, stat } = await openGuarded(source.path, { singleLink: true });
-  try {
-    if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(to)) fail('SOURCE_CHANGED');
-    const outer = createHash('sha256'), inner = createHash('sha256'), buffer = Buffer.alloc(Math.max(1, Math.min(STRETCH_READ_BYTES, to - from)));
-    for (let offset = from; offset < to;) {
-      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, to - offset), offset);
-      if (!bytesRead) fail('SOURCE_CHANGED');
-      const chunk = buffer.subarray(0, bytesRead);
-      outer.update(chunk);
-      const a = Math.max(innerFrom, offset), b = Math.min(innerTo, offset + bytesRead);
-      if (a < b) inner.update(chunk.subarray(a - offset, b - offset));
-      offset += bytesRead;
-    }
-    return { outer: outer.digest('hex'), inner: inner.digest('hex') };
-  } finally { await handle.close(); }
+  const hashes = await rangeHashes(source, [{ from, to }, { from: innerFrom, to: innerTo }]);
+  if (!hashes) fail('SOURCE_CHANGED');
+  return { outer: hashes[0], inner: hashes[1] };
 }
 async function stretchHolds(source, from, to, expected) {
   try { return await stretchHash(source, from, to) === expected; }
@@ -461,25 +441,37 @@ async function readsHold(source, reads) {
   return Boolean(hashes) && hashes.every((value, index) => value === reads[index].hash);
 }
 // The hashes of several `from`..`to` ranges of the transcript, from one
-// guarded read; null when the file is no longer the same or that long.
+// guarded read; null when the file is no longer the same or that long, or
+// was written in place while it was read. A file that only grew meanwhile is
+// read a second time, since an append can hide a rewrite from its times.
 async function rangeHashes(source, ranges) {
   if (!ranges.length) return [];
-  const start = Math.min(...ranges.map(range => range.from)), end = Math.max(...ranges.map(range => range.to)), hashers = ranges.map(() => createHash('sha256'));
+  const start = Math.min(...ranges.map(range => range.from)), end = Math.max(...ranges.map(range => range.to));
   const { handle, stat } = await openGuarded(source.path, { singleLink: true });
   try {
     if (stableSourceIdentity(stat) !== source.fileIdentity || stat.size < BigInt(end)) return null;
     const buffer = Buffer.alloc(Math.max(1, Math.min(STRETCH_READ_BYTES, end - start)));
-    for (let offset = start; offset < end;) {
-      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, end - offset), offset);
-      if (!bytesRead) return null;
-      ranges.forEach((range, index) => {
-        const low = Math.max(range.from, offset), high = Math.min(range.to, offset + bytesRead);
-        if (low < high) hashers[index].update(buffer.subarray(low - offset, high - offset));
-      });
-      offset += bytesRead;
-    }
+    const pass = async () => {
+      const hashers = ranges.map(() => createHash('sha256'));
+      for (let offset = start; offset < end;) {
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, end - offset), offset);
+        if (!bytesRead) return null;
+        ranges.forEach((range, index) => {
+          const low = Math.max(range.from, offset), high = Math.min(range.to, offset + bytesRead);
+          if (low < high) hashers[index].update(buffer.subarray(low - offset, high - offset));
+        });
+        offset += bytesRead;
+      }
+      return hashers.map(hasher => hasher.digest('hex'));
+    };
+    const first = await pass();
+    const after = await handle.stat({ bigint: true });
+    if (!first || !sameFileIdentity(stat, after) || after.size < stat.size || after.nlink !== 1n ||
+        (after.size === stat.size && (after.mtimeNs !== stat.mtimeNs || after.ctimeNs !== stat.ctimeNs))) return null;
+    if (after.size === stat.size) return first;
+    const second = await pass();
+    return second && second.every((value, index) => value === first[index]) ? first : null;
   } finally { await handle.close(); }
-  return hashers.map(hasher => hasher.digest('hex'));
 }
 // The hash of up to 4 KiB of transcript bytes ending at `offset`, read from
 // the verified file.
