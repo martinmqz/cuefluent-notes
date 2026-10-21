@@ -788,9 +788,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     } else if (!automatic) outcome = { capture: 'not-automatic' };
     else if (tool === 'pause_capture') {
       if (paused) outcome = { capture: 'already-paused' };
-      else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'pause' })); outcome = { capture: 'paused' }; }
+      else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'pause' }, { deadline: typedCaptureDeadline(started) })); outcome = { capture: 'paused' }; }
     } else if (!paused) outcome = { capture: 'already-active' };
-    else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' })); outcome = { capture: 'resumed' }; }
+    else { await withStorageProbes(() => controlChatCapture(capability, { ...chat, unitId: source.unitId, operation: 'resume' }, { deadline: typedCaptureDeadline(started) })); outcome = { capture: 'resumed' }; }
     signal?.throwIfAborted();
     let response = { ...view, ...outcome };
     // The command leaves out its own turn, so a later capture skips it, before

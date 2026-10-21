@@ -799,6 +799,20 @@ test('future controls seek after EOF and exclude the first proven boundary; paus
   assert.equal(state.state.active, false); assert.equal(state.state.intervals[0].upper.unitId, D);
 });
 
+test('pause chat and resume chat take each step only within their command\'s time', async t => {
+  const f = await fixture(t, { enabled: true }), C = randomUUID(), identity = { client: 'codex', sessionId: S };
+  const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,
+    expectedSelectionHash: null, operationId: randomUUID(), operation: 'start' };
+  const started = await controlCapture(f.capability, control);
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_started', turn_id: C }) + row('event_msg', { type: 'user_message', message: 'pause chat' }));
+  const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+  const pause = { selection: f.selection, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, unitId: C, operation: 'pause' };
+  // A command that started 50 s ago has no time left: nothing is applied.
+  await assert.rejects(controlChatCapture(f.capability, pause, { deadline: typedCaptureDeadline(performance.now() - 50_000) }), { code: 'WORKER_TIME_BUDGET' });
+  assert.equal((await readSelection(f.store, identity)).hash, started.hash);
+  assert.equal((await controlChatCapture(f.capability, pause, { deadline: typedCaptureDeadline(performance.now()) })).state.paused, true);
+});
+
 test('a resume clears the stop kept for the earlier stretch in the same locked step', async t => {
   const f = await fixture(t, { enabled: true }), identity = { client: 'codex', sessionId: S };
   const control = { selection: f.selection, sourcePath: f.sourcePath, expectedSourceIdentity: f.request.expectedSourceIdentity,

@@ -103,7 +103,7 @@ async function selectionHeadroom(store, selection, state, scopeId) {
 
 /** Future start/resume freezes EOF. With no verified current native anchor the
  * first subsequent full native unit establishes (and is excluded by) the floor. */
-export async function controlCapture(capability, request, { now, resumeAt = null, waitForLock = false } = {}) {
+export async function controlCapture(capability, request, { now, resumeAt = null, waitForLock = false, deadline = null } = {}) {
   keys(request, ['selection', 'sourcePath', 'expectedSourceIdentity', 'expectedSelectionHash', 'operationId', 'operation']);
   const selection = await selected(request.selection), { operationId, operation, expectedSelectionHash } = request;
   nativeId(operationId); oldHash(expectedSelectionHash); choice(operation, ['start', 'resume', 'pause', 'exclude']);
@@ -142,7 +142,7 @@ export async function controlCapture(capability, request, { now, resumeAt = null
       if (operation === 'resume') { try { await clearReaderBlock(store, identityOf(selection)); } catch { /* the next visit */ } }
       return result;
     });
-  });
+  }, deadline);
 }
 
 /** Reducing selection does not depend on a grant to read/copy private evidence.
@@ -976,14 +976,16 @@ export async function captureChatTurns(capability, { selection, source, floor, c
 
 /** `pause chat` and `resume chat`: the existing pause and resume controls at
  * the command turn, which each leaves out of captured turns. */
-export async function controlChatCapture(capability, { selection, source, unitId, operation }, { now } = {}) {
+// Each step ends by `deadline`, when given: a typed command's, which leaves
+// time for its own bookkeeping after.
+export async function controlChatCapture(capability, { selection, source, unitId, operation }, { now, deadline = null } = {}) {
   choice(operation, ['pause', 'resume']);
   const chat = await selected({ ...selection, unitId });
-  const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)));
-  const resumeAt = operation === 'resume' ? { ...await bounded(now, () => commandStart(capability, chat, source, unitId)), unitId } : null;
+  const current = await bounded(now, async () => readSelection(await openWorkflowIntake(capability), identityOf(chat)), deadline);
+  const resumeAt = operation === 'resume' ? { ...await bounded(now, () => commandStart(capability, chat, source, unitId), deadline), unitId } : null;
   return controlCapture(capability, { selection: chat, sourcePath: source.path, expectedSourceIdentity: source.fileIdentity,
     expectedSelectionHash: current.hash, operation,
-    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt, waitForLock: true });
+    operationId: digestId('cuefluent-chat-capture-control-v1', { client: chat.client, sessionId: chat.sessionId, unitId, operation }) }, { now, resumeAt, waitForLock: true, deadline });
 }
 // Where the command turn starts, read from the end of the transcript, where
 // the command was just typed, with the record that starts it as read there. A
