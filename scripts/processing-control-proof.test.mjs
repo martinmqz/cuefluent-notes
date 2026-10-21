@@ -539,3 +539,24 @@ test('a Codex code-mode proof needs the receipt to name both cells and the retry
     retryCallId: `exec-${randomUUID()}`, handshakeResultHash: 'b'.repeat(64) }));
   assert.equal(await proven(direct), false);
 });
+
+test('Desktop linked control proof requires the exact selected path, mirrored input and receipt', async t => {
+  for (const control of ['review', 'save', 'skip', 'review cancel']) for (const mode of ['code', 'direct']) {
+    await t.test(`${control} ${mode}`, async t => {
+      assert.equal(await proven(await turnFixture(t, { control, mode, form: 'desktop' })), true);
+    });
+  }
+  const userRow = rows => rows.find(isItem('UserMessage')).payload.item.content[0];
+  const mirror = rows => rows.find(row => row.payload?.internal_chat_message_metadata_passthrough?.content_item_kinds?.[0] === 'user.text').payload.content[0];
+  const selectionRow = row => row.payload?.internal_chat_message_metadata_passthrough?.content_item_kinds?.[0] === 'skills.selected_skill_instructions';
+  for (const [name, mutate] of Object.entries({
+    'link to another copy': rows => { userRow(rows).text = userRow(rows).text.replace(/\]\([^)]*\)/, '](/other/SKILL.md)'); mirror(rows).text = userRow(rows).text; },
+    'no selected-skill item': rows => { rows.splice(rows.findIndex(selectionRow), 1); },
+    'extra selected skill': rows => { rows.splice(rows.findIndex(selectionRow), 0, structuredClone(rows.find(selectionRow))); },
+    'altered input mirror': rows => { mirror(rows).text = mirror(rows).text.trimEnd(); },
+    'extra newline': rows => { userRow(rows).text += '\n'; mirror(rows).text = userRow(rows).text; },
+    'extra words': rows => { userRow(rows).text += 'and save another'; mirror(rows).text = userRow(rows).text; },
+  })) await t.test(`does not exclude: ${name}`, async t => {
+    assert.equal(await proven(await turnFixture(t, { control: 'save', form: 'desktop' }, mutate)), false);
+  });
+});

@@ -23,11 +23,15 @@ import { nativeId, integer, timestamp, string, choice, canonicalJSON, digest, fa
 // v5 keeps the v4 rules with the chat capture commands (`capture`, `pause
 // chat`, `resume chat`) in the command grammar it decides command-only messages
 // with. Published v1-v4 captures remain immutable under their own rules.
-export const CODEX_READER_VERSION = '5';
+// v6 also recognizes Desktop's literal Markdown mention bound to the same
+// message's selected skill path. Prior readers keep their exact evidence rules.
+// v7 strips that verified mention from ordinary Desktop input too, retaining
+// the text after its one separator and all line endings. v6 replay is unchanged.
+export const CODEX_READER_VERSION = '7';
 // Retain every supported historical reader independently of later reader bumps.
-export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2', '5': '2' });
-export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup', '4': 'mention', '5': 'mention-5' });
-const SKILL_MARKUP_RULES = Object.freeze(['markup', 'mention', 'mention-5']);
+export const CODEX_TOOL_RULES = Object.freeze({ '1': '1', '2': '2', '3': '2', '4': '2', '5': '2', '6': '2', '7': '2' });
+export const CODEX_SKILL_RULES = Object.freeze({ '1': 'retain', '2': 'retain', '3': 'markup', '4': 'mention', '5': 'mention-5', '6': 'mention-6', '7': 'mention-7' });
+const SKILL_MARKUP_RULES = Object.freeze(['markup', 'mention', 'mention-5', 'mention-6', 'mention-7']);
 // Which mentioned-skill message is only a command is decided with the command
 // grammar and draft-code alphabet as version 4 shipped them, frozen here: a
 // later grammar changes what a new reader version accepts, never the evidence
@@ -41,7 +45,7 @@ export const CODEX_V5_CONTROL_FORMS = Object.freeze(['help', 'status', 'status -
   'process', 'process repo', 'process chat', 'process resume', 'process cancel', 'review', 'review #', 'review cancel', 'review cancel #',
   'save', 'save #', 'skip', 'skip #'].map(form => Object.freeze(form.split(' '))));
 // Each mention rule set and the command forms it decides command-only messages with.
-const MENTION_FORMS = Object.freeze({ mention: CODEX_V4_CONTROL_FORMS, 'mention-5': CODEX_V5_CONTROL_FORMS });
+const MENTION_FORMS = Object.freeze({ mention: CODEX_V4_CONTROL_FORMS, 'mention-5': CODEX_V5_CONTROL_FORMS, 'mention-6': CODEX_V5_CONTROL_FORMS, 'mention-7': CODEX_V5_CONTROL_FORMS });
 const mentionRules = rules => Object.hasOwn(MENTION_FORMS, rules);
 const commandOnly = (rules, text) => typeof text === 'string' && text.length <= 64 && MENTION_FORMS[rules].some(form => {
   const words = text.split(' ');
@@ -60,7 +64,8 @@ const pluginSkillBlock = part => part?.type === 'skill' && part.name === MARKUP_
 // of its own and the message as one text part starting with the mention the
 // list inserted. These shapes are frozen with reader version 4 and shared with
 // the binder and the exclusion proof; a changed shape or name needs a new
-// reader version. The installed path is returned, never used by the reader.
+// reader version. Versions 4 and 5 do not use the returned path; versions 6
+// and 7 compare it only to the same message's recorded Desktop link.
 export const CODEX_SKILL_MENTIONS = Object.freeze([`$${MARKUP_SKILL_NAME}:${MARKUP_SKILL_NAME}`, `$${MARKUP_SKILL_NAME}`]);
 const SELECTION_NAMES = Object.freeze([`${MARKUP_SKILL_NAME}:${MARKUP_SKILL_NAME}`, MARKUP_SKILL_NAME]);
 const SELECTION_HEADER = /^<skill>\n<name>([^<\n]{1,128})<\/name>\n<path>([^<\n]{1,4096})<\/path>\n/;
@@ -95,6 +100,22 @@ export function codexMentionText(content) {
         element.byte_range.start !== 0 || element.byte_range.end !== Buffer.byteLength(mention)) return null;
   }
   return part.text.slice(mention.length);
+}
+/** Desktop's literal menu link, bound to the selected path from this same
+ * native message. No URL decoding, Markdown interpretation or general trim.
+ * Desktop appends one LF; remove exactly that LF only for this native shape. */
+export function codexDesktopMentionText(content, selectedPath) {
+  if (typeof selectedPath !== 'string' || !path.isAbsolute(selectedPath) || /[\r\n]/.test(selectedPath) ||
+      !Array.isArray(content) || content.length !== 1) return null;
+  const [part] = content;
+  if (part?.type !== 'text' || typeof part.text !== 'string' ||
+      Object.keys(part).some(key => !['type', 'text', 'text_elements'].includes(key)) ||
+      !Array.isArray(part.text_elements) || part.text_elements.length !== 0) return null;
+  const link = CODEX_SKILL_MENTIONS.map(label => `[${label}](${selectedPath})`).find(value =>
+    part.text === value || part.text.startsWith(`${value} `) || part.text.startsWith(`${value}\n`));
+  if (link === undefined) return null;
+  const after = part.text.slice(link.length);
+  return after.endsWith('\n') ? after.slice(0, -1) : after;
 }
 // Code mode frames each cell's output with this host status line; what the
 // cell printed follows it. A cell still running has printed nothing yet here.
@@ -290,6 +311,15 @@ function blocks(collector, record, content, kind, syntax, skillRules = 'retain',
     // mention the list inserted is markup; the words after it and one space
     // stay, unless they are exactly one action: then the message is only the
     // command. Other messages, and a mention typed by hand, stay as typed.
+    const desktop = syntax === 'user' && ['mention-6', 'mention-7'].includes(skillRules) && selected?.size === 1
+      ? codexDesktopMentionText(content, [...selected][0]) : null;
+    if (desktop === '' || (desktop?.startsWith(' ') && commandOnly(skillRules, desktop.slice(1)))) return;
+    if (desktop !== null && skillRules === 'mention-7') {
+      // Command recognition removes Desktop's final LF; ordinary evidence
+      // retains it. Remove only the verified link and one separator space.
+      const after = desktop + (content[0].text.endsWith('\n') ? '\n' : '');
+      collector.add(kind, record, { text: textValue(after.replace(/^ /, '')) }); return;
+    }
     const after = syntax === 'user' && selected ? codexMentionText(content) : null;
     if (after !== null) {
       if (after.startsWith(' ') && commandOnly(skillRules, after.slice(1))) return;
@@ -463,7 +493,7 @@ function normalizeUnit(unit, historyMode, checkBudget, toolRulesVersion, skillRu
   const exchanges = controlExchanges(unit, skillRules);
   const replies = mentionRules(skillRules) ? controlReplies(unit, exchanges) : null;
   // Markup belongs only to the message the `$` list selection was made for.
-  const selectedMessage = id => mentionRules(skillRules) && unit.selectedMessages.has(id);
+  const selectedMessage = id => mentionRules(skillRules) && unit.selectedMessages.get(id);
   // Only structured native completion status can refine an observed tool outcome.
   for (const record of unit.records) {
     checkBudget();
@@ -619,7 +649,7 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
       // overlapping starts cannot establish succession or legacy event ownership.
       if (scan.metadata.historyMode === 'legacy' && [...units.values()].some(unit => !unit.end)) fail('UNSUPPORTED_CODEX_ORDER');
       if (units.size >= 4096) fail('SESSION_UNIT_LIMIT');
-      units.set(unitId, { id: unitId, start: record, records: [record], end: null, terminal: null, collaborationIds: new Set(), selected: false, selectedMessages: new Set() });
+      units.set(unitId, { id: unitId, start: record, records: [record], end: null, terminal: null, collaborationIds: new Set(), selected: false, selectedMessages: new Map() });
       if (unanchoredUnits.has(unitId)) units.get(unitId).fault = 'EVIDENCE_BEFORE_CODEX_START';
       remember(unitId, record); frames.push({ ...range(record), kind: 'unit', unitId }); continue;
     }
@@ -663,7 +693,11 @@ export async function readCodexSelection({ state, scopeId, cursor = null, loadHe
           // The selection is made for the message just submitted: the turn's
           // latest user message before it.
           const message = selecting.records.findLast(entry => completedItem(entry.value)?.type === 'UserMessage');
-          if (typeof message?.value.payload.item.id === 'string') selecting.selectedMessages.add(message.value.payload.item.id);
+          if (typeof message?.value.payload.item.id === 'string') {
+            const id = message.value.payload.item.id;
+            if (!selecting.selectedMessages.has(id)) selecting.selectedMessages.set(id, new Set());
+            selecting.selectedMessages.get(id).add(codexSkillSelection(p));
+          }
         }
         frames.push({ ...range(record), kind: 'structural' }); continue;
       }

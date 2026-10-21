@@ -151,9 +151,16 @@ turn keeps its text, even one that starts with the mention. From version 4, a
 message whose text after that markup (or after the block) is exactly one action
 is only the command and leaves no evidence. Each version decides that with the
 actions it shipped with: version 5 adds `capture`, `pause chat` and
-`resume chat`, which version 4 keeps as typed text. The installed path, which changes
-with each plugin version, is not consulted, so a published unit replays
-unchanged after an upgrade.
+`resume chat`, which version 4 keeps as typed text. Version 6 also recognizes
+Desktop's literal Markdown link around either mention, only when its destination
+exactly matches the selected-skill path recorded for that same message. It removes
+one final LF from that shape when deciding whether it is a bare mention or exact
+command; other Desktop input stays verbatim under version 6. Version 7 removes
+the verified link and one separator space from ordinary Desktop input too,
+preserving the remaining text and all line endings. Unselected or mismatched
+links stay as typed. Versions 1–5 retain that link and its text. The currently
+installed path is never consulted: the reader uses only the paths in the
+transcript, so published units replay unchanged after an upgrade.
 
 Calls to this plugin's control server and their results are left out as its own
 processing and review activity: under version 3 in a unit started with this
@@ -203,8 +210,8 @@ reply, while a paraphrase, added or changed words, changed spacing inside a line
 or a path, a link named otherwise, a path shown as a link on one side and as
 text or a code span on the other, emphasis or joined lines keep the message; a
 refusal relayed in other words, for example without its `Cuefluent:` prefix,
-therefore stays as assistant text. These rules belong to reader versions 4 and
-5; changing one needs a new reader version.
+therefore stays as assistant text. These rules belong to reader versions 4–7;
+changing one needs a new reader version.
 Text alone never identifies anything: the person's words stay as typed, even an
 exact action typed without the skill, and commentary, any other assistant text,
 a reply with words added and other tools stay. Legacy history records MCP calls

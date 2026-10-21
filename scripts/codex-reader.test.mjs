@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm, CODEX_V4_CONTROL_FORMS, CODEX_V5_CONTROL_FORMS, CODEX_V4_CODE } from './codex-reader.mjs';
+import { readCodexSelection, codexPublicationPlan, codexProgressPlan, codexRegistrationHeader, codexReplyForm, codexDesktopMentionText, CODEX_V4_CONTROL_FORMS, CODEX_V5_CONTROL_FORMS, CODEX_V4_CODE } from './codex-reader.mjs';
 import { PROCESSING_CONTROL_FORMS, REVIEW_CODE, REVIEW_CODE_PLACEHOLDER } from './processing-control-proof.mjs';
 import { readSessionRange, SESSION_LINE_LIMIT } from './session-jsonl.mjs';
 import { newSelectionState, applySelectionControl, stableSourceIdentity, inspectSourceBoundary } from './capture-selection.mjs';
@@ -485,7 +485,7 @@ test('fair tool budgets retain later native failures identically after a bounded
   const resumed = await readCodexSelection({ ...f.args, cursor });
   const full = await readCodexSelection(f.args), capture = resumed.candidates[0].capture;
   assert.deepEqual(serializeCapture(capture), serializeCapture(full.candidates[0].capture));
-  assert.equal(capture.reader.version, '5'); // Version 5 keeps the version 2 tool allocation.
+  assert.equal(capture.reader.version, '7'); // The current reader retains the bounded tool allocation.
   const result = capture.evidence.find(item => item.kind === 'tool-result' && item.callId === 'late');
   assert.equal(result.text, 'Failure: unchanged caller crashes.'); assert.equal(result.outcome, 'failed');
   assert(capture.evidence.some(item => item.kind === 'user' && item.text.startsWith('Correction:')));
@@ -566,7 +566,7 @@ test('a Codex unit started with this skill keeps what the person typed and leave
     const f = await fixture(t, [start(A), skillUser(A, typed), ...controlExchange(A, 'cue-1'), ...otherWork(A),
       assistant(A, 'Nothing was applied.'), end(A)]);
     const capture = (await readCodexSelection(f.args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '5');
+    assert.equal(capture.reader.version, '7');
     assert.deepEqual(capture.evidence.map(item => [item.kind, item.callId ?? null, item.text]), [
       ['user', null, typed], ['tool-call', 'work', '{"cmd":"git status"}'], ['tool-result', 'work', 'Working tree clean.'],
       ['assistant', null, 'Nothing was applied.']]);
@@ -630,7 +630,7 @@ test('Codex 0.163: a skill picked from the list is markup, and its code-mode con
   ]) await t.test(name, async t => {
     const { rows } = turn(options), f = await fixture(t, rows);
     const capture = (await readCodexSelection(f.args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '5');
+    assert.equal(capture.reader.version, '7');
     // The typed words stay; the mention, the selection item, the cells, their
     // nested calls and outputs and any wait are left out, and so is the
     // assistant's repetition of this plugin's reply.
@@ -778,7 +778,7 @@ test('Codex: a plain-language request keeps its words while this plugin\'s contr
     ['a refusal of several lines', refused(plain({ calledTool: 'processing_status' }).rows, `${refusalReply}\n\nType $cuefluent-notes status.`, 'code')],
   ]) await t.test(name, async t => {
     const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '5');
+    assert.equal(capture.reader.version, '7');
     // The person's words stay exactly as typed; the cells, calls, outputs,
     // nested items, waits and the assistant's repetition of the reply do not.
     assert.deepEqual(kept(capture), [['user', typed]]);
@@ -960,7 +960,7 @@ test('Codex reader v4: a control reply the model reformatted is left out like an
   ];
   for (const [name, options] of cases) await t.test(name, async t => {
     const capture = (await readCodexSelection((await fixture(t, turn({ commentary, ...options }).rows)).args)).candidates[0].capture;
-    assert.equal(capture.reader.version, '5');
+    assert.equal(capture.reader.version, '7');
     assert.deepEqual(kept(capture), [['assistant', commentary[0]]]);
     assert.deepEqual(capture.coverage, { partial: false, omissions: [] });
     assert.doesNotMatch(serializeCapture(capture).toString(), /a42ksb|x3x499|Review folder|Pending drafts|Type one of these|cuefluent_control/);
@@ -1080,7 +1080,7 @@ test('the version 3, 4 and 5 skill rules ignore the install path, so a published
 
 test('published version 2 Codex captures keep their skill-block omission and control exchange on replay', async t => {
   const { CODEX_SKILL_RULES, CODEX_READER_VERSION } = await import('./codex-reader.mjs');
-  assert.equal(CODEX_SKILL_RULES[CODEX_READER_VERSION], 'mention-5'); assert.equal(CODEX_SKILL_RULES['4'], 'mention'); assert.equal(CODEX_SKILL_RULES['3'], 'markup');
+  assert.equal(CODEX_SKILL_RULES[CODEX_READER_VERSION], 'mention-7'); assert.equal(CODEX_SKILL_RULES['4'], 'mention'); assert.equal(CODEX_SKILL_RULES['3'], 'markup');
   const f = await fixture(t, [start(A), skillUser(A, 'review sav t7xb88'), ...controlExchange(A, 'cue-1'), end(A)]);
   const args = f.args, current = (await readCodexSelection(args)).candidates[0].capture;
   for (const version of ['1', '2']) {
@@ -1107,10 +1107,78 @@ test('reader version 5 decides command-only messages with the grammar it shipped
   // A typed capture is only the command from version 5; version 4 kept it as typed.
   const f = await fixture(t, [start(A), skillUser(A, 'capture'), ...controlExchange(A, 'cue-1'), assistant(A, 'Nothing was applied.'), end(A)]);
   const current = (await readCodexSelection(f.args)).candidates[0].capture;
-  assert.equal(current.reader.version, '5');
+  assert.equal(current.reader.version, '7');
   assert.deepEqual(current.evidence.map(item => [item.kind, item.text]), [['assistant', 'Nothing was applied.']]);
   const v4 = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture: { ...current, reader: { ...current.reader, version: '4' } } }) })).candidates[0].capture;
   assert.equal(v4.reader.version, '4');
   assert.deepEqual(v4.evidence.map(item => [item.kind, item.text]), [['user', 'capture'], ['assistant', 'Nothing was applied.']]);
   assert.equal(CODEX_V4_CODE.source, REVIEW_CODE.source, 'the draft-code alphabet changed: add a Codex reader version');
+});
+
+test('Desktop mention accepts only its literal selected-path shape and one final LF', () => {
+  const selected = path.resolve('synthetic', 'cuefluent-notes', 'SKILL.md');
+  const link = `[${MENU_MENTION}](${selected})`;
+  const content = text => [{ type: 'text', text, text_elements: [] }];
+  for (const suffix of ['', ' review', ' save a42ksb']) {
+    assert.equal(codexDesktopMentionText(content(link + suffix), selected), suffix);
+    assert.equal(codexDesktopMentionText(content(link + suffix + '\n'), selected), suffix);
+  }
+  for (const text of [` ${link} review\n`, link.replace(MENU_MENTION, '$other') + ' review\n',
+    `[${MENU_MENTION}](file://${selected}) review\n`, `[${MENU_MENTION}](<${selected}>) review\n`,
+    `${link}review\n`]) assert.equal(codexDesktopMentionText(content(text), selected), null);
+  assert.equal(codexDesktopMentionText(content(link + ' review\n'), selected + '-other'), null);
+  assert.equal(codexDesktopMentionText(content(link + ' review\n'), null), null);
+  assert.equal(codexDesktopMentionText([{ type: 'text', text: link + ' review\n' }], selected), null);
+  assert.equal(codexDesktopMentionText([{ ...content(link)[0], text_elements: [{}] }], selected), null);
+  assert.equal(codexDesktopMentionText([...content(link), ...content('review')], selected), null);
+  assert.equal(codexDesktopMentionText(content(link + ' review\n\n'), selected), ' review\n');
+  assert.equal(codexDesktopMentionText(content(link + ' review\r\n'), selected), ' review\r');
+});
+
+test('reader v7 removes exact Desktop commands only with the same-message skill path', async t => {
+  const make = (control = 'review') => {
+    const result = turn({ form: 'desktop', control });
+    // The fixture includes a separator before arguments; a bare menu mention
+    // has none in Desktop's submitted UserMessage.
+    const text = control ? result.text : `[${MENU_MENTION}](${skillPath})\n`;
+    result.rows.find(row => row.payload?.item?.type === 'UserMessage').payload.item.content[0].text = text;
+    return { ...result, text };
+  };
+  for (const control of ['', 'review', 'help', 'save a42ksb', 'capture', 'pause chat']) await t.test(control || 'bare', async t => {
+    const read = await readCodexSelection((await fixture(t, make(control).rows)).args);
+    assert.deepEqual(read.candidates, []); assert.deepEqual(read.noEvidence, [A]);
+  });
+  const selection = row => row.payload?.internal_chat_message_metadata_passthrough?.content_item_kinds?.[0] === 'skills.selected_skill_instructions';
+  for (const [name, change] of [
+    ['no selection', rows => rows.splice(rows.findIndex(selection), 1)],
+    ['other path', rows => { const entry = rows.find(selection); entry.payload.content[0].text = entry.payload.content[0].text.replace(skillPath, skillPath + '-other'); }],
+    ['other turn', rows => { rows.find(selection).payload.internal_chat_message_metadata_passthrough.turn_id = B; }],
+    ['inherited selection', rows => { rows.find(selection).metadata = { inherited_user_message: true }; }],
+    ['another message before selection', rows => { rows.splice(rows.findIndex(selection), 0, user(A, 'Independent work')); }],
+    ['conflicting selected paths', rows => { const extra = structuredClone(rows.find(selection)); extra.payload.content[0].text = extra.payload.content[0].text.replace(skillPath, skillPath + '-other'); rows.splice(rows.findIndex(selection) + 1, 0, extra); }],
+  ]) await t.test(name, async t => {
+    const { rows } = make(); change(rows);
+    const original = rows.find(row => row.payload?.item?.type === 'UserMessage').payload.item.content[0].text;
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.equal(capture.evidence.find(entry => entry.kind === 'user').text, original);
+  });
+  for (const words of ['save please, and note that the Juniper launch moved to Friday',
+    'review and record Friday as the target', ' review', 'review\n', 'review\r',
+    '\nKeep this paragraph.\nAnd this one.', 'Keep café, `code`, and \\paths.']) {
+    await t.test(`ordinary Desktop text preserves its bytes: ${JSON.stringify(words)}`, async t => {
+      const { rows } = make(words);
+      const f = await fixture(t, rows);
+      const capture = (await readCodexSelection(f.args)).candidates[0].capture;
+      assert.deepEqual(kept(capture), [['user', words + '\n']]);
+      const replay = (await readCodexSelection({ ...f.args, loadHead: async () => ({ capture }) })).candidates[0].capture;
+      assert.deepEqual(serializeCapture(replay), serializeCapture(capture));
+    });
+  }
+  await t.test('ordinary text without a terminal LF gains none', async t => {
+    const { rows } = make('Keep Friday as the target');
+    rows.find(row => row.payload?.item?.type === 'UserMessage').payload.item.content[0].text =
+      `[${MENU_MENTION}](${skillPath}) Keep Friday as the target`;
+    const capture = (await readCodexSelection((await fixture(t, rows)).args)).candidates[0].capture;
+    assert.deepEqual(kept(capture), [['user', 'Keep Friday as the target']]);
+  });
 });

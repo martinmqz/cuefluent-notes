@@ -453,7 +453,8 @@ test('receipt resolution rechecks the exact active selection and does not outliv
 
 test('Codex 0.163 code-mode receipts name both cells and the retry call, and exclude exactly the proven turn', async t => {
   for (const [name, turn] of [['code mode', {}], ['code mode finished by wait', { waits: 1 }], ['older skill part, code mode', { form: 'block' }],
-    ['direct call', { mode: 'direct' }]]) await t.test(name, async t => {
+    ['direct call', { mode: 'direct' }], ['Desktop code mode', { form: 'desktop' }],
+    ['Desktop direct call', { form: 'desktop', mode: 'direct' }]]) await t.test(name, async t => {
     for (const mixed of [false, true]) {
       const f = await fixture(t, { mixed, turn: { control: 'save t7xb88', ...turn } });
       await withIntakeLock(f.store, async tx => {

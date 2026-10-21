@@ -4,7 +4,7 @@ import { canonicalJSON, digest } from '../workflow-values.mjs';
 
 // One synthetic Codex control turn in the shapes Codex CLI 0.163 records:
 // typed input (`menu`: the `$` list's mention plus its selection item; `block`:
-// the older skill part; `typed`: the mention typed by hand; `plain`: the
+// the older skill part; `desktop`: the linked menu mention plus a terminal LF; `typed`: the mention typed by hand; `plain`: the
 // person's own words with no skill and no mention), the control call
 // (`code`: the two cells of the verification handshake, optionally finished by
 // `wait` calls; `direct`: one MCP function call), commentary and the final
@@ -37,8 +37,9 @@ export function codexControlTurn({ sessionId, unitId, skillPath, control = 'revi
   const call = processingControlCall(control) ?? { tool: calledTool, fields: {} }, tool = call.tool;
   // Codex calls carry no review or status fields; only a process scope.
   const args = tool === 'process_selected_captures' && call.fields.scope ? { scope: call.fields.scope } : {};
-  const result = { content: [{ type: 'text', text: canonicalJSON({ interfaceVersion: 1, status: 'awaiting-review', statusText }) }], isError: false };
-  const text = form === 'menu' ? `${MENU_MENTION} ${control}` : form === 'typed' ? `${HAND_MENTION} ${control}` : control;
+  const view = { interfaceVersion: 1, collectionId: 'fixture', status: 'awaiting-review', statusText };
+  const result = { content: [{ type: 'text', text: canonicalJSON(view) }], isError: false };
+  const text = form === 'desktop' ? `[${MENU_MENTION}](${skillPath}) ${control}\n` : form === 'menu' ? `${MENU_MENTION} ${control}` : form === 'typed' ? `${HAND_MENTION} ${control}` : control;
   const content = form === 'block' ? [{ type: 'skill', name: 'cuefluent-notes', path: skillPath }, { type: 'text', text, text_elements: [] }]
     : [{ type: 'text', text, text_elements: form === 'menu' ? [{ byte_range: { start: 0, end: Buffer.byteLength(MENU_MENTION) }, placeholder: MENU_MENTION }] : [] }];
   const rows = [evt('task_started', { turn_id: unitId, root_turn_id: unitId, started_at: 1790000000 }),
@@ -53,11 +54,11 @@ export function codexControlTurn({ sessionId, unitId, skillPath, control = 'revi
     item({ type: 'UserMessage', id: 'user-message', client_id: 'synthetic-client', content }),
     response({ type: 'message', id: 'msg-hook', role: 'developer', content: [{ type: 'input_text', text: 'Cuefluent Notes: capture status queued.' }] },
       ['hooks.additional_context']),
-    ...(form === 'menu' ? [response({ type: 'message', id: 'msg-selection', role: 'user', content: [{ type: 'input_text',
+    ...(['menu', 'desktop'].includes(form) ? [response({ type: 'message', id: 'msg-selection', role: 'user', content: [{ type: 'input_text',
       text: `<skill>\n<name>cuefluent-notes:cuefluent-notes</name>\n<path>${skillPath}</path>\nSYNTHETIC SKILL INSTRUCTIONS\n</skill>` }] },
     ['skills.selected_skill_instructions'])] : []),
     ...commentary.flatMap((value, index) => assistant(`msg-commentary-${index}`, value, 'commentary'))];
-  const receipt = { tool: `mcp__${server}.${tool}`, argsHash: digest(canonicalJSON(args)), resultHash: digest(canonicalJSON(result)), statusText, skillPath };
+  const receipt = { tool: `mcp__${server}.${tool}`, argsHash: digest(canonicalJSON(args)), resultHash: digest(canonicalJSON(result)), statusText, skillPath, response: view };
   const usage = () => ({ type: 'token_usage_record', payload: { thread_id: sessionId, session_id: sessionId, turn_id: unitId, root_turn_id: unitId } });
   if (mode === 'direct') {
     rows.push(response({ type: 'function_call', id: 'fc-control', call_id: 'dispatch-call', namespace: `mcp__${server}`, name: tool, arguments: JSON.stringify(args) }),

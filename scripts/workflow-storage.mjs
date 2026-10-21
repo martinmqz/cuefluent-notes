@@ -47,12 +47,15 @@ async function checkCurrentPlacement(value) {
 // Review folders (processing-review-files.mjs) are private copies people open
 // in an editor or Finder, which add files of their own. A full walk checks each
 // folder and its own files and skips, unfollowed, anything else in it, and
-// Finder's metadata file beside the folders.
+// Finder's metadata file beside the folders. Opening those folders can also
+// leave a regular .DS_Store in their intake-root parent; it is never input data.
 export const REVIEW_OWN_FILE = /^(?:\d{1,3}-)?(?:proposed|current)\.md$|^summary\.txt$/;
 export const FINDER_FILE = '.DS_Store';
-const reviewForeign = (reviewRoot, file) => {
+const reviewForeign = (reviewRoot, file, entry) => {
   const parent = path.dirname(file), name = path.basename(file);
-  return reviewRoot !== null && (parent === reviewRoot ? name === FINDER_FILE : path.dirname(parent) === reviewRoot && !REVIEW_OWN_FILE.test(name));
+  if (reviewRoot === null) return false;
+  if (parent === path.dirname(reviewRoot)) return name === FINDER_FILE && entry.isFile();
+  return parent === reviewRoot ? name === FINDER_FILE : path.dirname(parent) === reviewRoot && !REVIEW_OWN_FILE.test(name);
 };
 const reviewRootOf = collection => path.join(collection.intakeStateDir, 'review');
 
@@ -71,7 +74,7 @@ export async function privateStorageEntries(roots, { limit = 20000, paths = null
       const stream = await fs.opendir(file);
       for await (const child of stream) {
         const entry = path.join(file, child.name);
-        if (!reviewForeign(reviewRoot, entry)) await visit(entry, false);
+        if (!reviewForeign(reviewRoot, entry, child)) await visit(entry, false);
       }
     }
   }

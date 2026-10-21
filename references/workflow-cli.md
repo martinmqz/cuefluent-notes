@@ -247,12 +247,15 @@ freezes a floor. This creates no selection, moves no floor and
 captures nothing earlier: the first full prompt after the floor is still the
 excluded boundary, so collection starts with the prompt after that. With
 collection on, a typed control that is itself that first prompt after the floor
-binds before the selection is armed (it can never be collected), provided the
+binds before the selection is armed, provided the
 bounded read still reaches the floor; any later typed control, or one past a
-longer unarmed tail, binds only once the selection is armed. A typed `capture`,
-`pause chat` or `resume chat` before arming leaves its own turn out, since a
-first prompt precedes the floor and the worker's boundary does not cover it;
-that selection still binds and arms as before, and one paused before arming
+longer unarmed tail, binds only once the selection is armed. Before replying,
+a verified typed control also records an exclusion for its own turn, including
+before arming: a first prompt can precede the floor, and the worker's later
+boundary does not protect it from explicit capture of earlier turns. An
+exclusion alone neither arms nor pauses collection. If it cannot be recorded,
+the reply reports that exclusion is unverified; it does not undo the command.
+That selection still binds and arms as before, and one paused before arming
 binds every typed control.
 Omitted collection selection must resolve uniquely from bounded registration
 metadata; no new source is discovered. The optional `selection` must match the
@@ -376,7 +379,10 @@ supports and at most five omission details plus a count), inspection limits, the
 decision commands and the operation, claim and proposal hashes, bounded to 1 MiB.
 Entries an editor or Finder adds inside a review folder are neither checked nor
 followed by the storage privacy check; Finder's `.DS_Store` is removed with the
-folder's own files, and anything else keeps the folder. At most 32 folders are
+folder's own files, and anything else keeps the folder. A regular `.DS_Store`
+beside the `review/` directory is also ignored by that check and left untouched;
+other entries in that parent remain subject to private-storage checks.
+At most 32 folders are
 kept, the oldest removed first, and a reused copy whose permissions changed is
 written again. A durable presentation record in the
 same private state stores `{chatLineage, operationId, proposalHash, claimHash,
