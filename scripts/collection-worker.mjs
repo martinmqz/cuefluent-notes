@@ -471,12 +471,14 @@ async function recoverOwner(capability, store, snapshot, collectionId) {
       await assertWorkflowStorage(capability, null, 'maintenance'); return true;
     };
   } else {
-    // Exact lookup precedes the bounded registration batch. Missing/revoked
-    // ongoing authority leaves foreign intent untouched for recovery; an
-    // explicit capture's own is finished under its explicit authority.
-    const { registration } = await readRegistration(store, pending.identity, { mismatchCode: 'INTAKE_RECOVERY_REQUIRED' });
+    // An explicit capture's own intent is finished under its explicit
+    // authority, whatever the chat's Automatic registration and grant. Exact
+    // lookup precedes the bounded registration batch. Missing/revoked ongoing
+    // authority leaves any other intent untouched for recovery.
+    const explicit = (await readSelection(store, pending.identity)).state?.explicitScopes.some(scope => scope.id === pending.scopeId);
+    const { registration } = explicit ? { registration: null } : await readRegistration(store, pending.identity, { mismatchCode: 'INTAKE_RECOVERY_REQUIRED' });
     const route = registration && await resolveWorkflowRoute(snapshot.config, registration);
-    if (!registration || !route.intended?.collect || route.collection.id !== collectionId) {
+    if (explicit || !registration || !route.intended?.collect || route.collection.id !== collectionId) {
       ({ recoveryStore, authorize } = await explicitRecovery(capability, store, pending));
       await withIntakeLock(recoveryStore, transaction => recoverPendingPublication(transaction, { expectedHash: pending.hash, authorize }));
       return;

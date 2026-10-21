@@ -12,7 +12,7 @@ import { readCaptureHead, readReaderProgress, readSelection, publishCapture, ins
 import { readCodexSelection, codexPublicationPlan, codexCheckpoint } from './codex-reader.mjs';
 import { runCollectionWorker } from './test-support/capture-workflow.mjs';
 import { readReaderBlock, readerBlockPath } from './collection-worker.mjs';
-import { publishIngressMetadata } from './collection-ingress.mjs';
+import { publishIngressMetadata, collectionIngress } from './collection-ingress.mjs';
 import { captureSelectionStatus, controlCapture, previewExplicitCapture, selectExplicitCapture, runSelectedCapture } from './test-support/capture-workflow.mjs';
 import { captureChatTurns, controlChatCapture, excludeChatTurn, typedCaptureDeadline } from './capture-controls.mjs';
 const S = '10000000-0000-4000-8000-000000000001';
@@ -571,6 +571,26 @@ test('a typed or CLI capture stopped mid-publication is finished by the next col
   const pass = await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
   assert(!pass.pending.includes('INTAKE_RECOVERY_REQUIRED'), JSON.stringify(pass));
   assert.equal(await inspectPendingPublication(f.store), null);
+  assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head);
+});
+
+test('an interrupted typed or CLI capture is finished even when the Automatic grant of its chat changed', async t => {
+  const f = await fixture(t, { enabled: true });
+  // The chat is registered for Automatic capture, and its explicit capture stops mid-publication.
+  await collectionIngress('codex', { session_id: S, turn_id: A, cwd: f.project, transcript_path: f.sourcePath, hook_event_name: 'UserPromptSubmit',
+    prompt: 'Not persisted by ingress' }, { configPath: f.options.configPath, launch: async () => {} });
+  const chosen = await selectExplicitCapture(f.capability, f.request), scopeId = f.request.operationId;
+  const result = await readCodexSelection({ state: chosen.state, scopeId });
+  const plan = codexPublicationPlan(result, A), store = await openExplicitCaptureIntake(f.capability, f.selection, { scopeId, unitIds: [A] });
+  await assert.rejects(withIntakeLock(store, tx => publishCapture(tx, { ...result.candidates[0], selectionHash: chosen.hash, cursorHash: null,
+    scan: plan.scan, checkpoint: codexCheckpoint(result, plan.scan.to.offset), authorize: async () => true,
+    fault: async point => { if (point === 'intent') throw new Error('simulated interruption'); } })), /simulated interruption/);
+  // Capture settings saved again: the registration's grant needs review.
+  f.config.routes[0].collection.generation = randomUUID();
+  await fs.writeFile(f.options.configPath, JSON.stringify(f.config));
+  const pass = await runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  assert(!pass.pending.includes('INTAKE_RECOVERY_REQUIRED'), JSON.stringify(pass));
+  assert.equal(await inspectPendingPublication(f.store), null, JSON.stringify(pass));
   assert((await readCaptureHead(f.store, { client: 'codex', sessionId: S, unitId: A })).head);
 });
 
