@@ -345,19 +345,21 @@ export async function excludeChatTurn(capability, { selection, source, unitId },
   });
 }
 // Several turns a chat window left out, in one locked step that first checks,
-// with `verify`, that the bytes they were judged by are unchanged: when they
-// changed, nothing is left out (`stale`).
+// with `verify`, right before each is written, that the bytes they were judged
+// by are unchanged: once they changed, no further turn is left out (`stale`),
+// and `recorded` counts those already written.
 async function excludeChatTurns(capability, { chat, source, unitIds, verify }, { now, signal }) {
   return bounded(now, async () => {
     await assertWorkflowStorage(capability);
     const store = await openWorkflowIntake(capability);
     return withIntakeLockWaiting(store, async tx => {
-      // The file is looked at first and the bytes checked last, right before
-      // the exclusions are written.
       const metadata = await sourceMetadata(source);
-      if (!await verify()) return { stale: true };
-      for (const unitId of unitIds) await excludeTurn(tx, store, chat, source, unitId, metadata);
-      return { stale: false };
+      let recorded = 0;
+      for (const unitId of unitIds) {
+        if ((await excludeTurn(tx, store, chat, source, unitId, metadata, verify)).stale) return { stale: true, recorded };
+        recorded++;
+      }
+      return { stale: false, recorded };
     }, { signal });
   });
 }
@@ -366,12 +368,15 @@ async function sourceMetadata(source) {
   if (!metadata || metadata.fileIdentity !== source.fileIdentity) fail('SOURCE_CHANGED');
   return metadata;
 }
-async function excludeTurn(tx, store, chat, source, unitId, seen = null) {
+// `verify`, when given, runs last before the write: the transcript has no lock
+// its writer takes, so this is as close to the write as a check can be.
+async function excludeTurn(tx, store, chat, source, unitId, seen = null, verify = null) {
   const current = await readSelection(store, identityOf(chat));
   if (current.state?.safetyStop || deniedUnits(current.state).has(unitId)) return { ...current, excluded: true };
   if (current.state && (current.state.exclusions.length >= HOUSEKEEPING_EXCLUSIONS ||
       Buffer.byteLength(canonicalJSON(current.state)) >= HOUSEKEEPING_BYTES)) return { ...current, excluded: false };
   const metadata = seen ?? await sourceMetadata(source);
+  if (verify && !await verify()) return { stale: true };
   const observed = { client: chat.client, sessionId: chat.sessionId, path: metadata.path, projectRoot: chat.cwd, fileIdentity: metadata.fileIdentity };
   return { ...await controlSelection(tx, { source: observed, expectedHash: current.hash,
     boundary: { sourceIdentity: metadata.fileIdentity, eofByte: metadata.eofByte, startsMidRecord: true, unitId, record: null },
@@ -924,8 +929,8 @@ export async function captureChatTurns(capability, { selection, source, floor, c
   if (window.leftOut.length) {
     if (!timeFor(deadline, 2)) return { turns, more: true, leftOut };
     const recorded = await excludeChatTurns(capability, { chat, source, unitIds: window.leftOut, verify: () => readsHold(source, window.reads) }, { now, signal });
+    leftOut = recorded.recorded;
     if (recorded.stale) return { turns, more: true, leftOut };
-    leftOut = window.leftOut.length;
   }
   if (window.resumeAt) await advanceChatCursor(capability, chat, source, window.resumeAt, { now, signal });
   if (!window.unitIds.length) return { turns, more: window.more, leftOut };
