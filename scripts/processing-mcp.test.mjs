@@ -1615,6 +1615,19 @@ test('typed capture and resume chat do not say Automatic capture covers a chat w
   assert((await readCaptureHead(parent.store, { ...identity, unitId: later })).head);
 });
 
+test('a typed command that fails in a chat Automatic capture covers says its turn was not left out', async t => {
+  const { f, h, parent } = await nativeIngressFixture(t), identity = { client: 'codex', sessionId: f.identity.sessionId };
+  const run = () => runCollectionWorker({ configPath: f.options.configPath, collectionId: f.collection.id });
+  await parent.work('Captured automatically.'); await run();
+  // The command fails before it records the receipt that keeps a command turn out.
+  h.beforeStatus = () => { throw Object.assign(new Error('synthetic'), { code: 'PROCESSING_CLIENT_AUTHENTICATION_INVALID' }); };
+  const rpc = await h.call('processing_status', {});
+  assert.equal(rpc.error?.data?.code, 'PROCESSING_CLIENT_AUTHENTICATION_INVALID', JSON.stringify(rpc));
+  assert.deepEqual(rpc.error.data.diagnostics, ['PROCESSING_EXCLUSION_UNVERIFIED']);
+  // The selection a redelivery replays under is unchanged.
+  assert(!(await readSelection(parent.store, identity)).state.exclusions.includes(parent.controls.at(-1)));
+});
+
 test('typed capture takes a turn rewritten into the paused stretch after the pause record', async t => {
   // With no progress, as when a read stopped short of the pause's end, and
   // with progress past it whose own anchor still holds.

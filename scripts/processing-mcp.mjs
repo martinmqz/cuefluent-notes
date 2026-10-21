@@ -730,6 +730,9 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
   // Sources of capture-command deliveries that reserved their call: only these
   // act, and only these keep the command turn's bookkeeping.
   const reserving = new WeakSet();
+  // Sources whose dispatch receipt was recorded: their command turn is kept out
+  // of Automatic capture.
+  const receipted = new WeakSet();
   async function requestCapture({ source, tool, signal }) {
     // The command's time runs from here, so its capture and the steps around
     // it end within it.
@@ -825,8 +828,12 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
     if (CAPTURE_TOOLS.includes(invocation.tool) && !reserving.has(source)) return false;
     try {
       const { capability } = selected(source);
+      // In a chat Automatic capture covers, a command turn is kept out by its
+      // dispatch receipt, and an exclusion here would change the selection a
+      // redelivery replays under. Without that receipt the turn stays
+      // capturable, which the refusal reports.
       const automatic = await automaticCapture(capability, source);
-      if (!(CAPTURE_TOOLS.includes(invocation.tool) || source.captureActive === false || !automatic)) return true;
+      if (!(CAPTURE_TOOLS.includes(invocation.tool) || source.captureActive === false || !automatic)) return receipted.has(source);
       return (await withStorageProbes(() => excludeChatTurn(capability, { selection: source.selection, source: source.source, unitId: source.unitId }))).excluded;
     } catch { return false; }
   }
@@ -918,6 +925,7 @@ export async function runProcessingMcp({ client, configPath, input, output, env 
           ...(client === 'claude' ? Object.fromEntries(['inputId', 'inputHash', 'companionId', 'companionHash', 'skillExpansionHash', 'skillCommand']
             .map(key => [key, source[key]])) : {}) },
       }, { authorize, beforePublish: commitAdmission }), { signal }));
+      receipted.add(source);
       await release();
     } catch (error) {
       if (error.code === 'STALE_SELECTION' && !signal?.aborted) {
