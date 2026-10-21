@@ -219,7 +219,7 @@ export async function readClaudeSelection({ state, scopeId, cursor = null, check
   const pager = checkpointPageBuilder(carry);
   let checkpointBytes = Buffer.byteLength(canonicalJSON(carry));
   const checkBudget = () => { checkWorkflowBudget(); if (now() >= deadline) fail('SESSION_READ_BUDGET'); };
-  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, readHeader: readClaudeHeader, stretch: chosenStretch(scope),
+  const scan = await readSessionRange({ ...limits, source, from: from.offset, deadline, now, readHeader: readClaudeHeader, stretch: chosenStretch(scope) ?? limits.stretch ?? null,
     verifyHeader: (row, source) => verifyClaudeIdentity(row, source, { header: true, sessionKinds }), ...(stops.length ? { endByte: Math.min(...stops) } : {}),
     startsMidRecord: from.offset === floor && Boolean(scope.lower?.startsMidRecord) });
   let continuedIn = null, terminal = false;

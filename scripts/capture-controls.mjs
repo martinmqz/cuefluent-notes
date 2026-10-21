@@ -9,6 +9,7 @@ import { resolveWorkflowRoute } from './workflow-routes.mjs';
 import { readContinuesLink, readContinuedLink, continuationTarget, continuationOrigin } from './claude-continuation.mjs';
 import { readSelection, controlSelection, recoverPendingPublication, selectionPendingWarning, readReaderHeadroom, readCaptureHead, readReaderProgress, verifySourceCursor } from './intake-store.mjs';
 import { openGuarded, lstatOrNull } from './file-io.mjs';
+import { chosenStretch } from './session-jsonl.mjs';
 import { inspectSourceBoundary, newSelectionState, currentIntervals, stableSourceIdentity, MAX_SELECTION_BYTES } from './capture-selection.mjs';
 import { codexRegistrationHeader, readCodexSelection } from './codex-reader.mjs';
 import { claudeRegistrationHeader, readClaudeSelection } from './claude-reader.mjs';
@@ -612,19 +613,23 @@ async function advanceChatCursor(capability, chat, source, position, { now, sign
 // them and skips the turns Automatic capture took, so no turn is captured
 // twice and a turn written into them later is never skipped as covered.
 async function chatStart(store, chat, state, floor, source) {
-  let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord };
-  const later = (eofByte, startsMidRecord = false) => { if (eofByte > start.eofByte) start = { eofByte, startsMidRecord }; };
+  // `stretch` names the bytes the start passes and their hash, which the read
+  // from it checks again through its own handle.
+  let start = { eofByte: floor.eofByte, startsMidRecord: floor.startsMidRecord }, stretch = null;
+  const later = (eofByte, startsMidRecord, passed) => { if (eofByte > start.eofByte) { start = { eofByte, startsMidRecord }; stretch = passed; } };
   // Latest first: the first capture that still holds is the one that counts.
   const scopes = [...(state?.explicitScopes ?? [])].sort((a, b) => scopeEnd(b).endByte - scopeEnd(a).endByte);
   for (const scope of scopes) {
     if (scopeEnd(scope).endByte <= start.eofByte) break;
-    if (await scopeHolds(source, scope)) { later(scopeEnd(scope).endByte); break; }
+    if (await scopeHolds(source, scope)) { later(scopeEnd(scope).endByte, false, chosenStretch(scope)); break; }
   }
   // The position past turns a capture left out counts where it is later
   // still, and only while the stretch it passed is unchanged.
   const { cursor } = await readChatCursor(store, chat, source);
-  if (cursor && cursor.offset > start.eofByte && (await readChatCursor(store, chat, source, { stretch: true })).cursor) later(cursor.offset, cursor.startsMidRecord);
-  return { start };
+  if (cursor && cursor.offset > start.eofByte && (await readChatCursor(store, chat, source, { stretch: true })).cursor) {
+    later(cursor.offset, cursor.startsMidRecord, { from: cursor.from, to: cursor.offset, hash: cursor.contentHash });
+  }
+  return { start, stretch };
 }
 
 // The turns of this chat with a capture, or one since pruned: one guarded
@@ -648,11 +653,11 @@ async function capturedUnits(store, chat) {
 
 // One bounded read of the source from `start`: its turns, in order, and its
 // records. Reads only the explicitly authorized window of the verified source.
-async function scanChat(chat, source, start, endByte, observeRead, continuation = null) {
+async function scanChat(chat, source, start, endByte, observeRead, continuation = null, stretch = null) {
   const state = newSelectionState(source), scopeId = randomUUID();
   state.active = true; state.intervals = [{ id: scopeId, upper: null,
     lower: { sourceIdentity: source.fileIdentity, eofByte: start.eofByte, startsMidRecord: start.startsMidRecord, unitId: null, record: null } }];
-  const inspected = await reader(chat.client)({ state, scopeId, endByte, observeRead, continuation });
+  const inspected = await reader(chat.client)({ state, scopeId, endByte, observeRead, continuation, ...(stretch ? { stretch } : {}) });
   // A read that reached its record limit ends where it stopped: the turns
   // before that point are complete, and the next read continues from it.
   const limited = inspected.blocked?.code === 'SESSION_READ_LIMIT';
@@ -685,7 +690,7 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
   const continuation = await chatContinuation(store, chat, source.path, source.fileIdentity, observeRead);
   const observed = await sourceBoundary(chat, source.path, source.fileIdentity, null, continuation), eof = observed.boundary.eofByte;
   const withheld = withheldTurns(current.state), leftOut = [], reads = [];
-  let { start } = await chatStart(store, chat, current.state, floor, observed.source);
+  let { start, stretch } = await chatStart(store, chat, current.state, floor, observed.source);
   const from = start.eofByte;
   // A turn already captured (by Automatic capture or an earlier capture,
   // including one since pruned) is skipped like an excluded turn. Whether a
@@ -699,7 +704,17 @@ async function chatWindow(capability, { chat, source, floor, commandUnitId, obse
     // bytes before its limit, hashed just before it reads them, or the record
     // it read that ends there (its last bytes, when it is too large whole).
     const limitAnchor = limit < eof ? await chatCursorAnchor(observed.source, limit) : null;
-    const scanned = await scanChat(chat, observed.source, start, limit, observeRead, continuation);
+    // The first read also checks, through its own handle, the stretch its start
+    // passes; one rewritten since it was checked is not passed, and the next
+    // capture starts before it.
+    let scanned;
+    try { scanned = await scanChat(chat, observed.source, start, limit, observeRead, continuation, scan === 0 ? stretch : null); }
+    catch (error) {
+      if (scan === 0 && stretch && error.code === 'SOURCE_CHANGED' && !await stretchHolds(observed.source, stretch.from, stretch.to, stretch.hash)) {
+        return { current, unitIds: [], more: true, leftOut, reads };
+      }
+      throw error;
+    }
     reads.push(scanned.consumed);
     const { anchors, records, end, tooLarge, unitEnds, straddles } = scanned;
     const at = async (eofByte, startsMidRecord) => {

@@ -426,6 +426,37 @@ test('a turn left out is checked against the bytes that judged it as its exclusi
   assert.equal((await readSelection(f.store, identity)).state, null);
 });
 
+test('a capture does not pass an earlier window rewritten since its start was checked', async t => {
+  const f = await fixture(t), [C1, C2, D, NEW] = Array.from({ length: 4 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const started = id => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: 'capture' });
+  await fs.appendFile(f.sourcePath, started(C1));
+  const command = async commandUnitId => {
+    const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+    return { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId };
+  };
+  const first = await command(C1);
+  assert.deepEqual(await captureChatTurns(f.capability, first, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_complete', turn_id: C1 }) + turn(D, 'Decision: later.') + started(C2));
+  const second = await command(C2);
+  // Once the next capture has checked the first window's bytes to start after
+  // them, turn A is rewritten in place as a turn never captured.
+  const open = fs.open; let armed = true;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (armed && String(file) === f.sourcePath && new Error().stack.includes('scanChat')) {
+      armed = false;
+      const text = await fs.readFile(f.sourcePath, 'utf8');
+      await fs.writeFile(f.sourcePath, text.replaceAll(A, NEW));
+    }
+    return open.call(fs, file, ...rest);
+  });
+  assert.deepEqual(await captureChatTurns(f.capability, second, { now: () => 0 }), { turns: 0, more: true, leftOut: 0 });
+  assert.equal(armed, false);
+  // The next capture starts before the rewritten window and takes the new turn.
+  assert.deepEqual(await captureChatTurns(f.capability, second, { now: () => 0 }), { turns: 2, more: false, leftOut: 0 });
+  for (const unitId of [NEW, D]) assert((await readCaptureHead(f.store, { ...identity, unitId })).head, unitId);
+});
+
 test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
