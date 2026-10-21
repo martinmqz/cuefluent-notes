@@ -443,7 +443,8 @@ async function readsHold(source, reads) {
 // The hashes of several `from`..`to` ranges of the transcript, from one
 // guarded read; null when the file is no longer the same or that long, or
 // was written in place while it was read. A file that only grew meanwhile is
-// read a second time, since an append can hide a rewrite from its times.
+// read a second time, since an append can hide a rewrite from its times, and
+// that read counts only if the file did not change at all during it.
 async function rangeHashes(source, ranges) {
   if (!ranges.length) return [];
   const start = Math.min(...ranges.map(range => range.from)), end = Math.max(...ranges.map(range => range.to));
@@ -469,8 +470,10 @@ async function rangeHashes(source, ranges) {
     if (!first || !sameFileIdentity(stat, after) || after.size < stat.size || after.nlink !== 1n ||
         (after.size === stat.size && (after.mtimeNs !== stat.mtimeNs || after.ctimeNs !== stat.ctimeNs))) return null;
     if (after.size === stat.size) return first;
-    const second = await pass();
-    return second && second.every((value, index) => value === first[index]) ? first : null;
+    const second = await pass(), final = await handle.stat({ bigint: true });
+    if (!second || !sameFileIdentity(after, final) || final.size !== after.size || final.nlink !== 1n ||
+        final.mtimeNs !== after.mtimeNs || final.ctimeNs !== after.ctimeNs) return null;
+    return second.every((value, index) => value === first[index]) ? first : null;
   } finally { await handle.close(); }
 }
 // The hash of up to 4 KiB of transcript bytes ending at `offset`, read from

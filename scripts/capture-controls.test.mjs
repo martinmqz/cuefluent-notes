@@ -498,6 +498,51 @@ test('a turn left out is not recorded when its bytes change while they are being
   assert(!(await readSelection(f.store, identity)).state.exclusions.includes(X));
 });
 
+test('a turn left out is not recorded when the transcript grows and an already read part changes while it is checked again', async t => {
+  const f = await fixture(t), [C1, C2, X, D] = Array.from({ length: 4 }, () => randomUUID()), identity = { client: 'codex', sessionId: S };
+  const started = id => row('event_msg', { type: 'task_started', turn_id: id }) + row('event_msg', { type: 'user_message', message: 'capture' });
+  const command = async commandUnitId => {
+    const status = await captureSelectionStatus(f.capability, { selection: f.selection, sourcePath: f.sourcePath });
+    return { selection: { ...f.selection, unitId: null }, source: { path: f.sourcePath, fileIdentity: status.source.fileIdentity }, floor: { eofByte: 0, startsMidRecord: false }, commandUnitId };
+  };
+  await fs.appendFile(f.sourcePath, started(C1));
+  const first = await command(C1);
+  assert.equal((await captureChatTurns(f.capability, first, { now: () => 0 })).turns, 2);
+  await excludeChatTurn(f.capability, { selection: first.selection, source: first.source, unitId: C1 });
+  // A turn larger than a window, which the next capture leaves out, then turn D.
+  await fs.appendFile(f.sourcePath, row('event_msg', { type: 'task_complete', turn_id: C1 }) +
+    row('event_msg', { type: 'task_started', turn_id: X }) + row('event_msg', { type: 'user_message', message: 'Write a long report.' }) +
+    Array.from({ length: 9 }, () => row('event_msg', { type: 'agent_message', message: 'x'.repeat(1024 * 1024) })).join('') +
+    row('event_msg', { type: 'task_complete', turn_id: X }) + turn(D, 'Decision: later.') + started(C2));
+  const text = await fs.readFile(f.sourcePath, 'utf8'), at = Buffer.byteLength(text.slice(0, text.indexOf('Write a long report')));
+  // While the left-out turn's bytes are being checked, a part already read changes in place.
+  const open = fs.open; let rewrites = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    const handle = await open.call(fs, file, ...rest);
+    if (!rewrites && String(file) === f.sourcePath && new Error().stack.includes('readsHold')) {
+      // The transcript grows during the first read, so it is read again; during
+      // that second read, a part it has already read changes in place.
+      const read = handle.read.bind(handle), seen = new Set(); let grown = false, again = 0;
+      handle.read = async (...args) => {
+        const result = await read(...args), position = args[3];
+        if (!grown) { grown = true; appendFileSync(f.sourcePath, row('event_msg', { type: 'agent_message', message: 'Working.' })); }
+        else if (seen.has(position) && again++ === 1 && !rewrites) {
+          rewrites++;
+          const other = openSync(f.sourcePath, 'r+');
+          try { writeSync(other, Buffer.from('W'), 0, 1, at); } finally { closeSync(other); }
+        }
+        seen.add(position);
+        return result;
+      };
+    }
+    return handle;
+  });
+  const result = await captureChatTurns(f.capability, await command(C2), { now: () => 0 });
+  assert.equal(rewrites, 1);
+  assert.deepEqual(result, { turns: 0, more: true, leftOut: 0 });
+  assert(!(await readSelection(f.store, identity)).state.exclusions.includes(X));
+});
+
 test('a chat window refuses a turn in its bytes that is not its own, left out or captured', async t => {
   const f = await fixture(t), text = await fs.readFile(f.sourcePath, 'utf8'), lines = text.split('\n').slice(0, -1).map(line => line + '\n');
   const bounds = { start: digest(lines[1]), end: digest(lines.at(-1)), content: digest(lines.slice(1).join('')) };
