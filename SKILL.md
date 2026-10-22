@@ -12,6 +12,13 @@ one-file-per-turn rule, activity feed, or parallel recap system is required.
 
 ## Choose the workflow
 
+Choose from the user's current message. If the user typed this skill's slash
+command in Claude or selected it from Codex's `$` menu, apply the
+[routing rules](#route-the-request) below. Loading the skill yourself for an
+ordinary request does not turn that request into a typed command; use this table.
+Deciding a staged draft still requires the approval described under
+[formal controls](#formal-processing-controls).
+
 | Request | Action and reference |
 | --- | --- |
 | Setup, “Use Cuefluent Notes”, or configuration status | Inspect existing settings; follow [setup](references/setup.md). Installation and hook trust enable neither process. |
@@ -78,13 +85,54 @@ by hand does not attach the skill and is no command:
 | `skip`, `skip <code>` | Handle that draft's captures without saving, under the same rule. | `processing_review`; in Claude with `decision: "skip"` and any `draft` |
 | `review cancel`, `review cancel <code>` | Cancel that draft's operation, under the same rule; its captures stay pending. | `processing_review`; in Claude with `decision: "cancel"` and any `draft` |
 
+#### Route the request
+
+An exact action is one table row as written: same case, single spaces, a full
+draft code, nothing before or after it. Route other requests before selecting a
+tool:
+
+- With nothing typed after the skill, call `processing_status` once without
+  arguments and return its `statusText`; it lists the actions and applies nothing.
+- An independent request to author supplied material, such as "save this meeting
+  note: ..." or "update the Juniper note with this decision: ...", is never a
+  draft decision. Use the direct-save workflow without a control tool, including
+  when the request follows the typed skill. This applies only when the request
+  does not also ask to decide or revise a staged draft. If a pending draft for
+  that destination is already known, explain that a separate update can make
+  that draft stale; it does not update or approve the draft.
+- If a request combines a draft decision with corrections or new material, or
+  could mean either a draft decision or independent authoring, ask for
+  clarification and stop without calling tools. For example, `save please, and
+  note that the Juniper launch moved to Friday` or `save t7xb88 but change the
+  date` needs clarification. Say that nothing was saved and the correction was
+  not applied; an exact `save` can approve only the previously reviewed draft
+  unchanged. Ask whether to revise the draft or save the supplied material
+  separately. Do not suggest `save` as the fix, inspect notes, split the request,
+  or write through any tool. A known destination or prior conversation does not
+  resolve this choice. Wait for the user's answer before doing note work.
+- For any remaining non-exact control request with no authoring request or
+  additional material, call `processing_status` once without arguments and return
+  its `statusText`, then stop. This includes near misses (other case or spacing,
+  a misspelling, missing or extra command words, or a changed code). Do not repair
+  or complete the command or pass `draft`, `decision`, `verbose` or `help`. The
+  reply names the nearest commands only when the typed text verifies; an ordinary
+  status or a refusal does not mean the attempted action happened. Do not dispatch
+  it afterwards.
+
+An inexact command does not authorize an extra capture or a saved copy of its
+text. Automatic capture retains it only where the existing capture policy covers
+the chat; otherwise no capture is promised. Do not call `capture_turns` or write a
+copy to preserve it.
+
+#### Call a control
+
 For an exact action, select the **specific tool in that row**, then call it once.
 `cuefluent_control` is the server name, not a dispatcher: its tools are separate
 functions. There is no `action` argument. In code mode, never select the first
 tool whose name merely contains `cuefluent_control`; that can select
 `capture_turns` for a help or review request. Match both the server and the exact
 tool name. For `help`, a bare skill invocation, or `status`, use
-`processing_status`; for `review`, `save`, `skip`, or `review cancel`, use
+`processing_status`; for exact `review`, `save`, `skip`, or `review cancel`, use
 `processing_review`. Native clients may prefix these names.
 
 In Claude, copy the typed draft code, decision, `verbose` or `help` into the
@@ -99,25 +147,11 @@ unfinished operation, a limit or a conflict; it does not promise to drain an
 arbitrary backlog. Use `process resume` for a frozen remainder and `process` for
 the next inventory portion.
 
-An exact action is one table row as written: same case, single spaces, a full
-draft code, nothing before or after it. With nothing typed after this skill,
-call `processing_status` once without arguments and return its `statusText`:
-the adapter applies nothing and lists the actions. When the text after this skill
-is a short near miss of an action (other case or spacing, a misspelling, a
-missing or extra word, a changed code, or an action word with a code-like word),
-do not repair, complete or interpret it, and never pass `draft`, `decision`,
-`verbose` or `help` for it. Call `processing_status` once without arguments and
-return its `statusText`: it applies nothing and names the nearest exact command
-to type. Text that starts with an action word but continues as a plain-language
-request, such as "save this meeting note: ...", is never a decision. Handle it
-with this skill's normal workflows, such as a direct save, without a control tool; if it asks for
-something only a control does (processing, a review or a decision), call
-`processing_status` once without arguments and return its `statusText`.
-
-Do not read more files, packets or notes or synthesize in this source chat. In
-Codex code mode, run the control call alone in its exec cell and print only its
-result; call no other tool and print nothing else in that turn, so the control
-turn can be kept out of captures. For example, a first `help` or `status` call:
+During a control request, do not read more files, packets or notes or synthesize
+in this source chat. In Codex code mode, run the control call alone in its exec
+cell and print only its result; call no other tool and print nothing else in that
+turn, so the control turn can be kept out of captures. For example, a first
+`help` or `status` call:
 
 ```js
 const matches = ALL_TOOLS.filter(t =>
@@ -133,8 +167,9 @@ if (matches.length !== 1) {
 }
 ```
 
-For a review or draft decision, select `processing_review` instead, still with
-`{}` on the first Codex call. For other actions use their table row and schema.
+For an exact typed review or draft decision, select `processing_review` instead,
+still with `{}` on the first Codex call. For other actions use their table row
+and schema.
 Do not send `{action: "processing_status"}` or `{action: "processing_review"}`
 to any tool. If the tool returns `verification-required`, end that exec/tool
 call. In a separate
@@ -147,10 +182,10 @@ plain-text error message for the user: return that message unchanged and stop.
 If the tool itself is unavailable, report that limitation and stop; do not
 silently fall back to inline processing or invent selection metadata.
 
-Natural-language processing requests typed without this skill's command can use
-the same handoff. After the command, only an exact action calls its control;
-other text after it follows the rules above.
-Mixed messages remain original evidence. Preserve their facts, attachments and corrections.
+Natural-language processing or review requests typed without this skill's command
+can use the same handoff through their table tool. The
+[routing rules](#route-the-request) still govern mixed or ambiguous requests;
+loading the skill does not supply typed approval.
 A draft shown by `review` is decided only by the user's exact typed `save`, `skip`
 or `review cancel`, or by the Codex native review form; never by tool arguments the
 model chooses, by chat text, or by applying it through the CLI. A typed decision
