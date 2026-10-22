@@ -20,9 +20,10 @@ const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { prot
 const ready = { jsonrpc: '2.0', method: 'notifications/initialized' };
 
 test('draft protocol exposes exactly bounded draft tools, requires lifecycle, and sanitizes exceptions', async () => {
-  const protocol = draftProtocol(workspace(), definitions);
+  const protocol = draftProtocol(workspace(), definitions, { version: '0.16.0-dev.0' });
   assert.equal((await protocol({ jsonrpc: '2.0', id: 0, method: 'tools/list' })).error.code, -32002);
-  assert.equal((await protocol(initialize)).result.protocolVersion, '2025-11-25');
+  const initialized = await protocol(initialize); assert.equal(initialized.result.protocolVersion, '2025-11-25');
+  assert.deepEqual(initialized.result.serverInfo, { name: 'cuefluent-drafts', version: '0.16.0-dev.0' });
   await protocol(ready);
   assert.deepEqual((await protocol({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).result.tools.map(x => x.name), DRAFT_TOOL_NAMES);
   for (const name of ['manifest', 'constructor', '__proto__', 'write_file']) {
@@ -44,7 +45,7 @@ test('frame reader bounds both payload bytes and queued message count', async ()
 });
 
 test('real stdio child authenticates, serves tools, and loses capability when worker server closes', async t => {
-  const server = await serveDraftTools(workspace(), { definitions });
+  const server = await serveDraftTools(workspace(), { definitions, version: '0.16.0' });
   t.after(() => server.close());
   const child = spawn(server.descriptor.command, server.descriptor.args, { env: { ...process.env, ...server.descriptor.env }, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => { if (child.exitCode === null) child.kill(); });
@@ -55,7 +56,7 @@ test('real stdio child authenticates, serves tools, and loses capability when wo
   const request = message => new Promise((resolve, reject) => {
     replies.set(message.id, resolve); writeFrame(child.stdin, message).catch(reject);
   });
-  assert.equal((await request(initialize)).result.serverInfo.name, 'cuefluent-drafts');
+  assert.deepEqual((await request(initialize)).result.serverInfo, { name: 'cuefluent-drafts', version: '0.16.0' });
   await writeFrame(child.stdin, ready);
   const result = await request({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'read_note', arguments: { target: 'knowledge-base/synthetic.md' } } });
   assert.equal(result.result.structuredContent.target, 'knowledge-base/synthetic.md');
@@ -66,7 +67,7 @@ test('real stdio child authenticates, serves tools, and loses capability when wo
 test('unauthenticated IPC connection cannot reach a workspace tool', async t => {
   let calls = 0;
   const handlers = Object.fromEntries(DRAFT_TOOL_NAMES.map(name => [name, async () => { calls++; return {}; }]));
-  const server = await serveDraftTools(handlers, { definitions }); t.after(() => server.close());
+  const server = await serveDraftTools(handlers, { definitions, version: '0.16.0-dev.0' }); t.after(() => server.close());
   const socket = net.createConnection(server.descriptor.args[1]);
   const closed = once(socket, 'close'); socket.on('error', () => {});
   await once(socket, 'connect'); await writeFrame(socket, { token: '0'.repeat(64) }); await closed;
@@ -76,7 +77,7 @@ test('unauthenticated IPC connection cannot reach a workspace tool', async t => 
 test('draft protocol reports only bounded public log locations and omits arbitrary exception details', async () => {
   let error;
   const handlers = workspace(); handlers.read_activity_log = async () => { throw error; };
-  const protocol = draftProtocol(handlers, definitions); await protocol(initialize); await protocol(ready);
+  const protocol = draftProtocol(handlers, definitions, { version: '0.16.0-dev.0' }); await protocol(initialize); await protocol(ready);
   const request = { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_activity_log', arguments: { year: 2026 } } };
   error = Object.assign(new Error('PRIVATE_EXCEPTION_CONTENT'), { code: 'LOG_INVALID', file: '2026.md', line: 42 });
   const result = await protocol(request);
@@ -87,4 +88,9 @@ test('draft protocol reports only bounded public log locations and omits arbitra
     assert.deepEqual(JSON.parse(response.result.content[0].text), { error: details.code });
     assert.doesNotMatch(JSON.stringify(response), /PRIVATE_EXCEPTION_CONTENT|private\/notes/);
   }
+});
+
+test('draft protocol identity requires the exact package version', async () => {
+  for (const version of [undefined, '2.0', 'v0.16.0', '0.16.0+build.1', '01.16.0']) assert.throws(() => draftProtocol(workspace(), definitions, { version }), { code: 'PACKAGE_INVALID' });
+  await assert.rejects(serveDraftTools(workspace(), { definitions, version: '2.0' }), { code: 'PACKAGE_INVALID' });
 });

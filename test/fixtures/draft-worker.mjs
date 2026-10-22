@@ -47,7 +47,7 @@ if (options.stopAfterReady) {
 }
 try {
   await ownAttempt(store, 'project', options, async owner => {
-    const run = await prepareRunDrafts(store, owner, { client: 'codex', skillVersion: '2.0.0-dev.0', runClient: syntheticModel });
+    const run = await prepareRunDrafts(store, owner, { client: 'codex', skillVersion: '0.16.0-dev.0', runClient: syntheticModel });
     await fs.writeFile(path.join(root, 'draft-outcome.json'), JSON.stringify({ phase: run.phase, drafts: run.drafts.length }));
   });
 } catch (error) {

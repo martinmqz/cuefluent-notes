@@ -13,7 +13,7 @@ async function setup(t, client, mode = '') {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cuefluent-adapter-test-')), cwd = await mkdtemp(path.join(root, 'empty-')), trace = path.join(root, 'trace.jsonl');
   establishWindowsPrivacy(cwd);
   t.after(() => rm(root, { recursive: true, force: true }));
-  const options = { client, executable: process.execPath, cwd, prompt: 'Trusted drafting instructions.', input: 'SOURCE_SENTINEL untrusted data', mcp: { name: 'cuefluent', command: process.execPath, args: [fixture], env: { CUEFLUENT_DRAFT_BRIDGE_TOKEN: 'SYNTHETIC_SECRET' }, tools: ['notes_read', 'draft_write'] } };
+  const options = { client, version: '0.16.0-dev.0', executable: process.execPath, cwd, prompt: 'Trusted drafting instructions.', input: 'SOURCE_SENTINEL untrusted data', mcp: { name: 'cuefluent', command: process.execPath, args: [fixture], env: { CUEFLUENT_DRAFT_BRIDGE_TOKEN: 'SYNTHETIC_SECRET' }, tools: ['notes_read', 'draft_write'] } };
   const dependencies = { spawn: (_command, args, launch) => spawn(process.execPath, [fixture, ...args], { ...launch, env: { ...process.env, ...launch.env, FIXTURE_CLIENT: client, FIXTURE_MODE: mode, FIXTURE_TRACE: trace } }) };
   return { options, dependencies, trace: async () => (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse) };
 }
@@ -125,4 +125,11 @@ test('Claude clears inherited effort without mutating the parent environment', a
   };
   await runDraftingSession(fixture.options, fixture.dependencies);
   assert.equal((await fixture.trace())[0].effortOverride, null); assert.equal(process.env.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
+});
+
+test('Codex preflight identifies this package version and malformed versions are refused before any launch', async t => {
+  const fixture = await setup(t, 'codex');
+  assert.equal((await runDraftingSession(fixture.options, fixture.dependencies)).status, 'completed');
+  assert.equal((await fixture.trace()).find(value => value.method === 'initialize').clientVersion, '0.16.0-dev.0');
+  for (const version of [undefined, '2.0', 'v0.16.0', '0.16.0+build.1']) await assert.rejects(runDraftingSession({ ...fixture.options, version }, fixture.dependencies), { code: 'PROCESSING_ARGUMENT' });
 });

@@ -1,4 +1,5 @@
 import { fail } from '../core/errors.mjs';
+import { packageVersion } from '../core/version.mjs';
 import { bindClaudeCommand, parseAction } from './commands.mjs';
 import { readFrames, writeFrame } from '../processing/draft-protocol.mjs';
 
@@ -91,7 +92,8 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
       if (resolved?.status !== 'ready' || resolved.binding?.client !== 'codex' || resolved.binding.action !== action) fail('NATIVE_COMMAND_MISMATCH', 'The requested action does not match the exact native invocation.');
       return metadata(await executeInvocation(resolved.binding));
     },
-    protocol({ version = '2.0.0-dev.0' } = {}) {
+    protocol({ version } = {}) {
+      const serverVersion = packageVersion(version);
       let initialized = false, ready = false;
       const error = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
       const result = (id, value) => ({ jsonrpc: '2.0', id, result: value });
@@ -108,7 +110,7 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
           try { input = fields(params, ['protocolVersion', 'capabilities', 'clientInfo'], ['_meta']); } catch { return error(id, -32602, 'Invalid initialization.'); }
           if (initialized || typeof input.protocolVersion !== 'string' || !object(input.capabilities) || !object(input.clientInfo)) return error(id, -32602, 'Invalid initialization.');
           initialized = true;
-          return result(id, { protocolVersion: VERSIONS.includes(input.protocolVersion) ? input.protocolVersion : VERSIONS[0], capabilities: { tools: {} }, serverInfo: { name: 'cuefluent-control', version } });
+          return result(id, { protocolVersion: VERSIONS.includes(input.protocolVersion) ? input.protocolVersion : VERSIONS[0], capabilities: { tools: {} }, serverInfo: { name: 'cuefluent-control', version: serverVersion } });
         }
         if (!ready) return error(id, -32002, 'Initialize the control connection first.');
         if (method === 'tools/list') {
@@ -132,9 +134,9 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
 }
 
 /** Serial bounded MCP stdio. Host entrypoints own exit policy and resources. */
-export function serveControl(bridge, { input = process.stdin, output = process.stdout, onFailure = () => {} } = {}) {
+export function serveControl(bridge, { input = process.stdin, output = process.stdout, onFailure = () => {}, version } = {}) {
   if (typeof bridge?.protocol !== 'function' || typeof onFailure !== 'function') fail('CONTROL_ADAPTER_INVALID', 'A control protocol is required.');
-  const protocol = bridge.protocol();
+  const protocol = bridge.protocol({ version });
   return readFrames(input, async message => { const response = await protocol(message); if (response) await writeFrame(output, response); }, onFailure,
     { maxBytes: CONTROL_LIMITS.requestBytes, queuedBytes: 2 * CONTROL_LIMITS.requestBytes });
 }

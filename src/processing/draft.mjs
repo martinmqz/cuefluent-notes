@@ -79,7 +79,7 @@ export async function prepareRunDrafts(store, owner, { client, skillVersion, mod
   let bridge, ready, failure;
   try {
     bridge = await serveDraftTools(workspace, { definitions: NOTE_WORKSPACE_TOOLS, version: skillVersion, signal });
-    const result = await runClient({ client, model, effort, cwd: cwd.root, prompt: DRAFTING_PROMPT,
+    const result = await runClient({ client, version: skillVersion, model, effort, cwd: cwd.root, prompt: DRAFTING_PROMPT,
       input: draftingInput(input, run.settings), mcp: bridge.descriptor, signal });
     if (result?.status !== 'completed') fail('DRAFT_SESSION_INCOMPLETE', 'The native drafting session did not complete.');
     const manifest = await workspace.manifest();

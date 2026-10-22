@@ -10,6 +10,10 @@ export const PACKAGE_LIMITS = Object.freeze({ files: 4096, fileBytes: 16 * 1024 
 export const REFERENCES = Object.freeze(['setup', 'commands', 'notes', 'metadata', 'storage', 'verification', 'distribution']);
 export const INVENTORY = 'package-inventory.json';
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+// The source package version names tags, archives and manifests: an exact SemVer
+// core with an optional prerelease and no build metadata. Companion copies of
+// this tool run without src/, so src/core/version.mjs keeps an identical copy.
+export const PACKAGE_VERSION = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const json = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -99,7 +103,7 @@ export async function readProductionDependencies({ repoRoot, cacheRoot = default
   repoRoot = await fs.realpath(repoRoot);
   try { cacheRoot = await fs.realpath(cacheRoot); } catch (error) { if (error.code !== 'ENOENT') throw error; requirePackage(false, 'PACKAGE_CACHE_MISSING'); }
   const source = parse(await readFile(repoRoot, 'package.json')), lockBytes = await readFile(repoRoot, 'package-lock.json'), lock = parse(lockBytes);
-  requirePackage(source.name === 'cuefluent-notes' && VERSION.test(source.version) && source.type === 'module' && typeof source.license === 'string' && source.engines?.node &&
+  requirePackage(source.name === 'cuefluent-notes' && PACKAGE_VERSION.test(source.version) && source.type === 'module' && typeof source.license === 'string' && source.engines?.node &&
     lock.lockfileVersion === 3 && lock.name === source.name && lock.version === source.version && lock.packages?.[''] &&
     equal(lock.packages[''].dependencies, source.dependencies) && equal(lock.packages[''].engines, source.engines), 'PACKAGE_LOCK_INVALID');
   for (const value of Object.values(source.dependencies ?? {})) requirePackage(typeof value === 'string' && VERSION.test(value), 'PACKAGE_DEPENDENCY_UNPINNED');
@@ -276,7 +280,7 @@ export async function readVerifiedPackage(root, { expectedInventorySha256 } = {}
   const selected = await fs.lstat(root); requirePackage(selected.isDirectory() && !selected.isSymbolicLink(), 'PACKAGE_SOURCE_UNSAFE');
   root = await fs.realpath(root); const bytes = await readFile(root, INVENTORY, PACKAGE_LIMITS.inventoryBytes), inventory = parse(bytes);
   requirePackage(keys(inventory, ['format', 'schema', 'client', 'version', 'node', 'sourceLockSha256', 'dependencies', 'files']) && inventory.format === 'cuefluent-notes-package' && inventory.schema === 1 &&
-    ['codex', 'claude'].includes(inventory.client) && VERSION.test(inventory.version) && /^[a-f0-9]{64}$/.test(inventory.sourceLockSha256) && Array.isArray(inventory.dependencies) && Array.isArray(inventory.files) && inventory.files.length > 0 && inventory.files.length < PACKAGE_LIMITS.files && json(inventory).equals(bytes), 'PACKAGE_INVENTORY_INVALID');
+    ['codex', 'claude'].includes(inventory.client) && PACKAGE_VERSION.test(inventory.version) && /^[a-f0-9]{64}$/.test(inventory.sourceLockSha256) && Array.isArray(inventory.dependencies) && Array.isArray(inventory.files) && inventory.files.length > 0 && inventory.files.length < PACKAGE_LIMITS.files && json(inventory).equals(bytes), 'PACKAGE_INVENTORY_INVALID');
   if (expectedInventorySha256 !== undefined) requirePackage(typeof expectedInventorySha256 === 'string' && /^[a-f0-9]{64}$/.test(expectedInventorySha256) && digest(bytes) === expectedInventorySha256, 'PACKAGE_TRUSTED_DIGEST_MISMATCH');
   const files = [], inspected = []; let entries = 0;
   async function visit(relative = '') {

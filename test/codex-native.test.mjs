@@ -157,6 +157,7 @@ test('retained historical path replacement fails exact inode verification', asyn
 async function subprocess(t, mode = 'normal', overrides = {}) {
   const directory = await temporary(t), script = path.join(directory, 'server.mjs');
   await writeFile(script, `import readline from 'node:readline';
+import { writeFileSync } from 'node:fs';
 const mode=${JSON.stringify(mode)};let initialized=false;
 readline.createInterface({input:process.stdin}).on('line',line=>{
  const x=JSON.parse(line);if(!x.id)return;
@@ -165,19 +166,20 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(mode==='oversize'){console.log('x'.repeat(4096));return;}
  if(mode==='invalid'){console.log('{private native content');return;}
  if(mode==='init-error'&&x.method==='initialize'){console.log(JSON.stringify({id:x.id,error:{code:-32000,message:'Synthetic startup unavailable'}}));return;}
- if(x.method==='initialize'){initialized=true;console.log(JSON.stringify({id:x.id,result:{}}));return;}
+ if(x.method==='initialize'){initialized=true;writeFileSync(${JSON.stringify(path.join(directory, 'client-info.json'))},JSON.stringify(x.params.clientInfo));console.log(JSON.stringify({id:x.id,result:{}}));return;}
  if(!initialized||!['thread/read','thread/items/list','thread/turns/list'].includes(x.method))process.exit(7);
  const result=x.method==='thread/read'?{thread:{id:${JSON.stringify(id)},path:${JSON.stringify(path.join(directory, 'absent.jsonl'))},cwd:${JSON.stringify(directory)},turns:[]}}:x.method==='thread/turns/list'?{data:[{id:${JSON.stringify(turn)},items:[],itemsView:'notLoaded',status:'inProgress'}]}:{data:[${JSON.stringify(user())}],nextCursor:null};
  console.log(JSON.stringify({id:x.id,result}));
 });`);
   let args, child;
-  const adapter = createCodexNativeAdapter({ command: process.execPath, spawn(command, argv, options) { args = argv; child = spawn(process.execPath, [script], options); return child; }, ...overrides });
+  const adapter = createCodexNativeAdapter({ command: process.execPath, version: '0.16.0-dev.0', spawn(command, argv, options) { args = argv; child = spawn(process.execPath, [script], options); return child; }, ...overrides });
   t.after(() => adapter.close());
-  return { adapter, script, args: () => args, child: () => child };
+  return { adapter, script, args: () => args, child: () => child, clientInfo: async () => JSON.parse(await readFile(path.join(directory, 'client-info.json'), 'utf8')) };
 }
 
 test('default subprocess initializes and performs only stored reads with fixed flags', async t => {
   const probe = await subprocess(t); assert.equal((await probe.adapter.bindCommand(meta, selection)).status, 'ready');
+  assert.deepEqual(await probe.clientInfo(), { name: 'cuefluent_notes_source', version: '0.16.0-dev.0' });
   assert.deepEqual(probe.args(), CODEX_NATIVE_ARGUMENTS); await probe.adapter.close(); assert.notEqual(probe.child().exitCode, undefined);
 });
 
@@ -225,4 +227,11 @@ test('an initialization RPC rejection retires the reader before the next command
   await writeFile(probe.script, (await readFile(probe.script, 'utf8')).replace('const mode="init-error"', 'const mode="normal"'));
   assert.equal((await probe.adapter.bindCommand(meta, selection)).status, 'ready');
   assert.notEqual(probe.child(), old);
+});
+
+test('the native reader identifies itself to app-server with the exact package version only', async t => {
+  for (const version of [undefined, '2.0', 'v0.16.0', '0.16.0+build.1']) assert.throws(() => createCodexNativeAdapter({ command: process.execPath, version }), { code: 'PACKAGE_INVALID' });
+  const probe = await subprocess(t, 'normal', { version: '0.16.0' });
+  assert.equal((await probe.adapter.bindCommand(meta, selection)).status, 'ready');
+  assert.equal((await probe.clientInfo()).version, '0.16.0'); await probe.adapter.close();
 });

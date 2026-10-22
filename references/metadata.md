@@ -10,7 +10,7 @@ id: "9dd25a37-780e-4490-9738-40c601c5b6f5"
 created: "2026-01-01T12:00:00.000Z"
 updated: "2026-01-01T12:00:00.000Z"
 generation:
-  skill_version: "2.0.0"
+  skill_version: "0.16.0"
 -->
 # Retry policy
 

@@ -56,7 +56,7 @@ if (options.stopAtCleanup) {
 }
 try {
   const result = await ownAttempt(store, 'project', options, owner => runProcessingWork(store, owner,
-    { ...options, client: 'codex', skillVersion: '2.0.0-dev.0', runClient: syntheticModel }));
+    { ...options, client: 'codex', skillVersion: '0.16.0-dev.0', runClient: syntheticModel }));
   await fs.writeFile(path.join(root, `outcome-${options.attemptId}.json`), JSON.stringify(result));
 } catch (error) {
   await fs.writeFile(path.join(root, `error-${options.attemptId}.json`), JSON.stringify({ code: error.code, message: error.message })); process.exitCode = 1;

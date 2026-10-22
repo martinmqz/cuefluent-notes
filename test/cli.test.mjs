@@ -65,8 +65,23 @@ test('CLI Claude MCP polling is read-only and accepts no caller native identitie
   ].map(item => JSON.stringify(item)).join('\n') + '\n';
   const server = await f.run(['mcp', 'claude'], input); assert.equal(server.code, 0); assert.equal(server.stderr, '');
   const responses = server.stdout.trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(responses.find(item => item.id === 1).result.serverInfo, { name: 'cuefluent-control', version: JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version });
   assert.equal(responses.find(item => item.id === 2).result.tools.length, 1);
   assert.equal(responses.find(item => item.id === 3).result.structuredContent.state, 'expired');
   assert.equal(responses.find(item => item.id === 4).result.isError, true);
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('the CLI accepts any exact public package version and refuses malformed identities before any work', async t => {
+  const f = await fixture(t), copy = path.join(f.root, 'package-copy'), manifest = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  await fs.cp(fileURLToPath(new URL('../src', import.meta.url)), path.join(copy, 'src'), { recursive: true });
+  await fs.symlink(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(copy, 'node_modules'), 'junction');
+  const attempt = async (name, version) => { await fs.writeFile(path.join(copy, 'package.json'), JSON.stringify({ ...manifest, name, version })); return f.run(['settings'], '', path.join(copy, 'src', 'cli.mjs')); };
+  for (const version of ['0.16.0-dev.0', '0.16.0', '2.0.0']) {
+    const result = await attempt('cuefluent-notes', version); assert.deepEqual({ code: result.code, stderr: result.stderr }, { code: 0, stderr: '' }); assert.equal(JSON.parse(result.stdout).state, 'unconfigured');
+  }
+  for (const [name, version] of [['cuefluent-notes', '0.16'], ['cuefluent-notes', 'v0.16.0'], ['cuefluent-notes', '0.16.0+build.1'], ['cuefluent-notes', '01.16.0'], ['other-package', '0.16.0']]) {
+    const result = await attempt(name, version); assert.equal(result.code, 1); assert.match(result.stderr, /PACKAGE_INVALID/);
+  }
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
 });

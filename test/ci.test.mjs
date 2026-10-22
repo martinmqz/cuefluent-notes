@@ -36,3 +36,23 @@ test('candidate receipt cannot substitute another archive type or client', async
   await fs.writeFile(path.join(f.output, 'build.json'), JSON.stringify(receipt));
   await assert.rejects(verifyBuildArchives(f.output), { code: 'CI_CANDIDATE_INVALID' });
 });
+
+test('candidate receipts carry the public version line and reject malformed or mismatched versions', async t => {
+  const f = await packageSource(t);
+  assert.equal(f.built.version, JSON.parse(await fs.readFile(path.join(f.source, 'package.json'), 'utf8')).version);
+  assert.ok([...f.built.packages.flatMap(item => item.archives), ...f.built.tools].every(archive => archive.path.includes(`-${f.built.version}-`)));
+  for (const version of ['0.16', 'v0.16.0', '0.16.0+build.1', '01.16.0', 1, '0.17.0-dev.0']) {
+    const receipt = structuredClone(f.built); receipt.version = version;
+    await fs.writeFile(path.join(f.output, 'build.json'), JSON.stringify(receipt));
+    await assert.rejects(verifyBuildArchives(f.output), { code: 'CI_CANDIDATE_INVALID' });
+  }
+});
+
+test('release tag verification accepts any exact public version tag and keeps package, commit and main-history checks', async () => {
+  const text = await fs.readFile(path.resolve(import.meta.dirname, '../.github/workflows/ci.yml'), 'utf8');
+  const source = /if \(!\/(\^v[^/]+)\/\.test\(tag\)\)/.exec(text)?.[1]; assert.ok(source);
+  const pattern = new RegExp(source);
+  for (const tag of ['v0.16.0', 'v0.16.0-dev.0', 'v2.0.0', 'v10.4.1-rc.2']) assert.match(tag, pattern);
+  for (const tag of ['0.16.0', 'v0.16', 'v0.16.0+build.1', 'v01.16.0', 'v0.16.0 ', 'release-0.16.0']) assert.doesNotMatch(tag, pattern);
+  assert.match(text, /metadata\.version !== tag\.slice\(1\)/); assert.match(text, /refs\/tags\/\$\{tag\}\^\{commit\}/); assert.match(text, /'merge-base', '--is-ancestor', 'HEAD', 'origin\/main'/);
+});

@@ -7,7 +7,7 @@ import { createSyncLaunchGuard, ensureSyncSteward, launchDetachedSyncSteward, la
  * never model arguments or source text. Constructing this runtime opens nothing.
  * Collection creates a native reader only in its independent worker process.
  */
-export function createSyncRuntime({ store, entry, clients = {}, signal,
+export function createSyncRuntime({ store, entry, version, clients = {}, signal,
   createCodexAdapter = createCodexNativeAdapter, launchSteward = launchDetachedSyncSteward,
   launchAttempt = launchSyncAttempt } = {}) {
   if (typeof createCodexAdapter !== 'function' || typeof launchSteward !== 'function' || typeof launchAttempt !== 'function') fail('SYNC_RUNTIME_INVALID', 'Sync workers require trusted native and Node launch capabilities.');
@@ -30,7 +30,7 @@ export function createSyncRuntime({ store, entry, clients = {}, signal,
       let adapter = contract.nativeAdapter, owned = false;
       try {
         const resolveNativeSource = contract.resolveNativeSource ?? (client === 'codex' || adapter ? async input => {
-          if (!adapter) { adapter = createCodexAdapter(); owned = true; }
+          if (!adapter) { adapter = createCodexAdapter({ version }); owned = true; }
           return adapter.resolveNativeSource(input);
         } : null);
         return await collectChat(store, { client, sessionId, limits,

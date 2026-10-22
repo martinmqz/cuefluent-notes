@@ -10,7 +10,7 @@ const has = (result, code) => result.diagnostics.some(issue => issue.code === co
 test('plain notes and generated notes have visible H2 bodies', () => {
   const plain = '# Topic\n\n## Answer\n\nUseful content.\n';
   assert.equal(validateNote(plain).valid, true);
-  assert.equal(validateNote(createGeneratedNote(plain, { now: '2026-10-22T01:00:00Z', skillVersion: '2.0.0' }), { generated: true }).valid, true);
+  assert.equal(validateNote(createGeneratedNote(plain, { now: '2026-10-22T01:00:00Z', skillVersion: '0.16.0' }), { generated: true }).valid, true);
   assert.equal(has(validateNote('# Topic\n\nOnly introduction.'), 'no-answer-sections'), true);
   assert.equal(has(validateNote('# Topic\n\n## Answer\n\n<!-- comment -->\n'), 'empty-body'), true);
   assert.equal(validateNote('## Existing plain section\n\nBody.').valid, true);
@@ -81,8 +81,8 @@ test('raw HTML nesting and inline/nested aliases retain structural checks', () =
 });
 
 test('existing metadata identity and unfamiliar values cannot bypass preservation helpers', () => {
-  const original = createGeneratedNote('# T\n\n## A\n\nBody.', { id: 'original', now: '2026-10-22T01:00:00Z', skillVersion: '2.0.0', metadata: { custom: 'keep' } });
-  const replacement = createGeneratedNote('# T\n\n## A\n\nChanged body.', { id: 'replacement', now: '2026-10-22T01:00:00Z', skillVersion: '2.0.0' });
+  const original = createGeneratedNote('# T\n\n## A\n\nBody.', { id: 'original', now: '2026-10-22T01:00:00Z', skillVersion: '0.16.0', metadata: { custom: 'keep' } });
+  const replacement = createGeneratedNote('# T\n\n## A\n\nChanged body.', { id: 'replacement', now: '2026-10-22T01:00:00Z', skillVersion: '0.16.0' });
   const result = validateNote(replacement, { existing: original });
   assert.equal(result.valid, false);
   assert.equal(has(result, 'metadata-identity-changed'), true);
@@ -117,7 +117,7 @@ test('HTML destinations reject decoded leading whitespace and active attributes 
 test('new generated notes require exactly one topic H1 while existing multi-topic structure stays valid', () => {
   const body = '# First\n\n## Answer\n\nOne.\n\n# Second\n\n## Answer\n\nTwo.\n';
   assert.equal(validateNote(body).valid, true);
-  assert.equal(has(validateNote(createGeneratedNote(body, { now: '2026-10-22T01:00:00Z', skillVersion: '2.0.0' }), { generated: true }), 'topic-h1-count'), true);
+  assert.equal(has(validateNote(createGeneratedNote(body, { now: '2026-10-22T01:00:00Z', skillVersion: '0.16.0' }), { generated: true }), 'topic-h1-count'), true);
 });
 
 test('overlong adversarial headings stop at the source-line bound before Markdown inspection', () => {

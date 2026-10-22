@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { buildPackages, verifyPackage, packagePath, PACKAGE_LIMITS } from './packaging.mjs';
+import { buildPackages, verifyPackage, packagePath, PACKAGE_LIMITS, PACKAGE_VERSION } from './packaging.mjs';
 import { installPackage } from './install.mjs';
 
 const requireCI = condition => { if (!condition) { const error = new Error('Candidate build verification failed.'); error.code = 'CI_CANDIDATE_INVALID'; throw error; } };
@@ -16,7 +16,7 @@ async function bounded(file, limit) {
 
 export async function verifyBuildArchives(root) {
   const bytes = await bounded(path.join(root, 'build.json'), 1024 * 1024), build = decode(bytes);
-  requireCI(build.schema === 1 && /^2\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(build.version) && Array.isArray(build.packages) && build.packages.length === 2 &&
+  requireCI(build.schema === 1 && PACKAGE_VERSION.test(build.version) && Array.isArray(build.packages) && build.packages.length === 2 &&
     build.packages[0].client === 'codex' && build.packages[1].client === 'claude' && Array.isArray(build.tools) && build.tools.length === 2);
   for (const item of [...build.packages, { client: 'tools', archives: build.tools }]) {
     requireCI(Array.isArray(item.archives) && item.archives.length === 2);

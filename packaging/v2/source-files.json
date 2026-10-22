@@ -21,6 +21,7 @@
   "src/core/result.mjs",
   "src/core/run.mjs",
   "src/core/settings.mjs",
+  "src/core/version.mjs",
   "src/logs/index.mjs",
   "src/logs/storage.mjs",
   "src/notes/index.mjs",

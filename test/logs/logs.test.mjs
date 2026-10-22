@@ -5,7 +5,7 @@ import { inspectMetadata, validateNote } from '../../src/notes/index.mjs';
 
 const options = { year: 2026, seriesId: 'synthetic-series', timezone: 'America/Los_Angeles' };
 const eventId = index => `12345678-1234-4123-8123-${String(index).padStart(12, '0')}`;
-const create = (overrides = {}) => createAnnualLog({ ...options, noteId: `synthetic-${overrides.year ?? options.year}`, createdAt: '2026-01-01T00:00:00Z', skillVersion: '2.0.0', ...overrides });
+const create = (overrides = {}) => createAnnualLog({ ...options, noteId: `synthetic-${overrides.year ?? options.year}`, createdAt: '2026-01-01T00:00:00Z', skillVersion: '0.16.0', ...overrides });
 const event = (index = 1, overrides = {}) => ({ eventId: eventId(index), projectId: 'synthetic', savedAt: '2026-10-22T01:00:00Z', action: 'created', target: 'knowledge-base/topic.md', summary: 'Synthetic topic added', ...overrides });
 const append = (bytes, index = 1, overrides = {}, opts = options) => appendLogEntry(bytes, event(index, overrides), opts).bytes;
 

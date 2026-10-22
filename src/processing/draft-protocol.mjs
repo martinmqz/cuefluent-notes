@@ -1,4 +1,5 @@
 import { fail } from '../core/errors.mjs';
+import { packageVersion } from '../core/version.mjs';
 import { logDiagnostic } from '../logs/index.mjs';
 
 export const DRAFT_FRAME_BYTES = 1024 * 1024;
@@ -52,7 +53,8 @@ const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result });
 
 /** Only these five draft capabilities are reachable. There is no arbitrary
  * property dispatch, filesystem operation, sampling, or tool forwarding. */
-export function draftProtocol(workspace, definitions, { version = '2.0.0-dev.0' } = {}) {
+export function draftProtocol(workspace, definitions, { version } = {}) {
+  const serverVersion = packageVersion(version);
   if (!Array.isArray(definitions) || definitions.length !== DRAFT_TOOL_NAMES.length ||
       new Set(definitions.map(item => item.name)).size !== DRAFT_TOOL_NAMES.length ||
       definitions.some(item => !DRAFT_TOOL_NAMES.includes(item.name) || !object(item.inputSchema)) ||
@@ -77,7 +79,7 @@ export function draftProtocol(workspace, definitions, { version = '2.0.0-dev.0' 
           !object(message.params.capabilities) || !object(message.params.clientInfo)) return rpcError(id, -32602, 'Invalid initialization.');
       initialized = true;
       const protocolVersion = VERSIONS.includes(message.params.protocolVersion) ? message.params.protocolVersion : VERSIONS[0];
-      return rpcResult(id, { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'cuefluent-drafts', version } });
+      return rpcResult(id, { protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'cuefluent-drafts', version: serverVersion } });
     }
     if (!ready) return rpcError(id, -32002, 'Initialize the draft connection first.');
     if (message.method === 'tools/list') {

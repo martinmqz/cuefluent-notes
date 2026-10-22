@@ -12,7 +12,7 @@ if (options.stopAfterReplace) {
 }
 try {
   await ownAttempt(store, 'synthetic', options, async owner => {
-    const result = await flushRunLogs(store, owner, { skillVersion: '2.0.0' });
+    const result = await flushRunLogs(store, owner, { skillVersion: '0.16.0' });
     await fs.writeFile(path.join(root, 'log-result.json'), JSON.stringify(result));
   });
 } catch (error) {

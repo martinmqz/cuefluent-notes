@@ -11,7 +11,7 @@ import { establishActivityLogSeries, inspectActivityLogSeries, readActivityLog, 
 import { inspectAnnualLog } from '../../src/logs/index.mjs';
 
 const setupOptions = () => ({ year: 2026, seriesId: 'synthetic-series', noteId: randomUUID(), timezone: 'America/Los_Angeles',
-  createdAt: '2026-10-22T01:00:00.000Z', skillVersion: '2.0.0', runId: randomUUID() });
+  createdAt: '2026-10-22T01:00:00.000Z', skillVersion: '0.16.0', runId: randomUUID() });
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-log-storage-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -54,7 +54,7 @@ test('established series preserves unrelated sibling files and stages while malf
   const existing = await fs.readFile(path.join(logs, '2026.md'));
   assert.deepEqual((await inspectActivityLogSeries(f.destination)).binding, binding);
   assert.equal((await readActivityLog(f.destination, { year: 2026 })).entries.length, 0);
-  const bytes = logCandidate(binding, event(), existing, { skillVersion: '2.0.0' }).bytes;
+  const bytes = logCandidate(binding, event(), existing, { skillVersion: '0.16.0' }).bytes;
   await fs.writeFile(path.join(logs, '2026.md'), bytes);
   assert.equal((await readActivityLog(f.destination, { year: 2026 })).entries.length, 1);
   assert.deepEqual(await establishActivityLogSeries(f.pin, { ...setupOptions(), persistIntent: async () => assert.fail('Do not replace series.') }), binding);
@@ -75,8 +75,8 @@ test('read-only bounded queries follow current targets, reject changed cursors, 
   const binding = await establishActivityLogSeries(f.pin, { ...options, persistIntent: async () => {} });
   const target = path.join(f.notes, 'logs/2026.md'), first = event(), second = event({ savedAt: '2026-10-23T01:00:00.000Z' });
   let bytes = await fs.readFile(target);
-  bytes = logCandidate(binding, first, bytes, { skillVersion: '2.0.0' }).bytes;
-  bytes = logCandidate(binding, second, bytes, { skillVersion: '2.0.0' }).bytes; await fs.writeFile(target, bytes);
+  bytes = logCandidate(binding, first, bytes, { skillVersion: '0.16.0' }).bytes;
+  bytes = logCandidate(binding, second, bytes, { skillVersion: '0.16.0' }).bytes; await fs.writeFile(target, bytes);
   const result = await readActivityLog(f.destination, { year: 2026, binding, limit: 1, projectId: 'synthetic', target: 'topic.markdown' });
   assert.equal(result.entries[0].eventId, second.eventId); assert.ok(result.nextCursor);
   assert.equal((await readActivityLog(f.destination, { year: 2026, binding, limit: 1, projectId: 'synthetic', target: 'topic.markdown', cursor: result.nextCursor })).entries[0].eventId, first.eventId);
@@ -89,9 +89,9 @@ test('read-only bounded queries follow current targets, reject changed cursors, 
 
 test('rollover uses fixed series zone and reproducible annual identity and rejects impossible dates', async t => {
   const f = await fixture(t), binding = await establishActivityLogSeries(f.pin, { ...setupOptions(), persistIntent: async () => {} });
-  const input = event({ savedAt: '2027-01-01T09:00:00.000Z' }), first = logCandidate(binding, input, null, { skillVersion: '2.0.0' });
+  const input = event({ savedAt: '2027-01-01T09:00:00.000Z' }), first = logCandidate(binding, input, null, { skillVersion: '0.16.0' });
   assert.equal(first.relative, 'logs/2027.md');
-  assert.deepEqual(first.bytes, logCandidate(binding, input, null, { skillVersion: '2.0.0' }).bytes);
+  assert.deepEqual(first.bytes, logCandidate(binding, input, null, { skillVersion: '0.16.0' }).bytes);
   const annual = inspectAnnualLog(first.bytes, { year: 2027 });
   assert.equal(annual.seriesId, binding.seriesId); assert.equal(annual.timezone, binding.timezone);
   assert.equal(logYear('2027-01-01T01:00:00.000Z', binding.timezone), 2026);

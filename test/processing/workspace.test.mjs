@@ -9,7 +9,7 @@ import { createProject } from '../../src/core/settings.mjs';
 import { createGeneratedNote, inspectMetadata } from '../../src/notes/index.mjs';
 import { createAnnualLog, appendLogEntry, queryLogEntries } from '../../src/logs/index.mjs';
 
-const runId = '12345678-1234-4123-8123-123456789abc', now = '2026-10-22T01:00:00Z', skillVersion = '2.0.0-dev.0';
+const runId = '12345678-1234-4123-8123-123456789abc', now = '2026-10-22T01:00:00Z', skillVersion = '0.16.0-dev.0';
 const body = '# Synthetic topic\n\n## Answer\n\nUseful original content.\n';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function fixture(t, options = {}) {

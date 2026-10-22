@@ -1,5 +1,6 @@
 import { spawn as nativeSpawn } from 'node:child_process';
 import { executablePath } from './executable.mjs';
+import { packageVersion } from '../core/version.mjs';
 import { createHash } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
 import { assertAbsolute } from '../storage/paths.mjs';
@@ -59,7 +60,7 @@ function locator(meta) {
  * arbitrary RPC escape hatch. A fresh source-free app-server owns this stdio pipe.
  * Its normal config may load internally; invocation flags disable capabilities.
  */
-function readerSession({ command, spawn, timeoutMs, responseBytes }) {
+function readerSession({ command, spawn, timeoutMs, responseBytes, version }) {
   let child, initialized, failure, closed = false, nextId = 0, bytes = Buffer.alloc(0), exited;
   const waiting = new Map();
   function stop(code) {
@@ -112,7 +113,7 @@ function readerSession({ command, spawn, timeoutMs, responseBytes }) {
         else request.resolve(message.result);
       }
     });
-    initialized = rpc('initialize', { clientInfo: { name: 'cuefluent_notes_source', version: '2.0.0' }, capabilities: { experimentalApi: true } })
+    initialized = rpc('initialize', { clientInfo: { name: 'cuefluent_notes_source', version }, capabilities: { experimentalApi: true } })
       .then(() => send({ method: 'initialized', params: {} }))
       .catch(error => { throw stop(error.code ?? 'NATIVE_READER_FAILED'); });
     return initialized;
@@ -168,7 +169,7 @@ function cliReader(options) {
  * never tool arguments. Known physical sources are bounded retained capabilities,
  * not a transcript-discovery index or completed-command history.
  */
-export function createCodexNativeAdapter({ request, command = 'codex', spawn = nativeSpawn, knownSources = [],
+export function createCodexNativeAdapter({ request, command = 'codex', spawn = nativeSpawn, knownSources = [], version,
   timeoutMs = CODEX_NATIVE_LIMITS.timeoutMs, responseBytes = CODEX_NATIVE_LIMITS.responseBytes,
   itemPages = CODEX_NATIVE_LIMITS.itemPages, pageItems = CODEX_NATIVE_LIMITS.pageItems } = {}) {
   for (const [value, max] of [[timeoutMs, CODEX_NATIVE_LIMITS.timeoutMs], [responseBytes, CODEX_NATIVE_LIMITS.responseBytes], [itemPages, CODEX_NATIVE_LIMITS.itemPages], [pageItems, CODEX_NATIVE_LIMITS.pageItems]]) {
@@ -178,7 +179,7 @@ export function createCodexNativeAdapter({ request, command = 'codex', spawn = n
       (request !== undefined && typeof request !== 'function') || !Array.isArray(knownSources) || knownSources.length > CODEX_NATIVE_LIMITS.knownSources) invalid('Invalid trusted native reader configuration.');
   const known = knownSources.map(input => Object.freeze({ sessionId: token(own(input, 'sessionId')), ...retained(input) }));
   if (known.some(source => !source.identity)) invalid('Known historical paths require their exact retained inode.');
-  const reader = request ? null : cliReader({ command, spawn, timeoutMs, responseBytes });
+  const reader = request ? null : cliReader({ command, spawn, timeoutMs, responseBytes, version: packageVersion(version) });
   let closed = false, previousActive = null;
   async function query(method, params) {
     if (closed) fail('NATIVE_READER_CLOSED', 'The native metadata adapter is closed.');

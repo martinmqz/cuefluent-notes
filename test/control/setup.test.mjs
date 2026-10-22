@@ -13,7 +13,7 @@ import { initializeStore, openStore, readSettings, updateSettings, withProject }
 import { readJSON, writeJSON } from '../../src/storage/files.mjs';
 import { createAnnualLog, inspectAnnualLog } from '../../src/logs/index.mjs';
 
-const now = '2026-10-22T01:00:00.000Z', skillVersion = '2.0.0-dev.0';
+const now = '2026-10-22T01:00:00.000Z', skillVersion = '0.16.0-dev.0';
 async function fixture(t, { enabled = false, destinationKind = 'directory' } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-setup-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

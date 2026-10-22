@@ -16,6 +16,7 @@ import { executeControl } from './control/execute.mjs';
 import { readProjectStatus } from './control/status.mjs';
 import { setupProject } from './control/setup.mjs';
 import { createSyncRuntime } from './sync/runtime.mjs';
+import { packageIdentity } from './core/version.mjs';
 import { processingLauncher } from './processing/worker.mjs';
 
 const ENTRY = fileURLToPath(import.meta.url), PACKAGE = path.dirname(path.dirname(ENTRY));
@@ -26,8 +27,7 @@ function nodeVersion() {
 }
 async function version() {
   const file = await readJSON(await pinDirectory(PACKAGE), 'package.json', { maxBytes: 64 * 1024 });
-  if (file.value.name !== 'cuefluent-notes' || !/^2\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(file.value.version)) fail('PACKAGE_INVALID', 'The package identity or version is invalid.');
-  return file.value.version;
+  return packageIdentity(file.value);
 }
 async function inputJSON(stream, maxBytes) {
   const chunks = []; let bytes = 0;
@@ -90,7 +90,7 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
   if (args.command === 'status') { output(await readProjectStatus(store, args.projectId)); return; }
-  const runtime = createSyncRuntime({ store, entry: ENTRY });
+  const runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
   const execute = commandExecutor(store, runtime, skillVersion);
   try {
     if (args.command === 'sync-steward') { if (store) await runtime.steward(); return; }
@@ -116,7 +116,7 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
       output({ hookSpecificOutput: { hookEventName: 'UserPromptExpansion', additionalContext: context } }); return;
     }
     if (args.command === 'mcp') {
-      const adapter = args.client === 'codex' ? createCodexNativeAdapter() : null;
+      const adapter = args.client === 'codex' ? createCodexNativeAdapter({ version: skillVersion }) : null;
       try {
         const bridge = createControlBridge({ client: args.client, selection: contract.codex, codexAdapter: adapter,
           executeInvocation: invocation => invocation.action === 'status' ? execute(invocation) : submitCommand(store,
@@ -124,7 +124,7 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
           readInvocation: handle => readInvocation(store, handle) });
         let finish;
         const ended = new Promise(resolve => { finish = resolve; });
-        const transport = serveControl(bridge, { onFailure: () => { process.exitCode = 1; process.stdin.destroy(); finish(); } });
+        const transport = serveControl(bridge, { version: skillVersion, onFailure: () => { process.exitCode = 1; process.stdin.destroy(); finish(); } });
         process.stdin.once('end', finish); process.stdin.once('close', finish);
         await ended; await transport.idle();
       } finally { await adapter?.close(); }

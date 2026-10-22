@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createGeneratedNote, inspectMetadata, preserveMetadata, validateMetadata } from '../../src/notes/metadata.mjs';
 
 const body = '# Synthetic topic\n\n## Decision\n\nUse the checked result.\n';
-const options = { id: 'synthetic-note', now: '2026-10-22T01:00:00Z', skillVersion: '2.0.0-dev.0' };
+const options = { id: 'synthetic-note', now: '2026-10-22T01:00:00Z', skillVersion: '0.16.0-dev.0' };
 const metadata = payload => `<!-- cuefluent\n${payload}\n-->\n${body}`;
 
 test('new generated metadata uses quoted timestamps and supported document provenance', () => {

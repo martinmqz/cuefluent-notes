@@ -11,8 +11,8 @@ function codex(executeInvocation = async () => ({ state: 'running' }), bindComma
   return createControlBridge({ client: 'codex', selection: { name: 'notes', skillPath: path.resolve('SKILL.md') }, codexAdapter: { bindCommand }, executeInvocation });
 }
 async function protocol(bridge) {
-  const call = bridge.protocol();
-  assert.equal((await call({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } })).result.serverInfo.name, 'cuefluent-control');
+  const call = bridge.protocol({ version: '0.16.0-dev.0' });
+  assert.deepEqual((await call({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } })).result.serverInfo, { name: 'cuefluent-control', version: '0.16.0-dev.0' });
   await call({ jsonrpc: '2.0', method: 'notifications/initialized' }); return call;
 }
 
@@ -110,9 +110,17 @@ test('response profile bounds metadata and preserves truthful running/review/res
 test('bounded stdio framing processes initialization and rejects oversized input without calls', async () => {
   const input = new PassThrough(), output = new PassThrough(); let failure, calls = 0, text = '';
   output.on('data', chunk => { text += chunk; });
-  const transport = serveControl(codex(async () => { calls++; return { state: 'running' }; }), { input, output, onFailure: error => { failure = error; } });
+  const transport = serveControl(codex(async () => { calls++; return { state: 'running' }; }), { input, output, version: '0.16.0', onFailure: error => { failure = error; } });
   input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } }) + '\n');
-  await transport.idle(); assert.equal(JSON.parse(text).result.serverInfo.name, 'cuefluent-control');
+  await transport.idle(); assert.deepEqual(JSON.parse(text).result.serverInfo, { name: 'cuefluent-control', version: '0.16.0' });
   input.write('x'.repeat(CONTROL_LIMITS.requestBytes + 1)); await transport.idle(); assert.ok(failure); assert.equal(calls, 0);
   input.end(); output.end();
+});
+
+test('control protocol identity carries the exact package version and refuses malformed or missing versions', () => {
+  for (const version of [undefined, '2.0', 'v0.16.0', '0.16.0+build.1', '01.16.0', '0.16.0-', 2]) {
+    assert.throws(() => codex().protocol({ version }), { code: 'PACKAGE_INVALID' });
+    assert.throws(() => serveControl(codex(), { input: new PassThrough(), output: new PassThrough(), version }), { code: 'PACKAGE_INVALID' });
+  }
+  for (const version of ['0.16.0-dev.0', '0.16.0', '2.0.0', '10.4.1-rc.2']) assert.equal(typeof codex().protocol({ version }), 'function');
 });

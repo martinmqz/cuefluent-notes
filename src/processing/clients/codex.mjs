@@ -28,7 +28,7 @@ export async function runCodex(options, dependencies) {
     return false;
   };
   try {
-    const initialized = await preflight.request('initialize', { clientInfo: { name: 'cuefluent_processing', version: '2.0.0' }, capabilities: { experimentalApi: true } });
+    const initialized = await preflight.request('initialize', { clientInfo: { name: 'cuefluent_processing', version: options.version }, capabilities: { experimentalApi: true } });
     requireClient(typeof initialized?.userAgent === 'string');
     preflight.send({ method: 'initialized', params: {} });
     const requirements = await preflight.request('configRequirements/read', {});

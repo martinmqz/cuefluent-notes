@@ -125,7 +125,8 @@ The former release-published marketplace writer is removed. The
 [release preparation workflow](../.github/workflows/release.yml) has only a manual
 `workflow_dispatch` trigger, requires dispatch from `main` and an explicit
 confirmation. It accepts an
-existing exact v2 tag, verifies that the tag matches `package.json`, and requires
+existing exact version tag (`v` plus the `package.json` version, for example
+`v0.16.0`), verifies that the tag matches `package.json`, and requires
 its commit to be on `main` history before executing source tools. It runs the
 three-platform checks and uploads candidate artifacts with read-only repository
 permissions. It creates no GitHub release, commit, branch, PR, or marketplace

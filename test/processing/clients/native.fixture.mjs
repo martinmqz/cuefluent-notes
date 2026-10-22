@@ -26,7 +26,7 @@ if (client === 'codex' && args[0] === 'exec') {
       send({ type: 'result', session_id: sessionId, subtype: 'success', is_error: false, permission_denials: [], result: 'COMPLETE' }); return;
     }
     if (!method || method === 'initialized') return;
-    record({ method }); let result;
+    record({ method, clientVersion: value.params?.clientInfo?.version ?? null }); let result;
     if (method === 'initialize') result = client === 'claude' ? { claude_code_version: mode === 'updated' ? '2.1.308' : mode === 'old-version' ? '2.1.306' : mode === 'new-major' ? '3.0.0' : '2.1.307', current_permission_mode: 'dontAsk' } : { userAgent: 'Codex/0.163.0' };
     if (method === 'get_settings') result = { effective: { disableAllHooks: mode !== 'hooks', autoMemoryEnabled: false, enabledPlugins: {} }, sources: [{ source: mode === 'managed' ? 'policySettings' : 'flagSettings' }], applied: { model: 'claude-opus-5-5', effort: mode === 'effort-cap' ? 'medium' : process.env.CLAUDE_CODE_EFFORT_LEVEL ?? 'high' } };
     if (method === 'mcp_status') result = { mcpServers: [{ name: 'cuefluent', source: 'dynamic', status: mode === 'pending' && pending++ === 0 ? 'pending' : 'connected', tools: [{ name: 'notes_read' }, { name: 'draft_write' }, ...(mode === 'extra-tool' ? [{ name: 'shell' }] : [])] }] };

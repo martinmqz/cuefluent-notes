@@ -18,7 +18,7 @@ import { prepareNotePublication, publishNotePublication } from '../../src/storag
 import { establishActivityLogSeries, logCandidate, readActivityLog } from '../../src/logs/storage.mjs';
 import { pinProcessingLogging, flushRunLogs, discardRunLogPublication } from '../../src/processing/logging.mjs';
 
-const version = { skillVersion: '2.0.0' }, savedAt = '2026-10-22T01:00:00.000Z';
+const version = { skillVersion: '0.16.0' }, savedAt = '2026-10-22T01:00:00.000Z';
 async function fixture(t, { saved = true, pinned = true } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-log-process-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

@@ -32,7 +32,7 @@ async function fixture(t, { target = 'design.md', existing = true } = {}) {
   await setChatTracking(store, { client: 'claude', sessionId: 'chat', promptId: 'track', action: 'track', cwd, sourcePath: null });
   await withProject(store, 'project', () => appendQueueRecord(store.pin, queueRelative('claude', 'chat'), encodeQueueRecord('selected', Buffer.from('{"text":"synthetic"}'))));
   const { run } = await prepareProcessing(store, 'project', { kind: 'project' }, { reconcileChat: async () => ({ status: 'caught-up' }) });
-  const workspace = await openNoteWorkspace({ project, runId: run.id, skillVersion: '2.0.0-dev.0', now: '2026-10-22T09:00:00.000Z' });
+  const workspace = await openNoteWorkspace({ project, runId: run.id, skillVersion: '0.16.0-dev.0', now: '2026-10-22T09:00:00.000Z' });
   if (existing) await workspace.read_note({ target });
   await workspace.draft_note({ target, content: proposed, summary: 'Update the retry decision.', heading: 'Choice', usefulChange: true });
   await workspace.finish_drafting({ outcome: 'drafted' });

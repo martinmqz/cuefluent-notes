@@ -5,7 +5,7 @@ created: "2026-01-01T12:00:00.000Z"
 updated: "2026-01-01T12:00:00.000Z"
 type: task
 generation:
-  skill_version: "2.0.0-dev.0"
+  skill_version: "0.16.0-dev.0"
 -->
 # Synthetic retry documentation
 
