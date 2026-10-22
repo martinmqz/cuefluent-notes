@@ -1,6 +1,6 @@
 Capture and organize your knowledge for fast recall—right on cue.
 
-Cuefluent Notes 0.16.0 adds readable draft files with typed review decisions,
+Cuefluent Notes 0.16.0 adds readable proposal copies with typed review decisions,
 per-chat capture controls, and more reliable native-session handling. It also
 removes legacy-state compatibility. Processing still starts only when requested;
 installation and hook trust enable neither capture nor processing.
@@ -25,8 +25,10 @@ and [setup](https://github.com/martinmqz/cuefluent-notes/blob/v0.16.0/references
 ## Review drafts as Markdown
 
 `review` writes the exact proposed notes to a private review folder and returns
-links, note paths and a draft code. Open `proposed.md` in an editor; updates also
-include `current.md`. A separate summary contains source and inspection details.
+links, note paths and a draft code. Open `proposed.md` to read it; updates also
+include `current.md`. These are read-only review copies: editing them does not
+revise the pending proposal, change what `save` writes, or trigger a refusal.
+A separate summary contains source and inspection details.
 Claude uses these files and typed decisions instead of an unreadable native form.
 Codex also offers its native review form.
 
@@ -35,8 +37,14 @@ handles its captures without saving, and `review cancel <code>` releases its
 unapplied operation while keeping the captures pending. Without a code, a typed
 decision refers only to the draft most recently shown by a typed review in that
 chat. To keep a draft pending, do nothing or choose Later in the Codex form.
-Changed drafts or destinations are refused; viewing a folder does not itself
+Changes to the underlying pending proposal or destination are refused at save;
+edits to the review copies are not checked. Viewing a folder does not itself
 approve a save. Multiple drafts are identified by code and note path.
+
+For corrections, leave the proposal pending and provide the correction in the
+ordinary work chat. Capture it through the existing selected-source workflow
+before revising the proposal, then review the revised proposal before saving.
+See the [correction workflow](https://github.com/martinmqz/cuefluent-notes/blob/v0.16.0/references/processing-chat.md#claude-limitations).
 
 Use `/cuefluent-notes` before actions in Claude. In Codex, type `$` and select
 Cuefluent Notes from the menu before the action; a mention typed out by hand is
