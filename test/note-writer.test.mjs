@@ -47,6 +47,32 @@ if($null -ne $p.attributes){[IO.File]::SetAttributes($p.path,[int]$p.attributes)
   return JSON.parse(stdout.replace(/^\uFEFF/, ''));
 }
 
+async function windowsPublicationEvidence(notes) {
+  // Only this disposable synthetic fixture is inspected. Reuse the native
+  // reader so a failure reports every field in its actual metadata fingerprint.
+  const source = await fs.readFile(new URL('../src/storage/note-writer.mjs', import.meta.url), 'utf8');
+  const native = source.match(/const WINDOWS_NATIVE = String\.raw`([\s\S]*?)`;/)?.[1];
+  if (!native) throw new Error('Native metadata diagnostic reader was not found.');
+  const script = '$native = & {\n' + native + '\n} | ConvertFrom-Json\n' + String.raw`
+$p=ConvertFrom-Json $env:CUEFLUENT_NOTE_NATIVE
+$acl=Get-Acl -LiteralPath $p.source -Audit
+$parent=Get-Acl -LiteralPath ([IO.Path]::GetDirectoryName($p.source)) -Audit
+$volume=New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($p.source))
+@{native=$native;owner=$acl.Owner;group=$acl.Group;accessProtected=$acl.AreAccessRulesProtected;auditProtected=$acl.AreAuditRulesProtected;parentAcl=$parent.Sddl;filesystem=$volume.DriveFormat} | ConvertTo-Json -Depth 10 -Compress
+`;
+  const evidence = [];
+  for (const name of (await fs.readdir(notes)).sort()) {
+    const file = path.join(notes, name), stat = await fs.lstat(file, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink()) continue;
+    const { stdout } = await execute(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      { env: { ...process.env, CUEFLUENT_NOTE_NATIVE: JSON.stringify({ op: 'metadata', source: file }) } });
+    evidence.push({ name, stat: Object.fromEntries(['mode', 'uid', 'gid', 'dev', 'ino', 'nlink', 'size'].map(key => [key, String(stat[key])])),
+      hash: hashBytes(await fs.readFile(file)), metadata: JSON.parse(stdout.replace(/^\uFEFF/, '')) });
+  }
+  return evidence;
+}
+
 test('the pure core publication validator supports explicit Windows path semantics', () => {
   assert.equal(validatePurePublication, validateNotePublication);
   const value = { schema: 1, runId: randomUUID(), draftId: randomUUID(), root: 'C:\\Notes', relative: 'nested/note.md',
@@ -98,7 +124,15 @@ test('existing notes retain exact permissions, ACLs, and extended attributes', a
     await fs.writeFile(`${target}:cuefluent-synthetic`, Buffer.from([0, 255, 16, 32, 48]));
   }
   const intent = await prepare(pin, path.basename(target), body, hashBytes(before));
-  const saved = await publish(pin, intent);
+  let saved;
+  try { saved = await publish(pin, intent); }
+  catch (error) {
+    if (process.platform === 'win32') {
+      try { t.diagnostic(JSON.stringify({ expectedMetadata: intent.original.metadata, evidence: await windowsPublicationEvidence(notes) })); }
+      catch (diagnostic) { t.diagnostic(`Synthetic metadata diagnostics failed: ${diagnostic.message}`); }
+    }
+    throw error;
+  }
   assert.equal(saved.receipt.changed, true);
   assert.deepEqual(await fs.readFile(target), body);
   if (process.platform !== 'win32') assert.equal((await fs.stat(target)).mode & 0o7777, 0o640);
