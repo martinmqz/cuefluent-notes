@@ -127,6 +127,10 @@ if ($p.op -eq 'clone') {
  Set-Acl -LiteralPath $p.source -AclObject $acl
 } elseif ($p.op -eq 'attributes') {
  [IO.File]::SetAttributes($p.stage,[IO.File]::GetAttributes($p.source))
+} elseif ($p.op -eq 'restore-archive') {
+ $attrs=([int][IO.File]::GetAttributes($p.source)) -band (-bnot 32)
+ if($attrs -eq 0){$attrs=128}
+ [IO.File]::SetAttributes($p.source,$attrs)
 } elseif ($p.op -eq 'replace') {
  if(-not [CuefluentNoteNative]::ReplaceFileW($p.source,$p.stage,$p.backup,0,[IntPtr]::Zero,[IntPtr]::Zero)) { throw ('ReplaceFile failed: '+[Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
 } elseif ($p.op -eq 'empty') {
@@ -202,7 +206,7 @@ async function safeEmptyStage(file, stat) {
   else fail('NOTE_METADATA_UNSUPPORTED', 'Safe empty-stage recovery is unavailable on this platform.');
 }
 
-async function metadata(file) {
+async function metadataEvidence(file) {
   const before = await readPathStat(file), exact = fileIdentity(before);
   let extra;
   if (process.platform === 'darwin') {
@@ -230,7 +234,23 @@ async function metadata(file) {
   // PowerShell hashtable serialization order can vary between processes.
   const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
-  return hashBytes(Buffer.from(JSON.stringify(stable({ mode: before.mode, uid: before.uid, gid: before.gid, extra }))));
+  const value = { mode: before.mode, uid: before.uid, gid: before.gid, extra };
+  const fingerprint = input => hashBytes(Buffer.from(JSON.stringify(stable(input))));
+  // Rename/replacement can set Archive on both Windows inodes. This second
+  // fingerprint is only evidence for that one exact intermediate state, never
+  // the ordinary metadata comparison or permission to change a public original.
+  const withoutArchive = process.platform === 'win32' && (extra.attributes & 32)
+    ? fingerprint({ ...value, extra: { ...extra, attributes: (extra.attributes & ~32) || 128 } }) : null;
+  return { hash: fingerprint(value), withoutArchive };
+}
+
+const metadata = async file => (await metadataEvidence(file)).hash;
+
+async function publishedMetadata(file, intent) {
+  const evidence = await metadataEvidence(file);
+  if (evidence.hash === intent.original.metadata) return false;
+  if (evidence.withoutArchive === intent.original.metadata) return true;
+  conflict('The exact publication metadata changed beyond the native Archive transition.');
 }
 
 async function cloneOriginal(source, stage) {
@@ -310,7 +330,7 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   return intent;
 }
 
-async function outcome(pin, intent) {
+async function outcome(pin, intent, { windowsRecovery = false } = {}) {
   const names = await location(pin, intent);
   const stat = await lstatOrNull(names.target), stageStat = await lstatOrNull(names.stage), backupStat = await lstatOrNull(names.backup);
   if (backupStat && (!intent.original || !sameIdentity(backupStat, intent.original))) conflict('The publication backup is not the exact inspected original inode.');
@@ -318,11 +338,23 @@ async function outcome(pin, intent) {
     const links = stageStat ? 2 : 1;
     if (stageStat && !sameIdentity(stageStat, intent.stage)) conflict('The staging name was replaced after publication.');
     const current = await snapshot(names.target, { links });
-    if (current.hash !== intent.hash || current.bytes.length !== intent.bytes || (intent.original && await metadata(names.target) !== intent.original.metadata)) conflict('The published note differs from its exact draft or preserved metadata.');
+    if (current.hash !== intent.hash || current.bytes.length !== intent.bytes) conflict('The published note differs from its exact draft.');
+    let targetArchive = false, backupArchive = false;
+    if (windowsRecovery && process.platform === 'win32' && intent.original && backupStat) {
+      const backup = await snapshot(names.backup);
+      if (!sameIdentity(backup.stat, intent.original) || backup.hash !== intent.expectedHash) conflict('The exact publication backup changed.');
+      // Both exact inodes and both exact contents are necessary. An unrelated
+      // metadata edit, an absent backup, or a still-public original cannot enter
+      // this recovery path; every metadata field participates in either hash.
+      backupArchive = await publishedMetadata(names.backup, intent);
+      targetArchive = await publishedMetadata(names.target, intent);
+    } else {
+      if (intent.original && await metadata(names.target) !== intent.original.metadata) conflict('The published note differs from its preserved metadata.');
+      if (backupStat) await originalMatches(names.backup, intent);
+    }
     if (stageStat) regular(stageStat, 2);
-    if (backupStat) await originalMatches(names.backup, intent);
     await assertChain(intent.parent); await assertDirectory(pin);
-    return { status: 'applied', ...names };
+    return { status: targetArchive || backupArchive ? 'metadata-pending' : 'applied', targetArchive, backupArchive, ...names };
   }
   if (stat) {
     const links = backupStat ? 2 : 1;
@@ -352,7 +384,12 @@ export async function inspectPublicationOutcome(pin, input) {
 /** Reconstruct a pending log proposal only from its exact original bytes, or
  * finish an already-applied exact publication. Never refresh an expectation. */
 export async function readPublicationSource(pin, input) {
-  const intent = validateNotePublication(input), current = await outcome(pin, intent);
+  const intent = validateNotePublication(input), current = await outcome(pin, intent, { windowsRecovery: true });
+  if (current.status === 'metadata-pending') {
+    const original = await snapshot(current.backup);
+    if (!sameIdentity(original.stat, intent.original) || original.hash !== intent.expectedHash) conflict('The exact publication backup changed.');
+    return Object.freeze({ status: 'pending', bytes: original.bytes });
+  }
   if (current.status === 'applied') return Object.freeze({ status: 'applied', bytes: (await snapshot(current.target, { links: await lstatOrNull(current.stage) ? 2 : 1 })).bytes });
   if (intent.expectedHash === null) return Object.freeze({ status: current.status, bytes: null });
   const source = await lstatOrNull(current.target) ? current.target : current.backup;
@@ -369,18 +406,27 @@ async function unlinkExact(file, expected, links = 1) {
 }
 
 async function finish(pin, intent, names) {
-  const current = await outcome(pin, intent);
-  if (current.status !== 'applied') conflict('The expected publication did not reach the target.');
-  if (await lstatOrNull(names.stage)) await unlinkExact(names.stage, intent.stage, 2);
-  if (await lstatOrNull(names.backup)) {
-    await originalMatches(names.backup, intent);
-    await unlinkExact(names.backup, intent.original);
-  }
+  let current = await outcome(pin, intent, { windowsRecovery: true });
+  if (!['applied', 'metadata-pending'].includes(current.status)) conflict('The expected publication did not reach the target.');
   // Windows FlushFileBuffers needs write access even when this handle only
   // confirms already-written bytes. Keep the exact published-inode check.
   const handle = await fs.open(names.target, (process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY) | NO_FOLLOW);
   try { if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The saved note changed before durability was confirmed.'); await handle.sync(); }
   finally { await handle.close(); }
+  current = await outcome(pin, intent, { windowsRecovery: true });
+  if (current.targetArchive) {
+    await windows('restore-archive', names.target);
+    current = await outcome(pin, intent, { windowsRecovery: true });
+  }
+  if (current.backupArchive) await windows('restore-archive', names.backup);
+  // Keep the original backup until both inodes have their exact original
+  // metadata. A crash between restorations is retryable with the same proof.
+  if ((await outcome(pin, intent)).status !== 'applied') conflict('The exact publication metadata was not restored.');
+  if (await lstatOrNull(names.stage)) await unlinkExact(names.stage, intent.stage, 2);
+  if (await lstatOrNull(names.backup)) {
+    await originalMatches(names.backup, intent);
+    await unlinkExact(names.backup, intent.original);
+  }
   await syncDirectory(names.directory); await assertChain(intent.parent); await assertDirectory(pin);
   return Object.freeze({ draftId: intent.draftId, target: names.target, hash: intent.hash, changed: true });
 }
@@ -409,9 +455,9 @@ async function reconcileOriginalBackup(pin, intent, names, { restore = false } =
 export async function publishNotePublication(pin, input, bytes, { persistIntent } = {}) {
   let intent = validateNotePublication(input);
   const draft = exactBytes(bytes, intent.hash, intent.bytes);
-  let current = await outcome(pin, intent);
+  let current = await outcome(pin, intent, { windowsRecovery: true });
   if (current.status === 'existing') return Object.freeze({ draftId: intent.draftId, target: current.target, hash: intent.hash, changed: false });
-  if (current.status === 'applied') return finish(pin, intent, current);
+  if (['applied', 'metadata-pending'].includes(current.status)) return finish(pin, intent, current);
   if (intent.stage && !await lstatOrNull(current.stage)) conflict('The recorded staging inode disappeared without publication.');
   if (await lstatOrNull(current.target) && await lstatOrNull(current.backup)) {
     await reconcileOriginalBackup(pin, intent, current);
@@ -461,9 +507,13 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent 
     if (process.platform !== 'win32') await handle.chmod(original ? original.stat.mode & 0o7777 : 0o666 & ~process.umask());
     // Writing a Linux default stream can clear capability/set-id metadata.
     if (original && process.platform === 'linux') await command('/bin/cp', ['--attributes-only', '--preserve=mode,ownership,xattr', '--', source, current.stage]);
-    if (original && process.platform === 'win32') await windows('attributes', source, current.stage);
     await handle.sync();
   } finally { await handle.close(); }
+  // Windows can set Archive when the last data-writing handle closes, even
+  // after SetFileAttributes cleared it. Restore the exact inspected attributes
+  // only after flushing and closing that handle; the full fingerprint below
+  // still verifies ACLs, audit rules, streams, EAs, and every attribute bit.
+  if (original && process.platform === 'win32') await windows('attributes', source, current.stage);
   await assertChain(intent.parent); await assertDirectory(pin);
   if (original) await originalMatches(source, intent); else await originalMatches(current.target, intent);
   const complete = await snapshot(current.stage);
@@ -484,7 +534,7 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent 
  */
 export async function discardNoteStage(pin, input, { persistIntent } = {}) {
   let intent = validateNotePublication(input);
-  const current = await outcome(pin, intent);
+  const current = await outcome(pin, intent, { windowsRecovery: true });
   if (!intent.stage) {
     const empty = await lstatOrNull(current.stage);
     if (!empty) return Object.freeze({ discarded: false });
@@ -493,7 +543,7 @@ export async function discardNoteStage(pin, input, { persistIntent } = {}) {
     intent = validateNotePublication({ ...intent, stage: fileIdentity(empty) });
     await persistIntent(intent);
   }
-  if (current.status === 'applied') { await finish(pin, intent, current); return Object.freeze({ discarded: true, applied: true }); }
+  if (['applied', 'metadata-pending'].includes(current.status)) { await finish(pin, intent, current); return Object.freeze({ discarded: true, applied: true }); }
   if (await lstatOrNull(current.backup)) await reconcileOriginalBackup(pin, intent, current, { restore: true });
   if (!await lstatOrNull(current.stage)) return Object.freeze({ discarded: false, applied: false });
   await unlinkExact(current.stage, intent.stage);

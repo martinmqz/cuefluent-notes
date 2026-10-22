@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { pinDirectory } from '../src/storage/paths.mjs';
 import { hashBytes } from '../src/storage/files.mjs';
 import { MAX_NOTE_BYTES, validateNotePublication, prepareNotePublication, publishNotePublication,
-  inspectPublicationOutcome, discardNoteStage } from '../src/storage/note-writer.mjs';
+  inspectPublicationOutcome, readPublicationSource, discardNoteStage } from '../src/storage/note-writer.mjs';
 import { validateNotePublication as validatePurePublication } from '../src/core/note-publication.mjs';
 
 const execute = promisify(execFile);
@@ -33,6 +33,19 @@ async function publish(pin, intent, bytes = body) {
 }
 
 const stagePath = intent => path.join(path.dirname(path.join(intent.root, intent.relative)), `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+
+async function windowsMetadata(target, attributes) {
+  const script = String.raw`
+$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
+$p=ConvertFrom-Json $env:CUEFLUENT_NOTE_FIXTURE
+if($null -ne $p.attributes){[IO.File]::SetAttributes($p.path,[int]$p.attributes)}
+@{attributes=[int][IO.File]::GetAttributes($p.path);acl=(Get-Acl -LiteralPath $p.path -Audit).Sddl} | ConvertTo-Json -Compress
+`;
+  const { stdout } = await execute(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { env: { ...process.env, CUEFLUENT_NOTE_FIXTURE: JSON.stringify({ path: target, attributes }) } });
+  return JSON.parse(stdout.replace(/^\uFEFF/, ''));
+}
 
 test('the pure core publication validator supports explicit Windows path semantics', () => {
   assert.equal(validatePurePublication, validateNotePublication);
@@ -96,6 +109,28 @@ test('existing notes retain exact permissions, ACLs, and extended attributes', a
   } else if (process.platform === 'win32') {
     assert.deepEqual(await fs.readFile(`${target}:cuefluent-synthetic`), Buffer.from([0, 255, 16, 32, 48]));
   }
+});
+
+test('Windows publication preserves non-Archive attributes after data handles close', { skip: process.platform !== 'win32' }, async t => {
+  const { notes, pin } = await fixture(t);
+  for (const attributes of [128, 8192]) { // Normal, NotContentIndexed; neither includes Archive.
+    const relative = `attributes-${attributes}.md`, target = path.join(notes, relative), before = Buffer.from('original\n');
+    await fs.writeFile(target, before);
+    const stream = Buffer.from([0, 255, 16, 32, 48]);
+    await fs.writeFile(`${target}:cuefluent-synthetic`, stream);
+    const original = await windowsMetadata(target, attributes);
+    assert.equal(original.attributes, attributes);
+    const intent = await prepare(pin, relative, body, hashBytes(before));
+    const saved = await publish(pin, intent);
+    assert.equal(saved.receipt.changed, true);
+    assert.deepEqual(await fs.readFile(target), body);
+    assert.deepEqual(await fs.readFile(`${target}:cuefluent-synthetic`), stream);
+    assert.deepEqual(await windowsMetadata(target), original);
+    assert.deepEqual(await inspectPublicationOutcome(pin, saved.intent), { status: 'applied' });
+    assert.deepEqual(await publishNotePublication(pin, saved.intent, body), saved.receipt);
+    assert.deepEqual(await windowsMetadata(target), original);
+  }
+  assert.deepEqual((await fs.readdir(notes)).sort(), ['attributes-128.md', 'attributes-8192.md']);
 });
 
 test('manual edits and same-byte replacement inodes preserve the current public note', async t => {
@@ -221,14 +256,32 @@ test('valid plain notes larger than 2 MiB remain within the 10 MiB profile', asy
 const CHILD = String.raw`
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
+import path from 'node:path';
+import childProcess from 'node:child_process';
+import {promisify} from 'node:util';
+import {syncBuiltinESMExports} from 'node:module';
 const [root,journal,phase,writerURL,pathsURL] = process.argv.slice(1);
-const {pinDirectory}=await import(pathsURL);
-const {publishNotePublication}=await import(writerURL);
 const bytes=Buffer.from('# Synthetic note\n\nUpdated exact bytes.\n');
 const boundary=async()=>{setInterval(()=>{},1000);process.send('boundary');await new Promise(()=>{});};
+if(phase==='restored-target') {
+ const execute=childProcess.execFile;
+ const wrapped=(...args)=>execute(...args);
+ wrapped[promisify.custom]=(...args)=>new Promise((resolve,reject)=>execute(...args,async(error,stdout,stderr)=>{
+  if(error){reject(error);return;}
+  try {
+   const native=JSON.parse(args[2]?.env?.CUEFLUENT_NOTE_NATIVE ?? 'null');
+   if(native?.op==='restore-archive' && native.source===path.join(root,'note.md')) await boundary();
+   resolve({stdout,stderr});
+  } catch(cause){reject(cause);}
+ }));
+ childProcess.execFile=wrapped;syncBuiltinESMExports();
+}
+const {pinDirectory}=await import(pathsURL);
+const {publishNotePublication}=await import(writerURL);
 const open=fs.open;
 fs.open=async function(file,flags,...rest) {
  const handle=await open.call(this,file,flags,...rest);
+ if(phase==='published' && file===path.join(root,'note.md') && typeof flags==='number' && (flags & constants.O_RDWR)) await boundary();
  if(typeof file==='string' && file.endsWith('.tmp') && !file.endsWith('.backup.tmp')) {
   if(phase==='empty' && typeof flags==='number' && (flags & constants.O_EXCL)) await boundary();
   if(phase==='write' && typeof flags==='number' && (flags & constants.O_RDWR)) {
@@ -264,6 +317,54 @@ async function killedPublication(t, root, pin, intent, phase) {
   });
   child.kill('SIGKILL'); assert.equal((await exited).signal, 'SIGKILL');
   return JSON.parse(await fs.readFile(journal, 'utf8'));
+}
+
+for (const [phase, action] of [['published', 'retry'], ['restored-target', 'retry'], ['published', 'skip']]) {
+  test(`Windows Archive restoration survives death at ${phase} before ${action}`, { skip: process.platform !== 'win32' }, async t => {
+    const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('original\n');
+    await fs.writeFile(target, before);
+    const original = await windowsMetadata(target, 128);
+    const intent = await prepare(pin, 'note.md', body, hashBytes(before));
+    const journal = await killedPublication(t, root, pin, intent, phase), backup = stagePath(journal).replace(/\.tmp$/, '.backup.tmp');
+    assert.deepEqual(await fs.readFile(target), body);
+    assert.deepEqual(await fs.readFile(backup), before);
+    assert.equal((await fs.stat(target, { bigint: true })).ino.toString(), journal.stage.inode);
+    assert.equal((await fs.stat(backup, { bigint: true })).ino.toString(), journal.original.inode);
+    assert.equal((await windowsMetadata(target)).attributes, phase === 'published' ? 32 : 128);
+    assert.equal((await windowsMetadata(backup)).attributes, 32);
+    assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'conflict', code: 'NOTE_PUBLICATION_CONFLICT' });
+    assert.deepEqual(await readPublicationSource(pin, journal), { status: 'pending', bytes: before });
+    assert.equal((await windowsMetadata(backup)).attributes, 32); // Read-only inspection did not finish restoration.
+    if (action === 'skip') assert.deepEqual(await discardNoteStage(pin, journal), { discarded: true, applied: true });
+    else assert.equal((await publish(pin, journal)).receipt.changed, true);
+    assert.deepEqual(await windowsMetadata(target), original);
+    assert.deepEqual(await fs.readFile(target), body);
+    assert.deepEqual(await fs.readdir(notes), ['note.md']);
+    assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'applied' });
+  });
+}
+
+for (const changed of ['target', 'target-stream', 'backup', 'missing-backup', 'public-original']) {
+  test(`Windows Archive recovery refuses ${changed} metadata without changing it`, { skip: process.platform !== 'win32' }, async t => {
+    const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('original\n');
+    await fs.writeFile(target, before); await windowsMetadata(target, 128);
+    let intent = await prepare(pin, 'note.md', body, hashBytes(before));
+    if (changed !== 'public-original') intent = await killedPublication(t, root, pin, intent, 'published');
+    const backup = stagePath(intent).replace(/\.tmp$/, '.backup.tmp');
+    const selected = changed === 'backup' ? backup : target;
+    if (changed === 'missing-backup') await fs.rename(backup, path.join(notes, 'preserved-original.md'));
+    else if (changed === 'target-stream') await fs.writeFile(`${target}:manual-edit`, 'preserve this metadata');
+    else await windowsMetadata(selected, changed === 'public-original' ? 32 : 8224); // Otherwise add NotContentIndexed + Archive.
+    const metadata = await windowsMetadata(selected), names = (await fs.readdir(notes)).sort(), bytes = await fs.readFile(selected);
+    await assert.rejects(publish(pin, intent), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    assert.deepEqual(await inspectPublicationOutcome(pin, intent), { status: 'conflict', code: 'NOTE_PUBLICATION_CONFLICT' });
+    await assert.rejects(readPublicationSource(pin, intent), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    await assert.rejects(discardNoteStage(pin, intent), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    assert.deepEqual(await windowsMetadata(selected), metadata);
+    assert.deepEqual(await fs.readFile(selected), bytes);
+    assert.deepEqual((await fs.readdir(notes)).sort(), names);
+    if (changed === 'target-stream') assert.equal(await fs.readFile(`${target}:manual-edit`, 'utf8'), 'preserve this metadata');
+  });
 }
 
 for (const phase of ['empty', 'journal', 'write', 'link']) {

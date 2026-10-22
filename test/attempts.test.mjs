@@ -130,7 +130,9 @@ for (const [mode, stage] of [['before-publication', 'owned'], ['before-activatio
     else assert.ok(state.run.attempt);
     assert.deepEqual(state.run.warnings, []);
     assert.equal(await readIfPresent(path.join(f.root, 'working.json')), null);
-    assert.equal((await readIfPresent(path.join(f.root, 'outcome.json'))).code, 'ATTEMPT_PARENT_LOST');
+    // The worker releases its gate before its catch handler publishes the result.
+    const outcome = await waitFor(() => readIfPresent(path.join(f.root, 'outcome.json')));
+    assert.equal(outcome.code, 'ATTEMPT_PARENT_LOST');
     await fs.rm(path.join(f.root, 'outcome.json'));
     await launchOwnedAttempt(f.store, 'demo', { runId: f.run.id, launch: f.launch });
     assert.deepEqual(await finish(f), { ok: true });

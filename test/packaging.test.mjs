@@ -86,9 +86,12 @@ test('fresh builds are deterministic and detached inventories bind exact shipped
 test('standard tar and ZIP tools accept deterministic archives and extracted package executes without repository dependencies', async t => {
   const f = await fixture(t), built = await f.build('built'), item = built.packages[0];
   for (const archive of item.archives) {
-    const file = path.join(f.root, 'built', archive.path), extraction = path.join(f.root, archive.path.endsWith('.zip') ? 'zip' : 'tar'); await fs.mkdir(extraction);
-    if (file.endsWith('.zip')) await execute('unzip', ['-q', file, '-d', extraction]);
-    else await execute('tar', ['-xzf', file, '-C', extraction]);
+    const file = path.posix.join('built', archive.path), directory = archive.path.endsWith('.zip') ? 'zip' : 'tar';
+    const extraction = path.join(f.root, directory); await fs.mkdir(extraction);
+    // GNU tar treats a Windows drive colon as a remote archive. Both tools get
+    // portable relative paths within the same disposable fixture instead.
+    if (file.endsWith('.zip')) await execute('unzip', ['-q', file, '-d', directory], { cwd: f.root });
+    else await execute('tar', ['-xzf', file, '-C', directory], { cwd: f.root });
     const root = path.join(extraction, 'cuefluent-notes'); await verifyPackage(root, { expectedInventorySha256: item.inventorySha256 });
     assert.equal(JSON.parse((await execute(process.execPath, [path.join(root, 'src/cli.mjs'), '--help'], { cwd: extraction, env: { ...process.env, NODE_PATH: '' } })).stdout).label, 'detached');
   }
