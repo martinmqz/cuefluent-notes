@@ -72,17 +72,12 @@ busy. Those say what happened and to check `status`. The diagnostic code stays i
 for tools, as described in the [workflow CLI](workflow-cli.md#processing-chat-controls).
 
 Text after the skill that is not one exact action, such as a near miss or an
-action mixed with other words, is not a command. When its typed input verifies
-from the native transcript, no control applies anything and the reply names the
-nearest exact commands to type. That text stays evidence, as described under
-[capture prevention](#capture-prevention-and-limits).
-
-For a decision mixed with politeness or corrections, the agent calls
-`processing_status` without arguments and returns its reply before doing any
-note work. It must not reinterpret the correction as a direct save or inspect a
-note to decide whether the correction is already saved. Independent requests
-to author supplied material remain separate; use the
-[skill's routing rules](../SKILL.md#formal-processing-controls) to distinguish them.
+action mixed with other words, is not a command. A control receiving that text
+verified from the native transcript applies nothing and names the nearest exact
+commands to type. Without that verification, a status call may return ordinary
+status or a refusal instead. Follow the
+[skill's routing rules](../SKILL.md#route-the-request) for authoring requests,
+mixed decisions, clarification and capture consent.
 
 ### Capture commands
 
