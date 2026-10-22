@@ -85,12 +85,12 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     if (processing) return { status: 'excluded', reason: 'PROCESSING_SESSION' };
   }
   if (event.launchMarker !== null) return { status: 'pending', reason: 'PROCESSING_IDENTITY_UNVERIFIED' };
-  let found;
-  const result = await registerNativeMetadata(event, () => withSelectedProject(store, async settings => {
+  let found, durableResult, releaseWarning, result;
+  try { result = await registerNativeMetadata(event, () => withSelectedProject(store, async settings => {
     found = await readChat(store, event.client, event.sessionId);
     return chooseProject(settings, event.cwd, { existingOwnerId: found?.value.projectId })?.id ?? null;
   }, async context => {
-    if (found && !found.value.tracked) return { state: found.value, status: 'untracked', work: found.value.pending?.reason === 'untrack' };
+    if (found && !found.value.tracked) return durableResult = { state: found.value, status: 'untracked', work: found.value.pending?.reason === 'untrack' };
     let chat;
     if (!found) {
       if (context.project.tracking !== 'auto' || !event.newSession || event.kind !== 'start') return { status: 'ineligible', work: false };
@@ -105,14 +105,19 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     else if (!chat.pending) chat = requestReconciliation(chat);
     if (!found || JSON.stringify(chat) !== JSON.stringify(found.value)) await writeJSON(store.pin,
       chatRelative(context.project.id, event.client, event.sessionId), chat, { expectedHash: found?.hash ?? null, maxBytes: 64 * 1024 });
-    return { state: chat, status: found ? 'tracked' : 'enrolled', work: true };
-  }));
+    return durableResult = { state: chat, status: found ? 'tracked' : 'enrolled', work: true };
+  })); } catch (error) {
+    if (error.code !== 'GATE_RELEASE_FAILED' || !durableResult?.work) throw error;
+    // The metadata write completed. Gate release trouble remains visible, but
+    // cannot erase the independent reconciliation dispatch it just authorized.
+    result = durableResult; releaseWarning = error.code;
+  }
   if (!result) return { status: 'unconfigured' };
   if (!result.work) return { status: result.status };
   const request = frozen({ storeRoot: store.root, client: event.client, sessionId: event.sessionId,
     generation: result.state.generation, requestId: result.state.pending?.id ?? null });
   if (!schedule) return { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE' };
-  try { await schedule(request); return { status: result.status, scheduled: true }; }
+  try { await schedule(request); return releaseWarning ? { status: 'pending', reason: releaseWarning, scheduled: true } : { status: result.status, scheduled: true }; }
   catch (error) { return { status: 'pending', reason: code(error) }; }
 }
 

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fork } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { waitForReplacement } from '../fixtures/publication-boundary.mjs';
 import { createProject } from '../../src/core/settings.mjs';
@@ -51,9 +52,9 @@ async function fixture(t, { target = 'design.md', existing = true } = {}) {
     await writeJSON(store.pin, `${directory}/run.json`, validateRun({ ...current.value, phase: 'review', drafts }), { expectedHash: current.hash });
   });
   const children = [];
-  const launch = async (stopAfterNote = false) => {
+  const launch = async (stopAfterNote = false, extra = {}) => {
     await launchOwnedAttempt(store, 'project', { runId: run.id, launch: context => {
-      const child = fork(fileURLToPath(new URL('../fixtures/save-worker.mjs', import.meta.url)), [root, JSON.stringify({ ...context, stopAfterNote })],
+      const child = fork(fileURLToPath(new URL('../fixtures/save-worker.mjs', import.meta.url)), [root, JSON.stringify({ ...context, stopAfterNote, ...extra })],
         { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc', 'pipe'] });
       let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
       const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr })));
@@ -100,4 +101,32 @@ test('retry after note replacement but before receipt recognizes the exact stage
   const result = JSON.parse(await fs.readFile(path.join(f.root, 'outcome.json'), 'utf8'));
   assert.equal(result.counts.saved, 1); assert.equal(result.counts.handled, 1);
   await assert.rejects(inspectAttempt(f.store, 'project'), { code: 'RUN_MISSING' });
+});
+
+
+test('slow public note work leaves project gates available for new queue appends', async t => {
+  const f = await fixture(t), child = await f.launch(false, { holdDraft: true });
+  const deadline = Date.now() + 7000;
+  for (;;) {
+    try { await fs.stat(path.join(f.root, 'draft-reading')); break; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (Date.now() >= deadline) assert.fail('Save did not reach the draft read.');
+    await delay(10);
+  }
+  try {
+    await withProject(f.store, 'project', () => appendQueueRecord(f.store.pin, queueRelative('claude', 'chat'), encodeQueueRecord('arriving-during-save', Buffer.from('{"text":"new input"}'))));
+    assert.equal((await inspectAttempt(f.store, 'project')).active, true);
+  } finally { await fs.writeFile(path.join(f.root, 'continue-draft'), ''); }
+  assert.deepEqual(await child.exited, { code: 0, stderr: '' });
+  assert.equal((await inspectQueue(f.store.pin, queueRelative('claude', 'chat'))).records, 1);
+});
+
+
+test('a superseded attempt is fenced immediately before its public replacement', async t => {
+  const f = await fixture(t), child = await f.launch(false, { supersedeBeforePublish: true });
+  assert.equal((await child.exited).code, 1);
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'error.json'), 'utf8')).code, 'RUN_ATTEMPT_STALE');
+  assert.equal(await fs.readFile(f.note, 'utf8'), original);
+  assert.equal((await inspectQueue(f.store.pin, queueRelative('claude', 'chat'))).records, 1);
+  assert.equal((await inspectAttempt(f.store, 'project')).run.saved.length, 0);
 });

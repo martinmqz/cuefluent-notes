@@ -4,6 +4,7 @@
   "src/client/commands.mjs",
   "src/client/control-server.mjs",
   "src/client/entry-options.mjs",
+  "src/client/executable.mjs",
   "src/client/historical-commands.mjs",
   "src/client/history.mjs",
   "src/client/hooks.mjs",

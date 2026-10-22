@@ -26,8 +26,9 @@ function fail(code, message, cause) {
 }
 
 function runtime() {
-  if (typeof sqlite.Database !== 'function' || Number(process.versions.node.split('.')[0]) < 26) {
-    fail('GATE_UNSUPPORTED_RUNTIME', 'Gates require Node.js 26 or newer with node:sqlite Database.');
+  const [major, minor, patch] = process.versions.node.split('.').map(Number);
+  if (typeof sqlite.Database !== 'function' || major < 26 || major === 26 && (minor < 12 || minor === 12 && patch < 1)) {
+    fail('GATE_UNSUPPORTED_RUNTIME', 'Gates require Node.js 26.12.1 or newer with node:sqlite Database.');
   }
   // Worker threads share a process's POSIX locks but not its JavaScript registry.
   if (!isMainThread) fail('GATE_UNSUPPORTED_CONTEXT', 'Gate ownership must run in a main process, not a worker thread.');
@@ -340,8 +341,8 @@ export function inspectExistingGate(path, id, options = {}) {
     if (db) closeConnection(db, identity, db.isTransaction);
     else owners.delete(keyOf(identity));
   }
-  reconcilePublication(identity, stage, options);
-  syncParent(path);
+  try { reconcilePublication(identity, stage, options); syncParent(path); }
+  catch (error) { throw storageError(error, 'publication recovery'); }
   return identity;
 }
 
@@ -404,8 +405,16 @@ export async function withShortGate(value, { timeoutMs = 1000, signal, guardPath
     signal?.throwIfAborted();
     const result = tryAcquireExistingGate(value, { guardPath });
     if (result.acquired) {
+      let failure;
       try { return await fn(); }
-      finally { result.acquired.release(); }
+      catch (error) { failure = error; throw error; }
+      finally {
+        try { result.acquired.release(); }
+        catch (error) {
+          if (failure) { try { Object.defineProperty(failure, 'releaseError', { value: error, configurable: true }); } catch {} }
+          else throw new GateError('GATE_RELEASE_FAILED', 'The operation finished but releasing its gate failed.', { cause: error });
+        }
+      }
     }
     const remaining = deadline - performance.now();
     if (remaining <= 0) fail('GATE_BUSY', 'Gate remained busy until its bounded deadline.');

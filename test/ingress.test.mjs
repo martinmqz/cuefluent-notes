@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { Database } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { tryAcquireExistingGate } from '../src/storage/gates.mjs';
 import { createProject } from '../src/core/settings.mjs';
@@ -264,4 +265,19 @@ test('one-shot new-session authority retries transient gate contention without w
       }
     } finally { clearTimeout(timer); if (!released) owned.release(); }
   }
+});
+
+
+test('durable hook metadata still schedules reconciliation when gate release fails', async t => {
+  const f = await fixture(t), execute = Database.prototype.exec;
+  let failed = false, scheduled = null;
+  t.mock.method(Database.prototype, 'exec', function(sql, ...rest) {
+    const result = execute.call(this, sql, ...rest);
+    if (!failed && sql === 'ROLLBACK') { failed = true; throw new Error('Synthetic release failure after durable ingress.'); }
+    return result;
+  });
+  const result = await ingestNativeEvent(f.store, f.event, { schedule: async request => { scheduled = request; } });
+  assert.deepEqual(result, { status: 'pending', reason: 'GATE_RELEASE_FAILED', scheduled: true });
+  assert.ok(scheduled);
+  assert.equal((await readChat(f.store, f.event.client, f.event.sessionId)).value.pending.id, scheduled.requestId);
 });

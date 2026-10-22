@@ -5,9 +5,9 @@ import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
 import {
   assertChain, assertDirectory, assertRegularFile, createPrivateDirectory,
-  inspectParent, lstatOrNull, pinDirectory, relativePath, sameIdentity,
+  inspectParent, lstatOrNull, pinDirectory, sameIdentity,
 } from './paths.mjs';
-import { hashBytes, jsonBytes, readJSON, readSnapshot, removeExact, syncDirectory, writeJSON } from './files.mjs';
+import { hashBytes, jsonBytes, readJSON, readSnapshot, removeExact, reclaimAtomicStages, syncDirectory, writeJSON } from './files.mjs';
 import { establishWindowsPrivacy } from './platform.mjs';
 import { readHandleStat } from './stat.mjs';
 import {
@@ -78,6 +78,11 @@ function validateNode(value, expectedKey, queueId) {
   return value;
 }
 
+async function directoryEmpty(directory) {
+  const entries = await fs.opendir(directory, { bufferSize: 1 });
+  try { return await entries.read() === null; } finally { await entries.close(); }
+}
+
 async function root(pin, relative, create = false) {
   if (pin?.private !== true) fail('QUEUE_PRIVATE_ROOT_REQUIRED', 'Queues require a verified private storage root.');
   const parent = await inspectParent(pin, relative);
@@ -86,12 +91,16 @@ async function root(pin, relative, create = false) {
   let result;
   if (create) {
     result = await createPrivateDirectory(parent.file);
+    const removing = stat && await removalState(result);
+    if (removing && !removing.empty) fail('QUEUE_RECOVERY_REQUIRED', 'Interrupted empty-queue removal must finish before appending.');
     await createPrivateDirectory(path.join(parent.file, 'parts'));
     await createPrivateDirectory(path.join(parent.file, 'links'));
   } else {
     result = await pinDirectory(parent.file, { private: true });
-    await pinDirectory(path.join(parent.file, 'parts'), { private: true });
-    await pinDirectory(path.join(parent.file, 'links'), { private: true });
+    if (!await removalState(result)) {
+      await pinDirectory(path.join(parent.file, 'parts'), { private: true });
+      await pinDirectory(path.join(parent.file, 'links'), { private: true });
+    }
   }
   await assertChain(parent.chain);
   await assertDirectory(pin);
@@ -231,7 +240,7 @@ function after(intent) {
 async function applyJSON(pin, relative, expectedHash, next) {
   const current = await readSnapshot(pin, relative, { missing: true, maxBytes: METADATA_BYTES });
   const proposedHash = hashBytes(jsonBytes(next));
-  if (current?.hash === proposedHash) return;
+  if (current?.hash === proposedHash && expectedHash !== null) return;
   if (expectedHash === null) {
     await completeMetadata(pin, relative, next);
     return;
@@ -441,6 +450,8 @@ export async function recoverQueueAppend(pin, relative, { record: value, expecte
 export async function inspectQueue(pin, relative) {
   const queue = await root(pin, relative);
   if (!queue) return { exists: false, records: 0, pending: null };
+  const removing = await removalState(queue);
+  if (removing) return { exists: true, queueId: removing.queueId, records: 0, head: null, tail: null, pending: null };
   const current = await state(queue);
   const pending = await intent(queue);
   let mutation = null;
@@ -564,7 +575,12 @@ export async function readQueueRecord(pin, relative, selected) {
   const snapshot = await readSnapshot(queue, partPath(id), { maxBytes: MAX_QUEUE_RECORD_BYTES });
   const record = decodeRecord(snapshot.bytes, 0);
   if (record.id !== selected.id || record.hash !== selected.hash) fail('QUEUE_SELECTION_CONFLICT', 'Selected segment no longer matches its frozen data.');
-  if ((await state(queue)).hash !== physical.hash || ((await intent(queue))?.hash ?? null) !== (pending?.hash ?? null)) fail('QUEUE_CHANGED', 'Selected record changed while it was read.');
+  // An append may change the manifest and this record's next link. Recheck
+  // only the selected membership and exact frozen data, never the live queue hash.
+  const retained = await node(queue, id, current.value.queueId, true);
+  if (!retained || retained.value.id !== selected.id || retained.value.hash !== selected.hash) fail('QUEUE_SELECTION_CONFLICT', 'Selected membership changed while it was read.');
+  const confirmed = await readSnapshot(queue, partPath(id), { maxBytes: MAX_QUEUE_RECORD_BYTES });
+  if (confirmed.identity.device !== snapshot.identity.device || confirmed.identity.inode !== snapshot.identity.inode || confirmed.hash !== snapshot.hash) fail('QUEUE_SELECTION_CONFLICT', 'Selected segment changed while it was read.');
   return record;
 }
 
@@ -658,29 +674,68 @@ export async function acknowledgeQueueCleanup(pin, relative, value) {
   return { acknowledged: true };
 }
 
-/** Explicit empty-unit pruning only, after all cleanup cursors were acknowledged. */
+/** The existing mutation journal retains the exact empty queue identity until
+ * every child has gone. The final journal-unlink/rmdir gap is recognizable only
+ * as a completely empty directory whose inode-derived queue ID still matches. */
+async function removalState(queue) {
+  const journal = await metadata(queue, 'intent.json', true);
+  if (!journal) {
+    if (await directoryEmpty(queue.root)) return { empty: true, queueId: initialState(queue).queueId };
+    return null;
+  }
+  if (journal.value?.op !== 'prune') return null;
+  const value = journal.value;
+  shape(value, ['schema', 'op', 'queueId', 'root', 'stateHash', 'parts', 'links']);
+  if (value.schema !== 1) fail('QUEUE_INTENT_INVALID', 'Unsupported queue removal journal.');
+  uuid(value.queueId); assertHash(value.stateHash);
+  for (const [name, expected] of [['root', queue.root], ['parts', path.join(queue.root, 'parts')], ['links', path.join(queue.root, 'links')]]) {
+    const saved = value[name];
+    shape(saved, ['path', 'device', 'inode']);
+    if (saved.path !== expected || typeof saved.device !== 'string' || !/^[0-9]+$/.test(saved.device) || typeof saved.inode !== 'string' || !/^[1-9][0-9]*$/.test(saved.inode)) fail('QUEUE_INTENT_INVALID', 'Queue removal identity is invalid.');
+  }
+  if (value.queueId !== initialState(queue).queueId || value.root.device !== queue.chain.at(-1).device || value.root.inode !== queue.chain.at(-1).inode) fail('QUEUE_CONFLICT', 'The empty queue was replaced during removal.');
+  const retained = await metadata(queue, 'state.json', true);
+  if (retained && (validateState(retained.value).count !== 0 || retained.value.queueId !== value.queueId || retained.hash !== value.stateHash)) fail('QUEUE_CONFLICT', 'The retained removal manifest changed.');
+  return { ...value, journal };
+}
+
 export async function removeEmptyQueue(pin, relative, { queueId } = {}) {
   uuid(queueId);
   const queue = await root(pin, relative);
   if (!queue) return { removed: false };
-  const current = await state(queue);
-  if (current.value.queueId !== queueId || current.value.count !== 0 || await intent(queue) || await parkedCandidate(queue, current.value.queueId)) {
-    fail('QUEUE_NOT_EMPTY', 'Only an empty acknowledged queue can be removed.');
+  let removal = await removalState(queue);
+  if (!removal) {
+    const current = await state(queue);
+    if (current.value.queueId !== queueId || current.value.count !== 0 || await intent(queue) || await parkedCandidate(queue, current.value.queueId)) fail('QUEUE_NOT_EMPTY', 'Only an empty acknowledged queue can be removed.');
+    const parts = await pinDirectory(path.join(queue.root, 'parts'), { private: true });
+    const links = await pinDirectory(path.join(queue.root, 'links'), { private: true });
+    const proposal = { schema: 1, op: 'prune', queueId, root: queue.chain.at(-1), stateHash: current.hash, parts: parts.chain.at(-1), links: links.chain.at(-1) };
+    await reclaimAtomicStages(queue, '', { matchesTarget: name => ['state.json', 'intent.json'].includes(name), proposed: new Map([['intent.json', jsonBytes(proposal)]]), maxBytes: METADATA_BYTES });
+    await reclaimAtomicStages(queue, 'links', { matchesTarget: name => /^[a-f0-9]{64}\.json$/.test(name), maxBytes: METADATA_BYTES });
+    const allowed = new Set(['parts', 'links', 'state.json', 'intent.json']);
+    const entries = await fs.opendir(queue.root, { bufferSize: 1 });
+    try { for await (const entry of entries) if (!allowed.delete(entry.name)) fail('QUEUE_UNKNOWN_ARTIFACT', 'Unknown queue artifacts must be preserved.'); }
+    finally { if (!entries.closed) await entries.close().catch(error => { if (error.code !== 'ERR_DIR_CLOSED') throw error; }); }
+    if (allowed.size) fail('QUEUE_METADATA_INVALID', 'Empty queue layout is incomplete.');
+    if (!await directoryEmpty(parts.root) || !await directoryEmpty(links.root)) fail('QUEUE_UNKNOWN_ARTIFACT', 'Unknown empty-queue artifacts must be preserved.');
+    const idle = await metadata(queue, 'intent.json');
+    await writeJSON(queue, 'intent.json', proposal, { expectedHash: idle.hash, maxBytes: METADATA_BYTES });
+    removal = await removalState(queue);
   }
-  const allowed = new Set(['parts', 'links', 'state.json', 'intent.json']);
-  const entries = await fs.opendir(queue.root, { bufferSize: 1 });
-  try {
-    for await (const entry of entries) {
-      if (!allowed.delete(entry.name)) fail('QUEUE_UNKNOWN_ARTIFACT', 'Unknown queue artifacts must be preserved.');
+  if (removal.queueId !== queueId) fail('QUEUE_CONFLICT', 'The removal belongs to another queue.');
+  if (!removal.empty) {
+    for (const name of ['parts', 'links']) {
+      const saved = removal[name], stat = await lstatOrNull(saved.path);
+      if (!stat) continue;
+      const child = await pinDirectory(saved.path, { private: true });
+      if (child.chain.at(-1).device !== saved.device || child.chain.at(-1).inode !== saved.inode) fail('QUEUE_CONFLICT', 'An empty queue child was replaced.');
+      await assertDirectory(queue); await assertDirectory(child);
+      await fs.rmdir(saved.path); await syncDirectory(queue.root);
     }
-  } finally { if (!entries.closed) await entries.close().catch(error => { if (error.code !== 'ERR_DIR_CLOSED') throw error; }); }
-  if (allowed.size) fail('QUEUE_METADATA_INVALID', 'Empty queue layout is incomplete.');
-  await assertDirectory(queue);
-  await fs.rmdir(relativePath(queue, 'parts'));
-  await fs.rmdir(relativePath(queue, 'links'));
-  const idle = await metadata(queue, 'intent.json');
-  await removeExact(queue, 'intent.json', idle.hash, { maxBytes: METADATA_BYTES });
-  await removeExact(queue, 'state.json', current.hash, { maxBytes: METADATA_BYTES });
+    const current = await metadata(queue, 'state.json', true);
+    if (current) await removeExact(queue, 'state.json', removal.stateHash, { maxBytes: METADATA_BYTES });
+    await removeExact(queue, 'intent.json', removal.journal.hash, { maxBytes: METADATA_BYTES });
+  }
   await assertDirectory(queue);
   await fs.rmdir(queue.root);
   await syncDirectory(path.dirname(queue.root));

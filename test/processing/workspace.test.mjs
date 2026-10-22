@@ -183,3 +183,30 @@ test('bounded activity log queries require trusted reader and do not authorize o
   assert.equal(NOTE_WORKSPACE_TOOLS.length, 5); assert(NOTE_WORKSPACE_TOOLS.every(tool => tool.inputSchema.additionalProperties === false));
   assert(Object.isFrozen(NOTE_WORKSPACE_TOOLS[2].inputSchema.properties.edits.items)); assert(!NOTE_WORKSPACE_TOOLS.some(tool => tool.name === 'manifest'));
 });
+
+test('a refused draft receipt leaves no draft and the reserved terminal receipt remains usable', async t => {
+  const f = await fixture(t), workspace = await f.open({ limits: { contextBytes: 100 } });
+  await assert.rejects(workspace.draft_note({ target: 'new.md', content: body, summary: 'Should not be retained' }), { code: 'WORKSPACE_CONTEXT_LIMIT' });
+  assert.deepEqual(await workspace.finish_drafting({ outcome: 'nothing-useful' }), { outcome: 'nothing-useful', drafts: 0 });
+  assert.deepEqual((await workspace.manifest()).drafts, []);
+});
+
+test('exhausted ordinary context cannot strand an acknowledged draft set', async t => {
+  const f = await fixture(t), workspace = await f.open({ limits: { contextBytes: 550 } });
+  const receipt = await workspace.draft_note({ target: 'new.md', content: body, summary: 'Retain this draft' });
+  for (;;) {
+    try { await workspace.list_notes(); } catch (error) { assert.equal(error.code, 'WORKSPACE_CONTEXT_LIMIT'); break; }
+  }
+  assert.equal((await finish(workspace)).drafts[0].hash, receipt.hash);
+});
+
+test('unsafe linked entries do not hide safe notes from a listing or grant read/write authority', async t => {
+  const f = await fixture(t); await fs.writeFile(path.join(f.root, 'safe.md'), body);
+  await fs.writeFile(path.join(f.temporary, 'outside.md'), body);
+  await fs.link(path.join(f.temporary, 'outside.md'), path.join(f.root, 'hard.md'));
+  if (process.platform !== 'win32') await fs.symlink(path.join(f.temporary, 'outside.md'), path.join(f.root, 'linked.md'));
+  const workspace = await f.open();
+  assert.deepEqual((await workspace.list_notes()).entries, [{ target: path.join(f.root, 'safe.md'), kind: 'note' }]);
+  await assert.rejects(workspace.read_note({ target: 'hard.md' }), { code: 'PATH_UNSAFE' });
+  await assert.rejects(workspace.draft_note({ target: 'hard.md', content: body, summary: 'Must refuse' }), { code: 'PATH_UNSAFE' });
+});

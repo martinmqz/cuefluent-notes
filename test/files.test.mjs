@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { createPrivateDirectory, pinDirectory, assertPrivatePlacement, canonicalSelection } from '../src/storage/paths.mjs';
-import { hashBytes, readSnapshot, readJSON, writeAtomic, writeJSON } from '../src/storage/files.mjs';
+import { hashBytes, readSnapshot, readJSON, writeAtomic, writeJSON, reclaimAtomicStages } from '../src/storage/files.mjs';
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-files-')));
@@ -156,4 +156,43 @@ test('private placement refuses projects, notes and their ancestors', async t =>
   assert.throws(() => assertPrivatePlacement(root, { noteDestinations: [{ path: path.join(root, 'notes') }] }), { code: 'PRIVATE_LOCATION_OVERLAP' });
   assert.doesNotThrow(() => assertPrivatePlacement(path.join(root, 'private'), { projectRoots: [path.join(root, 'repo')], noteDestinations: [path.join(root, 'notes')] }));
   assert.equal(await canonicalSelection(path.join(root, 'new', 'deep')), path.join(root, 'new', 'deep'));
+});
+
+
+test('atomic cleanup preserves the primary conflict when stage unlink fails', async t => {
+  const { pin } = await fixture(t);
+  await writeJSON(pin, 'state.json', { before: true }, { expectedHash: null });
+  const original = await readSnapshot(pin, 'state.json');
+  const unlink = fs.unlink, open = fs.open; let changed = false;
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    const handle = await open.call(this, file, ...args);
+    if (!changed && path.basename(file).startsWith('.state.json.')) {
+      changed = true; await fs.writeFile(path.join(pin.root, 'state.json'), 'manual change');
+    }
+    return handle;
+  });
+  t.mock.method(fs, 'unlink', async function(file, ...args) {
+    if (path.basename(file).startsWith('.state.json.')) throw Object.assign(new Error('Synthetic cleanup denial'), { code: 'EPERM' });
+    return unlink.call(this, file, ...args);
+  });
+  await assert.rejects(writeJSON(pin, 'state.json', { after: true }, { expectedHash: original.hash }), error => error.code === 'WRITE_CONFLICT' && error.cleanupError?.code === 'EPERM');
+  assert.equal(await fs.readFile(path.join(pin.root, 'state.json'), 'utf8'), 'manual change');
+});
+
+
+test('explicit atomic stage cleanup removes only exact authoritative bytes', async t => {
+  const { pin } = await fixture(t);
+  const bytes = Buffer.from('{"authoritative":true}');
+  await writeAtomic(pin, 'state.json', bytes, { expectedHash: null });
+  const same = '.state.json.10000000-0000-4000-8000-000000000001.tmp';
+  const different = '.state.json.10000000-0000-4000-8000-000000000002.tmp';
+  const foreign = '.foreign.json.10000000-0000-4000-8000-000000000003.tmp';
+  for (const [name, value] of [[same, bytes], [different, Buffer.from('unproven fragment')], [foreign, bytes]]) await writeAtomic(pin, name, value, { expectedHash: null });
+  assert.deepEqual(await reclaimAtomicStages(pin, '', { matchesTarget: name => name === 'state.json' }), { removed: 1, incomplete: false });
+  assert.deepEqual((await fs.readdir(pin.root)).sort(), [different, foreign, 'state.json'].sort());
+  if (process.platform !== 'win32') {
+    await fs.symlink(path.join(pin.root, 'state.json'), path.join(pin.root, same));
+    assert.equal((await reclaimAtomicStages(pin, '', { matchesTarget: name => name === 'state.json' })).removed, 0);
+    assert.equal((await fs.lstat(path.join(pin.root, same))).isSymbolicLink(), true);
+  }
 });

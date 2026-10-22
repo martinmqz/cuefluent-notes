@@ -103,6 +103,9 @@ test('hook launch descriptors preserve stdin/stdout and hostile-looking plugin p
     const source = path.join(f.root, 'built', item.path), root = path.join(f.root, `${item.client} space ' apostrophe $dollar \x60tick\x60`); await fs.rename(source, root);
     const hooks = JSON.parse(await fs.readFile(path.join(root, 'hooks/hooks.json'), 'utf8')).hooks;
     assert.deepEqual(Object.keys(hooks).sort(), (item.client === 'claude' ? ['SessionStart', 'Stop', 'StopFailure', 'SessionEnd', 'PostCompact', 'UserPromptExpansion'] : ['SessionStart', 'Stop', 'SessionEnd', 'Interrupt']).sort());
+    if (item.client === 'codex') for (const [event, groups] of Object.entries(hooks)) for (const group of groups) for (const handler of group.hooks) {
+      assert.equal(handler.timeout, ['SessionEnd', 'Interrupt'].includes(event) ? 3 : 10, `${event} must use its native timeout profile`);
+    }
     const hook = hooks.SessionStart[0].hooks[0], environment = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ''}`, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root };
     const child = item.client === 'claude' ? spawn(process.execPath, hook.args.map(arg => arg.replaceAll('${CLAUDE_PLUGIN_ROOT}', root)), { env: environment, stdio: ['pipe', 'pipe', 'pipe'] })
       : spawn(process.platform === 'win32' ? 'cmd.exe' : '/bin/sh', process.platform === 'win32' ? ['/d', '/s', '/c', hook.command] : ['-c', hook.command], { env: environment, windowsVerbatimArguments: process.platform === 'win32', stdio: ['pipe', 'pipe', 'pipe'] });

@@ -72,3 +72,19 @@ test('unauthenticated IPC connection cannot reach a workspace tool', async t => 
   await once(socket, 'connect'); await writeFrame(socket, { token: '0'.repeat(64) }); await closed;
   assert.equal(calls, 0);
 });
+
+test('draft protocol reports only bounded public log locations and omits arbitrary exception details', async () => {
+  let error;
+  const handlers = workspace(); handlers.read_activity_log = async () => { throw error; };
+  const protocol = draftProtocol(handlers, definitions); await protocol(initialize); await protocol(ready);
+  const request = { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_activity_log', arguments: { year: 2026 } } };
+  error = Object.assign(new Error('PRIVATE_EXCEPTION_CONTENT'), { code: 'LOG_INVALID', file: '2026.md', line: 42 });
+  const result = await protocol(request);
+  assert.deepEqual(JSON.parse(result.result.content[0].text), { error: 'LOG_INVALID', location: { file: 'logs/2026.md', line: 42 } });
+  for (const details of [{ code: 'LOG_INVALID', file: '/private/notes/2026.md', line: 42 }, { code: 'LOG_INVALID', file: '2026.md', line: Infinity }, { code: 'NOTE_INVALID', file: '2026.md', line: 42 }]) {
+    error = Object.assign(new Error('PRIVATE_EXCEPTION_CONTENT'), details);
+    const response = await protocol(request);
+    assert.deepEqual(JSON.parse(response.result.content[0].text), { error: details.code });
+    assert.doesNotMatch(JSON.stringify(response), /PRIVATE_EXCEPTION_CONTENT|private\/notes/);
+  }
+});

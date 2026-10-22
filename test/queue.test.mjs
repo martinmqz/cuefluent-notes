@@ -51,7 +51,9 @@ async function killAt(t, pin, relative, phase, operation, item) {
     let hit=false;
     async function pause() {if(hit)return;hit=true;process.send({type:'paused'});setInterval(()=>{},1000);await new Promise(()=>{});}
     const rename=fs.rename;
-    fs.rename=async function(from,to){const result=await rename(from,to);
+    fs.rename=async function(from,to){
+      if(phase==='prune-before-publish'&&path.basename(to)==='intent.json') await pause();
+      const result=await rename(from,to);
       if((phase==='intent'&&path.basename(to)==='intent.json')||(phase==='manifest'&&path.basename(to)==='state.json')||
          (phase==='neighbor'&&to.split(path.sep).includes('links'))) await pause();return result;};
     const open=fs.open;
@@ -64,6 +66,7 @@ async function killAt(t, pin, relative, phase, operation, item) {
       return h;};
     let result;
     if(operation==='append') result=await q.appendQueueRecord(pin,relative,item);
+    else if(operation==='prune') result=await q.removeEmptyQueue(pin,relative,{queueId:(await q.inspectQueue(pin,relative)).queueId});
     else result=await q.cleanupQueueStep(pin,relative,{selected:item,context,index:0});
     if(phase==='completed') await pause();
     process.send({type:'unexpected-completion',result});
@@ -375,4 +378,75 @@ test('invalid record bounds, UTF-8, identities, and linked segment paths fail cl
   catch (error) { if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('Windows symlink privilege unavailable.'); return; } throw error; }
   await assert.rejects(all(pin, relative), { code: 'PATH_UNSAFE' });
   assert.deepEqual(await fs.readFile(`${file}.original`), item.bytes);
+});
+
+
+test('selected input survives an unrelated append during its payload read', async t => {
+  const { pin, relative } = await setup(t);
+  const first = record('selected'), later = record('newer');
+  await appendQueueRecord(pin, relative, first);
+  const open = fs.open; let inserted = false;
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    if (!inserted && file === partFor(pin, relative, first.id)) {
+      inserted = true; await appendQueueRecord(pin, relative, later);
+    }
+    return open.call(this, file, ...args);
+  });
+  assert.deepEqual((await readQueueRecord(pin, relative, { id: first.id, hash: first.hash })).dataBytes, first.dataBytes);
+  assert.equal((await inspectQueue(pin, relative)).records, 2);
+});
+
+for (const boundary of ['parts', 'links', 'state.json', 'intent.json']) {
+  test(`empty queue removal resumes after deleting ${boundary}`, async t => {
+    const { pin, relative } = await setup(t);
+    const item = record('only'); await appendQueueRecord(pin, relative, item);
+    const { queueId } = await inspectQueue(pin, relative); await remove(pin, relative, item);
+    const method = boundary.endsWith('.json') ? 'unlink' : 'rmdir';
+    const original = fs[method]; let failed = false;
+    const mocked = t.mock.method(fs, method, async function(file, ...args) {
+      const result = await original.call(this, file, ...args);
+      if (!failed && file === path.join(pin.root, relative, boundary)) {
+        failed = true; throw Object.assign(new Error('Synthetic interruption'), { code: 'SYNTHETIC_INTERRUPTION' });
+      }
+      return result;
+    });
+    await assert.rejects(removeEmptyQueue(pin, relative, { queueId }), { code: 'SYNTHETIC_INTERRUPTION' });
+    mocked.mock.restore();
+    const observed = await inspectQueue(pin, relative);
+    assert.equal(observed.queueId, queueId); assert.equal(observed.records, 0);
+    await removeEmptyQueue(pin, relative, { queueId });
+    assert.deepEqual(await fs.readdir(pin.root), []);
+  });
+}
+
+test('retry flushes a complete new link before publishing its queue manifest', async t => {
+  const { pin, relative } = await setup(t);
+  await appendQueueRecord(pin, relative, record('earlier'));
+  const later = record('later'), filename = path.join(pin.root, relative, 'links', `${keyFor(later.id)}.json`);
+  const open = fs.open; let failed = false, synced = 0;
+  t.mock.method(fs, 'open', async function(file, ...args) {
+    const handle = await open.call(this, file, ...args);
+    if (file === filename && typeof args[0] === 'number' && (args[0] & 2)) {
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        if (!failed) { failed = true; throw Object.assign(new Error('Synthetic pre-fsync interruption'), { code: 'SYNTHETIC_INTERRUPTION' }); }
+        synced++; return sync();
+      };
+    }
+    return handle;
+  });
+  await assert.rejects(appendQueueRecord(pin, relative, later), { code: 'SYNTHETIC_INTERRUPTION' });
+  await appendQueueRecord(pin, relative, later);
+  assert.ok(synced > 0); assert.equal((await inspectQueue(pin, relative)).records, 2);
+});
+
+
+test('killed empty-queue prune before journal rename reclaims its exact reconstructable stage', async t => {
+  const { pin, relative } = await setup(t), item = record('only');
+  await appendQueueRecord(pin, relative, item); const { queueId } = await inspectQueue(pin, relative);
+  await remove(pin, relative, item);
+  await killAt(t, pin, relative, 'prune-before-publish', 'prune', item);
+  assert.ok((await fs.readdir(path.join(pin.root, relative))).some(name => name.startsWith('.intent.json.')));
+  await removeEmptyQueue(pin, relative, { queueId });
+  assert.deepEqual(await fs.readdir(pin.root), []);
 });

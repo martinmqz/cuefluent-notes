@@ -237,3 +237,87 @@ test('late repeated track preserves a streaming cursor and resumes exact selecte
   const restored = result.flatMap(item => item.data.exchangeId === 'large' ? item.data.segments.filter(segment => segment.kind === 'human').map(segment => segment.text) : []).join('');
   assert.equal(restored, content);
 });
+
+test('ordinary retry replays the retained append outcome before collecting a newer completion', async t => {
+  for (const kind of ['observed', 'interrupted', 'failed']) {
+    const f = await fixture(t, [human('track'), assistant('track-answer')]);
+    await setChatTracking(f.store, f.invocation); await f.collect(); await f.collect();
+    await fs.appendFile(f.sourcePath, bytes([human('work'), { ...assistant('partial', 'Observed text'), message: { role: 'assistant', content: [{ type: 'text', text: 'Observed text' }], stop_reason: null } }]));
+    let saved = await readChat(f.store, 'claude', sessionId);
+    saved = await updateChat(f.store, 'project', 'claude', sessionId, { expectedHash: saved.hash,
+      change: chat => requestReconciliation(chat, { promptId: 'work', kind, finalTextHash: null }) });
+    const source = await openTranscript(f.sourcePath); let planned;
+    try {
+      for await (const event of normalizeTranscript(source, { client: 'claude', sessionId, checkpoint: saved.value.checkpoint, completion: saved.value.pending.completion })) {
+        if (event.type === 'part') { planned = event; break; }
+      }
+    } finally { await source.close(); }
+    assert.equal(planned.part.outcome, kind);
+    const record = transcriptPartRecord(planned.part);
+    saved = await updateChat(f.store, 'project', 'claude', sessionId, { expectedHash: saved.hash,
+      change: chat => stageChatPart(chat, { generation: chat.generation, recordId: record.id, hash: record.hash, checkpoint: planned.checkpoint }) });
+    await appendQueueRecord(f.store.pin, queueRelative('claude', sessionId), record);
+    assert.equal((await f.selection()).some(item => item.id === record.id), false);
+    await fs.appendFile(f.sourcePath, bytes([assistant('late-final', 'New final reply')]));
+    await updateChat(f.store, 'project', 'claude', sessionId, { expectedHash: saved.hash,
+      change: chat => requestReconciliation(chat, { promptId: 'work', kind: 'completed', finalTextHash: null }) });
+    assert.deepEqual(await f.collect(), { status: 'caught-up', parts: 2 });
+    const selected = await f.selection(), recovered = selected.find(item => item.id === record.id);
+    assert.equal(recovered.hash, record.hash); assert.deepEqual(recovered.data, planned.part);
+    const supplement = selected.at(-1).data;
+    assert.equal(supplement.exchangeId, 'work'); assert.equal(supplement.partIndex, 1); assert.equal(supplement.supplement, true);
+    assert.equal(supplement.segments.map(item => item.text).join(''), 'New final reply');
+    assert.equal((await readChat(f.store, 'claude', sessionId)).value.uncommitted, null);
+    assert.deepEqual(await f.collect(), { status: 'caught-up', parts: 0 });
+  }
+});
+
+test('initial chat-read races remain retryable collector results instead of crashing the steward child', async t => {
+  const f = await fixture(t, [human('before'), assistant('reply'), human('track')]);
+  const saved = await setChatTracking(f.store, f.invocation), target = path.join(f.store.root, saved.relative);
+  const original = fs.open; let injected = false;
+  const mocked = t.mock.method(fs, 'open', async (...args) => {
+    if (!injected && args[0] === target) { injected = true; throw Object.assign(new Error('Synthetic concurrent replacement'), { code: 'FILE_CHANGED' }); }
+    return original(...args);
+  });
+  assert.deepEqual(await f.collect(), { status: 'pending', reason: 'FILE_CHANGED', parts: 0 });
+  assert.equal(injected, true); mocked.mock.restore();
+  assert.equal((await f.collect()).status, 'caught-up');
+  assert.equal((await f.selection()).length, 1);
+});
+
+test('interrupted streaming append resumes its exact field position and original emission range after source growth', async t => {
+  const f = await fixture(t, [human('track'), assistant('track-answer')]), large = 'Exact large prompt λ🙂. '.repeat(1500), limits = { partBytes: 8192 };
+  await setChatTracking(f.store, f.invocation); await f.collect(); await f.collect();
+  await fs.appendFile(f.sourcePath, bytes([human('large-work', large), { ...assistant('partial'), message: { role: 'assistant', content: [{ type: 'text', text: 'Partial answer' }], stop_reason: null } }]));
+  let saved = await readChat(f.store, 'claude', sessionId);
+  saved = await updateChat(f.store, 'project', 'claude', sessionId, { expectedHash: saved.hash,
+    change: chat => requestReconciliation(chat, { promptId: 'large-work', kind: 'failed', finalTextHash: null }) });
+  const source = await openTranscript(f.sourcePath); let stagedRecord;
+  try {
+    let index = 0;
+    for await (const event of normalizeTranscript(source, { client: 'claude', sessionId, checkpoint: saved.value.checkpoint, completion: saved.value.pending.completion, limits })) {
+      if (event.type !== 'part') continue;
+      const record = transcriptPartRecord(event.part);
+      if (index++ === 0) saved = await commitChatPart(f.store, 'project', 'claude', sessionId, { expectedHash: saved.hash, generation: saved.value.generation,
+        checkpoint: event.checkpoint, requestId: saved.value.pending.id, record });
+      else {
+        assert(saved.value.checkpoint.cursor); assert(event.checkpoint.cursor); stagedRecord = record;
+        saved = await updateChat(f.store, 'project', 'claude', sessionId, { expectedHash: saved.hash,
+          change: chat => stageChatPart(chat, { generation: chat.generation, recordId: record.id, hash: record.hash, checkpoint: event.checkpoint }) });
+        await appendQueueRecord(f.store.pin, queueRelative('claude', sessionId), record); break;
+      }
+    }
+  } finally { await source.close(); }
+  await fs.appendFile(f.sourcePath, bytes([assistant('late-final', 'Late final')]));
+  await updateChat(f.store, 'project', 'claude', sessionId, { expectedHash: saved.hash,
+    change: chat => requestReconciliation(chat, { promptId: 'large-work', kind: 'completed', finalTextHash: null }) });
+  const result = await f.collect({ limits }); assert.equal(result.status, 'caught-up');
+  const selected = await f.selection(), recovered = selected.find(item => item.id === stagedRecord.id);
+  assert.equal(recovered.hash, stagedRecord.hash);
+  const work = selected.map(item => item.data).filter(item => item.exchangeId === 'large-work');
+  assert.equal(work.flatMap(item => item.segments).filter(item => item.kind === 'human').map(item => item.text).join(''), large);
+  assert.equal(work.flatMap(item => item.segments).filter(item => item.kind === 'assistant').map(item => item.text).join(''), 'Partial answerLate final');
+  assert(work.every((item, index) => item.partIndex === index)); assert.equal(work.at(-1).supplement, true);
+  assert.equal((await readChat(f.store, 'claude', sessionId)).value.uncommitted, null);
+});

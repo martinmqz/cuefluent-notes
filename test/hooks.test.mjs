@@ -47,6 +47,10 @@ test('Stop pins exact native prompt and UTF8 final-message hash; end/compact do 
   assert.equal(failed.kind, 'failed'); assert.deepEqual(failed.completion, { promptId: 'failed-prompt', kind: 'failed', finalTextHash: null });
   assert(!JSON.stringify(failed).includes('Rendered')); assert(!JSON.stringify(failed).includes('Not retained'));
   assert.equal(mapNativeHook('claude', { ...identity, hook_event_name: 'StopFailure', error: 'rate_limit' }).event.completion, null);
+  const verification = mapNativeHook('claude', { ...identity, hook_event_name: 'StopFailure', prompt_id: 'verification-prompt', error: 'verification_required',
+    last_assistant_message: 'Private authentication diagnostics must not be collected' }).event;
+  assert.equal(verification.kind, 'failed'); assert.deepEqual(verification.completion, { promptId: 'verification-prompt', kind: 'failed', finalTextHash: null });
+  assert(!JSON.stringify(verification).includes('Private authentication'));
   for (const hook_event_name of ['UserPromptSubmit', 'PreCompact', 'UnknownHook']) {
     assert.deepEqual(mapNativeHook('claude', { ...identity, hook_event_name, prompt: '/notes:notes track' }), { event: null, command: null });
   }

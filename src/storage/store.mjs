@@ -8,7 +8,7 @@ import {
   assertAbsolute, assertChain, assertPrivatePlacement, assertRegularFile,
   createPrivateDirectory, inspectAncestors, lstatOrNull, pinDirectory,
 } from './paths.mjs';
-import { readJSON, writeJSON } from './files.mjs';
+import { readJSON, writeJSON, reclaimAtomicStages } from './files.mjs';
 import { assertGatePlacement, initializeGate, inspectExistingGate, withShortGate } from './gates.mjs';
 
 const LAYOUT = 'store/layout.json';
@@ -63,7 +63,10 @@ export async function checkStorePlacement(root, settings) {
     }
   }
   for (const project of settings.projects) {
-    await inspectAncestors(project.root);
+    const projectChain = await inspectAncestors(project.root);
+    if (process.platform === 'darwin' && await fs.realpath(project.root) !== project.root)
+      fail('PROJECT_ROOT_NONCANONICAL', 'Use the project root with its exact filesystem spelling.');
+    await assertChain(projectChain);
     if (project.destination.kind === 'directory') {
       await inspectAncestors(project.destination.path, { allowMissing: true });
     } else {
@@ -151,10 +154,15 @@ async function hasDirectoryEntries(directory) {
   try { return Boolean(await stream.read()); } finally { await stream.close(); }
 }
 
-async function retainedFacts(store, settings) {
+async function retainedFacts(store, settings, proposed) {
   const retainedProjectIds = [], pendingRuns = [];
   for (const project of settings.projects) {
     const directory = path.join(store.root, 'store/projects', projectKey(project.id));
+    if (proposed && !proposed.projects.some(next => next.id === project.id)) {
+      const layout = await readLayout(store);
+      if (!Object.hasOwn(layout.value.projects, project.id)) fail('STORE_LAYOUT_INVALID', 'The retained project has no mutation gate.');
+      await withShortGate(layout.value.projects[project.id].stateGate, gateOptions, () => reclaimAtomicStages(store.pin, `store/projects/${projectKey(project.id)}/chats`, { matchesTarget: name => /^[a-f0-9]{64}\.json$/.test(name), maxBytes: 64 * 1024 }));
+    }
     const run = await lstatOrNull(path.join(directory, 'run.json'));
     if (run) {
       assertRegularFile(path.join(directory, 'run.json'), run, { private: true });
@@ -183,7 +191,7 @@ export async function withSelectedProject(store, select, fn) {
     const project = settings.value.projects.find(entry => entry.id === id);
     if (!project) fail('PROJECT_UNCONFIGURED', 'The project is not configured.');
     const layout = await readLayout(store);
-    const gates = layout.value.projects[id];
+    const gates = Object.hasOwn(layout.value.projects, id) ? layout.value.projects[id] : null;
     if (!gates) fail('STORE_LAYOUT_INVALID', 'The configured project has no registered ownership gates.');
     return withShortGate(gates.stateGate, gateOptions, async () => fn(Object.freeze({
       project, settingsHash: settings.hash, gates,
@@ -200,7 +208,7 @@ export async function updateSettings(store, proposed, { expectedHash, beforePubl
   return withShortGate(store.settingsGate, gateOptions, async () => {
     const current = await readSettings(store);
     if (current.hash !== expectedHash) fail('SETTINGS_CONFLICT', 'Settings changed after inspection.');
-    assertSettingsChange(current.value, next, await retainedFacts(store, current.value));
+    assertSettingsChange(current.value, next, await retainedFacts(store, current.value, next));
     const layout = await readLayout(store);
     let changed = false;
     for (const project of next.projects) {
@@ -222,7 +230,7 @@ export async function updateSettings(store, proposed, { expectedHash, beforePubl
       const adjusted = await beforePublish(Object.freeze({ current: current.value, next, hash: current.hash }));
       if (adjusted !== undefined) next = validateSettings(adjusted);
       await checkStorePlacement(store.root, next);
-      assertSettingsChange(current.value, next, await retainedFacts(store, current.value));
+      assertSettingsChange(current.value, next, await retainedFacts(store, current.value, next));
       if (next.projects.some(project => !Object.hasOwn(layout.value.projects, project.id))) fail('SETTINGS_INVALID', 'Setup cannot add an unprepared project inside publication.');
     }
     return writeJSON(store.pin, SETTINGS, next, { expectedHash: current.hash });
@@ -231,5 +239,7 @@ export async function updateSettings(store, proposed, { expectedHash, beforePubl
 
 /** Short shared destination coordination also serializes overlapping folder/file routes. */
 export async function withWriter(store, fn) {
-  return withShortGate(store.writerGate, gateOptions, fn);
+  // Callers may already hold settings/project gates: never wait here while
+  // another owned writer needs a short CAS under those gates.
+  return withShortGate(store.writerGate, { ...gateOptions, timeoutMs: 0 }, fn);
 }

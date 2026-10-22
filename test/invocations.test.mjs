@@ -47,14 +47,21 @@ test('a concurrent command cannot replace an executing claim or acquire its gate
   const explicit = await claimInvocation(f.store, { ...f.binding, promptId: 'third', action: 'untrack' }); assert.ok(explicit.ticket);
 });
 
-test('an ownerless pending claim gets a terminal receipt before another prompt may replace it', async t => {
+test('a fresh prompt replaces an ownerless pending claim and invalidates late startup', async t => {
   const f = await fixture(t), first = await claimInvocation(f.store, f.binding);
-  const refused = await claimInvocation(f.store, { ...f.binding, promptId: 'second', action: 'untrack' });
-  assert.equal(refused.ticket, null); assert.equal(refused.result.state, 'not-executed'); assert.equal(refused.result.handle, undefined);
-  assert.equal((await readInvocation(f.store, first.ticket)).state, 'not-executed');
-  assert.equal((await runClaimedInvocation(f.store, first.ticket, { execute: () => assert.fail('Cancelled startup executed') })).state, 'not-executed');
-  const repeated = await claimInvocation(f.store, { ...f.binding, promptId: 'second', action: 'untrack' }); assert.equal(repeated.ticket, null);
-  const retry = await claimInvocation(f.store, { ...f.binding, promptId: 'third', action: 'untrack' }); assert.notEqual(retry.ticket, first.ticket);
+  const next = await claimInvocation(f.store, { ...f.binding, promptId: 'second', action: 'untrack' });
+  assert.ok(next.ticket); assert.notEqual(next.ticket, first.ticket);
+  assert.equal((await readInvocation(f.store, first.ticket)).state, 'expired');
+  assert.equal((await runClaimedInvocation(f.store, first.ticket, { execute: () => assert.fail('Cancelled startup executed') })).state, 'expired');
+  assert.equal((await claimInvocation(f.store, { ...f.binding, promptId: 'second', action: 'untrack' })).ticket, next.ticket);
+  assert.equal((await runClaimedInvocation(f.store, next.ticket, { execute: async () => ({ state: 'untracked' }) })).state, 'untracked');
+});
+
+test('polling returns a running status snapshot without mistaking it for a launch receipt', async t => {
+  const f = await fixture(t), claim = await claimInvocation(f.store, f.binding);
+  const snapshot = { state: 'running', run: { id: 'synthetic-run' }, counts: { queued: 1 }, latest: null };
+  await runClaimedInvocation(f.store, claim.ticket, { execute: async () => snapshot });
+  assert.deepEqual(await readInvocation(f.store, claim.ticket), { ...snapshot, handle: claim.ticket });
 });
 
 function worker(f, ticket, mode = 'normal') {
@@ -94,4 +101,22 @@ test('unconfigured claims and absent polling write nothing; failed delivery does
   assert.equal(failed.reason, 'COMMAND_FAILED'); assert.ok(!JSON.stringify(failed).includes('Sensitive'));
   const repeat = await runClaimedInvocation(f.store, first.ticket, { execute: () => assert.fail('Repeated failed command') });
   assert.equal(repeat.state, 'failed');
+});
+
+
+test('polling rereads a result published between status inspection and idle gate observation', async t => {
+  const f = await fixture(t), claim = await claimInvocation(f.store, f.binding);
+  let release, entered;
+  const ready = new Promise(resolve => { entered = resolve; }), blocked = new Promise(resolve => { release = resolve; });
+  const work = runClaimedInvocation(f.store, claim.ticket, { execute: async () => { entered(); await blocked; return { state: 'tracked' }; } });
+  await ready;
+  const original = fs.lstat; let raced = false;
+  fs.lstat = async (file, ...args) => {
+    if (!raced && String(file).includes(`${path.sep}chats${path.sep}`) && String(file).endsWith('.json')) {
+      raced = true; release(); await work;
+    }
+    return original(file, ...args);
+  };
+  try { assert.equal((await readInvocation(f.store, claim.ticket)).state, 'tracked'); assert.equal(raced, true); }
+  finally { fs.lstat = original; release(); await work; }
 });

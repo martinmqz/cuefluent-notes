@@ -35,17 +35,22 @@ async function annualFiles(pin) {
   const directory = path.join(pin.root, 'logs'), stat = await lstatOrNull(directory);
   requireLog(stat?.isDirectory() && !stat.isSymbolicLink(), 'LOG_MISSING');
   const parent = await inspectParent(pin, 'logs/0000.md'), handle = await fs.opendir(directory), files = [];
-  let inspected = 0, unrelated = 0;
+  let inspected = 0, unrelated = 0, firstUnrelated = null;
   try {
     for (;;) {
       const item = await handle.read(); if (!item) break;
       requireLog(++inspected <= 4096, 'LOG_LAYOUT_UNRECOGNIZED');
-      if (!annualName.test(item.name)) { unrelated++; continue; }
+      if (!annualName.test(item.name)) {
+        unrelated++;
+        // Desktop metadata establishes no series and owns no note content.
+        if (item.isFile() && ['.DS_Store', 'desktop.ini', 'Thumbs.db'].includes(item.name)) continue;
+        firstUnrelated ??= item.name; continue;
+      }
       requireLog(files.length < 256 && item.isFile() && !item.isSymbolicLink(), 'LOG_LAYOUT_UNRECOGNIZED');
       const year = Number(item.name.slice(0, 4));
       const snapshot = await readSnapshot(pin, logRelative(year), { maxBytes: NOTE_PROFILE.fileBytes });
       const annual = inspectAnnualLog(snapshot.bytes, { year });
-      requireLog(annual.unrecognizedEntries === 0, 'LOG_ENTRY_INVALID');
+      if (annual.unrecognizedEntries) { const error = new Error(`Activity log logs/${item.name}:${annual.unrecognizedLines[0]} has an unrecognized entry; preserve the existing file.`); Object.assign(error, { code: 'LOG_ENTRY_INVALID', file: `logs/${item.name}`, line: annual.unrecognizedLines[0] }); throw error; }
       files.push(annual);
     }
   } finally { await handle.close(); }
@@ -53,7 +58,10 @@ async function annualFiles(pin) {
   // An established annual series can coexist with Finder/editor files and
   // another run's transient stage. An unrelated-only folder is not a series to
   // adopt or silently replace during setup.
-  requireLog(files.length > 0 || unrelated === 0, 'LOG_LAYOUT_UNRECOGNIZED');
+  if (!files.length && firstUnrelated !== null) {
+    const error = new Error(`The existing logs/${JSON.stringify(firstUnrelated)} does not establish an activity-log series; preserve it before enabling logging.`);
+    Object.assign(error, { code: 'LOG_LAYOUT_UNRECOGNIZED', entry: firstUnrelated }); throw error;
+  }
   return { files, parent: parent.chain, unrelatedEntries: unrelated };
 }
 

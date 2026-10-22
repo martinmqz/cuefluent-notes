@@ -91,3 +91,15 @@ test('package loader refuses symlink skill and symlink ancestors', { skip: proce
   const alias = `${directory}-alias`; await symlink(directory, alias); t.after(() => rm(alias, { force: true }));
   await assert.rejects(loadClientContract(alias), { code: 'PATH_UNSAFE' });
 });
+
+
+test('OS locations normalize separators without relaxing explicit arguments', () => {
+  for (const home of ['/home/synthetic/', '/home//synthetic']) assert.equal(selectStoreRoot({ platform: 'linux', homedir: home, env: {} }), '/home/synthetic/.local/state/cuefluent-notes/v2');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/', env: {} }), '/.local/state/cuefluent-notes/v2');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/home/synthetic/', env: { XDG_STATE_HOME: 'relative' } }), '/home/synthetic/.local/state/cuefluent-notes/v2');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/', env: { XDG_STATE_HOME: '/state//' } }), '/state/cuefluent-notes/v2');
+  assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic/', env: { LOCALAPPDATA: 'D:/Local Data/' } }), 'D:\\Local Data\\Cuefluent Notes\\v2');
+  assert.throws(() => selectStoreRoot({ platform: 'linux', homedir: 'relative', env: {} }), { code: 'ENTRY_LOCATION_INVALID' });
+  assert.throws(() => selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic', env: { LOCALAPPDATA: 'relative' } }), { code: 'ENTRY_LOCATION_INVALID' });
+  assert.throws(() => parseEntryArguments(['setup', '--config', '/tmp/config/'], { platform: 'linux' }), { code: 'ENTRY_ARGUMENT_INVALID' });
+});

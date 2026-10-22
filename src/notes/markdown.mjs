@@ -12,9 +12,24 @@ export function parseMarkdown(source) {
   const env = {};
   return { tokens: parser.parse(source, env), env };
 }
+function withoutRawText(input) {
+  const opening = /<(script|style|textarea|title)\b/gi;
+  let output = '', cursor = 0, match;
+  while ((match = opening.exec(input))) {
+    const tagEnd = input.indexOf('>', opening.lastIndex);
+    if (tagEnd === -1) break;
+    const closing = new RegExp(`</${match[1]}\\s*>`, 'gi'); closing.lastIndex = tagEnd + 1;
+    const end = closing.exec(input);
+    // Raw-text content is not visible heading text, including an unclosed tail.
+    output += input.slice(cursor, match.index) + ' ';
+    cursor = end ? closing.lastIndex : input.length;
+    opening.lastIndex = cursor;
+  }
+  return output + input.slice(cursor);
+}
+
 function plainFragment(input) {
-  const source = input.replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(script|style|textarea|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
+  const source = withoutRawText(input.replace(/<!--[\s\S]*?(?:-->|$)/g, ' '))
     .replace(/!\[[^\]]*\]\((?:\\.|[^)])*\)/g, ' ')
     .replace(/<(?:https?:\/\/|mailto:)[^>\s]+>/gi, ' ');
   let output = '';
@@ -27,7 +42,7 @@ function plainFragment(input) {
       else if (character === '"' || character === "'") quote = character;
       else if (character === '>') break;
     }
-    if (end === source.length) { output += source[i++]; continue; }
+    if (end === source.length) { output += source.slice(i); break; }
     output += ' '; i = end + 1;
   }
   return output;

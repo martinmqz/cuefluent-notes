@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fail } from '../core/errors.mjs';
 import { assertAttempt, replaceAttempt, validateRun } from '../core/run.mjs';
 import { readJSON, writeJSON } from './files.mjs';
-import { probeGate, tryAcquireExistingGate } from './gates.mjs';
+import { GateError, probeGate, tryAcquireExistingGate } from './gates.mjs';
 import { gateOptions, withProject } from './store.mjs';
 
 const owners = new WeakMap();
@@ -170,18 +171,18 @@ export async function ownAttempt(store, projectId, { runId, attemptId, workerGat
   if (typeof work !== 'function' || typeof channel?.send !== 'function') {
     fail('ATTEMPT_WORKER_INVALID', 'An owned worker needs work and a parent IPC channel.');
   }
-  let gate, owner, workFinished = false;
+  let gate, owner, failure, workFinished = false;
   try {
-    gate = await withProject(store, projectId, context => {
+    await withProject(store, projectId, context => {
       const expected = context.gates.workerGate;
       if (workerGate && ['path', 'id', 'device', 'inode'].some(key => workerGate[key] !== expected[key])) fail('ATTEMPT_GATE_CHANGED', 'The worker gate differs from its launch binding.');
       const acquired = tryAcquireExistingGate(expected, gateOptions);
       if (acquired.busy) fail('ATTEMPT_ACTIVE', 'A worker already owns this project.');
-      return acquired.acquired;
+      gate = acquired.acquired;
     });
     await awaitActivation(channel, attemptId, startupTimeoutMs);
     owner = Object.freeze({ runId, attemptId, projectId });
-    owners.set(owner, { store, projectId, runId, attemptId, active: true, accepting: true, publications: new Set(), failure: null });
+    owners.set(owner, { store, projectId, runId, attemptId, active: true, accepting: true, publications: new Set(), failures: new Set() });
     await withCurrentAttempt(owner, () => {});
     // IPC is only the startup handshake. Closing it lets both processes proceed
     // independently and prevents later parent loss from cancelling active work.
@@ -194,6 +195,7 @@ export async function ownAttempt(store, projectId, { runId, attemptId, workerGat
     workFinished = true;
     return result;
   } catch (error) {
+    failure = error;
     if (channel.connected) {
       try { channel.send({ type: `${PREFIX}error`, attemptId, code: error.code ?? 'ATTEMPT_WORKER_FAILED' }, () => {}); } catch { /* Parent may already be gone. */ }
     }
@@ -202,11 +204,17 @@ export async function ownAttempt(store, projectId, { runId, attemptId, workerGat
     if (owner) {
       const state = owners.get(owner);
       state.accepting = false;
-      await Promise.allSettled([...state.publications]);
+      while (state.publications.size) await Promise.allSettled([...state.publications]);
       state.active = false;
     }
-    gate?.release();
-    if (workFinished && owners.get(owner)?.failure) throw owners.get(owner).failure;
+    const unattended = workFinished && [...(owners.get(owner)?.failures ?? [])].find(item => !item.observed);
+    failure ??= unattended?.error;
+    try { gate?.release(); }
+    catch (error) {
+      if (failure) { try { Object.defineProperty(failure, 'releaseError', { value: error, configurable: true }); } catch {} }
+      else throw new GateError('GATE_RELEASE_FAILED', 'The attempt finished but its worker gate release failed.', { cause: error });
+    }
+    if (unattended) throw unattended.error;
   }
 }
 
@@ -222,9 +230,62 @@ export function withCurrentAttempt(owner, fn) {
     assertAttempt(snapshot.value, state.attemptId);
     return fn(Object.freeze({ ...context, run: snapshot.value, hash: snapshot.hash }));
   });
+  return trackPublication(state, publication);
+}
+
+function trackPublication(state, publication) {
+  const observation = { observed: false, error: null };
   state.publications.add(publication);
   publication.then(() => state.publications.delete(publication), error => {
-    state.failure ??= error; state.publications.delete(publication);
+    observation.error = error; state.failures.add(observation); state.publications.delete(publication);
   });
-  return publication;
+  // Every branch has its own observation. Chaining a success-only handler or a
+  // finally transfers the rejection to its child; it does not handle it.
+  return Object.freeze({
+    then(resolve, reject) { observation.observed = true; return trackPublication(state, publication.then(resolve, reject)); },
+    catch(reject) { observation.observed = true; return trackPublication(state, publication.catch(reject)); },
+    finally(callback) { observation.observed = true; return trackPublication(state, publication.finally(callback)); },
+  });
+}
+
+/** Acquire in settings → project → writer order, then release short gates for
+ * public filesystem work. Only this live worker owns the run; each persistence
+ * callback reacquires short gates and checks its exact prior hash and attempt. */
+export async function withAttemptWriter(owner, fn, { timeoutMs = 5000 } = {}) {
+  timeout(timeoutMs);
+  if (typeof fn !== 'function') fail('ATTEMPT_WORKER_INVALID', 'Writer work requires a callback.');
+  const state = owners.get(owner);
+  if (!state?.active || !state.accepting) fail('ATTEMPT_NOT_OWNED', 'A live worker capability is required.');
+  const deadline = performance.now() + timeoutMs;
+  let acquired, context;
+  try { while (!acquired) {
+    await withCurrentAttempt(owner, current => {
+      const result = tryAcquireExistingGate(state.store.writerGate, gateOptions);
+      if (result.acquired) { acquired = result.acquired; context = current; }
+    });
+    if (acquired) break;
+    if (performance.now() >= deadline) fail('GATE_BUSY', 'The notes writer remained busy until its bounded deadline.');
+    await delay(Math.max(0, Math.min(25, deadline - performance.now())));
+  } } catch (error) {
+    try { acquired?.release(); } catch (releaseError) { try { Object.defineProperty(error, 'releaseError', { value: releaseError, configurable: true }); } catch {} }
+    throw error;
+  }
+  let run = context.run, hash = context.hash, failure;
+  const assertCurrent = () => withCurrentAttempt(owner, current => {
+    if (current.hash !== hash) fail('RUN_CHANGED', 'The pending run changed during the owned write.');
+  });
+  const persist = async next => withCurrentAttempt(owner, async current => {
+    if (current.hash !== hash) fail('RUN_CHANGED', 'The pending run changed during the owned write.');
+    const result = await writeJSON(state.store.pin, `${current.directory}/run.json`, next, { expectedHash: hash });
+    run = next; hash = result.hash; return next;
+  });
+  try { return await fn(Object.freeze({ ...context, get run() { return run; }, get hash() { return hash; }, persist, assertCurrent })); }
+  catch (error) { failure = error; throw error; }
+  finally {
+    try { acquired.release(); }
+    catch (error) {
+      if (failure) { try { Object.defineProperty(failure, 'releaseError', { value: error, configurable: true }); } catch {} }
+      else throw error;
+    }
+  }
 }

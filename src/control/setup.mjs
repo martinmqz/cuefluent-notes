@@ -9,6 +9,7 @@ import { withShortGate } from '../storage/gates.mjs';
 import { readJSON, writeJSON, removeExact, syncDirectory } from '../storage/files.mjs';
 import { assertAbsolute, assertChain, inspectAncestors, lstatOrNull, pinDirectory } from '../storage/paths.mjs';
 import { establishActivityLogSeries, inspectActivityLogSeries, logYear } from '../logs/storage.mjs';
+import { logDiagnostic } from '../logs/index.mjs';
 
 const JOURNAL = 'config/setup.json';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -36,10 +37,11 @@ function chainValue(value, root) {
 function logReport(input, request) {
   const expectedPath = request.destination.kind === 'directory' ? path.join(request.destination.path, 'logs') : null;
   requireSetup(input && input.path === expectedPath && typeof input.status === 'string');
-  const fields = input.status === 'valid' ? ['path', 'seriesId', 'status', 'timezone', 'unrelatedEntries', 'years'] : input.status === 'problem' ? ['path', 'status', 'warning'] : ['path', 'status'];
+  const fields = input.status === 'valid' ? ['path', 'seriesId', 'status', 'timezone', 'unrelatedEntries', 'years'] : input.status === 'problem' ? [...(Object.hasOwn(input, 'location') ? ['location'] : []), 'path', 'status', 'warning'] : ['path', 'status'];
   requireSetup(equal(Object.keys(input).sort(), fields));
   requireSetup(request.destination.kind === 'file' ? input.status === 'not-applicable' : ['absent', 'empty', 'valid', 'problem'].includes(input.status));
   if (input.status === 'problem') requireSetup(typeof input.warning === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(input.warning));
+  if (Object.hasOwn(input, 'location')) requireSetup(input.location && equal(input.location, logDiagnostic({ code: input.warning, ...input.location })));
   if (input.status === 'valid') {
     requireSetup(Number.isSafeInteger(input.unrelatedEntries) && input.unrelatedEntries >= 0 && input.unrelatedEntries <= 4096 &&
       typeof input.seriesId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.seriesId) &&
@@ -95,7 +97,8 @@ async function inspectLogs(project) {
     return Object.freeze({ path: logPath, status: 'valid', seriesId: result.binding.seriesId, timezone: result.binding.timezone, years: result.years, unrelatedEntries: result.unrelatedEntries });
   } catch (error) {
     if (error.code === 'LOG_SERIES_MISSING') return Object.freeze({ path: logPath, status: 'empty' });
-    return Object.freeze({ path: logPath, status: 'problem', warning: codeOf(error) });
+    const location = logDiagnostic(error);
+    return Object.freeze({ path: logPath, status: 'problem', warning: codeOf(error), ...(location ? { location } : {}) });
   }
 }
 

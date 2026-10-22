@@ -2,6 +2,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fail } from './core/errors.mjs';
+import { withWindowsAclDeadline } from './storage/windows-acl.mjs';
 import { openStore, readSettings } from './storage/store.mjs';
 import { pinDirectory } from './storage/paths.mjs';
 import { readJSON } from './storage/files.mjs';
@@ -62,9 +63,22 @@ async function submitCommand(store, invocation) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
+  const started = performance.now();
   nodeVersion();
   const args = parseEntryArguments(argv), skillVersion = await version();
   const storeRoot = args.storeRoot ?? selectStoreRoot();
+  if (args.command === 'hook') {
+    const envelope = await inputJSON(process.stdin, 64 * 1024 * 1024);
+    const limit = args.client === 'codex' && ['SessionEnd', 'Interrupt'].includes(envelope?.hook_event_name) ? 3000 : 10000;
+    // Include store opening in the ACL budget and leave time for a coded reply
+    // before the native hook runner terminates the two-process wrapper.
+    return withWindowsAclDeadline(() => runEntry(args, skillVersion, storeRoot, envelope),
+      { timeoutMs: Math.max(1, Math.floor(limit - (performance.now() - started) - 500)) });
+  }
+  return runEntry(args, skillVersion, storeRoot);
+}
+
+async function runEntry(args, skillVersion, storeRoot, envelope) {
   if (args.command === 'setup') {
     const request = await readJSON(await pinDirectory(path.dirname(args.configPath)), path.basename(args.configPath), { maxBytes: 1024 * 1024 });
     if (!request.value || typeof request.value !== 'object' || Array.isArray(request.value) ||
@@ -94,7 +108,6 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const contract = await loadClientContract(PACKAGE);
     if (args.command === 'hook') {
-      const envelope = await inputJSON(process.stdin, 64 * 1024 * 1024);
       const mapped = await handleNativeHook(store, args.client, envelope, { claudeCommand: contract.claude,
         clientContract: clientContract(contract, args.client), schedule: () => runtime.schedule() });
       if (!mapped.command) return; // Ordinary hooks inject no context.

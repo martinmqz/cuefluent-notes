@@ -1,10 +1,24 @@
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { spawn } from 'node:child_process';
 import { parse } from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const LIMIT = 64 * 1024;
 const DEADLINE = 15_000;
 const REGISTRY = Symbol.for('cuefluent.notes.v2.windows-acl');
+const deadlines = new AsyncLocalStorage();
+
+/** One hook's whole storage budget, including every synchronous ACL round trip. */
+export function withWindowsAclDeadline(fn, { timeoutMs } = {}) {
+  if (typeof fn !== 'function' || !Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) throw Object.assign(new Error('Invalid ACL operation deadline.'), { code: 'WINDOWS_ACL_DEADLINE_INVALID' });
+  return deadlines.run(Math.min(deadlines.getStore() ?? Infinity, performance.now() + timeoutMs), fn);
+}
+
+function remainingBudget() {
+  const remaining = Math.min(DEADLINE, (deadlines.getStore() ?? Infinity) - performance.now());
+  if (remaining <= 0) throw Object.assign(new Error('Windows ACL verification exhausted the operation deadline.'), { code: 'WINDOWS_ACL_TIMEOUT' });
+  return remaining;
+}
 
 // Only this fixed operation runs in PowerShell. Paths are JSON data on stdin,
 // never interpolated into a script. Every request performs a fresh Get-Acl.
@@ -53,6 +67,7 @@ export function queryWindowsAcl(file, create) {
       !/^[A-Za-z]:[\\/]/.test(file) || /[\u0000-\u001f\u007f]/.test(file) || typeof create !== 'boolean') {
     throw new Error('Invalid Windows ACL request.');
   }
+  remainingBudget(); // Refuse before creating a helper or starting an ACL mutation.
   const request = JSON.stringify({ path: file, create });
   if (Buffer.byteLength(request) > LIMIT) throw new Error('Windows ACL request exceeds its bound.');
   let worker = globalThis[REGISTRY];
@@ -65,7 +80,8 @@ export function queryWindowsAcl(file, create) {
   const buffer = new SharedArrayBuffer(8 + LIMIT), state = new Int32Array(buffer, 0, 2);
   try {
     worker.postMessage({ request, buffer });
-    if (Atomics.wait(state, 0, 0, DEADLINE) === 'timed-out' || Atomics.load(state, 0) !== 1) throw new Error('Windows ACL helper failed or exceeded its deadline.');
+    if (Atomics.wait(state, 0, 0, remainingBudget()) === 'timed-out') throw Object.assign(new Error('Windows ACL helper exceeded its deadline.'), { code: 'WINDOWS_ACL_TIMEOUT' });
+    if (Atomics.load(state, 0) !== 1) throw new Error('Windows ACL helper failed.');
     const size = Atomics.load(state, 1);
     if (size < 1 || size > LIMIT) throw new Error('Invalid Windows ACL response bound.');
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(buffer, 8, size)));

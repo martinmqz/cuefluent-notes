@@ -77,7 +77,10 @@ export async function* tokensAtPaths(chunks, limits = TRANSCRIPT_LIMITS) {
         inKey = false;
         const parent = stack.at(-1);
         if (!parent || parent.kind !== 'object' || parent.keys.has(key)) transcriptError('TRANSCRIPT_JSON_INVALID', 'Duplicate or misplaced native JSON key');
-        keyBytes += Buffer.byteLength(key);
+        const bytes = Buffer.byteLength(key);
+        // Only open objects retain duplicate-key sets. Repeated schema keys in
+        // already-closed objects do not consume additional live memory.
+        keyBytes += bytes; parent.keyBytes += bytes;
         if (keyBytes > limits.metadataBytes) transcriptError('TRANSCRIPT_METADATA_LIMIT', 'Native structural keys exceed the supported bound');
         parent.keys.add(key); parent.key = key;
         if (++structures > limits.structuralValues) transcriptError('TRANSCRIPT_STRUCTURE_LIMIT', 'Native row structure exceeds the supported bound');
@@ -93,10 +96,10 @@ export async function* tokensAtPaths(chunks, limits = TRANSCRIPT_LIMITS) {
         const at = valuePath();
         if (!stack.length) { if (rootSeen || name !== 'startObject') transcriptError('TRANSCRIPT_JSON_INVALID', 'Each native row must be one JSON object'); rootSeen = true; }
         yield { name, path: at };
-        stack.push({ path: at, kind: name === 'startObject' ? 'object' : 'array', key: null, index: 0, keys: new Set() }); continue;
+        stack.push({ path: at, kind: name === 'startObject' ? 'object' : 'array', key: null, index: 0, keys: new Set(), keyBytes: 0 }); continue;
       }
       if (name === 'endObject' || name === 'endArray') {
-        const parent = stack.pop();
+        const parent = stack.pop(); keyBytes -= parent.keyBytes;
         yield { name, path: parent.path }; finished(); continue;
       }
       if (name === 'startString' || name === 'startNumber') {
@@ -137,8 +140,15 @@ function contentPath(at) {
     /^message\/content\/\d+\/content\/\d+\/text$/.test(joined);
 }
 
+function containerPath(at) {
+  const joined = at.join('/');
+  return contentPath(at) || /^(message\/content|payload\/content|payload\/item\/content|payload\/output)(\/\d+)?$/.test(joined) ||
+    /^message\/content\/\d+\/content\/\d+$/.test(joined) || /^payload\/(summary|tools)$/.test(joined);
+}
+
 function opaqueStringPath(at) {
-  return at.length === 1 && at[0] === 'mode' || /^message\/content\/\d+\/(thinking|signature|data)$/.test(at.join('/'));
+  return at.length === 1 && at[0] === 'mode' || /^message\/content\/\d+\/(thinking|signature|data)$/.test(at.join('/')) ||
+    /^payload\/(encrypted_content|author|recipient)$/.test(at.join('/'));
 }
 
 function digestText(hash, value, state, final = false) {
@@ -160,7 +170,7 @@ export async function inspectNativeRow(source, start, { limits: inputLimits = {}
   try {
     for await (const token of tokensAtPaths(rowBytes(source, start, state, limits, end), limits)) {
       const at = JSON.stringify(token.path);
-      if (['startObject', 'startArray'].includes(token.name) && (contentPath(token.path) || /^message\/content\/\d+\/input$/.test(token.path.join('/')))) {
+      if (['startObject', 'startArray'].includes(token.name) && (containerPath(token.path) || /^message\/content\/\d+\/input$/.test(token.path.join('/')))) {
         containers[at] = token.name === 'startObject' ? 'object' : 'array'; count++;
       }
       if (token.name === 'startString' || token.name === 'startNumber') {

@@ -83,3 +83,11 @@ test('standalone companion archive verifies and copies with Node built-ins outsi
   const copy = await execute(process.execPath, [path.join(tools, 'install.mjs'), source, destination, '--expected-inventory-sha256', item.inventorySha256, '--client', 'claude'], { cwd: extraction, env: { ...process.env, NODE_PATH: '' } });
   assert.equal(JSON.parse(copy.stdout).state, 'copied'); assert.equal((await verifyPackage(destination)).client, 'claude');
 });
+
+
+test('Windows explicit absolute copy accepts forward-slash spelling', { skip: process.platform !== 'win32' }, async t => {
+  const f = await packageSource(t), item = f.built.packages[0], input = options(f, item, 'forward-slash');
+  const result = await installPackage({ ...input, destination: input.destination.replaceAll('\\', '/') });
+  assert.equal(result.destination, input.destination);
+  assert.equal((await verifyPackage(result.destination, { expectedInventorySha256: item.inventorySha256 })).integrityVerified, true);
+});

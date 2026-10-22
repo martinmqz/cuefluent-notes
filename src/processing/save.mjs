@@ -3,9 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
 import { setNotePublication, markNoteSaved, completeSaving } from '../core/run.mjs';
-import { withCurrentAttempt } from '../storage/attempts.mjs';
-import { withWriter } from '../storage/store.mjs';
-import { writeJSON, readSnapshot, syncDirectory, hashBytes } from '../storage/files.mjs';
+import { withAttemptWriter } from '../storage/attempts.mjs';
+import { readSnapshot, syncDirectory, hashBytes } from '../storage/files.mjs';
 import { assertChain, pinDirectory, inspectAncestors, fileIdentity, lstatOrNull } from '../storage/paths.mjs';
 import { prepareNotePublication, publishNotePublication, inspectPublicationOutcome } from '../storage/note-writer.mjs';
 import { readDraftArtifact } from '../storage/draft-artifacts.mjs';
@@ -47,15 +46,14 @@ export async function readPrivateDraft(store, directory, run, draft) {
  * its own short current-attempt/writer-fenced operations between note writes. */
 export async function saveRunNotes(store, owner, { readDraft = readPrivateDraft, flushLogs = async () => {} } = {}) {
   for (;;) {
-    const step = await withCurrentAttempt(owner, context => withWriter(store, async () => {
-      let { run, hash } = context;
+    const step = await withAttemptWriter(owner, async context => {
+      let { run } = context;
       if (run.phase === 'cleanup') return { done: true };
       if (run.phase !== 'saving') fail('RUN_PHASE_INVALID', 'Only an authorized save can publish note drafts.');
       const draft = run.publication ? run.drafts.find(item => item.id === run.publication.note.draftId) :
         run.drafts.find(item => !run.saved.some(saved => saved.draftId === item.id));
       const persist = async next => {
-        const result = await writeJSON(store.pin, `${context.directory}/run.json`, next, { expectedHash: hash });
-        run = next; hash = result.hash;
+        await context.persist(next); run = next;
       };
       if (!draft) { await persist(completeSaving(run, owner.attemptId)); return { done: true }; }
       const bytes = await readDraft(store, context.directory, run, draft);
@@ -81,11 +79,12 @@ export async function saveRunNotes(store, owner, { readDraft = readPrivateDraft,
           { event: { ...run.publication.event, savedAt: new Date().toISOString() } }));
       }
       const outcome = await publishNotePublication(pin, run.publication.note, bytes, {
+        beforePublish: context.assertCurrent,
         persistIntent: note => persist(setNotePublication(run, owner.attemptId, note, { event: run.publication.event })),
       });
       await persist(markNoteSaved(run, owner.attemptId, draft.id, { changed: outcome.changed }));
       return { done: false };
-    }));
+    });
     await flushLogs(store, owner);
     if (step.done) return;
   }

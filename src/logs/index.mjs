@@ -18,6 +18,17 @@ const escapeText = value => value.replace(punctuation, '\\$&');
 const unescapeText = value => value.replace(/\\([!-/:-@\[-`{-~])/g, '$1');
 const encodedSegment = value => encodeURIComponent(value).replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 
+/** Only bounded locations within the requested public log directory may cross
+ * the tool boundary; exception messages and arbitrary paths remain private. */
+export function logDiagnostic(error) {
+  if (typeof error?.code !== 'string' || !/^LOG_[A-Z0-9_]{1,59}$/.test(error.code)) return null;
+  if (typeof error.file === 'string' && /^(?:logs\/)?[1-9][0-9]{3}\.md$/.test(error.file) && Number.isSafeInteger(error.line) && error.line >= 1 && error.line <= 10 * 1024 * 1024) {
+    return Object.freeze({ file: error.file.startsWith('logs/') ? error.file : `logs/${error.file}`, line: error.line });
+  }
+  if (error.code === 'LOG_LAYOUT_UNRECOGNIZED' && typeof error.entry === 'string' && error.entry.length <= 255 && error.entry.length > 0 && !/[\/\\\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u.test(error.entry)) return Object.freeze({ entry: error.entry });
+  return null;
+}
+
 function noteTarget(value) {
   requireLog(safeText(value, 2048) && !/[\\:]/.test(value), 'LOG_ARGUMENT');
   const parts = value.split('/');
@@ -58,6 +69,9 @@ function entryLine(entry) {
 
 function parseEntry(line, timezone) {
   const fields = line.split(' | ');
+  // Only the first five separators define fields; a person's summary may
+  // contain ordinary pipes without invalidating the writer-owned marker.
+  if (fields.length > 6) fields.splice(5, fields.length - 5, fields.slice(5).join(' | '));
   if (fields.length !== 6 || !fields[0].startsWith('- ')) return null;
   const marker = markerPattern.exec(fields[5]);
   if (!marker || !isLogEntryMarker(marker[0])) return null;
@@ -77,12 +91,17 @@ function parseEntry(line, timezone) {
 
 function inspect(input, options = {}) {
   const source = decodeNote(input), year = yearValue(options.year), metadata = inspectMetadata(source);
+  const requireLog = (condition, code = 'LOG_INVALID', line = 1) => {
+    if (condition) return;
+    const error = new Error(`Activity log ${year}.md:${line} could not be used; preserve the existing file.`);
+    Object.assign(error, { code, file: `${year}.md`, line }); throw error;
+  };
   requireLog(metadata.status === 'supported');
   const value = metadata.value;
   requireLog(value.type === 'log' && value.log_format_version === 1 && value.series?.id && value.period?.start === `${year}-01-01` && value.period?.end === `${year}-12-31` && value.period?.timezone && value.created && value.updated && value.generation?.skill_version);
   if (options.seriesId !== undefined) requireLog(value.series.id === options.seriesId, 'LOG_SERIES_CONFLICT');
   if (options.timezone !== undefined) requireLog(value.period.timezone === options.timezone, 'LOG_SERIES_CONFLICT');
-  const validation = validateNote(source, { kind: 'log' }); requireLog(validation.valid, 'LOG_NOTE_INVALID');
+  const validation = validateNote(source, { kind: 'log' }); requireLog(validation.valid, 'LOG_NOTE_INVALID', validation.diagnostics.find(item => item.severity === 'error')?.line);
   const { tokens, env } = parseMarkdown(source), sourceTokens = env.sourceTokens ?? tokens;
   const lines = source.split(/\r\n|\r|\n/), offsets = [0];
   for (const match of source.matchAll(/\r\n|\r|\n/g)) offsets.push(match.index + match[0].length);
@@ -104,7 +123,8 @@ function inspect(input, options = {}) {
   const seen = new Set(), monthSections = [];
   for (let index = 1; index < sections.length; index++) {
     const section = sections[index], month = months.findIndex(name => section.title === `${name} ${year}`);
-    requireLog(month >= 0 && !seen.has(month)); seen.add(month);
+    if (month < 0) continue; // A person's non-month section is preserved.
+    requireLog(!seen.has(month), 'LOG_INVALID', section.line + 1); seen.add(month);
     monthSections.push({ ...section, month: month + 1, end: sections[index + 1]?.start ?? source.length });
   }
   // Only comments emitted by the Markdown parser count: code examples and
@@ -115,25 +135,26 @@ function inspect(input, options = {}) {
       const map = token.map ?? range;
       if (['html_inline', 'html_block'].includes(token.type)) {
         for (const match of token.content.matchAll(/<!--\s*note-log-entry\b[\s\S]*?(?:-->|$)/gi)) {
-          requireLog(token.type === 'html_inline' && isLogEntryMarker(match[0]) && map);
-          const identity = markerPattern.exec(match[0]); requireLog(identity && !ids.has(identity[1]), 'LOG_EVENT_CONFLICT'); ids.add(identity[1]);
+          requireLog(token.type === 'html_inline' && isLogEntryMarker(match[0]) && map, 'LOG_INVALID', (map?.[0] ?? 0) + 1);
+          const identity = markerPattern.exec(match[0]); requireLog(identity && !ids.has(identity[1]), 'LOG_EVENT_CONFLICT', (map?.[0] ?? 0) + 1); ids.add(identity[1]);
           const candidates = (markerLines.get(match[0]) ?? []).filter(line => line >= map[0] && line < map[1]);
           requireLog(candidates.length === 1); const line = candidates[0];
           const section = monthSections.find(item => offsets[line] >= item.start && offsets[line] < item.end);
-          requireLog(section);
+          requireLog(section, 'LOG_INVALID', line + 1);
           const parsed = parseEntry(lines[line], value.period.timezone);
           if (parsed) {
-            requireLog(parsed.savedAt.slice(0, 4) === year && +parsed.savedAt.slice(5, 7) === section.month);
+            requireLog(parsed.savedAt.slice(0, 4) === year && +parsed.savedAt.slice(5, 7) === section.month, 'LOG_INVALID', line + 1);
             entries.push(Object.freeze({ ...parsed, line: line + 1 }));
           }
-          markers.push({ eventId: identity[1], projectId: identity[2], line: lines[line], offset: offsets[line], entry: parsed });
+          markers.push({ eventId: identity[1], projectId: identity[2], line: lines[line], lineNumber: line + 1, offset: offsets[line], entry: parsed });
         }
       }
       if (token.children) visit(token.children, map);
     }
   }
   visit(sourceTokens);
-  requireLog(monthSections.every(section => markers.some(marker => marker.offset >= section.start && marker.offset < section.end)));
+  // A hand-removed retry marker does not erase the person's visible entry or
+  // make the containing month unavailable. Only remaining markers acknowledge IDs.
   return { source, year: +year, noteId: value.id, seriesId: value.series.id, timezone: value.period.timezone, metadata: value, monthSections, markers, entries, sourceHash: hash(source) };
 }
 
@@ -147,7 +168,7 @@ export function createAnnualLog({ year, noteId, seriesId, timezone, skillVersion
 
 export function inspectAnnualLog(bytes, options) {
   const result = inspect(bytes, options);
-  return Object.freeze({ year: result.year, noteId: result.noteId, seriesId: result.seriesId, timezone: result.timezone, sourceHash: result.sourceHash, entryCount: result.entries.length, unrecognizedEntries: result.markers.filter(marker => !marker.entry).length });
+  return Object.freeze({ year: result.year, noteId: result.noteId, seriesId: result.seriesId, timezone: result.timezone, sourceHash: result.sourceHash, entryCount: result.entries.length, unrecognizedEntries: result.markers.filter(marker => !marker.entry).length, unrecognizedLines: Object.freeze(result.markers.filter(marker => !marker.entry).map(marker => marker.lineNumber)) });
 }
 
 /** Empty input establishes nothing. No machine timezone or replacement series
@@ -158,7 +179,7 @@ export function inspectLogSeries(files, expected = {}) {
   const years = [], ids = new Set();
   for (const file of files) {
     const annual = inspectAnnualLog(file.bytes, { year: file.year, ...(seriesId === undefined ? {} : { seriesId }), ...(timezone === undefined ? {} : { timezone }) });
-    requireLog(annual.unrecognizedEntries === 0, 'LOG_ENTRY_INVALID');
+    if (annual.unrecognizedEntries) { const error = new Error(`Activity log ${file.year}.md:${annual.unrecognizedLines[0]} has an unrecognized entry; preserve the existing file.`); Object.assign(error, { code: 'LOG_ENTRY_INVALID', file: `${file.year}.md`, line: annual.unrecognizedLines[0] }); throw error; }
     requireLog(!years.includes(annual.year) && !ids.has(annual.noteId), 'LOG_SERIES_CONFLICT');
     seriesId = annual.seriesId; timezone = annual.timezone; years.push(annual.year); ids.add(annual.noteId);
   }

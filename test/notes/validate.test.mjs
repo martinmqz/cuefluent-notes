@@ -100,3 +100,44 @@ test('raw HTML budgets count each text child and quoted attributes are not visib
   assert.equal(has(validateNote('# T\n\n## A\n\n<div title=">attribute text"></div>'), 'empty-body'), true);
   assert.equal(has(validateNote('# T\n\n## A\n\n' + '<div/>'.repeat(33) + 'text'), 'section-body-limit'), true);
 });
+
+test('HTML destinations reject decoded leading whitespace and active attributes only inside tags', () => {
+  for (const destination of [' javascript:alert(1)', '&#32;javascript:alert(1)', '&#x20;data:text/html,bad', ' //example.test']) {
+    const result = validateNote(`# Topic\n\n## Answer\n\n<a href="${destination}">text</a>`);
+    assert.equal(has(result, 'unsafe-destination'), true, destination);
+  }
+  for (const body of ['<div>font style = bold</div>', '<span title="style = bold">text</span>', '<div>onclick=example is text</div>']) {
+    assert.equal(validateNote(`# Topic\n\n## Answer\n\n${body}`).valid, true, body);
+  }
+  for (const body of ['<div style="font-weight: bold">text</div>', '<span onclick="bad()">text</span>']) {
+    assert.equal(has(validateNote(`# Topic\n\n## Answer\n\n${body}`), 'unsafe-html'), true);
+  }
+});
+
+test('new generated notes require exactly one topic H1 while existing multi-topic structure stays valid', () => {
+  const body = '# First\n\n## Answer\n\nOne.\n\n# Second\n\n## Answer\n\nTwo.\n';
+  assert.equal(validateNote(body).valid, true);
+  assert.equal(has(validateNote(createGeneratedNote(body, { now: '2026-10-22T01:00:00Z', skillVersion: '2.0.0' }), { generated: true }), 'topic-h1-count'), true);
+});
+
+test('overlong adversarial headings stop at the source-line bound before Markdown inspection', () => {
+  const source = `# Topic\n\n## ${'<script>'.repeat(NOTE_PROFILE.lineBytes)}\n\nBody.`;
+  const result = validateNote(source);
+  assert.deepEqual(result.diagnostics, [{ code: 'source-line-limit', line: 3, severity: 'error' }]);
+  assert.deepEqual(result.sections, []);
+});
+
+test('HTML attribute scanning handles stray slashes and adjacent quoted attributes without reading values as names', () => {
+  const note = html => `# Topic\n\n## Answer\n\n<div>\n${html}\n</div>`;
+  for (const html of ['<a/href="javascript:alert(1)">link</a>', '<a title="safe"href="javascript:alert(1)">link</a>', '<img/src="&#32;javascript:alert(1)">']) {
+    const result = validateNote(note(html));
+    assert.equal(result.valid, false, html); assert.equal(has(result, 'unsafe-destination'), true, html);
+  }
+  for (const html of ['<div/style="color:red">text</div>', '<img/onerror="alert(1)" src="https://example.test/x.png">', '<span title="safe"onclick="bad()">text</span>', '<div/ /style="color:red">text</div>', '<img src=x" onerror=alert(1)>', '<img src=x=" onerror=alert(1)>']) {
+    const result = validateNote(note(html));
+    assert.equal(result.valid, false, html); assert.equal(has(result, 'unsafe-html'), true, html);
+  }
+  for (const html of ['<span title="/onerror=bad href=javascript:bad style = bold">text</span>', '<span title=x/onerror=bad>text</span>', '<div>font style = bold</div>', '<a/href="&#32;https://example.test">link</a>']) {
+    assert.equal(validateNote(note(html)).valid, true, html);
+  }
+});

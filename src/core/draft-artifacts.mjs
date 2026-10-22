@@ -50,7 +50,8 @@ export function validateDraftArtifactManifest(input, { platform = process.platfo
         /[\u0000-\u001f\u007f]/.test(value.target) || !/\.(?:md|markdown)$/i.test(value.target) || (value.expectedHash !== null && !hash(value.expectedHash)) || !hash(value.hash) ||
         !Number.isSafeInteger(value.byteLength) || value.byteLength < 1 || value.byteLength > DRAFT_ARTIFACT_LIMITS.fileBytes) invalid('Invalid exact draft descriptor.');
     const parts = platform === 'win32' ? value.target.slice(3).split('\\') : value.target.slice(1).split('/');
-    if ((platform === 'win32' && !/^[A-Za-z]:\\/.test(value.target)) || parts.some(part => !part || part === '.' || part === '..' || /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part))) invalid('Draft targets must use portable local paths.');
+    if ((platform === 'win32' && !/^[A-Za-z]:\\/.test(value.target)) || parts.some(part => !part || part === '.' || part === '..' ||
+        (platform === 'win32' && (/[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part))))) invalid('Draft targets must use canonical local paths.');
     for (const [field, max] of [['summary', 1024], ['heading', 512]]) {
       if (value[field] !== null && (typeof value[field] !== 'string' || !value[field].trim() || value[field].length > max || /[\u0000-\u001f\u007f]/.test(value[field]))) invalid('Draft descriptions must be bounded single-line data.');
     }

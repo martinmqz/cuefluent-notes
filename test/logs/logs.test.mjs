@@ -149,3 +149,24 @@ test('whole-note limits are checked before returning an addition; oversized inpu
   assert.throws(() => append(full, 2, { summary: '*'.repeat(2048) }), error => error.code === 'LOG_NOTE_INVALID' || error.code === 'LOG_INVALID');
   assert.deepEqual(full, original);
 });
+
+test('manual sections, removed markers and summary pipes preserve annual log usability and exact text', () => {
+  const initial = append(create()), original = initial.toString();
+  const withoutMarker = original.replace(/ <!-- note-log-entry[^\n]+/, '');
+  const manual = `${withoutMarker}\n## Personal context\n\nKeep this manually authored section.\n`;
+  assert.equal(inspectAnnualLog(manual, options).entryCount, 0);
+  const restored = append(manual, 2);
+  assert.ok(restored.toString().includes('## Personal context\n\nKeep this manually authored section.'));
+  assert.ok(restored.toString().includes(withoutMarker.slice(withoutMarker.indexOf('- 2026-')).trim()));
+  assert.equal(queryLogEntries(restored, options).entries.length, 1);
+  const withPipes = original.replace('Synthetic topic added', 'Manual summary | with pipes | retained');
+  assert.equal(queryLogEntries(withPipes, options).entries[0].summary, 'Manual summary | with pipes | retained');
+  assert.deepEqual(appendLogEntry(withPipes, event(), options).bytes, Buffer.from(withPipes));
+});
+
+test('invalid annual structures report their annual filename and concrete source line', () => {
+  const bad = append(create()).toString().replace('## October 2026', '## Other');
+  assert.throws(() => inspectAnnualLog(bad, options), error => error.code === 'LOG_INVALID' && error.file === '2026.md' && error.line > 1 && error.message.includes(`2026.md:${error.line}`));
+  const malformed = append(create()).toString().replace(' | created | ', ' | unsupported | ');
+  assert.throws(() => inspectLogSeries([{ year: 2026, bytes: malformed }]), error => error.code === 'LOG_ENTRY_INVALID' && error.line > 1 && error.message.includes(`2026.md:${error.line}`));
+});

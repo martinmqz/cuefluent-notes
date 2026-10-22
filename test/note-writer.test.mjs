@@ -590,3 +590,60 @@ for (const changed of ['incomplete-stage', 'third-alias', 'original-stream', 'or
     assert.deepEqual((await fs.readdir(notes)).sort(), names);
   });
 }
+
+test('macOS immutable notes are refused before creating a draft stage', { skip: process.platform !== 'darwin' }, async t => {
+  const { notes, pin } = await fixture(t), target = path.join(notes, 'locked.md');
+  const before = Buffer.from('Keep this locked note.'); await fs.writeFile(target, before);
+  await execute('/usr/bin/chflags', ['uchg', target]);
+  try {
+    await assert.rejects(prepare(pin, 'locked.md', body, hashBytes(before)), { code: 'NOTE_METADATA_UNSUPPORTED' });
+    assert.deepEqual(await fs.readdir(notes), ['locked.md']);
+    assert.deepEqual(await fs.readFile(target), before);
+  } finally { await execute('/usr/bin/chflags', ['nouchg', target]); }
+});
+
+test('empty stage recovery accepts the same user under a different safe umask', { skip: process.platform === 'win32' }, async t => {
+  const { notes, pin } = await fixture(t), intent = await prepare(pin);
+  const staged = stagePath(intent); await fs.writeFile(staged, '', { mode: 0o600 });
+  await fs.chmod(staged, (0o666 & ~process.umask()) === 0o600 ? 0o640 : 0o600);
+  const result = await publish(pin, intent);
+  assert.equal(result.receipt.changed, true);
+  assert.deepEqual(await fs.readFile(path.join(notes, 'note.md')), body);
+  assert.deepEqual(await fs.readdir(notes), ['note.md']);
+});
+
+
+for (const mutation of ['manual-edit', 'parent-replacement']) test(`publication rechecks ${mutation} after waiting for its attempt fence`, async t => {
+  const { notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('Original note.'), manual = Buffer.from('Manual edit during gate wait.');
+  await fs.writeFile(target, before);
+  const intent = await prepare(pin, 'note.md', body, hashBytes(before));
+  await assert.rejects(publishNotePublication(pin, intent, body, {
+    persistIntent: async () => {},
+    beforePublish: async () => {
+      if (mutation === 'parent-replacement') { await fs.rename(notes, `${notes}-original`); await fs.mkdir(notes); }
+      await fs.writeFile(target, manual);
+    },
+  }), { code: mutation === 'manual-edit' ? 'NOTE_PUBLICATION_CONFLICT' : 'PATH_CHANGED' });
+  assert.deepEqual(await fs.readFile(target), manual);
+});
+
+test('Windows publication rechecks a manual edit after its final fence', { skip: process.platform !== 'win32' }, async t => {
+  const { notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('Original note.'), manual = Buffer.from('Manual edit during final gate wait.');
+  await fs.writeFile(target, before);
+  const intent = await prepare(pin, 'note.md', body, hashBytes(before)); let fences = 0;
+  await assert.rejects(publishNotePublication(pin, intent, body, {
+    persistIntent: async () => {}, beforePublish: async () => { if (++fences === 2) await fs.writeFile(target, manual); },
+  }), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(fences, 2); assert.deepEqual(await fs.readFile(target), manual);
+});
+
+
+test('Windows publication refuses a changed stage after its final fence', { skip: process.platform !== 'win32' }, async t => {
+  const { notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('Original note.');
+  await fs.writeFile(target, before);
+  const intent = await prepare(pin, 'note.md', body, hashBytes(before)); let fences = 0;
+  await assert.rejects(publishNotePublication(pin, intent, body, {
+    persistIntent: async () => {}, beforePublish: async () => { if (++fences === 2) await fs.writeFile(stagePath(intent), 'Unapproved stage content'); },
+  }), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(fences, 2); assert.deepEqual(await fs.readFile(target), before);
+});

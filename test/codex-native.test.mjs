@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, writeFile, rm, realpath, rename } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, realpath, rename, readFile, mkdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createCodexNativeAdapter, CODEX_NATIVE_ARGUMENTS } from '../src/client/codex-native.mjs';
 import { openTranscript } from '../src/client/source.mjs';
@@ -164,15 +164,16 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(mode==='request'){console.log(JSON.stringify({id:999,method:'command/exec',params:{command:'NEVER'}}));return;}
  if(mode==='oversize'){console.log('x'.repeat(4096));return;}
  if(mode==='invalid'){console.log('{private native content');return;}
+ if(mode==='init-error'&&x.method==='initialize'){console.log(JSON.stringify({id:x.id,error:{code:-32000,message:'Synthetic startup unavailable'}}));return;}
  if(x.method==='initialize'){initialized=true;console.log(JSON.stringify({id:x.id,result:{}}));return;}
  if(!initialized||!['thread/read','thread/items/list','thread/turns/list'].includes(x.method))process.exit(7);
  const result=x.method==='thread/read'?{thread:{id:${JSON.stringify(id)},path:${JSON.stringify(path.join(directory, 'absent.jsonl'))},cwd:${JSON.stringify(directory)},turns:[]}}:x.method==='thread/turns/list'?{data:[{id:${JSON.stringify(turn)},items:[],itemsView:'notLoaded',status:'inProgress'}]}:{data:[${JSON.stringify(user())}],nextCursor:null};
  console.log(JSON.stringify({id:x.id,result}));
 });`);
   let args, child;
-  const adapter = createCodexNativeAdapter({ spawn(command, argv, options) { args = argv; child = spawn(process.execPath, [script], options); return child; }, ...overrides });
+  const adapter = createCodexNativeAdapter({ command: process.execPath, spawn(command, argv, options) { args = argv; child = spawn(process.execPath, [script], options); return child; }, ...overrides });
   t.after(() => adapter.close());
-  return { adapter, args: () => args, child: () => child };
+  return { adapter, script, args: () => args, child: () => child };
 }
 
 test('default subprocess initializes and performs only stored reads with fixed flags', async t => {
@@ -187,3 +188,41 @@ for (const [mode, code, overrides] of [['request', 'NATIVE_UNEXPECTED_REQUEST', 
     await adapter.close();
   });
 }
+
+
+test('a failed app-server is retired and the next command gets a fresh reader', async t => {
+  const probe = await subprocess(t, 'invalid');
+  await assert.rejects(probe.adapter.bindCommand(meta, selection), { code: 'NATIVE_RESPONSE_INVALID' });
+  const old = probe.child();
+  await writeFile(probe.script, (await readFile(probe.script, 'utf8')).replace('const mode="invalid"', 'const mode="normal"'));
+  const results = await Promise.all([probe.adapter.bindCommand(meta, selection), probe.adapter.bindCommand(meta, selection)]);
+  assert.ok(results.every(result => result.status === 'ready')); assert.notEqual(probe.child(), old);
+  assert.ok(old.exitCode !== null || old.signalCode !== null);
+  await probe.adapter.close();
+  await assert.rejects(probe.adapter.bindCommand(meta, selection), { code: 'NATIVE_READER_CLOSED' });
+});
+
+test('Windows metadata reader resolves the npm vendor executable before spawning', { skip: process.platform !== 'win32' }, async t => {
+  const directory = await temporary(t), wrapper = path.join(directory, 'codex.cmd');
+  await writeFile(wrapper, 'This shim must never execute.');
+  const arch = process.arch, triple = arch === 'x64' ? 'x86_64-pc-windows-msvc' : 'aarch64-pc-windows-msvc';
+  const pkg = path.join(directory, 'node_modules', '@openai', `codex-win32-${arch}`);
+  const executable = path.join(pkg, 'vendor', triple, 'codex', 'codex.exe');
+  await mkdir(path.dirname(executable), { recursive: true });
+  await writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: '@openai/codex', version: '0.163.0' }));
+  await writeFile(executable, 'Synthetic executable file; spawn is intercepted.');
+  const { executablePath } = await import('../src/client/executable.mjs');
+  assert.equal(await executablePath(wrapper), executable);
+  const probe = await subprocess(t, 'normal', { command: wrapper });
+  assert.equal((await probe.adapter.bindCommand(meta, selection)).status, 'ready');
+});
+
+
+test('an initialization RPC rejection retires the reader before the next command', async t => {
+  const probe = await subprocess(t, 'init-error');
+  await assert.rejects(probe.adapter.bindCommand(meta, selection), { code: 'NATIVE_RPC_UNAVAILABLE' });
+  const old = probe.child();
+  await writeFile(probe.script, (await readFile(probe.script, 'utf8')).replace('const mode="init-error"', 'const mode="normal"'));
+  assert.equal((await probe.adapter.bindCommand(meta, selection)).status, 'ready');
+  assert.notEqual(probe.child(), old);
+});

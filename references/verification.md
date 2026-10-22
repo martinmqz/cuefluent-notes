@@ -3,11 +3,21 @@
 ## Native clients
 
 The current adapters target Claude Code 2.1.307 and Codex CLI 0.163.0 native
-contracts. Claude uses direct plugin command expansion plus an exact native
+contracts. Claude processing accepts stable 2.x releases from 2.1.307 while
+rechecking effective settings, tools and context before delivering source; older,
+prerelease or new-major clients return `PROCESSING_CLIENT_VERSION_UNSUPPORTED`.
+A native policy cap that prevents the requested effort returns
+`PROCESSING_EFFORT_UNAVAILABLE`; choose an effort the policy permits. These
+checks do not establish acceptance of every later client release.
+Claude uses direct plugin command expansion plus an exact native
 attachment nonce for copied-history command boundaries. Codex uses native MCP turn
 metadata, the selected skill item, exact thread source metadata and current-turn
 checks. Different session/thread identity shapes remain unsupported until verified.
 No newest-file, working-directory or model-supplied identity fallback exists.
+
+Known native bookkeeping is excluded from collection. Supported non-text image
+and tool-reference blocks produce explicit omission notices while surrounding
+text remains intact. Unknown conversation shapes remain reported gaps.
 
 A Stop hook may precede final transcript persistence. Durable retries and idle
 reconciliation handle delayed rows and supplementary output. Unsupported hook

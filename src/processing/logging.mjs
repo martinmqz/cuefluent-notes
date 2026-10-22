@@ -1,15 +1,16 @@
 import path from 'node:path';
 import { fail } from '../core/errors.mjs';
 import { pinRunLogging, confirmLogEvent, failLogEvent, setLogPublication, addRunWarning, validateRun, RUN_LIMITS } from '../core/run.mjs';
-import { withCurrentAttempt } from '../storage/attempts.mjs';
-import { withWriter } from '../storage/store.mjs';
+import { withCurrentAttempt, withAttemptWriter } from '../storage/attempts.mjs';
 import { writeJSON, readSnapshot, hashBytes } from '../storage/files.mjs';
 import { prepareNotePublication, publishNotePublication, readPublicationSource, discardNoteStage, discardRecordedNoteStage } from '../storage/note-writer.mjs';
 import { inspectActivityLogSeries, logPin, logCandidate, logYear, logRelative } from '../logs/storage.mjs';
+import { logDiagnostic } from '../logs/index.mjs';
 import { NOTE_PROFILE } from '../notes/index.mjs';
 
 const codeOf = error => typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'LOG_WRITE_FAILED';
-const warning = (eventId, code) => `Activity log entry ${eventId} was not confirmed (${code}); the saved note is intact and the entry may be absent.`;
+const detailOf = error => { const location = logDiagnostic(error); return location ? ` at ${JSON.stringify(location)}` : ''; };
+const warning = (eventId, code, detail = '') => `Activity log entry ${eventId} was not confirmed (${code}${detail}); the saved note is intact and the entry may be absent.`;
 const summarize = run => {
   const count = run.logEvents.filter(event => !event.confirmed).length;
   return count ? `${count} saved note change${count === 1 ? ' was' : 's were'} not confirmed in the activity log. Retry details end with this run; no later backfill is scheduled.` : null;
@@ -31,24 +32,30 @@ function eventInput(run, event) {
 function persistence(store, context) {
   let run = context.run, hash = context.hash;
   return { get run() { return run; }, async persist(next) {
-    const result = await writeJSON(store.pin, `${context.directory}/run.json`, next, { expectedHash: hash });
-    run = next; hash = result.hash; return next;
+    if (context.persist) await context.persist(next);
+    else { const result = await writeJSON(store.pin, `${context.directory}/run.json`, next, { expectedHash: hash }); hash = result.hash; }
+    run = next; return next;
   } };
 }
 
 /** Optional setup trouble records a warning while note processing continues. */
 export async function pinProcessingLogging(store, owner) {
-  return withCurrentAttempt(owner, async context => {
-    if (!context.run.settings.activityLog.enabled || context.run.logging) return context.run.logging;
-    const state = persistence(store, context);
-    try {
-      const inspected = await withWriter(store, () => inspectActivityLogSeries(state.run.settings.destination));
-      await state.persist(pinRunLogging(state.run, owner.attemptId, inspected.binding)); return inspected.binding;
-    } catch (error) {
-      await state.persist(addRunWarning(state.run, owner.attemptId, `Activity logging is unavailable for this run (${codeOf(error)}); note processing can continue.`));
+  const initial = await withCurrentAttempt(owner, ({ run }) => run);
+  if (!initial.settings.activityLog.enabled || initial.logging) return initial.logging;
+  try {
+    return await withAttemptWriter(owner, async context => {
+      if (context.run.logging) return context.run.logging;
+      const inspected = await inspectActivityLogSeries(context.run.settings.destination);
+      await context.persist(pinRunLogging(context.run, owner.attemptId, inspected.binding));
+      return inspected.binding;
+    });
+  } catch (error) {
+    return withCurrentAttempt(owner, async context => {
+      const state = persistence(store, context);
+      await state.persist(addRunWarning(state.run, owner.attemptId, `Activity logging is unavailable for this run (${codeOf(error)}${detailOf(error)}); note processing can continue.`));
       return null;
-    }
-  });
+    });
+  }
 }
 
 async function discardOwned(pin, publication, persistIntent) {
@@ -67,14 +74,14 @@ export async function flushRunLogs(store, owner, { skillVersion } = {}) {
     ...(run.logPublication ? [run.logPublication.eventId] : []),
     ...run.logEvents.filter(event => !event.confirmed && event.failure === null && event.id !== run.logPublication?.eventId).map(event => event.id),
   ]);
-  for (const eventId of events) await withCurrentAttempt(owner, async context => {
+  for (const eventId of events) await withAttemptWriter(owner, async context => {
     const state = persistence(store, context), current = state.run.logEvents.find(event => event.id === eventId);
     if (!current || current.confirmed || current.failure !== null) return;
     if (!state.run.logging) {
       await state.persist(addRunWarning(failLogEvent(state.run, owner.attemptId, eventId, 'LOG_SERIES_UNAVAILABLE'), owner.attemptId, warning(eventId, 'LOG_SERIES_UNAVAILABLE'))); return;
     }
     try {
-      await withWriter(store, async () => {
+      await (async () => {
         let pin;
         try {
           pin = await logPin(state.run.logging);
@@ -94,7 +101,7 @@ export async function flushRunLogs(store, owner, { skillVersion } = {}) {
             const note = await prepareNotePublication(pin, relative, bytes, { runId: state.run.id, draftId: eventId, expectedHash: original?.hash ?? null, hash: hashBytes(bytes), expectedParentChain: state.run.logging.parent });
             await state.persist(setLogPublication(state.run, owner.attemptId, eventId, note));
           }
-          await publishNotePublication(pin, state.run.logPublication.note, bytes, { persistIntent: note => state.persist(setLogPublication(state.run, owner.attemptId, eventId, note)) });
+          await publishNotePublication(pin, state.run.logPublication.note, bytes, { beforePublish: context.assertCurrent, persistIntent: note => state.persist(setLogPublication(state.run, owner.attemptId, eventId, note)) });
           await state.persist(confirmLogEvent(state.run, owner.attemptId, eventId));
         } catch (error) {
           let code = codeOf(error);
@@ -118,15 +125,18 @@ export async function flushRunLogs(store, owner, { skillVersion } = {}) {
               if (discarded.backupPreserved) code = 'LOG_STAGE_PRESERVED';
             } catch { code = 'LOG_STAGE_PRESERVED'; }
           }
-          await state.persist(addRunWarning(failLogEvent(state.run, owner.attemptId, eventId, code), owner.attemptId, warning(eventId, code)));
+          await state.persist(addRunWarning(failLogEvent(state.run, owner.attemptId, eventId, code), owner.attemptId, warning(eventId, code, detailOf(error))));
         }
-      });
+      })();
     } catch (error) {
       // Failure to acquire the destination gate is itself best effort. A known
       // stage is left journaled for a later owned cleanup, never blindly unlinked.
       await state.persist(addRunWarning(state.run, owner.attemptId, warning(eventId, codeOf(error))));
     }
-  });
+  }).catch(error => withCurrentAttempt(owner, async context => {
+    const state = persistence(store, context);
+    await state.persist(addRunWarning(state.run, owner.attemptId, warning(eventId, codeOf(error))));
+  }));
   return withCurrentAttempt(owner, async context => {
     const state = persistence(store, context), summary = summarize(state.run);
     if (summary) await state.persist(addRunWarning(state.run, owner.attemptId, summary));
@@ -134,8 +144,8 @@ export async function flushRunLogs(store, owner, { skillVersion } = {}) {
   });
 }
 
-/** Low-level release for a caller already holding the project/attempt (or proven
- * inactive skip) and writer gates. persistRun journals an adopted empty stage
+/** Low-level release for a caller holding the live attempt worker and writer
+ * gates. persistRun journals an adopted empty stage
  * before its removal. A log problem alone never prevents releasing this run. */
 export async function discardLogPublication(store, input, { persistRun } = {}) {
   let run = validateRun(input);
@@ -155,16 +165,17 @@ export async function discardLogPublication(store, input, { persistRun } = {}) {
 }
 
 export async function discardRunLogPublication(store, owner) {
-  return withCurrentAttempt(owner, async context => {
-    const state = persistence(store, context);
-    try { return await withWriter(store, () => discardLogPublication(store, state.run, { persistRun: next => state.persist(next) })); }
-    catch (error) {
+  try {
+    return await withAttemptWriter(owner, context => discardLogPublication(store, context.run, { persistRun: context.persist }));
+  } catch (error) {
+    return withCurrentAttempt(owner, async context => {
+      const state = persistence(store, context);
       // No public write happens without the gate. Preserve and report any
       // unverified staging path; cleanup must not turn into a cross-run backlog.
       let run = addWarning(state.run, `Activity-log cleanup was unavailable (${codeOf(error)}); unverified staging paths were preserved.`);
       run = validateRun({ ...run, logPublication: null, logEvents: run.logEvents.map(event => event.confirmed ? event : { ...event, failure: event.failure ?? 'LOG_RUN_RELEASED' }) });
       const summary = summarize(run); if (summary) run = addWarning(run, summary);
       return state.persist(run);
-    }
-  });
+    });
+  }
 }

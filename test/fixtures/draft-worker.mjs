@@ -9,8 +9,10 @@ import { readFrames, writeFrame } from '../../src/processing/draft-protocol.mjs'
 
 const [root, serialized] = process.argv.slice(2), options = JSON.parse(serialized);
 const store = await openStore(path.join(root, 'private'));
-async function syntheticModel({ mcp }) {
+async function syntheticModel({ mcp, cwd }) {
   if (options.rejectModel) throw new Error('A recovered complete set must not call a model.');
+  if (options.residue) await fs.writeFile(path.join(cwd, 'synthetic-client-file'), 'Preserve unexpected client output.');
+  if (options.clientError) throw Object.assign(new Error('Synthetic client failure'), { code: 'SYNTHETIC_CLIENT_FAILURE' });
   await fs.writeFile(path.join(root, 'model-called'), 'yes');
   const child = spawn(mcp.command, mcp.args, { env: { ...process.env, ...mcp.env }, stdio: ['pipe', 'pipe', 'ignore'] });
   const exited = once(child, 'exit');

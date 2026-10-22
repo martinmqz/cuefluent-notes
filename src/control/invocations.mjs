@@ -91,11 +91,8 @@ export async function claimInvocation(store, input) {
         await writeJSON(store.pin, relative(key), { ...prior, blockedPromptId: checked.promptId }, { expectedHash: current.hash, maxBytes: MAX_BYTES });
         return { refusal: { state: 'busy', reason: 'COMMAND_IN_PROGRESS', message: 'This command was not executed. Repeat it in a new prompt after the current command finishes.' } };
       }
-      if (prior.phase === 'pending') {
-        const result = { state: 'not-executed', reason: 'COMMAND_STARTUP_INTERRUPTED', message: 'The previous command did not start. This command was not executed; repeat the typed command to try again.' };
-        await writeJSON(store.pin, relative(key), { ...prior, phase: 'finished', result, blockedPromptId: checked.promptId }, { expectedHash: current.hash, maxBytes: MAX_BYTES });
-        return { refusal: result };
-      }
+      // With no gate owner, a fresh typed command can replace a pending
+      // startup. A late old worker rechecks the token under these same gates.
     }
     await createPrivateDirectory(path.join(store.root, 'store/invocations'));
     const file = path.join(store.root, `store/invocations/${key}.sqlite`);
@@ -171,7 +168,7 @@ export async function readInvocation(store, handle) {
   const current = await read(store, token.key);
   if (!current || !matches(current, token.token)) return { state: 'expired' };
   const item = current.value;
-  if (item.phase === 'finished' && item.result.state !== 'running') return { ...item.result, handle };
+  if (item.phase === 'finished' && (item.result.state !== 'running' || typeof item.result.runId !== 'string')) return { ...item.result, handle };
   const state = await readProjectStatus(store, item.projectId, { chat: { client: item.binding.client, sessionId: item.binding.sessionId } });
   if (item.phase === 'finished') {
     if (state.run?.id === item.result.runId) return { ...state, handle };
@@ -179,6 +176,12 @@ export async function readInvocation(store, handle) {
     return { ...item.result, state: 'unavailable', handle };
   }
   const active = probeGate(item.gate, gateOptions).busy;
+  if (!active) {
+    // The worker may have persisted its result while status was being read.
+    const settled = await read(store, token.key);
+    if (!settled || !matches(settled, token.token)) return { state: 'expired' };
+    if (settled.hash !== current.hash) return readInvocation(store, handle);
+  }
   if (active) return { state: item.phase === 'pending' ? 'starting' : 'running', handle };
   if (item.phase === 'pending') return { state: 'interrupted', reason: 'COMMAND_STARTUP_INTERRUPTED', handle,
     message: 'The command has no active startup owner. Repeat its typed command to retry safely.' };

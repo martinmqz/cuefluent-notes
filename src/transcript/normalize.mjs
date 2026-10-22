@@ -132,7 +132,8 @@ async function* emitRange(source, initial, until, options) {
         if (item.type === 'end') {
           if (index === resumeField && position + text.length < resumeText) transcriptError('TRANSCRIPT_CHECKPOINT_INVALID', 'The streaming cursor is outside its exact native field');
           position += text.length;
-          const notices = selected.kind === 'tool-result' && selected.bytes > retainedBytes ? [{ kind: 'tool-output-clipped', rowId: classified.rowId,
+          const notices = selected.omittedType ? [{ kind: 'non-text-content-omitted', rowId: classified.rowId,
+            blockIndex: selected.blockIndex, field: selected.path, contentType: selected.omittedType }] : selected.kind === 'tool-result' && selected.bytes > retainedBytes ? [{ kind: 'tool-output-clipped', rowId: classified.rowId,
             blockIndex: selected.blockIndex, field: selected.path, originalBytes: selected.bytes, retainedBytes,
             omittedBytes: selected.bytes - retainedBytes }] : [];
           const after = emissionPosition(state, row, classified, index, position, until, supplement, true);

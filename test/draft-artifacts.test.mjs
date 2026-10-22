@@ -310,3 +310,12 @@ for (const phase of ['own', 'write', 'link']) {
     assert.deepEqual(await fs.readdir(path.join(fx.pin.root, 'runs')), []);
   });
 }
+
+test('POSIX destination ancestors may contain characters reserved only on Windows', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX filesystem name fixture');
+  const fx = await fixture(t, 1), notes = path.join(fx.root, 'Notes:Work'); await fs.mkdir(notes);
+  const pin = await pinDirectory(notes), parent = await inspectParent(pin, 'topic.md');
+  fx.manifest.drafts[0] = { ...fx.manifest.drafts[0], target: path.join(notes, 'topic.md'), binding: { root: notes, parent: parent.chain } };
+  const pointer = await completed(fx);
+  assert.equal((await inspectDraftArtifacts(fx.pin, pointer)).manifest.drafts[0].target, path.join(notes, 'topic.md'));
+});

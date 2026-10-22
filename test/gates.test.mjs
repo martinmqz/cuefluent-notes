@@ -9,6 +9,8 @@ import { Worker } from 'node:worker_threads';
 import { Database } from 'node:sqlite';
 import test from 'node:test';
 import * as gates from '../src/storage/gates.mjs';
+import nativeFs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { assertPrivateAccess, establishWindowsPrivacy } from '../src/storage/platform.mjs';
 
 const { assertGatePlacement } = gates;
@@ -521,4 +523,40 @@ test('Windows long paths keep private stages, two-process ownership and no-creat
   const names = readdirSync(directory);
   assert.throws(() => tryAcquireExistingGate(identity, options), { code: 'GATE_STORAGE_ERROR' });
   assert.deepEqual(readdirSync(directory), names);
+});
+
+
+gateTest('short gate release failure preserves the original callback error', async t => {
+  const directory = setup(t), identity = initializeGate(join(directory, 'gate.sqlite'), 'release-primary');
+  let callbackFinished = false;
+  const original = Object.assign(new Error('Primary callback failure'), { code: 'SYNTHETIC_PRIMARY' });
+  await assert.rejects(withShortGate(identity, { guardPath() {
+    if (callbackFinished) throw new Error('Synthetic release verification failure');
+  } }, async () => { callbackFinished = true; throw original; }), error => error === original && error.releaseError instanceof AggregateError);
+  assert.deepEqual(probeGate(identity), { available: true });
+});
+
+gateTest('short gate release failure after success has a distinct recovery code', async t => {
+  const directory = setup(t), identity = initializeGate(join(directory, 'gate.sqlite'), 'release-success');
+  let callbackFinished = false;
+  await assert.rejects(withShortGate(identity, { guardPath() {
+    if (callbackFinished) throw new Error('Synthetic release verification failure');
+  } }, async () => { callbackFinished = true; return 'committed'; }), { code: 'GATE_RELEASE_FAILED' });
+  assert.deepEqual(probeGate(identity), { available: true });
+});
+
+
+gateTest('setup recovery wraps native staging-cleanup failures in a storage code', async t => {
+  const directory = setup(t), filename = join(directory, 'gate.sqlite');
+  await crashInitialization(t, filename, 'published');
+  const original = nativeFs.unlinkSync;
+  const mocked = t.mock.method(nativeFs, 'unlinkSync', function(file, ...args) {
+    if (String(file).endsWith('.tmp')) throw Object.assign(new Error('Synthetic native unlink denial'), { code: 'EPERM' });
+    return original.call(this, file, ...args);
+  });
+  syncBuiltinESMExports();
+  try { assert.throws(() => inspectExistingGate(filename, 'crash-test'), { code: 'GATE_STORAGE_ERROR' }); }
+  finally { mocked.mock.restore(); syncBuiltinESMExports(); }
+  assert.equal(lstatSync(filename).nlink, 2);
+  assert.deepEqual(probeGate(inspectExistingGate(filename, 'crash-test')), { available: true });
 });

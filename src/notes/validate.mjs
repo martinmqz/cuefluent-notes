@@ -29,7 +29,9 @@ export function assertOrdinaryTarget(project, target, { platform = process.platf
 }
 
 function destinationAllowed(value, image = false) {
-  if (typeof value !== 'string' || /[\p{Cc}\\]/u.test(value) || value.startsWith('//')) return false;
+  if (typeof value !== 'string' || /[\p{Cc}\\]/u.test(value)) return false;
+  value = value.trim();
+  if (value.startsWith('//')) return false;
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(value);
   return !scheme || (image ? ['http', 'https'] : ['http', 'https', 'mailto']).includes(scheme[1].toLowerCase());
 }
@@ -44,19 +46,46 @@ function htmlParts(source) {
   const parts = []; let cursor = 0, index = 0;
   while ((index = source.indexOf('<', index)) !== -1) {
     if (!/^<(?:\/?[A-Za-z]|[!?])/.test(source.slice(index))) { index++; continue; }
-    let quote = null, end = index + 1;
-    for (; end < source.length; end++) {
-      const character = source[end];
-      if (quote) { if (character === quote) quote = null; }
-      else if (character === '"' || character === "'") quote = character;
-      else if (character === '>') break;
-    }
-    if (end === source.length) break;
+    const name = /^<\/?[^\t\n\f\r />]+/.exec(source.slice(index));
+    const parsed = name ? htmlAttributes(source, index + name[0].length) : null;
+    const end = parsed?.end ?? (source.indexOf('>', index + 1) + 1);
+    if (!end) break;
     if (cursor < index) parts.push({ text: source.slice(cursor, index) });
-    parts.push({ tag: source.slice(index, end + 1) }); cursor = end + 1; index = cursor;
+    parts.push({ tag: source.slice(index, end), attributes: parsed?.attributes ?? [] }); cursor = end; index = cursor;
   }
   if (cursor < source.length) parts.push({ text: source.slice(cursor) });
   return parts;
+}
+
+function htmlAttributes(tag, start) {
+  const whitespace = character => /[\t\n\f\r ]/.test(character);
+  const attributes = []; let cursor = start;
+  while (cursor < tag.length) {
+    // HTML re-enters the before-attribute state after a stray self-closing
+    // slash, and accepts a new name directly after a quoted value.
+    while (cursor < tag.length && (whitespace(tag[cursor]) || tag[cursor] === '/')) cursor++;
+    if (cursor === tag.length || tag[cursor] === '>') return { attributes, end: tag[cursor] === '>' ? cursor + 1 : 0 };
+    const begin = cursor++;
+    while (cursor < tag.length && !whitespace(tag[cursor]) && !['/', '>', '='].includes(tag[cursor])) cursor++;
+    const name = tag.slice(begin, cursor).toLowerCase();
+    while (cursor < tag.length && whitespace(tag[cursor])) cursor++;
+    let value = '';
+    if (tag[cursor] === '=') {
+      cursor++;
+      while (cursor < tag.length && whitespace(tag[cursor])) cursor++;
+      const quote = tag[cursor] === '"' || tag[cursor] === "'" ? tag[cursor++] : null;
+      const begin = cursor;
+      if (quote) {
+        while (cursor < tag.length && tag[cursor] !== quote) cursor++;
+        value = tag.slice(begin, cursor); if (cursor < tag.length) cursor++;
+      } else {
+        while (cursor < tag.length && !whitespace(tag[cursor]) && tag[cursor] !== '>') cursor++;
+        value = tag.slice(begin, cursor);
+      }
+    }
+    attributes.push({ name, value });
+  }
+  return { attributes, end: 0 };
 }
 
 function metric() { return { nodes: 0, bytes: 0, depth: 0, visible: false }; }
@@ -86,7 +115,7 @@ function measure(tokens, issues, initialDepth = 0) {
         if (!isLogEntryMarker(html)) issues.push({ code: 'html-comment', severity: 'warning', line });
         continue;
       }
-      issues.push({ code: dangerousTags.test(html) || /\bon[a-z]+\s*=|\bstyle\s*=/i.test(html) ? 'unsafe-html' : 'raw-html', severity: dangerousTags.test(html) || /\bon[a-z]+\s*=|\bstyle\s*=/i.test(html) ? 'error' : 'warning', line });
+      issues.push({ code: dangerousTags.test(html) ? 'unsafe-html' : 'raw-html', severity: dangerousTags.test(html) ? 'error' : 'warning', line });
       if ([...html.matchAll(/<!--/g)].length !== [...html.matchAll(/-->/g)].length) issues.push({ code: 'unclosed-html-block', severity: 'error', line });
       const cleaned = html.replace(/<!--[\s\S]*?(?:-->|$)/g, '');
       for (const part of htmlParts(cleaned)) {
@@ -107,8 +136,9 @@ function measure(tokens, issues, initialDepth = 0) {
         } else if (!voidTags.has(name)) {
           if (htmlStack.pop() !== name) issues.push({ code: 'unbalanced-html', severity: 'error', line });
         }
-        for (const attribute of part.tag.matchAll(/\b(href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
-          if (!destinationAllowed(decodeEntities(attribute[2] ?? attribute[3] ?? attribute[4]), attribute[1].toLowerCase() === 'src')) issues.push({ code: 'unsafe-destination', severity: 'error', line });
+        for (const { name, value } of part.attributes) {
+          if (/^on[a-z]+$/.test(name) || name === 'style') issues.push({ code: 'unsafe-html', severity: 'error', line });
+          if (['href', 'src'].includes(name) && !destinationAllowed(decodeEntities(value), name === 'src')) issues.push({ code: 'unsafe-destination', severity: 'error', line });
         }
       }
       continue;
@@ -141,6 +171,7 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
   catch (error) { return Object.freeze({ valid: false, profile: P.id, diagnostics: [{ code: error.code, line: 1, severity: 'error' }], sections: [], nodes: 0 }); }
   const lines = source.split(/\r\n|\r|\n/);
   lines.forEach((line, index) => { if (Buffer.byteLength(line) > P.lineBytes) issue('source-line-limit', index + 1); });
+  if (issues.length) return Object.freeze({ valid: false, profile: P.id, diagnostics: Object.freeze(issues), sections: [], nodes: 0 });
   const metadata = inspectMetadata(source);
   if (metadata.status === 'invalid') issue('metadata-invalid');
   if (metadata.status === 'unsupported') issue('metadata-unsupported', 1, 'warning');
@@ -235,6 +266,7 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
   finish();
   if (!sections.length) issue('no-answer-sections');
   if (generated && !h1) issue('topic-h1-required');
+  if (generated && h1 > 1) issue('topic-h1-count');
   if (sections.length > P.sections) issue('section-limit');
   const nodes = sections.reduce((count, item) => count + item.nodes, 0);
   if (nodes > P.documentNodes || sections.reduce((count, item) => count + item.estimatedBodyBytes, 0) > P.bodyBytes) issue('document-body-limit');

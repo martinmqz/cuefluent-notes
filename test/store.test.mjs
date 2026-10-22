@@ -106,3 +106,13 @@ test('private setup refuses any source repository and configured note overlap', 
   await assert.rejects(initializeStore(f.project.destination.path, f.settings), { code: 'PRIVATE_LOCATION_OVERLAP' });
   assert.deepEqual(await fs.readdir(f.project.root), ['.git']);
 });
+
+
+test('a corrupt layout missing a prototype-named project reports the layout error', async t => {
+  const f = await fixture(t), project = { ...f.project, id: 'constructor' };
+  const store = await initializeStore(f.privateRoot, { schemaVersion: 1, projects: [project] });
+  const filename = path.join(store.root, 'store/layout.json');
+  const layout = JSON.parse(await fs.readFile(filename, 'utf8')); delete layout.projects.constructor;
+  await fs.writeFile(filename, JSON.stringify(layout));
+  await assert.rejects(withProject(store, 'constructor', () => assert.fail('Missing project gates were accepted.')), { code: 'STORE_LAYOUT_INVALID' });
+});

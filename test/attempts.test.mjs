@@ -236,3 +236,25 @@ test('startup publication that exhausts the budget never activates the worker', 
   assert.equal((await inspectAttempt(f.store, 'demo')).active, false);
   assert.equal(await readIfPresent(path.join(f.root, 'working.json')), null);
 });
+
+
+test('an explicitly handled publication failure does not fail completed work again', async t => {
+  const f = await fixture(t);
+  await launchOwnedAttempt(f.store, 'demo', { runId: f.run.id, launch: async context => {
+    const spawned = childProcess(t, 'worker', f.root, { ...context, handledFailure: true }); f.children.push(spawned);
+    return attachAttemptChild(spawned.child, context);
+  } });
+  assert.deepEqual(await finish(f), { ok: true });
+  assert.equal((await f.children[0].exited).code, 0);
+});
+
+
+for (const chainedUnawaited of ['then', 'finally']) test(`an unawaited rejected ${chainedUnawaited} chain still fails the attempt`, async t => {
+  const f = await fixture(t);
+  await launchOwnedAttempt(f.store, 'demo', { runId: f.run.id, launch: async context => {
+    const spawned = childProcess(t, 'worker', f.root, { ...context, unawaitedFailure: true, chainedUnawaited }); f.children.push(spawned);
+    return attachAttemptChild(spawned.child, context);
+  } });
+  assert.equal((await finish(f)).code, 'SYNTHETIC_PUBLICATION_FAILED');
+  assert.equal((await f.children[0].exited).code, 1);
+});

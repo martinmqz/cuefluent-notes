@@ -223,3 +223,21 @@ test('SIGKILL after public log replacement recovers the same frozen event withou
   assert.deepEqual(await fs.readFile(f.annual), exact);
   assert.equal((await readActivityLog(f.project.destination, { year: 2026 })).entries.length, 1);
 });
+
+test('temporary writer contention before drafting retries outside short gates and still pins logging', async t => {
+  const f = await fixture(t, { saved: false, pinned: false });
+  await f.own(async owner => {
+    let entered, release;
+    const locked = new Promise(resolve => { entered = resolve; });
+    const held = withWriter(f.store, async () => { entered(); await new Promise(resolve => { release = resolve; }); });
+    await locked;
+    const pinning = pinProcessingLogging(f.store, owner);
+    try {
+      // More than the former one-second gate deadline, less than the bounded retry.
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      await withProject(f.store, f.project.id, async () => {});
+    } finally { release(); await held; }
+    assert.deepEqual(await pinning, f.binding);
+  });
+  assert.equal((await f.read()).warnings.length, 0);
+});

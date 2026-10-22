@@ -98,12 +98,15 @@ export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes
   const stage = path.join(path.dirname(parent.file), `.${path.basename(parent.file)}.${randomUUID()}.tmp`);
   let staged = false;
   let published = false;
+  let failure, stageIdentity;
   try {
     const handle = await fs.open(stage, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, pin.private ? 0o600 : 0o666);
     staged = true;
     try {
       if (pin.private) establishWindowsPrivacy(stage);
-      assertRegularFile(stage, await readHandleStat(handle), pin);
+      const created = await readHandleStat(handle);
+      assertRegularFile(stage, created, pin);
+      stageIdentity = fileIdentity(created);
       await assertChain(parent.chain);
       await handle.writeFile(bytes);
       // Public note replacements retain POSIX permission bits. Node rename does
@@ -138,12 +141,22 @@ export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes
     await assertChain(parent.chain);
     await assertDirectory(pin);
     return { changed: true, hash };
-  } finally {
+  } catch (error) { failure = error; throw error; } finally {
     // Never remove a published destination. A failed unlink after link leaves a
     // detectable two-link file; recovery must reconcile that exact staged inode.
     if (staged && !published) {
-      await assertChain(parent.chain);
-      await fs.unlink(stage);
+      try {
+        await assertChain(parent.chain);
+        const current = await lstatOrNull(stage);
+        if (current) {
+          assertRegularFile(stage, current, pin);
+          if (!stageIdentity || !sameIdentity(current, stageIdentity)) fail('FILE_CHANGED', 'The owned atomic stage was replaced.');
+          await fs.unlink(stage);
+        }
+      } catch (error) {
+        if (failure) { try { Object.defineProperty(failure, 'cleanupError', { value: error, configurable: true }); } catch {} }
+        else throw error;
+      }
     }
   }
 }
@@ -160,4 +173,48 @@ export async function removeExact(pin, relative, expectedHash, { maxBytes = 2 * 
   await assertChain(parent.chain);
   await fs.unlink(parent.file);
   await syncDirectory(path.dirname(parent.file));
+}
+
+
+/** Explicit cleanup only, under the metadata owner's mutation gate. A UUID-like
+ * name is insufficient: reclaim only a private, single-link stage containing
+ * exactly current target bytes or an independently reconstructed exact proposal,
+ * with the authoritative target and stage inodes rechecked.
+ * Unknown/torn/obsolete proposals remain visible and are never adopted. */
+export async function reclaimAtomicStages(pin, directory, { matchesTarget, proposed = new Map(), maxBytes = 2 * 1024 * 1024, maxEntries = 256 } = {}) {
+  if (pin?.private !== true || typeof matchesTarget !== 'function' || !(proposed instanceof Map) || !Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 4096) fail('STAGE_CLEANUP_INVALID', 'Stage cleanup requires private metadata ownership and explicit target names.');
+  const prefix = directory ? `${directory}/` : '';
+  const parent = await inspectParent(pin, `${prefix}inventory`);
+  const stream = await fs.opendir(path.dirname(parent.file));
+  let examined = 0, removed = 0, incomplete = false;
+  try {
+    for await (const entry of stream) {
+      if (++examined > maxEntries) { incomplete = true; break; }
+      const match = /^\.(.+)\.[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.tmp$/.exec(entry.name);
+      if (!match || !matchesTarget(match[1]) || !entry.isFile()) continue;
+      const stageRelative = `${prefix}${entry.name}`, targetRelative = `${prefix}${match[1]}`;
+      let stage, target;
+      try {
+        stage = await readSnapshot(pin, stageRelative, { maxBytes });
+        target = await readSnapshot(pin, targetRelative, { maxBytes, missing: true });
+      } catch (error) {
+        if (['PATH_UNSAFE', 'PRIVATE_ACCESS_UNSAFE', 'READ_LIMIT_EXCEEDED', 'FILE_CHANGED', 'FILE_MISSING', 'ENOENT'].includes(error.code)) continue;
+        throw error;
+      }
+      const proposal = proposed.get(match[1]);
+      if (!target || !stage.bytes.equals(target.bytes) && (!Buffer.isBuffer(proposal) || !stage.bytes.equals(proposal))) continue;
+      const currentTarget = await readSnapshot(pin, targetRelative, { maxBytes });
+      if (currentTarget.hash !== target.hash || currentTarget.identity.device !== target.identity.device || currentTarget.identity.inode !== target.identity.inode) fail('FILE_CHANGED', 'Authoritative metadata changed during stage cleanup.');
+      const currentStage = await readSnapshot(pin, stageRelative, { maxBytes });
+      if (currentStage.hash !== stage.hash || currentStage.identity.device !== stage.identity.device || currentStage.identity.inode !== stage.identity.inode) fail('FILE_CHANGED', 'The metadata stage changed during cleanup.');
+      await assertChain(parent.chain);
+      const named = await lstatOrNull(path.join(path.dirname(parent.file), entry.name));
+      if (!named || !sameIdentity(named, stage.identity)) fail('FILE_CHANGED', 'The exact inspected metadata stage was replaced.');
+      assertRegularFile(entry.name, named, pin);
+      await fs.unlink(path.join(path.dirname(parent.file), entry.name)); removed++;
+    }
+  } finally { if (!stream.closed) await stream.close().catch(error => { if (error.code !== 'ERR_DIR_CLOSED') throw error; }); }
+  if (removed) await syncDirectory(path.dirname(parent.file));
+  await assertChain(parent.chain); await assertDirectory(pin);
+  return { removed, incomplete };
 }

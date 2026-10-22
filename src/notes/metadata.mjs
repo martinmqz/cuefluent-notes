@@ -7,7 +7,7 @@ import { parseMarkdown } from './markdown.mjs';
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const hashPattern = /^sha256:[a-f0-9]{64}$/;
-const marker = /<!--[\t \r\n]*cuefluent(?![\p{L}\p{N}\p{M}_])/giu;
+const marker = /<!--[\t \r\n]*cuefluent(?=[\t \r\n]|-->|$)/giu;
 const block = /^(?:\uFEFF)?[ \t\r\n]*?( {0,3}<!-- cuefluent[ \t]*(?:\r\n|\r|\n)([\s\S]*?)(?:\r\n|\r|\n) {0,3}-->[ \t]*(?:(?:\r\n|\r|\n)|$))/;
 const plain = value => value !== null && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const keyAllowed = key => /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(key) && !['__proto__', 'constructor', 'prototype'].includes(key);
@@ -236,7 +236,7 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
     }
     if (skillVersion !== undefined) {
       requireValue(typeof skillVersion === 'string' && versionPattern.test(skillVersion));
-      if (!document.has('generation')) document.set('generation', {});
+      if (!document.has('generation')) document.set('generation', document.createNode({}));
       const current = document.getIn(['generation', 'skill_version'], true);
       if (isScalar(current)) current.value = skillVersion;
       else document.setIn(['generation', 'skill_version'], skillVersion);

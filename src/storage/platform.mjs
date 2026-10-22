@@ -7,6 +7,7 @@ function windowsAcl(file, create, { allowAdministratorsOwner = false } = {}) {
   try {
     value = queryWindowsAcl(file, create);
   } catch (cause) {
+    if (cause.code === 'WINDOWS_ACL_TIMEOUT') fail('PRIVATE_ACCESS_TIMEOUT', 'Windows private storage verification exceeded the operation deadline.', cause);
     fail('PRIVATE_ACCESS_UNVERIFIED', 'Windows private storage permissions could not be verified.', cause);
   }
   // SYSTEM and local administrators can administer the machine in any event.

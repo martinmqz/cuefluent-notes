@@ -19,6 +19,8 @@ async function assertChain(chain) {
 /** Explicit verified copy only. No native folder discovery, registration, hook
  * trust, settings/auth changes, overwrite, upgrade, or cleanup of old versions. */
 export async function installPackage({ sourceRoot, destination, expectedInventorySha256, client } = {}) {
+  // Windows accepts both separator spellings for absolute command arguments.
+  if (process.platform === 'win32' && typeof destination === 'string') destination = destination.replaceAll('/', '\\');
   requireInstall(typeof sourceRoot === 'string' && path.isAbsolute(sourceRoot) && typeof destination === 'string' && path.isAbsolute(destination) &&
     path.normalize(destination) === destination && !/[\u0000-\u001f\u007f]/.test(destination) && destination !== path.parse(destination).root, 'INSTALL_ARGUMENT');
   requireInstall(typeof expectedInventorySha256 === 'string' && /^[a-f0-9]{64}$/.test(expectedInventorySha256), 'INSTALL_TRUSTED_DIGEST_REQUIRED');

@@ -1,4 +1,5 @@
 import { fail } from '../core/errors.mjs';
+import { logDiagnostic } from '../logs/index.mjs';
 
 export const DRAFT_FRAME_BYTES = 1024 * 1024;
 export const DRAFT_TOOL_NAMES = Object.freeze(['list_notes', 'read_note', 'draft_note', 'finish_drafting', 'read_activity_log']);
@@ -91,9 +92,10 @@ export function draftProtocol(workspace, definitions, { version = '2.0.0-dev.0' 
       return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value, isError: false });
     } catch (error) {
       // Never expose arbitrary underlying exceptions: paths, transcript content,
-      // or client stderr may occur in them. Stable codes are enough to correct a call.
+      // or client stderr may occur in them. Allow only verified public log locations.
       const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'DRAFT_TOOL_FAILED';
-      return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify({ error: code }) }], isError: true });
+      const location = logDiagnostic(error);
+      return rpcResult(id, { content: [{ type: 'text', text: JSON.stringify({ error: code, ...(location ? { location } : {}) }) }], isError: true });
     }
   };
 }

@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
-import { validateRun, publishDrafts } from '../core/run.mjs';
+import { validateRun, publishDrafts, addRunWarning } from '../core/run.mjs';
 import { withCurrentAttempt } from '../storage/attempts.mjs';
 import { createPrivateDirectory, assertDirectory } from '../storage/paths.mjs';
 import { writeJSON } from '../storage/files.mjs';
@@ -76,7 +76,7 @@ export async function prepareRunDrafts(store, owner, { client, skillVersion, mod
   const workspace = await openNoteWorkspace({ project: run.settings, runId: run.id, skillVersion,
     now: new Date().toISOString(), readActivityLog });
   const cwd = await createPrivateDirectory(path.join(store.root, 'processing', randomUUID()));
-  let bridge;
+  let bridge, ready, failure;
   try {
     bridge = await serveDraftTools(workspace, { definitions: NOTE_WORKSPACE_TOOLS, version: skillVersion, signal });
     const result = await runClient({ client, model, effort, cwd: cwd.root, prompt: DRAFTING_PROMPT,
@@ -98,10 +98,31 @@ export async function prepareRunDrafts(store, owner, { client, skillVersion, mod
     });
     for (const draft of manifest.drafts) await withCurrentAttempt(owner, ({ run }) => writeDraftArtifact(store.pin, run.artifacts, draft.id, draft.bytes));
     await withCurrentAttempt(owner, ({ run }) => completeDraftArtifacts(store.pin, run.artifacts));
-    return publishReady(store, owner);
+    ready = await publishReady(store, owner);
+  } catch (error) {
+    failure = error;
   } finally {
-    await bridge?.close();
-    // Never recursively remove unexpected files left by a native client.
-    await assertDirectory(cwd); await fs.rmdir(cwd.root);
+    const warnings = [];
+    for (const clean of [() => bridge?.close(), async () => {
+      // Never recursively remove unexpected files left by a native client.
+      await assertDirectory(cwd); await fs.rmdir(cwd.root);
+    }]) {
+      try { await clean(); }
+      catch (error) {
+        const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'CLEANUP_FAILED';
+        warnings.push(`Private drafting-session cleanup was incomplete (${code}); unexpected files were preserved.`);
+      }
+    }
+    if (warnings.length) {
+      try {
+        const next = await withCurrentAttempt(owner, async ({ run, hash, directory }) => {
+          const updated = warnings.reduce((current, warning) => addRunWarning(current, owner.attemptId, warning), run);
+          await writeJSON(store.pin, `${directory}/run.json`, updated, { expectedHash: hash }); return updated;
+        });
+        if (ready) ready = next;
+      } catch { /* Cleanup reporting must never replace the model/publication outcome. */ }
+    }
   }
+  if (failure) throw failure;
+  return ready;
 }

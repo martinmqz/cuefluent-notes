@@ -13,9 +13,12 @@ function field(row, kind, path, { blockIndex = 0, callId = null, tool = null, fo
     total: row.strings[atKey(path)]?.units ?? null, bytes: row.strings[atKey(path)]?.bytes ?? null });
 }
 
-function contentFields(row, prefix, kind, acceptedType, options = {}) {
+function contentFields(row, prefix, kind, acceptedType, options = {}, omittedTypes = []) {
   return blockIndices(row, prefix).map(index => {
-    if (value(row, ...prefix, index, 'type') !== acceptedType) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported native content block');
+    const type = value(row, ...prefix, index, 'type');
+    if (omittedTypes.includes(type)) return Object.freeze({ ...field(row, kind, [...prefix, index], { ...options, blockIndex: index, format: 'notice' }),
+      total: 0, bytes: 0, omittedType: type });
+    if (type !== acceptedType) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported native content block');
     return field(row, kind, [...prefix, index, 'text'], { ...options, blockIndex: index });
   });
 }
@@ -32,7 +35,8 @@ export function classifyNativeRow(row, { client, sessionId, completion = null, c
     if (value(row, 'isCompactSummary') === true || value(row, 'isVisibleInTranscriptOnly') === true ||
         value(row, 'isMeta') === true || value(row, 'turnCompanion') === true) return { kind: 'ignore', rowId: value(row, 'uuid') };
     if (!['user', 'assistant'].includes(type)) {
-      const known = ['queue-operation', 'attachment', 'system', 'last-prompt', 'atis-latch', 'cost-state', 'api-request', 'api-request-blob', 'api-request-shape', 'file-history-snapshot', 'progress', 'summary', 'mode'];
+      const known = ['queue-operation', 'attachment', 'system', 'last-prompt', 'atis-latch', 'cost-state', 'api-request', 'api-request-blob', 'api-request-shape', 'file-history-snapshot', 'file-history-delta', 'progress', 'summary', 'mode',
+        'custom-title', 'ai-title', 'agent-name', 'agent-color', 'agent-setting', 'bridge-session', 'pr-link', 'permission-mode', 'tag', 'worktree-state', 'isolation-latch', 'attribution-snapshot'];
       if (!known.includes(type)) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Claude native row kind');
       if (type === 'api-request-shape' && nativeSession !== sessionId) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'API request shape bookkeeping requires its native session identity');
       if (type === 'mode' && (nativeSession !== sessionId || !hasString(row, ['mode']))) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Claude mode bookkeeping row');
@@ -48,20 +52,21 @@ export function classifyNativeRow(row, { client, sessionId, completion = null, c
         if (value(row, 'message', 'content', index, 'type') !== 'tool_result') transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Mixed native tool-result and human content is ambiguous');
         const callId = nativeId(value(row, 'message', 'content', index, 'tool_use_id')), base = ['message', 'content', index, 'content'];
         if (hasString(row, base)) fields.push(field(row, 'tool-result', base, { blockIndex: index, callId }));
-        else fields.push(...contentFields(row, base, 'tool-result', 'text', { callId }));
+        else fields.push(...contentFields(row, base, 'tool-result', 'text', { callId }, ['image', 'tool_reference']));
       }
       return { kind: 'content', rowId, fields };
     }
     if (type === 'user') {
-      const promptId = nativeId(value(row, 'promptId'));
+      const promptId = value(row, 'promptId');
       if (value(row, 'turnOrigin') === undefined && value(row, 'turnPosition', 'turnIndex') === undefined) {
         // Native companion/interruption rows share the actual human's prompt
         // identity and lack its origin/position fields. Never match their text.
-        if (promptId === currentPromptId || (completion && ['interrupted', 'failed'].includes(completion.kind) && completion.promptId === promptId)) return { kind: 'ignore', rowId };
+        if (promptId !== undefined && (promptId === currentPromptId || (completion && ['interrupted', 'failed'].includes(completion.kind) && completion.promptId === promptId))) return { kind: 'ignore', rowId };
         transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'The native row does not prove an actual human prompt');
       }
+      nativeId(promptId);
       if (hasString(row, ['message', 'content'])) fields.push(field(row, 'human', ['message', 'content']));
-      else fields.push(...contentFields(row, ['message', 'content'], 'human', 'text'));
+      else fields.push(...contentFields(row, ['message', 'content'], 'human', 'text', {}, ['image']));
       if (!fields.length) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'A native human prompt has no supported content');
       return { kind: 'human', rowId, promptId, fields };
     }
@@ -114,10 +119,17 @@ export function classifyNativeRow(row, { client, sessionId, completion = null, c
     return { kind: 'ignore', rowId: value(row, 'payload', 'item', 'id') };
   }
   if (type !== 'response_item') {
-    if (!['world_state', 'turn_context', 'token_usage_record'].includes(type)) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Codex native row kind');
+    if (!['world_state', 'turn_context', 'token_usage_record', 'inter_agent_communication_metadata'].includes(type)) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Codex native row kind');
     return { kind: 'ignore' };
   }
   const subtype = value(row, 'payload', 'type'), rowId = value(row, 'payload', 'id');
+  // These producer-defined input/control envelopes are not canonical assistant
+  // messages or human prompts. Inspect their shape without retaining payloads.
+  if (subtype === 'reasoning' && row.containers[atKey(['payload', 'summary'])] === 'array' ||
+      ['compaction', 'compaction_summary'].includes(subtype) && hasString(row, ['payload', 'encrypted_content']) ||
+      subtype === 'context_compaction' ||
+      subtype === 'additional_tools' && typeof value(row, 'payload', 'role') === 'string' && row.containers[atKey(['payload', 'tools'])] === 'array' ||
+      subtype === 'agent_message' && hasString(row, ['payload', 'author']) && hasString(row, ['payload', 'recipient']) && row.containers[atKey(['payload', 'content'])] === 'array') return { kind: 'ignore', rowId };
   if (subtype === 'message') {
     if (value(row, 'payload', 'role') !== 'assistant') return { kind: 'ignore', rowId };
     return { kind: 'content', rowId: nativeId(rowId), fields: contentFields(row, ['payload', 'content'], 'assistant', 'output_text'),
@@ -130,10 +142,10 @@ export function classifyNativeRow(row, { client, sessionId, completion = null, c
   }
   if (['custom_tool_call_output', 'function_call_output'].includes(subtype)) {
     const at = ['payload', 'output'], callId = nativeId(value(row, 'payload', 'call_id'));
-    const fields = hasString(row, at) ? [field(row, 'tool-result', at, { callId })] : contentFields(row, at, 'tool-result', 'input_text', { callId });
+    const fields = hasString(row, at) ? [field(row, 'tool-result', at, { callId })] : contentFields(row, at, 'tool-result', 'input_text', { callId }, ['input_image', 'input_audio', 'encrypted_content']);
     return { kind: 'content', rowId: nativeId(rowId), fields };
   }
-  // Reasoning and other unobserved response shapes are explicit gaps, not dropped prose.
+  // Unknown response shapes remain explicit gaps rather than dropped prose.
   transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Codex response item');
 }
 
@@ -157,7 +169,9 @@ export async function* extractNativeFields(source, row, fields, { limits } = {})
       yield { fieldIndex: active, type: 'start' };
     }
     const selected = fields[active]; let text = '';
-    if (selected.format === 'text') {
+    if (selected.format === 'notice') {
+      // The field produces an explicit omission notice, never opaque content.
+    } else if (selected.format === 'text') {
       if (token.name === 'stringChunk') text = token.value;
     } else {
       if (token.name === 'startObject' || token.name === 'startArray') {

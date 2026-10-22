@@ -305,3 +305,82 @@ test('invalid UTF-8 and corrupt streaming cursors preserve their source position
   assert(first.checkpoint.cursor);
   await assert.rejects(() => collect(input, { checkpoint: { ...first.checkpoint, cursor: { ...first.checkpoint.cursor, textOffset: 999999 } } }), { code: 'TRANSCRIPT_CHECKPOINT_INVALID' });
 });
+
+test('producer bookkeeping rows do not stall Claude collection, including large repeated schema keys', async () => {
+  const kinds = ['custom-title', 'ai-title', 'agent-name', 'agent-color', 'agent-setting', 'bridge-session', 'pr-link', 'permission-mode', 'file-history-delta', 'tag', 'worktree-state', 'isolation-latch', 'attribution-snapshot'];
+  const shape = Array.from({ length: 1500 }, () => ({ ['schema-key-'.repeat(9)]: 'SYNTHETIC_BOOKKEEPING_ONLY' }));
+  const rows = [human(), ...kinds.map(type => ({ type, sessionId })), { type: 'api-request-shape', sessionId, shape }, assistant()];
+  const observed = await collect(source(rows));
+  assert.equal(observed.pending, undefined); assert.equal(observed.parts.length, 1);
+  assert.equal(textFor(observed.parts, 'human'), 'A synthetic prompt'); assert.equal(textFor(observed.parts, 'assistant'), 'A synthetic reply');
+  assert(!JSON.stringify(observed).includes('SYNTHETIC_BOOKKEEPING_ONLY'));
+  const unknown = await collect(source([human(), { type: 'unknown-conversation-shape', sessionId, text: 'Do not silently discard' }, assistant()]));
+  assert.equal(unknown.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED'); assert.equal(unknown.parts.length, 0);
+  const foreign = await collect(source([human(), { type: 'custom-title', sessionId: 'another-session' }, assistant()])).catch(error => error);
+  assert.equal(foreign.code, 'TRANSCRIPT_IDENTITY_MISMATCH');
+  const wide = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`${i}-${'x'.repeat(900)}`, 0]));
+  await assert.rejects(inspectNativeRow(source([{ type: 'api-request-shape', sessionId, shape: wide }]), 0), { code: 'TRANSCRIPT_METADATA_LIMIT' });
+});
+
+test('known Codex reasoning, compaction, tool definitions and inter-agent envelopes are excluded from canonical conversation', async () => {
+  const rows = [{ type: 'session_meta', payload: { id: sessionId } },
+    { type: 'event_msg', payload: { type: 'item_completed', thread_id: sessionId, turn_id: 'turn-1', item: { type: 'UserMessage', id: 'human', content: [{ type: 'text', text: 'Keep human' }] } } },
+    { type: 'response_item', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'REASONING_ONLY' }], encrypted_content: 'OPAQUE_REASONING' } },
+    { type: 'response_item', payload: { type: 'compaction', encrypted_content: 'OPAQUE_COMPACTION' } },
+    { type: 'response_item', payload: { type: 'additional_tools', role: 'developer', tools: [{ name: 'TOOL_DEFINITION_ONLY' }] } },
+    { type: 'response_item', payload: { type: 'agent_message', author: 'worker', recipient: 'parent', content: [{ type: 'input_text', text: 'AGENT_ONLY' }] } },
+    { type: 'inter_agent_communication_metadata', payload: { trigger_turn: false } },
+    { type: 'response_item', payload: { type: 'message', id: 'answer', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: 'Keep answer' }] } }];
+  const observed = await collect(source(rows), { client: 'codex' });
+  assert.equal(observed.pending, undefined); assert.equal(observed.parts.length, 1);
+  assert.equal(textFor(observed.parts, 'human'), 'Keep human'); assert.equal(textFor(observed.parts, 'assistant'), 'Keep answer');
+  for (const text of ['REASONING_ONLY', 'OPAQUE_REASONING', 'OPAQUE_COMPACTION', 'TOOL_DEFINITION_ONLY', 'AGENT_ONLY']) assert(!JSON.stringify(observed).includes(text));
+  for (const payload of [{ type: 'reasoning', summary: {} }, { type: 'compaction', encrypted_content: {} }, { type: 'additional_tools', role: 'developer', tools: {} }, { type: 'agent_message', content: [] }, { type: 'future_assistant', text: 'Unclassified' }]) {
+    const gap = await collect(source([...rows.slice(0, 2), { type: 'response_item', payload }, rows.at(-1)]), { client: 'codex' });
+    assert.equal(gap.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED'); assert.equal(gap.parts.length, 0);
+  }
+});
+
+test('Claude image prompts and mixed tool results preserve text with explicit ordered non-text notices', async () => {
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'OPAQUE_IMAGE'.repeat(10000) } };
+  const rows = [human('human-1', [{ type: 'text', text: 'Before image' }, image, { type: 'text', text: 'After image' }]), toolCall({ command: 'synthetic' }),
+    result([{ type: 'text', text: 'Before result' }, image, { type: 'tool_reference', tool_name: 'SyntheticTool' }, { type: 'text', text: 'After result' }]), assistant()];
+  const observed = await collect(source(rows));
+  assert.equal(observed.pending, undefined); assert.equal(textFor(observed.parts, 'human'), 'Before imageAfter image');
+  assert.equal(textFor(observed.parts, 'tool-result'), 'Before resultAfter result');
+  assert(!JSON.stringify(observed).includes('OPAQUE_IMAGE'));
+  const notices = observed.parts.flatMap(part => part.notices);
+  assert.deepEqual(notices.map(item => item.contentType), ['image', 'image', 'tool_reference']);
+  assert(notices.every(item => item.kind === 'non-text-content-omitted'));
+  const onlyImage = await collect(source([human('image-only', [image]), assistant()]));
+  assert.equal(onlyImage.parts.length, 1); assert.equal(onlyImage.parts[0].notices.length, 1);
+  const interrupted = await collect(source([human(), { type: 'user', sessionId, uuid: 'originless-missing-prompt', message: { role: 'user', content: 'Ambiguous input' } }, assistant()]));
+  assert.equal(interrupted.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED'); assert.equal(interrupted.parts.length, 0);
+});
+
+test('non-text notices survive streaming retries once without hiding text output or bypassing output clipping', async () => {
+  const text = 'Visible output λ🙂'.repeat(2000), input = source([human(), toolCall({}), result([{ type: 'image', source: { data: 'opaque' } }, { type: 'text', text }]), assistant()], { trusted: true });
+  let checkpoint = null; const parts = [];
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const observed = await collect(input, { checkpoint, limits: { parts: 1, partBytes: 8192, toolOutputBytes: 10000 } });
+    assert.equal(observed.pending, undefined); parts.push(...observed.parts); checkpoint = observed.checkpoint;
+    if (checkpoint.offset === input.size && !checkpoint.cursor) break;
+    assert(attempt < 99);
+  }
+  assert.equal(parts.flatMap(part => part.notices).filter(item => item.kind === 'non-text-content-omitted').length, 1);
+  const clips = parts.flatMap(part => part.notices).filter(item => item.kind === 'tool-output-clipped');
+  assert.equal(clips.length, 1); assert.equal(clips[0].retainedBytes, Buffer.byteLength(textFor(parts, 'tool-result')));
+  assert(text.startsWith(textFor(parts, 'tool-result'))); assert.equal(textFor(parts, 'assistant'), 'A synthetic reply');
+});
+
+test('Codex multimodal tool-output variants preserve their textual siblings and disclose omitted blocks', async () => {
+  const rows = [{ type: 'session_meta', payload: { id: sessionId } },
+    { type: 'event_msg', payload: { type: 'item_completed', thread_id: sessionId, turn_id: 'turn', item: { type: 'UserMessage', id: 'human', content: [{ type: 'text', text: 'Human' }] } } },
+    { type: 'response_item', payload: { type: 'function_call_output', id: 'result', call_id: 'call', output: [
+      { type: 'input_text', text: 'Tool text' }, { type: 'input_image', image_url: 'OPAQUE_IMAGE' }, { type: 'input_audio', audio_url: 'OPAQUE_AUDIO' }, { type: 'encrypted_content', encrypted_content: 'OPAQUE_ENCRYPTED' }] } },
+    { type: 'response_item', payload: { type: 'message', id: 'answer', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: 'Answer' }] } }];
+  const observed = await collect(source(rows), { client: 'codex' });
+  assert.equal(observed.pending, undefined); assert.equal(textFor(observed.parts, 'tool-result'), 'Tool text');
+  assert.deepEqual(observed.parts.flatMap(part => part.notices).map(item => item.contentType), ['input_image', 'input_audio', 'encrypted_content']);
+  assert(!JSON.stringify(observed).includes('OPAQUE_'));
+});

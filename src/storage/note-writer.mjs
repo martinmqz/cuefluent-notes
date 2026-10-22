@@ -227,7 +227,7 @@ async function linuxInventory(file) {
 
 async function safeEmptyStage(file, stat) {
   regular(stat);
-  if (stat.size !== 0 || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & 0o7777) !== (0o666 & ~process.umask())))) conflict('An unjournaled stage must have the exact empty-file owner and default permissions.');
+  if (stat.size !== 0 || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & ~0o666 & 0o7777) !== 0))) conflict('An unjournaled stage must have the empty-file owner and non-executable ordinary permissions.');
   if (process.platform === 'darwin') {
     const attrs = (await command('/usr/bin/xattr', [file])).toString('utf8').split('\n').filter(Boolean);
     const acl = (await command('/bin/ls', ['-lde', file])).toString('utf8').split('\n').slice(1).filter(Boolean);
@@ -259,6 +259,7 @@ async function metadataEvidence(file) {
     if (acl.some(line => !/^\s+[0-9]+: /.test(line))) fail('NOTE_METADATA_UNSUPPORTED', 'The note ACL could not be verified.');
     const flags = (await command('/usr/bin/stat', ['-f', '%f', file])).toString('ascii').trim();
     if (!/^[0-9]+$/.test(flags)) fail('NOTE_METADATA_UNSUPPORTED', 'The note flags could not be verified.');
+    if ((BigInt(flags) & 0x60006n) !== 0n) fail('NOTE_METADATA_UNSUPPORTED', 'Immutable or append-only notes must be unlocked before publication.');
     extra = { attrs, acl, flags };
   } else if (process.platform === 'linux') {
     extra = await linuxInventory(file);
@@ -507,15 +508,16 @@ async function reconcileOriginalBackup(pin, intent, names, { restore = false } =
   await syncDirectory(names.directory); await assertChain(intent.parent);
 }
 
-/** Caller holds current-attempt/project/writer fencing. persistIntent must durably
- * replace the current-run intent before resolving. No independent lock or store.
+/** Caller holds the live attempt worker and writer gates. persistIntent must durably
+ * replace the exact current-run intent under short gates before resolving.
  */
-export async function publishNotePublication(pin, input, bytes, { persistIntent } = {}) {
+export async function publishNotePublication(pin, input, bytes, { persistIntent, beforePublish = async () => {} } = {}) {
+  if (typeof beforePublish !== 'function') invalid('Publication fencing requires a trusted callback.');
   let intent = validateNotePublication(input);
   const draft = exactBytes(bytes, intent.hash, intent.bytes);
   let current = await outcome(pin, intent, { windowsRecovery: true });
   if (current.status === 'existing') return Object.freeze({ draftId: intent.draftId, target: current.target, hash: intent.hash, changed: false });
-  if (['applied', 'metadata-pending'].includes(current.status)) return finish(pin, intent, current);
+  if (['applied', 'metadata-pending'].includes(current.status)) { await beforePublish(); return finish(pin, intent, current); }
   if (intent.stage && !await lstatOrNull(current.stage)) conflict('The recorded staging inode disappeared without publication.');
   if (await lstatOrNull(current.target) && await lstatOrNull(current.backup)) {
     await reconcileOriginalBackup(pin, intent, current);
@@ -581,6 +583,9 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent 
   // only after flushing and closing that handle; the full fingerprint below
   // still verifies ACLs, audit rules, streams, EAs, and every attribute bit.
   if (original && process.platform === 'win32') await windows('attributes', source, current.stage);
+  // The fence may wait for short gates. Inspect every public expectation again
+  // afterwards so a manual edit made during that wait remains a conflict.
+  await beforePublish();
   await assertChain(intent.parent); await assertDirectory(pin);
   if (original) await originalMatches(source, intent); else await originalMatches(current.target, intent);
   const complete = await snapshot(current.stage);
@@ -593,7 +598,9 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent 
     // Preserve the exact security descriptor already verified on the stage.
     // ReplaceFileW would merge and auto-inherit the original DACL again.
     await fs.link(current.target, current.backup);
-    await outcome(pin, intent, { windowsRecovery: true });
+    await beforePublish();
+    const prepared = await outcome(pin, intent, { windowsRecovery: true });
+    if (prepared.status !== 'unapplied' || !prepared.prepared) conflict('The exact prepared publication changed during its ownership check.');
     await fs.rename(current.stage, current.target);
   } else await fs.rename(current.stage, current.target);
   return finish(pin, intent, current);

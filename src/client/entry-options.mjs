@@ -50,6 +50,19 @@ function environment(env, key) {
   return descriptor?.value;
 }
 
+// OS locations may contain redundant or trailing separators. Normalize these
+// separately from strict explicit CLI/override arguments; root homes are valid.
+function environmentLocation(value, platform) {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value) || !paths.isAbsolute(value))
+    fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+  const normalized = paths.normalize(value), root = paths.parse(normalized).root;
+  const result = normalized === root ? root : normalized.replace(platform === 'win32' ? /\\+$/ : /\/+$/, '');
+  if (platform === 'win32' && (!/^[A-Za-z]:\\/.test(result) || result.slice(3).split('\\').filter(Boolean).some(part => /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part))))
+    fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+  return result;
+}
+
 /** Pure location selection. Opening/setup owns canonical ancestor verification,
  * privacy, local-filesystem and repository/note overlap checks. Nothing is read
  * from any former product location and this function never creates directories. */
@@ -58,14 +71,14 @@ export function selectStoreRoot({ env = process.env, platform = process.platform
   const override = environment(env, 'CUEFLUENT_V2_HOME');
   if (override !== undefined) return absolute(override, platform);
   const paths = platform === 'win32' ? path.win32 : path.posix;
-  const home = absolute(homedir, platform);
+  const home = environmentLocation(homedir, platform);
   if (platform === 'darwin') return paths.join(home, 'Library', 'Application Support', 'Cuefluent Notes', 'v2');
   if (platform === 'win32') {
     const local = environment(env, 'LOCALAPPDATA');
-    return paths.join(local ? absolute(local, platform) : paths.join(home, 'AppData', 'Local'), 'Cuefluent Notes', 'v2');
+    return paths.join(local ? environmentLocation(local, platform) : paths.join(home, 'AppData', 'Local'), 'Cuefluent Notes', 'v2');
   }
   const state = environment(env, 'XDG_STATE_HOME');
-  return paths.join(state ? absolute(state, platform) : paths.join(home, '.local', 'state'), 'cuefluent-notes', 'v2');
+  return paths.join(state && paths.isAbsolute(state) ? environmentLocation(state, platform) : paths.join(home, '.local', 'state'), 'cuefluent-notes', 'v2');
 }
 
 async function packageFile(pin, relative, { read = false, missing = false, maxBytes = 64 * 1024 } = {}) {

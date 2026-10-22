@@ -91,3 +91,21 @@ test('backticks in YAML or reference attributes cannot hide a second metadata ma
   assert.equal(inspectMetadata(text).status, 'invalid');
   assert.equal(inspectMetadata(metadata('schema_version: 1\nid: demo\ncustom: 0x10')).status, 'supported');
 });
+
+test('schema-1 notes without optional generation metadata accept useful edits', () => {
+  const original = metadata('schema_version: 1\nid: stable\ncreated: "2026-10-21T00:00:00Z"\ncustom: retained # Preserve explanation');
+  const updated = preserveMetadata(original, body.replace('checked', 'verified'), { updated: options.now, skillVersion: options.skillVersion });
+  const result = inspectMetadata(updated.bytes);
+  assert.equal(result.status, 'supported'); assert.equal(result.value.id, 'stable');
+  assert.equal(result.value.created, '2026-10-21T00:00:00Z'); assert.equal(result.value.generation.skill_version, options.skillVersion);
+  assert.match(updated.bytes.toString(), /custom: retained # Preserve explanation/);
+});
+
+test('similarly named body comments do not claim the cuefluent metadata marker', () => {
+  for (const comment of ['<!-- cuefluent-notes: synced -->', '<!-- cuefluent: unrelated -->', '<!-- cuefluent_extra -->']) {
+    const original = `${body}\n${comment}\n`;
+    assert.equal(inspectMetadata(original).status, 'absent');
+    assert.equal(preserveMetadata(original, original.replace('checked', 'verified')).bytes.toString(), original.replace('checked', 'verified'));
+  }
+  assert.equal(inspectMetadata(`${body}\n<!-- cuefluent\nschema_version: 1\nid: misplaced\n-->`).status, 'invalid');
+});

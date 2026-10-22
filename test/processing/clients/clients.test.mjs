@@ -99,3 +99,30 @@ test('a private but project-configured cwd is refused before native startup', as
   await mkdir(path.join(path.dirname(fixture.options.cwd), '.git'));
   await assert.rejects(runDraftingSession(fixture.options, fixture.dependencies), { code: 'PROCESSING_ISOLATION_UNSUPPORTED' });
 });
+
+
+for (const mode of ['updated', 'builtin']) test(`Claude accepts ${mode} only after verifying effective capabilities`, async t => {
+  const fixture = await setup(t, 'claude', mode);
+  assert.equal((await runDraftingSession(fixture.options, fixture.dependencies)).status, 'completed');
+  const launch = (await fixture.trace()).find(value => value.arguments);
+  const settings = JSON.parse(launch.arguments[launch.arguments.indexOf('--settings') + 1]);
+  assert.equal(settings.enabledPlugins['cc-plugin-mermaid@builtin'], false);
+});
+for (const [mode, code] of [['old-version', 'PROCESSING_CLIENT_VERSION_UNSUPPORTED'], ['new-major', 'PROCESSING_CLIENT_VERSION_UNSUPPORTED'], ['effort-cap', 'PROCESSING_EFFORT_UNAVAILABLE'], ['builtin-tool', 'PROCESSING_ISOLATION_UNSUPPORTED']]) test(`Claude refuses ${mode} before delivering source`, async t => {
+  const fixture = await setup(t, 'claude', mode);
+  await assert.rejects(runDraftingSession(fixture.options, fixture.dependencies), { code });
+  assert.equal((await fixture.trace()).some(value => value.sourceReceived), false);
+});
+test('Claude clears inherited effort without mutating the parent environment', async t => {
+  const prior = process.env.CLAUDE_CODE_EFFORT_LEVEL; process.env.CLAUDE_CODE_EFFORT_LEVEL = 'medium';
+  t.after(() => { if (prior === undefined) delete process.env.CLAUDE_CODE_EFFORT_LEVEL; else process.env.CLAUDE_CODE_EFFORT_LEVEL = prior; });
+  const fixture = await setup(t, 'claude');
+  // Avoid reintroducing a deliberately absent inherited override in the mock.
+  const original = fixture.dependencies.spawn;
+  fixture.dependencies.spawn = (command, args, launch) => {
+    const ambient = process.env.CLAUDE_CODE_EFFORT_LEVEL; delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
+    try { return original(command, args, launch); } finally { process.env.CLAUDE_CODE_EFFORT_LEVEL = ambient; }
+  };
+  await runDraftingSession(fixture.options, fixture.dependencies);
+  assert.equal((await fixture.trace())[0].effortOverride, null); assert.equal(process.env.CLAUDE_CODE_EFFORT_LEVEL, 'medium');
+});

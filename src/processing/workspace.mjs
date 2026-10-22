@@ -59,12 +59,15 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
   for (const [key, value] of Object.entries(inputLimits)) limits[key] = integer(value, 1, limits[key]);
   const root = project.destination.kind === 'file' ? path.dirname(project.destination.path) : project.destination.path;
   const pin = await pinDirectory(root), originals = new Map(), drafts = new Map(), spellings = new Map();
+  // One terminal receipt remains available even after ordinary context is full.
+  const finishBytes = Math.max(...['drafted', 'nothing-useful'].map(outcome => Buffer.byteLength(JSON.stringify({ outcome, drafts: limits.drafts }))));
+  if (limits.contextBytes < finishBytes) fail('WORKSPACE_CONTEXT_INVALID', 'The context budget must include a terminal drafting receipt.');
   let contextBytes = 0, draftBytes = 0, privateBytes = 0, finished = null, tail = Promise.resolve();
   const serial = fn => { const result = tail.then(fn); tail = result.catch(() => {}); return result; };
   const active = async () => { if (finished) fail('WORKSPACE_FINISHED', 'Drafting has already finished.'); await assertDirectory(pin); };
-  const visible = result => {
+  const visible = (result, terminal = false) => {
     const bytes = Buffer.byteLength(JSON.stringify(result));
-    if (contextBytes + bytes > limits.contextBytes) fail('WORKSPACE_CONTEXT_LIMIT', 'The model-visible note context budget is exhausted.');
+    if (contextBytes + bytes > limits.contextBytes - (terminal ? 0 : finishBytes)) fail('WORKSPACE_CONTEXT_LIMIT', 'The model-visible note context budget is exhausted.');
     contextBytes += bytes; return freeze(result);
   };
   function target(input, ordinary = true) {
@@ -134,11 +137,16 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
       const file = path.join(directory, entry.name), relative = path.relative(root, file).split(path.sep).join('/');
       if (relative <= cursor) continue;
       if (!entry.isDirectory() && !/\.md$/i.test(entry.name)) continue;
-      relativePath(pin, relative);
+      // An unsafe unrelated entry cannot authorize access or make every safe
+      // sibling unavailable. Direct reads/drafts retain their strict checks.
+      try { relativePath(pin, relative); } catch (error) { if (error.code === 'PATH_INVALID') continue; throw error; }
       const stat = await lstatOrNull(file);
       if (!stat) fail('WORKSPACE_LIST_CHANGED', 'The notes directory changed during inspection.');
       if (stat.isDirectory() && !stat.isSymbolicLink()) candidates.push({ target: file, kind: 'directory', relative });
-      else { assertRegularFile(file, stat); candidates.push({ target: file, kind: 'note', relative }); }
+      else {
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) continue;
+        assertRegularFile(file, stat); candidates.push({ target: file, kind: 'note', relative });
+      }
       candidates.sort((a, b) => a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0);
       if (candidates.length > limit + 1) candidates.pop();
     }
@@ -160,8 +168,8 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     }
     const submitted = Buffer.byteLength(JSON.stringify(input));
     if (draftBytes + submitted > limits.draftBytes) fail('WORKSPACE_DRAFT_LIMIT', 'The cumulative submitted draft budget is exhausted.');
-    draftBytes += submitted;
-    const original = originals.get(selected.key) ?? retain(await inspect(selected, { absentOnly: true }), originals);
+    const retained = originals.get(selected.key), original = retained ?? await inspect(selected, { absentOnly: true });
+    if (!retained && originals.size >= limits.targets) fail('WORKSPACE_TARGET_LIMIT', 'Too many note versions are retained in one workspace.');
     await assertChain(original.binding.parent);
     let proposed = input.content;
     if (input.edits) {
@@ -186,11 +194,14 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     const prior = drafts.get(selected.key);
     if (!prior && drafts.size >= limits.drafts) fail('WORKSPACE_DRAFT_LIMIT', 'Too many draft targets are retained.');
     if (privateBytes - (prior?.bytes.length ?? 0) + bytes.length > limits.privateBytes) fail('WORKSPACE_PRIVATE_LIMIT', 'The complete private draft exceeds the workspace budget.');
-    privateBytes += bytes.length - (prior?.bytes.length ?? 0);
     const draft = { id: prior?.id ?? randomUUID(), target: original.file, expectedHash: original.hash, hash: hashBytes(bytes), summary, heading, bytes: Buffer.from(bytes), binding: original.binding };
-    drafts.set(selected.key, draft);
-    return visible({ id: draft.id, target: draft.target, hash: draft.hash, expectedHash: draft.expectedHash, bytes: draft.bytes.length, changed: draft.expectedHash !== draft.hash,
+    const receipt = visible({ id: draft.id, target: draft.target, hash: draft.hash, expectedHash: draft.expectedHash, bytes: draft.bytes.length, changed: draft.expectedHash !== draft.hash,
       warnings: validation.diagnostics.filter(item => unchanged || item.severity === 'warning').map(item => item.code) });
+    // No fallible operation follows admission: a rejected receipt never changes
+    // the draft set or consumes its submitted/private budgets.
+    if (!retained) originals.set(selected.key, original);
+    privateBytes += bytes.length - (prior?.bytes.length ?? 0); draftBytes += submitted;
+    drafts.set(selected.key, draft); return receipt;
   }
   async function read_activity_log(input) {
     object(input, ['year', 'from', 'to', 'target', 'projectId', 'limit', 'cursor'], ['year']); await active();
@@ -231,7 +242,7 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
         (input.outcome === 'nothing-useful' && [...drafts.values()].some(draft => draft.hash !== draft.expectedHash))) fail('WORKSPACE_FINISH_CONFLICT', 'Choose an explicit outcome consistent with the private drafts.');
     for (const draft of drafts.values()) await assertChain(draft.binding.parent);
     const outcome = [...drafts.values()].some(draft => draft.hash !== draft.expectedHash) ? 'drafted' : 'nothing-useful';
-    const result = visible({ outcome, drafts: outcome === 'drafted' ? drafts.size : 0 });
+    const result = visible({ outcome, drafts: outcome === 'drafted' ? drafts.size : 0 }, true);
     finished = outcome; return result;
   }
   return Object.freeze({ list_notes: input => serial(() => list_notes(input)), read_note: input => serial(() => read_note(input)), draft_note: input => serial(() => draft_note(input)),

@@ -177,3 +177,20 @@ test('complete loaded enabled settings require the recorded destination-relative
   assert.throws(() => validateSettings({ schemaVersion: 1, projects: [missing] }, { platform: 'posix' }), { code: 'SETTINGS_INVALID' });
   assert.throws(() => createProject({ ...project, activityLog: { ...project.activityLog, path: '/notes/sibling-logs' } }, { platform: 'posix' }), { code: 'SETTINGS_INVALID' });
 });
+
+test('setup diagnostics identify an unrelated reserved entry without adopting or rewriting it', async t => {
+  const f = await fixture(t); await fs.mkdir(path.join(f.notes, 'logs'), { recursive: true });
+  await fs.writeFile(path.join(f.notes, 'logs', 'README.md'), 'Manual notes.');
+  const result = await setupProject(f.options);
+  assert.equal(result.logs.warning, 'LOG_LAYOUT_UNRECOGNIZED');
+  assert.deepEqual(result.logs.location, { entry: 'README.md' });
+  assert.equal(await fs.readFile(path.join(f.notes, 'logs', 'README.md'), 'utf8'), 'Manual notes.');
+});
+
+test('setup enables logging beside preserved Finder metadata and reports it as unrelated', async t => {
+  const f = await fixture(t, { enabled: true }); await fs.mkdir(path.join(f.notes, 'logs'), { recursive: true });
+  await fs.writeFile(path.join(f.notes, 'logs', '.DS_Store'), 'Synthetic Finder file.');
+  const result = await setupProject(f.options);
+  assert.equal(result.logs.status, 'valid'); assert.equal(result.logs.unrelatedEntries, 1);
+  assert.equal(await fs.readFile(path.join(f.notes, 'logs', '.DS_Store'), 'utf8'), 'Synthetic Finder file.');
+});

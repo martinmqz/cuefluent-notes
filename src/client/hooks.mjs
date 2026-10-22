@@ -5,7 +5,7 @@ import { validateClientContract } from '../core/chat.mjs';
 import { validateNativeEvent, ingestNativeEvent } from '../sync/ingress.mjs';
 
 const STARTS = new Set(['startup', 'resume', 'fork', 'clear', 'compact']);
-const CLAUDE_FAILURES = new Set(['rate_limit', 'overloaded', 'authentication_failed', 'oauth_org_not_allowed', 'account_on_hold', 'billing_error', 'invalid_request', 'model_not_found', 'server_error', 'max_output_tokens', 'cloud_credential_error', 'unknown']);
+const CLAUDE_FAILURES = new Set(['rate_limit', 'overloaded', 'authentication_failed', 'oauth_org_not_allowed', 'account_on_hold', 'verification_required', 'billing_error', 'invalid_request', 'model_not_found', 'server_error', 'max_output_tokens', 'cloud_credential_error', 'unknown']);
 export const NATIVE_HOOK_LIMITS = Object.freeze({ fields: 128, finalTextUnits: 16 * 1024 * 1024 });
 
 function envelopeObject(input) {

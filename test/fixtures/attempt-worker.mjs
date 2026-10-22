@@ -36,10 +36,13 @@ if (mode === 'worker') {
           await fs.writeFile(path.join(root, 'publishing'), '');
           await delay(200);
         }
-        if (options.unawaitedFailure) throw Object.assign(new Error('Synthetic publication failure.'), { code: 'SYNTHETIC_PUBLICATION_FAILED' });
+        if (options.unawaitedFailure || options.handledFailure) throw Object.assign(new Error('Synthetic publication failure.'), { code: 'SYNTHETIC_PUBLICATION_FAILED' });
         await writeJSON(store.pin, `${directory}/run.json`, { ...run, warnings: ['synthetic worker finished'] }, { expectedHash: hash });
       });
-      if (!options.unawaited && !options.unawaitedFailure) await publication;
+      if (options.chainedUnawaited === 'then') publication.then(() => {});
+      else if (options.chainedUnawaited === 'finally') publication.finally(() => {});
+      else if (options.handledFailure) await publication.catch(() => {});
+      else if (!options.unawaited && !options.unawaitedFailure) await publication;
     });
     if (options.postRelease) {
       await withCurrentAttempt(retained, () => { throw new Error('Released worker published.'); });

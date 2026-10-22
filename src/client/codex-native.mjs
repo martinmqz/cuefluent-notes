@@ -1,4 +1,5 @@
 import { spawn as nativeSpawn } from 'node:child_process';
+import { executablePath } from './executable.mjs';
 import { createHash } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
 import { assertAbsolute } from '../storage/paths.mjs';
@@ -58,7 +59,7 @@ function locator(meta) {
  * arbitrary RPC escape hatch. A fresh source-free app-server owns this stdio pipe.
  * Its normal config may load internally; invocation flags disable capabilities.
  */
-function cliReader({ command, spawn, timeoutMs, responseBytes }) {
+function readerSession({ command, spawn, timeoutMs, responseBytes }) {
   let child, initialized, failure, closed = false, nextId = 0, bytes = Buffer.alloc(0), exited;
   const waiting = new Map();
   function stop(code) {
@@ -82,7 +83,7 @@ function cliReader({ command, spawn, timeoutMs, responseBytes }) {
   function start() {
     if (closed) fail('NATIVE_READER_CLOSED', 'The native metadata reader is closed.');
     child = spawn(command, [...CODEX_NATIVE_ARGUMENTS], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-    exited = new Promise(resolve => child.once('exit', resolve));
+    exited = new Promise(resolve => child.once('close', resolve));
     child.stderr.on('data', () => {}); // Never retain native diagnostics/content.
     child.stdin.on('error', () => stop('NATIVE_READER_FAILED'));
     child.on('error', () => stop('NATIVE_READER_FAILED'));
@@ -112,10 +113,12 @@ function cliReader({ command, spawn, timeoutMs, responseBytes }) {
       }
     });
     initialized = rpc('initialize', { clientInfo: { name: 'cuefluent_notes_source', version: '2.0.0' }, capabilities: { experimentalApi: true } })
-      .then(() => send({ method: 'initialized', params: {} }));
+      .then(() => send({ method: 'initialized', params: {} }))
+      .catch(error => { throw stop(error.code ?? 'NATIVE_READER_FAILED'); });
     return initialized;
   }
   return {
+    get failed() { return Boolean(failure); },
     async request(method, params) {
       if (!READS.has(method)) fail('NATIVE_METHOD_FORBIDDEN', 'Only bounded stored-thread reads are supported.');
       if (!initialized) await start(); else await initialized;
@@ -129,6 +132,35 @@ function cliReader({ command, spawn, timeoutMs, responseBytes }) {
       await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 1000); })]);
       clearTimeout(timer); bytes = Buffer.alloc(0);
     },
+  };
+}
+
+// A failed metadata process is retired before the next external request starts
+// a fresh one. No request is replayed automatically and concurrent callers share
+// one startup/retirement promise; late callbacks remain in their old session.
+function cliReader(options) {
+  let session = null, changing = null, closed = false;
+  async function current() {
+    if (closed) fail('NATIVE_READER_CLOSED', 'The native metadata reader is closed.');
+    if (!changing && (!session || session.failed)) {
+      changing = (async () => {
+        await session?.close();
+        let command;
+        try { command = await executablePath(options.command); }
+        catch { fail('NATIVE_READER_MISSING', 'A supported native metadata executable is unavailable.'); }
+        if (closed) fail('NATIVE_READER_CLOSED', 'The native metadata reader is closed.');
+        session = readerSession({ ...options, command });
+      })();
+    }
+    if (changing) {
+      const pending = changing;
+      try { await pending; } finally { if (changing === pending) changing = null; }
+    }
+    return session;
+  }
+  return {
+    async request(method, params) { return (await current()).request(method, params); },
+    async close() { closed = true; try { await changing; } catch { /* Failed startup has no live reader. */ } await session?.close(); },
   };
 }
 

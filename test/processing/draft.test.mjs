@@ -61,6 +61,20 @@ test('native completion without explicit finish cannot publish drafts or consume
   assert.equal((await inspectQueue(f.store.pin, queueRelative('codex', 'synthetic'))).records, 1);
 });
 
+test('unexpected native session files preserve successful drafts and the original client failure', async t => {
+  for (const clientError of [false, true]) {
+    const f = await fixture(t), child = await f.launch({ residue: true, clientError });
+    assert.equal((await child.exited).code, clientError ? 1 : 0);
+    const { run } = await inspectAttempt(f.store, 'project');
+    assert.equal(run.phase, clientError ? 'drafting' : 'review');
+    assert.ok(run.warnings.some(warning => warning.includes('cleanup was incomplete')));
+    if (clientError) assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'error.json'), 'utf8')).code, 'SYNTHETIC_CLIENT_FAILURE');
+    const directories = await fs.readdir(path.join(f.store.root, 'processing'));
+    assert.equal(directories.length, 1);
+    assert.equal(await fs.readFile(path.join(f.store.root, 'processing', directories[0], 'synthetic-client-file'), 'utf8'), 'Preserve unexpected client output.');
+  }
+});
+
 test('a complete durable artifact set survives worker death and is published on retry without another model', async t => {
   const f = await fixture(t), first = await f.launch({ stopAfterReady: true });
   await waitFile(path.join(f.root, 'drafts-ready')); first.child.kill('SIGKILL'); await first.exited;

@@ -116,3 +116,12 @@ test('explicit abandonment removes only the exact owned stage despite a manually
   await assert.rejects(discardRecordedNoteStage(f.pin, note), { code: 'NOTE_PUBLICATION_CONFLICT' });
   assert.equal(await fs.readFile(recorded, 'utf8'), 'Unrelated replacement.');
 });
+
+test('desktop metadata alone does not claim a log series and is preserved during explicit setup', async t => {
+  const f = await fixture(t), logs = path.join(f.notes, 'logs'); await fs.mkdir(logs);
+  const desktop = path.join(logs, '.DS_Store'); await fs.writeFile(desktop, 'Synthetic Finder metadata');
+  const binding = await establishActivityLogSeries(f.pin, { ...setupOptions(), persistIntent: async () => {} });
+  assert.equal(binding.seriesId, 'synthetic-series');
+  assert.equal(await fs.readFile(desktop, 'utf8'), 'Synthetic Finder metadata');
+  assert.equal((await inspectActivityLogSeries(f.destination)).years[0], 2026);
+});

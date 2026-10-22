@@ -37,7 +37,12 @@ function satisfied(chat, size) {
  * A pending reason preserves all previously committed queue data for processing.
  */
 export async function collectChat(store, { client, sessionId, classifyCommand = null, resolveNativeSource = null, limits = {} }) {
-  let saved = await readChat(store, client, sessionId);
+  let saved;
+  try { saved = await readChat(store, client, sessionId); }
+  catch (error) {
+    if (error.code !== 'FILE_CHANGED') throw error;
+    return { status: 'pending', reason: 'FILE_CHANGED', parts: 0 };
+  }
   if (!saved) return { status: 'unconfigured', parts: 0 };
   if (!saved.value.tracked && saved.value.pending?.reason !== 'untrack') return { status: 'untracked', parts: 0 };
   if (saved.value.clientContractOverflow) return { status: 'pending', reason: 'CLIENT_CONTRACT_LIMIT', parts: 0 };
@@ -115,18 +120,23 @@ export async function collectChat(store, { client, sessionId, classifyCommand = 
     }
     if (JSON.stringify(saved.value.historySources) !== JSON.stringify(historySources)) saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
       change: chat => validateChat({ ...chat, historySources }) });
-    if (saved.value.uncommitted && ['track', 'untrack'].includes(saved.value.pending?.reason)) {
-      // A tracking mutation must not orphan a publication intent staged by the
-      // previous generation. Reconstruct only its first exact record under its
-      // original planned boundary/outcome. The retained ID/hash fences this
-      // recovery; no newly selected post-command input may pass through it.
-      const intent = saved.value.uncommitted, priorBoundary = intent.checkpoint.boundary;
-      const exchange = intent.checkpoint.exchange;
-      const completion = exchange && ['observed', 'interrupted', 'failed'].includes(exchange.outcome) ?
-        { promptId: exchange.promptId, kind: exchange.outcome, finalTextHash: null } : null;
-      for await (const event of normalizeTranscript(source, { client, sessionId, checkpoint: saved.value.checkpoint,
-        completion, beforePromptId: priorBoundary?.promptId ?? null, beforeRowId: priorBoundary?.rowId ?? null,
-        classifyCommand, limits })) {
+    if (saved.value.uncommitted) {
+      // Reconstruct exactly the retained emission plan, including its original
+      // outcome and range. A newer hook or appended final row cannot change the
+      // bytes of an interrupted publication. The retained ID/hash remains the
+      // authority; this cursor is never published as a replacement checkpoint.
+      const intent = saved.value.uncommitted, planned = intent.checkpoint, prior = saved.value.checkpoint;
+      const exchange = planned.exchange, sameExchange = prior.exchange?.id === exchange?.id;
+      if (!exchange?.completed || exchange.nextPart < 1) fail('CHAT_PART_CONFLICT', 'The interrupted publication has no complete retained emission plan.');
+      const until = planned.cursor?.until ?? planned.offset, offset = Math.max(prior.offset, exchange.start);
+      const priorCursor = sameExchange ? prior.cursor : null;
+      const replay = { ...prior, offset, anchor: planned.anchor, scanOffset: until,
+        exchange: { ...exchange, nextPart: exchange.nextPart - 1 }, boundary: null,
+        cursor: { until, rowStart: offset, fieldIndex: priorCursor?.fieldIndex ?? 0, textOffset: priorCursor?.textOffset ?? 0,
+          supplement: priorCursor?.supplement ?? (sameExchange && prior.exchange.completed && prior.exchange.nextPart > 0) } };
+      await source.verify(planned.anchor);
+      for await (const event of normalizeTranscript(source, { client, sessionId, checkpoint: replay,
+        classifyCommand, limits: { ...limits, parts: 1 } })) {
         if (event.type !== 'part') continue;
         const record = transcriptPartRecord(event.part);
         if (record.id !== intent.recordId || record.hash !== intent.hash) fail('CHAT_PART_CONFLICT', 'The interrupted publication no longer reconstructs its exact record.');
