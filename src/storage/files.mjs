@@ -208,10 +208,11 @@ export async function reclaimAtomicStages(pin, directory, { matchesTarget, propo
       const currentStage = await readSnapshot(pin, stageRelative, { maxBytes });
       if (currentStage.hash !== stage.hash || currentStage.identity.device !== stage.identity.device || currentStage.identity.inode !== stage.identity.inode) fail('FILE_CHANGED', 'The metadata stage changed during cleanup.');
       await assertChain(parent.chain);
-      const named = await lstatOrNull(path.join(path.dirname(parent.file), entry.name));
+      const stageFile = path.join(path.dirname(parent.file), entry.name);
+      const named = await lstatOrNull(stageFile);
       if (!named || !sameIdentity(named, stage.identity)) fail('FILE_CHANGED', 'The exact inspected metadata stage was replaced.');
-      assertRegularFile(entry.name, named, pin);
-      await fs.unlink(path.join(path.dirname(parent.file), entry.name)); removed++;
+      assertRegularFile(stageFile, named, pin);
+      await fs.unlink(stageFile); removed++;
     }
   } finally { if (!stream.closed) await stream.close().catch(error => { if (error.code !== 'ERR_DIR_CLOSED') throw error; }); }
   if (removed) await syncDirectory(path.dirname(parent.file));
