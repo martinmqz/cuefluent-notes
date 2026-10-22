@@ -1,294 +1,99 @@
-# Setup and status
+# Setup and preferences
 
-Cuefluent Notes has two independent processes: deterministic capture of selected
-session evidence, and agent processing into searchable Markdown. Both start inactive:
-capture mode Manual (collection disabled in settings) and processing Manual. A direct
-request to save selected material can proceed without setup. Installation or
-trusting hooks supplies no capture consent.
+Setup is an explicit user operation. Agree on the configured project root, exact
+notes destination, tracking and saving modes, and optional activity logging.
+Do not infer consent from installation, hook trust or an ordinary chat message.
 
-## Inspect before changing
+## Find the package and inspect settings
 
-Run `node scripts/workflow.mjs status` from the installed package. Use an explicit
-`--config` when one was selected; otherwise the helper respects
-`CUEFLUENT_WORKFLOW_CONFIG` and its platform default. Status reads settings and
-creates nothing; request `diagnostics: true` for bounded Windows package inventory. Report existing collections, routes, collection selection, processing
-mode, destinations and transport limits; preserve settings unrelated to the request.
-Use [workflow-cli](workflow-cli.md) for JSON request formats and inspected hashes.
+Use the package's `src/cli.mjs` entry. In an installed package, it is two levels
+above the skill directory. In the source checkout, `src/` is beside `SKILL.md`.
+Do not search client configuration or credential files to find it.
 
-For a bare “Use Cuefluent Notes”, ask which operation is wanted. For setup, establish
-only missing choices: the project folder or explicit sessions; the notes folder or
-file for finished notes; the capture mode; and the processing mode with its subject
-scope. Do not ask the user to classify notes. Infer note
-type from context when saving; new folder destinations default to type folders.
-A chosen explicit file remains exact. Multiple projects and notes folders are
-supported; route ambiguity requires a specific selection, never a guessed destination.
+```text
+node /absolute/package/src/cli.mjs settings
+```
 
-Explain the choices in ordinary terms, using the
-[words people see](../SKILL.md#words-people-see):
+This read creates nothing. It returns the private store location and exact
+`settingsHash`; retain that hash for a settings change. A fresh store returns null.
+Never refresh the hash merely to bypass a conflict.
 
-- **Capture mode: Manual or Automatic.** Manual, the default, captures nothing on
-  its own: typing `capture` in a chat captures its finished turns not captured
-  yet, from the chat's start. Automatic lets the hooks capture later turns of the route's clients'
-  sessions in the project folder (a narrower excluded folder stays out), or of
-  listed sessions only; `pause chat` stops it for one chat and `resume chat`
-  restarts it. Capturing makes sensitive local JSON copies using scripts, with no
-  model calls. It starts from its saved boundary, never earlier history: each
-  session's first prompt after that boundary marks it and is not captured. A
-  typed `capture` in a paused chat is explicit and also takes turns from before
-  that boundary.
-  Captured sessions can include secrets and private remarks; there is no automatic
-  redaction. They are not finished Cuefluent notes.
-- **Processing mode: Manual or Prompted.** Manual runs only when requested.
-  Prompted prepares useful changes for approval. The capture mode does not select
-  a processing mode, and processing existing captured turns does not require
-  Automatic capture.
-- **Automatic processing is not offered.** Its live trigger is unverified
-  (`status.transport.automaticProcessing: false`): processing in a chat still
-  needs an explicit request, and the drafts it prepares still go to review. It is
-  not the same as Manual: a standalone CLI processing run may save without a
-  review question (see [processing](processing.md)). Save it only when the user
-  explicitly asks, and then confirm it as below.
-- **Current limit:** live processing context transport is unverified. Processing
-  requires an explicit request and native selection in every mode. Trusted hooks
-  can capture automatically, but no mode makes Markdown processing run on its own.
-  Do not promise native prompt rendering without verifying it in the actual client.
+## Apply the agreed configuration
 
-## Confirm Automatic processing
+Place the requested JSON outside source repositories. Use canonical absolute
+paths without symbolic links. The project root must exist; setup may create the
+chosen notes directory or an explicit file's parent after checking its ancestors.
 
-When setup or a mode change saves Automatic processing, give a concise confirmation
-after the save succeeds, for each affected route/project. For example: “Automatic
-processing is saved for [project], limited to [approved processing subject scope],
-but it does not run on its own: processing in a chat still needs an explicit
-`process`, and its drafts still go to review; a standalone CLI processing run may
-save without a review question. Capture mode: Automatic for [N listed sessions].” Direct saves of supplied material retain their separate workflow.
+```json
+{
+  "expectedHash": null,
+  "project": {
+    "id": "example-project",
+    "root": "/absolute/project",
+    "destination": { "kind": "directory", "path": "/absolute/notes" },
+    "tracking": "manual",
+    "saving": "review",
+    "activityLog": { "enabled": false }
+  }
+}
+```
 
-Ground the processing limitation in the existing
-`status.transport.automaticProcessing: false` result. Saving the preference does
-not change that capability. Take each route's capture mode and session selection
-from the `config` returned by `configure`, or its post-save status read-back.
-Report Manual, Automatic for every session of the route's clients in the project
-folder, or Automatic for N listed sessions; explicitly say “no sessions selected” for an empty list. Include
-any known pause or exclusion, and do not describe an excluded route as capturing.
-The processing subject scope limits note content; the capture mode belongs
-to the route and may differ between projects.
-Keep the confirmation in ordinary language; this reports the result of the save
-and adds no approval question. Existing processing scope and save-consent rules
-remain in [processing](processing.md).
+On Windows use JSON-escaped local drive paths, for example `C:\\Work\\Project`.
+Apply only after the user has approved the complete choices:
 
-## Windows storage selection
+```text
+node /absolute/package/src/cli.mjs setup --config /absolute/private/setup.json
+```
 
-Fresh Windows setups use `<local user profile>\.cuefluent-notes\workflow.json`.
-The raw, intake and writer suggestions share the selected settings file's
-`collections\<collectionId>` folder. Explicit custom settings and aliases retain
-that same base instead of creating storage at an unrelated implicit default.
-The Markdown destination remains a separate user choice. The same resolver is used
-by setup, the CLI and hooks; installation does not create this storage.
+For an existing store use its inspected settings hash. Changing an existing
+project uses the same ID. Complete proposals are validated; unsupported schemas,
+stale settings, unsafe destinations and changes that would orphan retained work
+are refused. Resolve the reported conflict and inspect current state before
+proposing a different change. Do not delete recovery state to force setup.
 
-An explicit `--config` takes precedence over `CUEFLUENT_WORKFLOW_CONFIG`.
-Without either override, the only default is the local profile's
-`.cuefluent-notes\workflow.json`. Settings at the earlier
-`%LOCALAPPDATA%\CuefluentNotes\workflow.json` location are never selected
-automatically. If that file exists as a different object from the profile
-settings, including when the profile settings are absent, the helper reports
-`WORKFLOW_CONFIG_SELECTION_REQUIRED`. Inspect the settings and explicitly select
-the intended path. This prevents an implicit second setup while preserving the
-existing files; it does not import them.
+| Preference | Choices |
+| --- | --- |
+| Tracking | `manual` (default), `auto` for new chats going forward |
+| Saving | `review` (default), `auto` after explicit processing |
+| Activity log | `{ "enabled": false }` (default), or enabled with an IANA timezone |
 
-`--config` selects only that command, not future hooks. For hooks,
-`CUEFLUENT_WORKFLOW_CONFIG` must be present in the launching client's environment.
-Verify the value in that client context; setting it in a separate terminal does
-not establish what Desktop hooks inherit. Equal contents do not make two stores
-interchangeable. Errors or unreadable paths are not treated as missing settings.
-A network profile cannot be the default; select an explicit supported local path
-instead. Custom paths still undergo the normal storage and overlap checks.
+Mode changes do not untrack existing chats or override opt-outs. A pending run
+pins its destination, saving preference and logging settings. Settle it before
+changing its destination or saving mode; logging changes apply to future runs.
+Nearest configured ancestor owns a newly bound chat. Existing ownership does not
+move when nested projects are added.
 
-Before a fresh setup or ownership change, the helper checks known old/new defaults
-and package-cache locations for conflicting settings. Incomplete discovery blocks
-setup. It reads bounded settings for this comparison, never captures or notes.
-Implicit fresh setup stops whenever other settings exist, even without overlap.
-An explicit new path does not bypass an overlapping project, note destination or
-private store. An explicitly selected, provably disjoint setup is permitted; empty package shadows alone
-do not block the new profile default. See [Windows diagnostics](workflow-cli.md#windows-settings-discovery).
+## Activity logging
 
-Windows package-backed stores are preserved. Existing prepared collections can
-continue while their storage verifies, but missing roots cannot be created for
-those stores. Additions that need new roots and replacement of the same collection
-require separate migration work; this release has no migration or retirement
-command. Do not copy settings to another host view, create another writer for the
-same notes, or rerun fresh setup to work around that freeze.
+Logging requires a directory destination. Use, for example,
+`"activityLog": { "enabled": true, "timezone": "America/Los_Angeles" }`.
+Setup shows and records the exact `logs/` path, establishes the first valid annual
+file under the writer lock, then enables logging. An existing valid series supplies
+its authoritative identity and timezone; machine-local preferences do not change it.
+A single-file destination rejects logging without creating siblings.
 
-Private settings and storage under the native profile, outside verified
-non-roaming LocalAppData, require a local, loaded, non-roaming profile and content
-indexing protection. This applies to custom private profile paths too. New empty
-private directories get the NotContentIndexed attribute before private writes;
-children must retain it. Existing unmarked data fail with
-`PRIVATE_CONTENT_INDEXING_REQUIRED` and are not modified. Preserve the files and
-review the storage configuration rather than moving them or recursively changing
-attributes as an automatic repair. The native profile location is checked from
-registry metadata. The WMI profile policy query runs only for private paths inside
-that profile outside verified LocalAppData; failures block those paths, without
-gating unrelated local stores. Read-only status does not grant that verification. These rules do not restrict finished notes in Documents, OneDrive or
-other user-selected document locations. The indexing attribute is separate from
-the raw folder's optional Hidden attribute and does not control every third-party
-indexer or synchronization tool.
+Setup reports pre-existing `logs/` content even when logging is off. Those files
+remain readable and untouched by ordinary note drafts. Unrecognized or malformed
+annual files are preserved and reported; do not silently adopt, rename or delete
+them. Interrupted setup retains its exact proposal for recovery.
 
-## Save the chosen settings
+Logs consume the watched app's document and corpus allowances. Their dates are
+save times, coverage includes only opted-in projects, and failures can leave gaps.
+Current Cuefluent desktop relative note links are not clickable; the same standard
+links remain useful to agents and other Markdown readers.
 
-Use the complete configuration described by [session-workflow](session-workflow.md)
-and the synthetic [example](../examples/workflow.json). `defaults` with a collection
-ID suggests platform-specific private paths for a fresh collection. Never use
-those defaults to replace existing bindings.
-The user selects the Markdown location;
-private raw/intake/writer storage uses machine-local paths outside projects, notes,
-and the plugin. Do not place private state in a sync folder or the repository.
+## Private location
 
-The default raw folder is `.cuefluent-raw`. Its leading dot hides it from normal
-macOS/Linux browsing; after privacy validation, explicit `storage-prepare` attempts
-to set and verify the Hidden attribute on Windows, including custom paths. Only the raw root
-gets that attribute, not individual captures, finished notes, or state folders.
-Hidden folders retain the same private-storage permission requirements. Existing
-configured paths are preserved; setup never moves captures or renames a directory.
-For a custom raw location on macOS/Linux, choose a dot-prefixed folder name if you
-want it hidden.
-If Windows blocks the attribute change, setup returns `storage-ready` with a
-`STORAGE_VISIBILITY_FAILED` warning; report that the folder remains visible.
-Privacy, identity and policy failures still stop setup. Already-hidden roots
-require no attribute change.
+Defaults are `~/Library/Application Support/Cuefluent Notes/v2` on macOS,
+`$XDG_STATE_HOME/cuefluent-notes/v2` (or `~/.local/state/cuefluent-notes/v2`) on
+Linux, and `%LOCALAPPDATA%/Cuefluent Notes/v2` on Windows. `CUEFLUENT_V2_HOME`
+selects an explicit fresh location consistently for the client and its workers.
+A setup request may also name `storeRoot`; subsequent client invocations must
+select that same location with `CUEFLUENT_V2_HOME` in each native client's launch
+environment, so its hooks and MCP worker use the configured store. Never place
+it in a repository or notes destination.
+Private storage requires a supported local filesystem and verifiable permissions.
 
-For a fresh collection:
-
-1. Inspect settings and retain the exact `configHash` (null for absent settings).
-2. Submit the complete proposed configuration through `configure`, initially with
-   collection disabled and processing Manual. This validates every route and path;
-   unsupported/newer settings and stale hashes are refused.
-3. Run explicit `storage-prepare` for the selected collection using the returned
-   settings hash. It creates and verifies private roots, without enabling anything
-   or repairing existing directory permissions. Existing unsafe roots need a user
-   decision. Never create category folders during setup.
-4. If the user authorized activation, use a second guarded `configure` to apply
-   the chosen collection and processing settings after privacy verification. Read
-   status back and report saved preferences, verified storage, observed hook
-   execution and completed capture as separate outcomes, including the transport limit.
-
-The selected notes root must exist before proposal inspection; create a missing
-root only within an explicit setup/destination authorization. Existing notes and
-permissions remain intact. Category creation belongs to the approved note plan.
-All overlapping note routes must share one writer state; do not create per-category
-or per-session writers. A custom raw directory does not relocate intake state.
-
-## Existing settings
-
-Inspect the selected settings through `workflow.mjs status`. A recognized
-configuration uses `format: "cuefluent-workflow"` with collections and routes.
-Preserve its paths and independent collection and processing choices. Missing,
-ambiguous, invalid or unsupported settings require inspection; do not infer from
-a filename or failed status command that fresh setup is appropriate.
-
-Only current formats are supported. There is no legacy import, migration, or
-mixed-version operation. Unsupported stored formats are refused; configuration
-recognition alone does not establish that every capture or processing record is
-supported. Preserve existing captures, drafts, notes, settings and active
-operations when a format is refused. Do not rewrite them, reset storage, or
-create another writer to bypass the refusal.
-
-Before replacing a package, stop collection entrypoints and processing, close
-affected client sessions, and let running workers and processing clients finish.
-Keep every plugin and standalone helper sharing a collection on the same version
-before any resumes access. Preserve claims, locks, journals and unfinished work.
-Start fresh client sessions after replacement and inspect hook and MCP
-registration. Installation grants neither consent nor hook trust. For supported
-interrupted operations, use [processing recovery](processing.md#outcomes-and-recovery);
-that recovery does not migrate unsupported formats.
-
-Both hook and manual packages include the MCP server. It starts when loaded by
-the client; an explicit `process` request can launch or resume a restricted native
-client session using its normal authentication and model resolution. In every
-configured, non-excluded project where Automatic capture does not cover a
-session, whatever the processing mode, trusted hooks still store its source
-identity and byte-boundary metadata (the session start), so a typed command can
-verify its chat. Explicit native controls can read bounded recent source records
-to verify their call. This creates no collection interval or
-worker. Review [processing chat prerequisites and privacy boundaries](processing-chat.md)
-before using the handoff. Installation grants neither collection nor processing
-consent, and Automatic still needs an explicit processing request.
-
-For Claude Desktop, explain the processor's authentication options during setup
-and let the user choose. Do not start processing or inspect credentials to
-verify that choice. If Desktop cannot pass its managed credential to
-subprocesses, the user can explicitly select an already authenticated CLI
-profile using the [processor authentication
-setting](processing-chat.md#select-the-processors-authentication). Regular
-native account logins and supported providers use this same choice; do not
-assume a matching provider means the same account or change the setting
-automatically after an error. This choice does not enable collection or
-processing.
-
-For Windows storage changes, follow
-[Windows storage selection](#windows-storage-selection) and preserve existing
-paths and consent; the profile default is not a migration.
-
-Package replacement does not rerun storage preparation or change visibility.
-Use an explicit `storage-prepare` only when requested, such as hiding a configured
-Windows raw folder. Keep existing names and paths: preparation refuses a missing
-raw root paired with nonempty intake state (`PRIVATE_SETUP_CONFLICT`). Preserve
-the original raw/state pairing after lost settings. Moving an existing
-collection is not supported; new paths do not recover its state.
-
-Preparation holds the shared intake lock through the empty-state check and raw
-folder setup. An active or unfamiliar owner blocks preparation (`INTAKE_BLOCKED`).
-If a known worker or other live owner is still running, let it finish and then
-retry preparation; contention alone does not mean storage is damaged.
-If interrupted setup cannot safely clean up, preserve the remaining files and
-owner metadata and follow [explicit intake recovery](workflow-cli.md); do not
-delete the lock or select different paths to bypass it.
-
-Change only the requested fields in a complete inspected proposal and use its exact
-old hash. Collection and processing preferences remain independent. Preserve explicit
-flat organization until the user requests type folders; such a request authorizes
-setting `organization: "by-type"`. Omitted organization defaults to by-type in this
-replacement. Do not move or rename existing notes when changing the setting.
-
-An excluded route wins over a broader route. A session allowlist is not equivalent
-to all project sessions. Native IDs must come from an explicit selection; never
-choose the latest session by cwd or copy a transcript record UUID as a prompt ID.
-The replacement does not import legacy capture configuration or support
-mixed-version operation. Old settings are not permission to enable new collection.
-
-### Storage compatibility
-
-The current capture readers are `codex-rollout/7` and `claude-transcript/2`.
-Extraction refuses other capture reader versions instead of replaying historical
-rules or silently reinterpreting evidence. Native transcript formats supported by
-those readers remain described in [session-workflow](session-workflow.md).
-
-Stored hashes, paths, claims and writer reservations remain integrity boundaries.
-Use supported commands for interrupted processing and retained-draft reinspection;
-do not rebuild or discard state to bypass a conflict. This is current-operation
-recovery, not an upgrade or downgrade path.
-
-## Boundaries and diagnostics
-
-Future start/resume freezes source identity and EOF. The worker seeks from that
-floor rather than scanning previous history. The first later verified native unit
-establishes the boundary and is excluded; later full eligible units can be captured.
-State retains this coverage loss, exclusions and pauses. A missing source or boundary
-stays pending. Resume, compact or clear events cannot silently restart a paused
-selection or adopt a replacement file.
-
-One-time current/historical capture uses explicit native IDs and an explicitly
-selected byte window; it works with ongoing collection off. Missing IDs, unsupported
-structure, excessive ranges and incomplete records are unresolved boundaries,
-not permission to read a larger range. The active agent never mines archives.
-
-Use `capture-status` for one selected session and `processing-pending` for bounded
-metadata discovery. A busy/blocked intake is shown even when processing is Manual
-or collection is paused. `storage-status` is an explicit deeper inventory that
-may inspect raw captures; do not poll it during ordinary turns. Pruning, offline
-lock recovery and processing recovery are separate reviewed operations.
-
-Node.js 22+ must be available on the client's launch PATH. Desktop clients may not
-inherit a terminal's runtime-manager PATH. Report missing Node, unavailable hooks,
-policy restrictions and untrusted hooks without changing profiles, machine PATH or
-trust. The host's feature/trust settings need direct host evidence; helper settings
-alone do not prove that hooks execute. See [hooks](hooks.md) and
-[verification](verification.md) for client and platform evidence limits.
+Setup changes only Cuefluent Notes project state and the explicitly authorized
+notes/log destination. Native plugin registration, hook trust, authentication,
+publication and existing capture settings are separate actions.

@@ -1,95 +1,67 @@
-# Product limits
+# Compatibility and limitations
 
-This page describes the boundaries of the installed plugin. Use the linked
-contracts for supported commands, formats, permissions and recovery procedures.
+## Native clients
 
-- Hooks do not start automatic Markdown processing or supply a usable processing
-  `contextRef`. Processing requires an explicit request. See
-  [hook transport limits](hooks.md#failure-and-transport-limits).
-- The [dedicated processing controller](processing-chat.md) disables inherited
-  hooks and supports exact native record exclusions. Arbitrary generated-output
-  copy attribution is unsupported; inline processing in a collected chat can
-  still enter later captures. Existing packet copies are not automatically
-  filtered from processing.
-- Collection budgets can omit original content. Inspecting every retained page
-  does not establish source completeness, and future retention improvements
-  cannot recover previously omitted output.
-- Claude extraction retains proven human input with unconfirmed coverage. It
-  does not infer assistant ownership or completed turns from ordinary transcript
-  parentage. See the [Claude reader contract](session-workflow.md#claude-reader-contract).
-- Processing uses the native client's model resolution. Persistent controller
-  status does not report the resolved model; neither successful dispatch nor
-  structural Markdown checks certify classification or summary quality.
-- Host hook trust, launch PATH, session reload and native review rendering depend
-  on the client. Tested Claude Desktop and CLI versions cannot complete a native
-  review form, so Claude reviews through the private review folder and typed
-  decisions; see [Claude limitations](processing-chat.md#claude-limitations).
-  Opening or reading the review folder is not verified by the plugin. Installation grants
-  neither collection nor processing consent. See [installation](distribution.md)
-  and [setup](setup.md).
-- Typed controls and decisions are verified against the client's native
-  transcript: Claude's skill command with its skill expansion, or Codex's skill
-  block or `$`-list skill selection with the typed text. Input recorded in another
-  shape, including a Codex mention typed out by hand, is treated as unverified
-  and decides nothing. These channels resist the chat model, not a local
-  process: any process running as the user can drive the client or the helper
-  commands. See [review controls](processing-chat.md#review-controls).
-- A verified Codex control turn, direct or in code mode, is kept out of captures
-  only when the whole completed turn has exactly the verified shape. Anything
-  else in it, such as commentary, the assistant reading a file or calling another
-  tool, keeps that turn collectible with the assistant's own words; its exact
-  command, command markup, this plugin's control calls and the assistant's
-  repetition of the plugin's reply are still left out. A mention typed out by hand
-  is collected as typed. Code-mode cells are
-  bound through the IDs Codex sends with the call, which Codex CLI 0.163's source
-  shows model-written code cannot set; other Codex versions and the installed
-  binaries themselves are not checked. A nested tool that leaves no native record
-  is not visible to the check. A Claude Desktop session connected for Remote
-  Control stops collection at its first `bridge-session` record; one connected
-  before collection started for it confirms only a command typed as its first
-  prompt. See
-  [capture prevention](processing-chat.md#capture-prevention-and-limits).
-- In every Codex turn, including a plain-language request without the skill,
-  this plugin's control calls, their results, code-mode cells that only made such
-  calls and the assistant's repetition of a control reply are left out of
-  captures by native identity. A repetition is compared after one
-  [defined Markdown normalization](session-workflow.md#generated-output-provenance-gate)
-  of link form, line endings, spacing at line ends, bullets and blank lines,
-  with code spans and decoded paths compared as written. The request's own
-  words stay, and so do commentary, a paraphrase (such as a refusal relayed in
-  other words), a reply with words added or other formatting such as emphasis or
-  code spans, a cell that also did other work, every code-mode record of a turn
-  with a nested call no single cell owns or a child agent, and transcripts in
-  legacy history, whose MCP calls have no native MCP items. Copies of a reply in
-  another turn or chat are not detected. These rules are tested with synthetic
-  transcripts, not live Codex sessions.
-- Codex replies link the review folder and proposed copies in the form Codex's
-  model writes a local link, `[name](/absolute/path)`; a path Markdown cannot
-  carry that way, including any Windows path, is shown as a code span without a
-  link. How Codex on Windows writes and relays such paths is unverified.
-- Routing text typed after the skill command, such as a plain-language request
-  that starts with `save`, depends on the model following
-  [the skill](../SKILL.md#formal-processing-controls). Verified inexact text
-  applies nothing whichever control is called; text that cannot be verified
-  binds as a model-chosen call, which can display a draft or run another control
-  but never decides a draft.
-- A control typed as the first prompt of a fresh Claude session binds through
-  its registration within a bounded read; a Codex control binds once the session
-  has a collection selection or processing-only binding. A continued Claude CLI
-  session joins the review lineage only under the
-  [continuation conditions](session-workflow.md#claude-reader-contract).
-- Windows profile, package visibility and indexing policies vary by host. Existing
-  package stores have limits on additions and replacement setup, and automatic
-  migration is unsupported. No universal protection from third-party indexing or
-  sync is claimed. See [Windows storage selection](setup.md#windows-storage-selection).
-- The complete fresh Windows Desktop/CLI workflow, including setup, live
-  collection, processing and a duplicate-safe retry, remains unverified.
-- Recovery does not guarantee survival of every OS termination or sudden power
-  loss. Windows lacks Node directory fsync, so its power-loss durability is weaker.
-- Windows refuses to replace a file another process has open. A private-state or
-  settings write then retries for up to about 0.6 s (a hook's for 70 ms) and
-  otherwise fails, changing nothing. Note saves do not wait this way, so a note
-  an editor, indexer or sync client holds open can refuse a save.
-- Plugin filesystem and Markdown checks do not establish Cuefluent recursive file
-  admission, rendering, image loading or search ranking. See the
-  [authoring contract](authoring.md).
+The current adapters target Claude Code 2.1.307 and Codex CLI 0.163.0 native
+contracts. Claude uses direct plugin command expansion plus an exact native
+attachment nonce for copied-history command boundaries. Codex uses native MCP turn
+metadata, the selected skill item, exact thread source metadata and current-turn
+checks. Different session/thread identity shapes remain unsupported until verified.
+No newest-file, working-directory or model-supplied identity fallback exists.
+
+A Stop hook may precede final transcript persistence. Durable retries and idle
+reconciliation handle delayed rows and supplementary output. Unsupported hook
+shapes do not imply completed or interrupted conversation. Automatic enrollment of
+a Claude fork with an unknown inherited prefix remains pending; the current file's
+size or current command nonce cannot establish that inherited boundary. Codex uses
+verified native history cutoffs and reports missing historical sources.
+
+Native CLI checks do not establish desktop or TUI rendering, every lifecycle
+variant, search ranking, or watcher behavior on another operating system.
+
+## Processing and platform support
+
+macOS native checks cover GPT-6.1 and Claude Opus draft-only sessions and a complete
+private-draft → review → save flow. Native processing verifies an effective floor
+before providing source input: no inherited instructions/hooks/plugins, no general
+shell or network access, and only the explicit draft workspace MCP capability.
+If that floor cannot be verified, processing fails without releasing source input.
+
+Windows native checks cover Claude Opus and explicitly selected Codex GPT-6 Luna
+processing through private draft, review, exact-byte save and cleanup. GPT-6.1
+remains the default Codex processing model; an explicit supported model selection
+can accommodate host availability. Codex on Windows requires its explicit MXC
+sandbox, a compatible Windows host, and access to the requested model; the native
+filesystem and network floor is checked before source delivery, with no fallback
+to a weaker sandbox. Linux processing and metadata-preservation branches require
+native acceptance. Windows public-file metadata preservation requires verifiable
+security metadata; missing native privileges are a refusal before replacement,
+not permission to discard ACLs.
+Do not describe deterministic test coverage as completed native platform support.
+
+Automatic tracking requires supported, enabled native hooks. A processing session
+uses a private working directory outside configured projects and an ephemeral
+native launch with hook/plugin isolation; it is never enrolled into the queue.
+A host outage preserves state but does not run an OS service in the background.
+
+## Output profile
+
+The supported Cuefluent Markdown profile currently limits a file to 10 MiB,
+body structure to 20,000 nodes per section and 100,000 per document, and metadata
+to a 64 KiB payload within a 2 MiB inspected source. Additional parser bounds cover
+nesting, lines and decoded content. Generated metadata must remain inspectable;
+a metadata-bearing annual log cannot use the larger plain-file ceiling to bypass
+metadata limits. Validate actual structure and bytes, not a presumed safe entry count.
+
+The app's 256-document and 250,000-node corpus allowances apply across its selected
+library. Per-file validation cannot guarantee admission into an already-full
+library. Annual logs count toward those allowances and can appear in app search.
+The current desktop app does not open relative note links; standard links remain
+for agents and other readers. These are compatibility-profile constraints to
+revisit as supported app versions change.
+
+Staging filenames end in `.tmp` and cannot be discovered as Markdown notes merely
+because they contain `.md` earlier in the name. Atomic publication keeps the final
+path and verifies parent identity, original hash and supported metadata. External
+editors can still race filesystem operations; detected changes are preserved and
+reported, and no cross-process protocol can force an unrelated editor to cooperate.

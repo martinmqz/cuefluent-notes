@@ -1,32 +1,26 @@
 {
   "name": "cuefluent-notes",
-  "version": "0.16.0",
+  "version": "2.0.0-dev.0",
   "private": true,
   "type": "module",
-  "description": "Selected session evidence and searchable Markdown notes with independent collection and processing.",
+  "description": "Track Claude and Codex chats and explicitly process them into searchable Markdown notes.",
   "engines": {
-    "node": ">=22"
+    "node": ">=26.12.1 <27"
   },
   "scripts": {
     "guidance:sync": "agent-guidance sync",
     "check:guidance": "agent-guidance check",
-    "install:codex": "node scripts/install.mjs --client codex",
-    "install:claude": "node scripts/install.mjs --client claude",
-    "test": "node scripts/test.mjs",
-    "check:examples": "node scripts/check-examples.mjs",
-    "package": "node scripts/package.mjs",
-    "package:hooks": "node scripts/package.mjs --hooks",
-    "release:build": "node scripts/release.mjs"
-  },
-  "dependencies": {
-    "markdown-it": "15.0.2",
-    "markdown-it-footnote": "4.0.0",
-    "yaml": "2.9.1"
+    "check:examples": "node tools/check-examples.mjs",
+    "test": "node --test \"test/**/*.test.mjs\""
   },
   "devDependencies": {
-    "@martinmqz/agent-guidance-sync": "0.1.2",
-    "fflate": "0.8.3",
-    "tar-stream": "3.2.1"
+    "@martinmqz/agent-guidance-sync": "0.1.2"
   },
-  "license": "SUL-1.0"
+  "license": "SUL-1.0",
+  "dependencies": {
+    "markdown-it": "15.0.3",
+    "markdown-it-footnote": "4.0.0",
+    "stream-json": "3.7.0",
+    "yaml": "2.9.1"
+  }
 }

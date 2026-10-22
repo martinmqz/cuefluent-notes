@@ -1,337 +1,67 @@
-# Cuefluent Notes
+# Cuefluent Notes v2
 
-Capture and organize your knowledge for fast recall—right on cue.
+Turn selected Claude Code and Codex working chats into durable Markdown notes.
+Tracking runs locally without a model. Processing starts only when requested and
+uses a separate session to prepare notes for review or automatic saving.
 
-Cuefluent Notes has two independent steps: a local worker captures selected parts
-of Codex or Claude sessions as immutable JSON; an agent turns those captured turns
-into clear, searchable Markdown. Directly saving user-selected material also works
-without capturing sessions. Notes stay ordinary files with descriptive
-names and optional type folders.
+This source is a development candidate. See the installed skill's verification
+reference for supported client formats and platform limitations. Published
+release snapshots remain separate from this source version.
 
-Fresh setup leaves the capture mode and the processing mode at Manual.
-Installation and hook trust enable neither process. Only current storage formats
-are supported; there is no legacy migration or mixed-version support.
-
-The plugin requires no Cuefluent app or Devlog. User notes, raw evidence and private
-settings belong outside the replaceable package; examples in this repository are
-fictional.
-
-## Install in Codex or Claude Code
-
-### From the marketplace
-
-Marketplace installation uses the published packages on the repository's `main`
-branch. A release becomes installable this way after its package-update PR merges;
-a GitHub release alone does not update the catalog. Check the
-[main branch](https://github.com/martinmqz/cuefluent-notes/tree/main) for `release.json`
-and both marketplace catalogs. If they are absent, use [source installation](#from-source).
-
-Once the catalogs are available, choose your client:
-
-**Codex**
-
-```sh
-codex plugin marketplace add martinmqz/cuefluent-notes --ref main
-codex plugin add cuefluent-notes@cuefluent
-```
-
-**Claude Code**
-
-```sh
-claude plugin marketplace add https://github.com/martinmqz/cuefluent-notes.git#main
-claude plugin install cuefluent-notes@cuefluent --scope user
-```
-
-These complete packages need Git, Node.js 22+ on the client's PATH and a current
-client CLI; no source checkout or npm install is needed. Published
-[release downloads](https://github.com/martinmqz/cuefluent-notes/releases) also offer
-manual ZIPs without hooks. See [package installation](references/distribution.md).
-Keep one active installation per client and update through its original method.
-This is a publisher-hosted marketplace, not an OpenAI or Anthropic directory listing.
-
-### From source
-
-You need **Git, Node.js 22+ with npm, and a current client CLI** (`codex` or
-`claude`). Native Windows, macOS, and Linux are supported. On Windows, use
-PowerShell or Command Prompt; WSL is not required.
-
-Clone once:
-
-```sh
-git clone https://github.com/martinmqz/cuefluent-notes.git
-cd cuefluent-notes
-```
-
-Then choose your client:
-
-| Codex | Claude Code |
-| --- | --- |
-| `npm run install:codex` | `npm run install:claude` |
-
-In Windows PowerShell, use `npm.cmd run install:codex` or
-`npm.cmd run install:claude` if execution policy blocks `npm.ps1`. No global
-execution-policy change is needed. Paths with spaces must be quoted.
-
-Run both commands if you use both clients. Each command installs the locked
-build dependencies, builds a complete plugin, and installs it for your user.
-There is no JSON to write or separate packaging step.
-
-You can also ask the agent to do it:
+## Workflow
 
 ```text
-Install Cuefluent Notes from https://github.com/martinmqz/cuefluent-notes
-for this user. Clone the repository and run its install:codex npm script
-(or install:claude in Claude Code). Leave capture mode selection to setup.
+track → work in the chat → process → review → save
 ```
 
-### Start using it
+Use `untrack` to stop new collection while keeping queued input. `process project`
+includes all queues owned by the project. `skip` releases inactive pending work
+without rolling back saved notes. `status` is read-only.
 
-1. Start a fresh session after installation. Review the plugin's hooks and the
-   bundled `cuefluent_control` MCP server registration and permissions in your
-   client; Codex exposes hook trust through `/hooks`. Both package variants
-   include the server, which the client can start when loading the plugin.
-2. Say **“Set up Cuefluent Notes.”** Select a project and where Markdown should go.
-   The agent prepares private, machine-local evidence and state directories.
-3. Choose the capture mode and the processing mode separately. Capture mode
-   Manual captures nothing on its own; Automatic captures later turns of the
-   chosen clients' sessions in the project folder, or of listed sessions only,
-   starting after each session's boundary prompt. Processing mode Manual runs
-   only when you ask; Prompted prepares changes for your approval (Save / Skip).
-   Automatic processing has no verified trigger, so setup does not offer it.
+Defaults are manual tracking, review saving and logging off. Automatic tracking
+follows new chats only; processing remains explicit. Optional annual activity logs
+record successful note changes at `logs/YYYY.md` within a directory destination.
 
-**Processing starts with an explicit request.** For the reusable processing chat,
-type `/cuefluent-notes process` in Claude or `$cuefluent-notes process` in Codex;
-in Codex, type `$` and pick cuefluent-notes from the list rather than typing the
-mention out by hand. Invoke the same skill with `review` to write an exact
-proposal to a private review folder, linked in the reply (Codex also opens its
-native form), then decide by typing `save <code>` or
-`skip <code>`, or type nothing to keep the draft pending. Without a code, `save`
-applies only to the draft your last typed `review` showed. A draft or destination
-that changed after your review is refused and nothing is saved. `help` lists
-every action, also before setup.
-Plain `process` drafts from the pending captured turns of every project and client
-saving to this notes folder or file. One request takes at most 100 of them, so a backlog
-can need another `process` later; use
-`process repo` or `process chat` to narrow it, `process resume` for saved
-unfinished work, `status` for progress, and `process cancel` to stop owned work
-while keeping captured turns pending. With capture mode Manual, type `capture` in a
-chat to capture its finished turns not captured yet, from the chat's start; with Automatic, type
-`pause chat` or `resume chat` to stop or restart capturing that chat. Processing
-prepares drafts; only your exact typed
-`save` (or Save in the Codex form) saves them.
-The controller uses the existing native client and processing engine; it does not
-require the Cuefluent app. See [processing chats](references/processing-chat.md)
-for prerequisites, capture prevention and recovery.
+## Requirements and setup
 
-Hook notifications do not automatically start Markdown processing. Explicit CLI
-processing remains available with selected native sessions/units; identity is
-never inferred from the current folder. Automatic capture can run after setup
-and hook trust. New selection starts at the current file boundary, excluding the
-initial boundary unit; it does
-not sweep historical session contents. Explicit historical capture reviews a
-fixed byte window and named units.
+Use Node.js 26.12.1 or a newer Node 26 patch and a supported authenticated native
+client. Runtime libraries and their licenses are included in each detached client
+package; an installed package needs no npm install. Current processing isolation
+is verified on macOS. Windows processing is unavailable until its native isolation
+floor is implemented and validated; Linux native acceptance remains incomplete.
 
-For example: “Process the captured turns from this selected session into a
-meeting note; show me the proposed change before saving.” Or: “Save this supplied
-meeting summary to my notes.” The latter needs no session capture setup.
-See [setup](references/setup.md) and [explicit controls](references/workflow-cli.md).
+Install or register the chosen client package through the client's explicit plugin
+flow and trust its hooks only if desired. Plugin installation and hook trust do
+not configure a project or start tracking. Never change client authentication to
+set up this plugin.
 
-New folder destinations default to type folders. The agent infers the type from
-context: `meetings/`, `tasks/`, `knowledge-base/`, or `decisions/`; general content
-stays at the root. Explicit files and suitable existing notes take precedence.
-No type questionnaire, automatic renaming, or duplicate category copy is needed.
-Prompted processing shows the complete proposed path, edit and new folders before
-approval; Skip creates no notes or folders. An explicit flat layout is supported.
-Cuefluent's recursive loading and search ranking remain separately unverified.
+The workflow entry is `SKILL.md` in the source checkout and
+`skills/cuefluent-notes/SKILL.md` in a detached package. Its setup reference explains
+fresh project settings, exact destinations, logging and private storage.
 
-### Update a marketplace installation
+Claude command example: `/cuefluent-notes:cuefluent-notes track`.
+Codex command example: select `$cuefluent-notes` and type `track`.
 
-Before updating clients that share a notes folder and its private storage, follow the
-[package replacement guidance](references/setup.md#existing-settings). Preserve notes,
-settings, captures and active operations. The catalog's `release.json` identifies
-the available package version; it may lag development source or a newly published
-release until the package-update PR merges.
+## Data handling
 
-**Codex**
+Queues and draft bytes remain in a private store outside repositories and notes.
+Original native transcripts are never deleted. Successful saves consume only the
+selected queue records; later arrivals remain. Hash checks preserve manual edits.
+Activity-log failures are reported without blocking successful note cleanup.
 
-```sh
-codex plugin marketplace upgrade cuefluent
-codex plugin add cuefluent-notes@cuefluent
-```
+V2 uses fresh settings and storage. It does not migrate or interpret earlier
+runtime state. Existing Markdown notes remain user content and can be updated
+under the current writer's conflict rules.
 
-**Claude Code**
-
-```sh
-claude plugin marketplace update cuefluent
-claude plugin update cuefluent-notes@cuefluent --scope user
-```
-
-Use the scope of your existing Claude installation if it differs from `user`.
-Restart affected clients after all shared-store helpers are updated. Review changed
-hooks and the `cuefluent_control` MCP registration and permissions before resuming;
-neither installation nor server availability enables automatic capture or
-automatic Markdown processing. See [processing chat prerequisites](references/processing-chat.md).
-
-### Update or customize a source installation
-
-To update an installation made by these commands, pull the repository changes
-and repeat the command for your client. Follow the same
-[package replacement guidance](references/setup.md#existing-settings) before updating
-any clients that share storage:
-
-```sh
-git pull --ff-only
-npm run install:codex
-# Or: npm run install:claude
-```
-
-Updates preserve the previous package in a backup directory printed by the
-installer. A package installed by another method is left untouched: use that
-method to update it, or remove/move that copy before switching to this installer.
-Start a new session after updates and review changed hooks and the bundled
-`cuefluent_control` MCP registration and permissions.
-
-Append `-- --manual` for a package with no hooks, or `-- --cli /absolute/path`
-to choose a client executable. Run `node scripts/install.mjs --help` for options.
-The source checkout is needed for updates; installed helpers run independently.
-
-See [installation details and troubleshooting](references/distribution.md#guided-installer)
-for locations, compatibility, and recovery. Published marketplace packages coexist
-with development source on `main`; `release.json` identifies their version
-independently of the source package version.
-
-## Use the workflow
-
-Say **“Use Cuefluent Notes”** with selected sources and the desired outcome.
-The agent follows the configured capture and processing modes and checks
-[status](references/setup.md). Direct saves use the same guarded writer as
-processed session evidence.
-
-Start with [SKILL.md](SKILL.md), or ask an agent to use it with selected evidence
-and a requested destination. For example:
-
-- “Log this decision in the existing project note.”
-- “Prepare tomorrow's standup from these dated findings.”
-- “Update this feature explanation with the verified behavior and its limits.”
-- “Check these notes and infer useful lookup phrases.”
-
-[Log, Prepare, Update, Refresh, and Check](references/workflow.md) share ordinary
-Markdown and [evidence rules](references/evidence.md). No keyword questionnaire,
-Q&A template, daily file tree, or output bundle is required. H1/H2 headings and
-optional aliases supply search vocabulary; body text and deeper headings do not.
-The [checker](references/retrieval.md) reviews documented structure and vocabulary
-without claiming Cuefluent rendering or search ranking.
-
-[Safe updates](references/refresh.md) apply reviewed text against inspected
-hashes. Derived manifests track source drift and detect manual edits. The writer
-replaces one file atomically at a time and supports bounded recovery; it does
-not infer facts, merge competing edits, or make one transaction across several notes.
-
-## Run from the source checkout
-
-Use Node 22 or later. From this repository:
+## Source development
 
 ```sh
 npm ci --ignore-scripts
-node scripts/check-notes.mjs /absolute/private-notes/project.md
+npm run check:guidance
+npm test
 ```
 
-The examples use fictional material. Keep real query cases, proposals,
-and source mappings in selected private locations. See [retrieval](references/retrieval.md)
-for checker commands and [refresh](references/refresh.md) for write plans.
-
-## Standalone plugin packages
-
-Download the ZIP for your client and chosen variant from the
-[release assets](https://github.com/martinmqz/cuefluent-notes/releases), then
-extract it and follow the [package installation guide](references/distribution.md).
-
-Codex and Claude packages contain the full skill, product guides, examples,
-helpers, runtime dependencies and license notices. Packaged helpers require
-Node 22+, with no npm install or development checkout at runtime. See
-[package layout and installation](references/distribution.md#package-layout).
-
-Choose one variant per client. Manual packages register no hooks, so they record
-no session start for typed commands such as `capture` to verify their chat;
-hook-enabled packages do, and provide automatic capture that still requires
-separate consent and client trust. Both variants use the same plugin identity.
-
-Repository maintainers can use the
-[build and publishing guide](https://github.com/martinmqz/cuefluent-notes/blob/main/.agents/publishing.md).
-
-## Optional automatic capture
-
-Hook packages register SessionStart, UserPromptSubmit, Stop, SessionEnd, and
-Codex Interrupt or Claude StopFailure. Ingress stores bounded native metadata
-and launches a short-lived local worker only with fresh capture permission.
-Unconfigured and excluded projects cause zero filesystem writes; with capture mode
-Manual, hooks record only where each session starts, so typed commands can verify it.
-Synchronous hooks never scan source text, call models, write Markdown, block a
-prompt, or request a recovery continuation. There is no old Stop completion check.
-
-The worker reads only selected source ranges. Codex supports verified turn
-boundaries and completed/interrupted/failed flags. Claude currently retains
-proven human input only, marked unconfirmed; assistant parentage is insufficient
-proof of ownership. Source text is untrusted evidence, not instructions.
-See the [reader coverage matrix](references/session-workflow.md) and
-[hook limits](references/hooks.md).
-
-Capturing and processing can be paused independently; user opt-outs override
-saved permission. Captured sessions are private and may contain sensitive
-information; capturing does not automatically redact them. Pruning and abandoned-lock recovery
-require explicit, reviewed commands. Intake and writer state must stay on local
-storage, outside projects, notes and the plugin. Fresh Windows setups use a
-shared local profile directory; existing settings are preserved. See
-[Windows storage selection](references/setup.md#windows-storage-selection) for
-Desktop/CLI selection, package-store limits and profile checks.
-
-## Product limits
-
-See [product limits](references/verification.md) for source completeness,
-processing feedback, client integration and Cuefluent app behavior. The
-[releases page](https://github.com/martinmqz/cuefluent-notes/releases) lists
-published packages.
-
-## License
-
-Cuefluent Notes is source-available under the
-[Sustainable Use License 1.0](LICENSE.md). You may use and modify it for personal,
-non-commercial, or internal business purposes. Redistribution must be free of
-charge and for non-commercial purposes. Selling the plugin, commercial
-redistribution, or selling access to it requires separate permission from the
-applicable copyright holders. For licensing inquiries, [open an issue with
-Cuefluent](https://github.com/martinmqz/cuefluent-notes/issues/new). An inquiry does
-not grant permission or guarantee that a separate license is available.
-Contributors retain their copyrights; contributing under this license does not
-assign ownership or grant Cuefluent additional sublicensing rights. This is not
-an OSI-approved open-source license; the full license controls.
-
-Using the plugin does not place this license on your inputs, captures, or authored
-notes. Any plugin code or other third-party material copied into them retains its
-applicable license. Bundled dependencies keep their own licenses and notices.
-The Cuefluent app is a separate product with its own terms; it is not required to
-use this plugin.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-![image](https://api.webect.com/px?r=cuefluent-notes)
+The source runtime is in `src/`, synthetic tests in `test/`, and distribution
+sources in `packaging/v2/`. Maintainer build and release instructions live in
+`.agents/publishing.md` in the source checkout. Building a candidate does not
+publish, install, or change immutable release snapshots.

@@ -1,9 +1,0 @@
-{
-  "name": "cuefluent-client-smoke",
-  "private": true,
-  "version": "1.0.0",
-  "dependencies": {
-    "@openai/codex": "0.156.1",
-    "@anthropic-ai/claude-code": "2.1.280"
-  }
-}

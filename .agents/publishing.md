@@ -1,391 +1,139 @@
-# Publishing Cuefluent Notes
+# Maintaining and preparing Cuefluent Notes packages
 
-Repository-maintenance guidance. This file is excluded from installed plugins.
+Repository maintenance guidance; excluded from installed plugins. Product setup
+and native registration are documented in [distribution](../references/distribution.md)
+and [setup](../references/setup.md).
 
-There are two distribution steps: publish our GitHub-hosted marketplace, then
-apply separately for OpenAI and Claude public listings. A GitHub release does
-not grant either public listing. Publisher credentials and portal submissions
-are not part of this repository or its automation.
+## Source and published artifacts
 
-## Public repository hygiene
+V2 source is `src/`, the root skill, and the seven installed workflow references.
+`packaging/v2/source-files.json` is the explicit runtime input list. Update it when
+adding a runtime module; build checks reject missing relative imports. Client
+descriptors live under `packaging/v2/{codex,claude}/`. Both packages contain one
+native skill at `skills/cuefluent-notes/SKILL.md`; Claude has no duplicate command
+file. Development tools, tests, repository guidance, and private planning are not
+part of either plugin.
 
-Keep real user notes, captured session evidence, private capture configuration,
-secrets and credentials outside this repository, including ignored directories.
-Keep implementation plans, review notes, synthetic-test results, dated validation
-logs, internal process history and machine-specific paths in ignored `.local/`;
-exclude them from commits and package inputs. Authorized installed-plugin checks
-do not permit copying real captured content into `.local/`. Commit only synthetic
-examples. Before making a repository public, inspect its Git and pull-request
-history as well as retained Actions logs and artifacts; deleting a file from the
-current branch does not remove history.
+The source package version is separate from the historical published version in
+`release.json`. Preserve published `plugins/`, `claude/`, their checksums, tags,
+and release assets byte-for-byte. Candidate builds never update those paths or
+reconstruct a historical release using today's source list. Missing historical
+assets may be recovered only when their original trusted checksums match.
 
-Require pull requests and passing CI on `main`, prevent force pushes and branch
-deletion, and enable secret scanning and push protection when GitHub supports
-those settings. Publication prepares a package-update PR whose CI requires
-maintainer approval; it does not push to `main`, bypass branch rules or merge the
-PR. Keep workflow tokens read-only by default and actions pinned. Repository
-visibility and security settings are separate from publishing a plugin release.
+Keep real notes, conversation data, private configuration, secrets, credentials,
+and authentication caches outside the checkout. Commit synthetic fixtures only.
+Use ignored `.local/` for repository-owned audits and implementation notes; it
+does not authorize copying private conversations into the repository. Before
+changing repository visibility, inspect history and retained Actions artifacts as
+well as the current tree. Visibility and repository security changes require
+separate authorization.
 
-## Build standalone packages
+## Local verification and fresh builds
 
-In the source repository, install the locked build dependencies and run checks:
-
-```sh
-npm ci --ignore-scripts
-npm test
-npm run check:examples
-npm run package
-```
-
-`npm run package` creates the manual variant under `dist/manual`. To include the
-opt-in hook registration, use:
-
-```sh
-npm run package -- --hooks
-```
-
-That writes `dist/hooks`. For a repeat build, choose a fresh directory:
-
-```sh
-npm run package -- --hooks --out /absolute/fresh-package-output
-```
-
-The package builder refuses an existing output directory. It creates directories, not
-an archive, marketplace registration, published package, or installed plugin.
-Do not remove a previous build merely to reuse its name when a fresh destination
-will suffice.
-
-## Build and inspect a release
-
-From the source checkout, use Node.js 22+, Git, Bash, and `unzip`/`tar` for the
-extraction tests:
+Use Node **26.12.1** or a newer supported Node 26 patch. Full maintenance checks
+also require npm, Git, Bash, `tar`, and `unzip`. PowerShell users can invoke
+`npm.cmd` when required by their shell policy.
 
 ```sh
 npm ci --ignore-scripts
+npm run check:guidance
 npm test
 npm run check:examples
-npm run release:build
+node tools/packaging.mjs build /absolute/fresh-output
 ```
 
-The builder creates a fresh `dist/release`; use `-- --out /absolute/fresh-output`
-for another build. It never installs, changes hook trust, writes capture settings,
-or publishes. Each plugin has its complete runtime and third-party notices.
+The output directory must not exist and must be outside the source checkout.
+Choose a new name for another build. The builder reads the exact production
+dependency graph in lockfile v3, verifies each cached npm tarball against its
+SHA-512 integrity, and includes the package's complete distributed files and
+license notices. It does not run dependency lifecycle scripts or fetch packages.
+`npm ci --ignore-scripts` prepares the cache. For a custom cache, supply
+`--cache-root /absolute/npm-cache`; npm cache environment overrides are also
+honored. Missing or corrupt tarballs fail before output publication.
+
+Each build contains:
 
 ```text
-dist/release/
-  .agents/plugins/marketplace.json       # Codex catalog
-  .claude-plugin/marketplace.json        # Claude catalog
-  plugins/cuefluent-notes/               # Codex hook-enabled plugin
-  claude/cuefluent-notes/                # Claude hook-enabled plugin
-  README.md
-  release.json                          # version, ZIP and inventory digests
-  artifacts/
-    cuefluent-notes-VERSION-codex-hooks.zip
-    cuefluent-notes-VERSION-codex-manual.zip
-    cuefluent-notes-VERSION-claude-hooks.zip
-    cuefluent-notes-VERSION-claude-manual.zip
-    cuefluent-notes-VERSION-marketplace.tar.gz
-    SHA256SUMS
+codex/cuefluent-notes/              # Complete detached plugin
+claude/cuefluent-notes/             # Complete detached plugin
+cuefluent-notes-VERSION-codex.{zip,tar.gz}
+cuefluent-notes-VERSION-claude.{zip,tar.gz}
+cuefluent-notes-VERSION-tools.{zip,tar.gz}
+build.json                        # Version, lock digest, inventory/archive hashes
 ```
 
-Every ZIP contains one top-level `cuefluent-notes/` folder, including its hidden
-client manifest. The snapshot contains both catalogs and hook packages, excluding
-the artifacts directory. The builder uses pinned JavaScript archive libraries,
-sorted file paths, fixed 1980 timestamps, normalized file permissions and ownership,
-and a timestamp-free gzip header. The same source and locked dependencies produce
-identical archive bytes across supported hosts. Manual packages use the already-built
-hook packages, removing hook registration and updating their generated README.
-Build-only dependencies are excluded from every plugin runtime.
+Plugin trees include root runtime dependencies, a production-only lockfile,
+third-party notices, source modules, client descriptors, and installed guidance.
+The companion tools archive contains `install.mjs`, `packaging.mjs`, and usage
+instructions; its closure uses Node built-ins only. It is separate from the
+installed plugin. Sorted paths, fixed archive timestamps and permissions, and a
+normalized gzip header make archive bytes deterministic for the pinned runtime.
 
-Builds capture validated source and dependency inputs once for both clients.
-Shared manifest descriptions/authors and their corresponding Codex labels must
-agree, as must the Claude catalog description. Client-specific interface details
-remain separate. Release verification compares the complete shared skill trees,
-both inventories and their recorded digests before producing the marketplace
-archive. Manual archives receive a new inventory for their own README and file set.
-Marketplace verification requires inventories with identities matching the
-enclosing client, release version and hooks variant, regardless of the declared
-version. Missing inventories are refused. Published package bytes and digests are
-immutable; never reconstruct them using today's shipping list.
-See [package verification](../references/distribution.md#verify-a-selected-package)
-for an explicit read-only check of a built or installed package.
+## Verify and copy an explicit package
 
-Keep the reviewed artifacts and `SHA256SUMS` together. If an asset is lost, a rebuild
-from the unchanged tag can recover it only when its checksum matches the original;
-never replace the checksum record to make a different build appear unchanged.
+Obtain the archive and inventory hashes from an independently trusted build or
+release receipt. An inventory by itself proves internal consistency, not release
+authenticity. Verify downloaded archive hashes before executing companion tools.
 
-Validate with `claude plugin validate --strict --json dist/release` and
-`claude plugin validate --strict --json dist/release/claude/cuefluent-notes`.
-Use the Plugin Creator validator for the Codex package when that tooling is
-available. Test fresh-client installation against the prepared local catalog,
-including first-use setup and hook trust, before advertising a release. The
-[product limits](../references/verification.md) describe the installed
-workflow boundaries.
+```sh
+node tools/packaging.mjs verify /absolute/package --expected-inventory-sha256 HASH
+node tools/install.mjs /absolute/package /absolute/FRESH-destination --expected-inventory-sha256 HASH --client codex
+```
+
+The standalone companion uses the same arguments with `node packaging.mjs` and
+`node install.mjs`. A copied package retains all verified bytes and dependencies.
+The destination is mandatory, its parent must exist, and the final destination
+must be absent. Existing files, folders, and prior versions are never overwritten
+or removed. A failed partial copy remains inspectable and is refused on retry;
+choose a fresh destination. No client locations are guessed, no native plugin is
+registered, and no hook trust, project settings, or authentication is changed.
+Native registration and hook review are separate explicit user actions. Copying
+a package enables neither tracking nor note processing.
 
 ## CI evidence limits
 
-The source suite covers session readers, consent boundaries, private storage,
-processing state, conflict detection, recovery, note metadata and package integrity
-using synthetic inputs. CI runs on native Windows, Linux and macOS and compares
-release archive checksums. The [Checks workflow](https://github.com/martinmqz/cuefluent-notes/blob/main/.github/workflows/ci.yml)
-defines the current jobs.
+[Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
+commits. It runs the complete synthetic source suite on native Linux, macOS, and
+Windows. It does not waive queue, gate, worker, or filesystem tests on Windows.
+Tests may explicitly exercise an unsupported native adapter or skip an actual
+platform-specific primitive. CI does not establish native client isolation, MXC
+sandbox availability, model access, or public-file security privileges. Separate
+Windows native checks cover the explicit Codex MXC floor and a complete Claude
+owned-worker draft → review → save flow; see the platform limits in
+[verification](../references/verification.md).
 
-Source changes, release tags and manual runs use the full source test/build
-matrix. Scope classification uses a shallow checkout and, for eligible events,
-the selected base tree. The workflow's independent diff boundary uses only Node
-built-ins and Git; it never imports checked-out selector code or dependencies.
-Any source, helper, dependency, gate or workflow change forces full checks before
-the repository selector can run. The workflow itself remains review-controlled
-CI policy. Full source runs and tag/manual runs do not install scope
-dependencies or fetch full history. Only package candidates load verification
-dependencies and fetch the selected base/HEAD ancestry and release tag.
-For PRs into `main` and pushes to `main`, CI can use a shorter path when
-the complete Git diff changes only the canonical marketplace publication paths.
-It verifies a newer, stable published release, a successful **Prepare release**
-run for its exact tag commit in the base's history, the published snapshot checksum,
-and exact agreement between that snapshot and the committed packages and catalogs.
-Published checksums must also match `SHA256SUMS` inside the retained Linux artifact
-from that exact successful run. The artifact's run identity, size and GitHub SHA-256
-digest are verified before reading its bounded checksum entry in memory. This
-binds release bytes to tested build output even when a release's assets are mutable.
-Missing, expired, ambiguous or mismatched run artifacts refuse the shorter path;
-release assets and their own checksums cannot substitute for that evidence. See
-the [Actions artifact API](https://docs.github.com/en/rest/actions/artifacts).
-Release asset metadata must fit the download bounds before either body is fetched;
-asset-ID downloads also enforce byte limits and must match the advertised sizes,
-using GitHub’s [release asset API](https://docs.github.com/en/rest/releases/assets#get-a-release-asset).
-Missing provenance or a mismatch fails CI; a package's own inventory is not enough.
-Source, dependency, workflow and other file changes always use full checks. A
-known base outside the current history also selects full checks. For an otherwise
-eligible package-only diff, same-version edits and downgrades are refused as
-release-policy violations; publish a newer version rather than changing immutable
-published content.
+Every platform builds fresh candidates and runs `tools/ci.mjs build`: package
+verification, the actual detached `settings` command against a new absent private
+store, and checksum-bound copying. The unconfigured command must create no store.
+The reproducibility job verifies every retained archive against its receipt and
+compares all three receipts, including companion tools. Guidance checks run in a
+separate job and are omitted for an explicitly selected release tag. No native
+client downloads, credentials, model calls, installations, or hook-trust changes
+are part of artifact-producing jobs.
 
-The repository-only `scripts/marketplace-ci.mjs` commands keep classification and
-verification separate: `classify` emits `full` or `candidate` for local diagnostics;
-CI uses its independent workflow boundary instead. `select --fetch`
-fetches the selected history/tag and emits `full` or verified `packages`. Plain
-`select` expects those Git objects to be present already. `gate` checks `CI_NEEDS`
-against the selected mode and uses `GITHUB_REF` for the tag-only client-check
-exception. A candidate result never authorizes the shorter path on its own.
+Passing CI establishes the tested synthetic and packaging behavior. It does not
+prove native desktop command rendering, live hook activation, native processing
+isolation on an unaudited platform, reboot recovery, Cuefluent corpus admission,
+or search ranking. Report local checks, current-revision CI results, pending jobs,
+and separate native acceptance evidence distinctly. Product limits belong in
+[verification](../references/verification.md).
 
-The shorter path retains guidance checks and isolated macOS/Windows client
-registration checks against the committed marketplace. It skips source-installer
-rebuilds and the full source suites. Each required `test (...)` job runs focused
-committed-package tests on its named native platform, under a shorter timeout.
-The required `reproducibility` check requires successful package provenance,
-those native package tests and client registration checks. Its result gate has no
-npm dependencies. On the full path it still compares all native build artifacts;
-only tag runs may omit client registration, as defined below. Required check names
-and protected-main settings stay the same. A failed or cancelled selection cannot
-satisfy the required check. Published assets are neither rebuilt nor replaced by
-the shorter path. On the full path, macOS and Windows each run four disjoint
-source-test shards. The first keeps the required `test (macos-14)` or
-`test (windows-2025)` name; the others add `, 2/4`, `, 3/4` and `, 4/4`.
-All shards must succeed through the matrix-wide `reproducibility` gate. Only
-one shard per native platform runs the additional privacy checks, examples,
-release build and release-artifact upload.
+## Manual release preparation
 
-The runner discovers all test files independently of its platform-specific timing
-weights and starts larger estimated workloads first. Missing measurements use a
-deterministic file-size estimate; they never remove files from discovery. Windows
-retains its separate serial phase for timing-sensitive native tests. Full CI also
-uploads small `test-timings-*` artifacts, separately from release artifacts, even
-after a test failure. Each phase has its own file: per-file summaries record
-runtime and counts, and a final total distinguishes completion from interruption.
-Initial weights are summed top-level test durations; use successful, complete
-native per-file summaries to refresh them. They are scheduling estimates, not
-promised CI completion times. Test cases, native privacy checks, existing job
-timeouts and production deadlines remain unchanged.
+Pushing a branch or tag does not publish a v2 release or update a marketplace.
+The former release-published marketplace writer is removed. The
+[release preparation workflow](../.github/workflows/release.yml) has only a manual
+`workflow_dispatch` trigger, requires dispatch from `main` and an explicit
+confirmation. It accepts an
+existing exact v2 tag, verifies that the tag matches `package.json`, and requires
+its commit to be on `main` history before executing source tools. It runs the
+three-platform checks and uploads candidate artifacts with read-only repository
+permissions. It creates no GitHub release, commit, branch, PR, or marketplace
+update.
 
-Draft pull requests skip every Checks job, so their required matrix checks do
-not exist and their other checks, `reproducibility` included, report as skipped
-until the pull request is marked ready for review, which runs them; a draft
-cannot be merged. The draft package-update PR from publication still runs, so
-marking it ready runs its checks a second time. A newer push to a pull request,
-or converting it back to draft, cancels its running checks; a re-run of an
-earlier run waits for them instead, and a cancelled run does not run
-`reproducibility`.
-
-The `client-smoke` job skips tag refs. On the full path it checks disposable
-client registration using separately built packages and, when present, the
-committed marketplace.
-On the package-only path it checks only that committed marketplace after release
-verification. Neither path installs the exact draft-release ZIPs. It covers
-neither remote authentication nor maintainer approval of a bot-created PR's
-Checks run. Release assets still need their own [inspection](#build-and-inspect-a-release).
-Native Windows CI exercises local NTFS; it does not establish ReFS, network-share
-or cloud-sync durability. Private-storage support still accepts local NTFS/ReFS
-under the product's permission and locality checks.
-A skipped platform or shell check provides no verification for that platform or
-shell; report skips separately from passing checks.
-
-Automated checks, package consistency and client registration do not establish
-hook delivery, model behavior, host review rendering or Cuefluent app behavior.
-Supported source formats are defined by the [reader contracts](../references/session-workflow.md),
-not by a matching client version string.
-
-## Publish the GitHub marketplace
-
-1. Merge the release changes into `main`. Ensure `package.json`, both version
-   fields in `package-lock.json`, and `packaging/{codex,claude}/plugin.json`
-   all have the same stable `major.minor.patch` version. Each update needs a
-   higher version so installed clients discover it. The project license is a
-   publisher decision; dependency licenses do not license the project itself.
-2. Enable GitHub Actions and allow it to create pull requests. The publication
-   job uses `GITHUB_TOKEN` with `contents: write` for its temporary branch and
-   `pull-requests: write` for the draft PR.
-   No main-branch bypass or extra secret is required. Keep the default branch as
-   `main`.
-3. From the reviewed commit on `main`, create and push `v` followed by that exact
-   version (for example, `v0.5.0` when all manifests say `0.5.0`). Do not move or
-   reuse an existing version tag. **Prepare release** runs the Node 22 test
-   matrix and release builds on Windows, Linux, and macOS, verifies that their archive
-   checksums match, and creates a **draft** GitHub Release using those exact Linux
-   CI artifacts: all five archives and `SHA256SUMS`. Preparation does not rebuild.
-4. Open that draft on GitHub. Review the files, smoke-test the plugin ZIPs, and
-   add version-specific changes to the prepared release notes. Keep the snapshot
-   and its checksums together. Use GitHub's **Publish release** action when ready.
-5. **Publish marketplace** downloads that release's snapshot, verifies its
-   checksum, layout and package digests, and prepares `chore/publish-vVERSION`
-   from current `main`. It opens a **draft package-update PR**. GitHub creates its
-   **Checks** run in an approval-required state because the PR uses `GITHUB_TOKEN`.
-   After reviewing the generated changes, a maintainer with write access selects
-   **Approve workflows to run** in the PR. Publication does not dispatch a second run.
-6. Verify that PR's current commit's checks (including the published-package
-   verification and client registration checks described above) and merge it
-   through the normal protected-main process. Only then are the packages
-   available through the [installation commands](../README.md#from-the-marketplace). There is no
-   automatic merge or direct main push.
-
-Both release paths require the source tag to belong to `main` history. Only
-stable releases prepare marketplace updates. The canonical path list is
-`scripts/marketplace-layout.mjs`. Publication replaces only these paths in its
-review branch:
-
-- `.agents/plugins/marketplace.json`
-- `.claude-plugin/marketplace.json`
-- `plugins/cuefluent-notes/`
-- `claude/cuefluent-notes/`
-- `release.json`
-
-The snapshot's README is for the downloadable archive; it does not replace the
-source README. Source files, unrelated package paths, history, and the checkout's
-index are preserved. Never edit generated packages directly. Their installed
-version follows `release.json`, independently of unreleased source changes.
-Unexpected snapshot entries are rejected instead of silently discarded; the
-archive README is the sole deliberate omission. The package digests are checked
-against the actual staged Git bytes before creating a commit. Publication writes
-only its package-update review branch; it does not update other distribution
-branches.
-
-Ordinary source PRs run checks and upload preview artifacts. Merging the generated
-package-update PR makes its already-published release installable from main.
-Neither kind of merge creates a GitHub Release or updates an installed plugin.
-Publishing a draft manually triggers the publication event. A release published
-with `GITHUB_TOKEN` does not trigger that follow-on workflow. Bot-created PRs have
-a separate approval-required exception; see
-[GitHub token workflow triggers](https://docs.github.com/en/actions/concepts/security/github_token#when-github_token-triggers-workflow-runs).
-
-## Recovery and subsequent releases
-
-- Rerun preparation only after a transient failure or a fix to runner access,
-  permissions, or other external configuration. Reruns use the tag's original
-  commit. A source fix (including manifests, scripts, or release notes) requires
-  a new version committed to `main` and a new version tag; never move the old tag.
-  If a draft already exists, inspect its assets before using it; preparation
-  refuses to overwrite a release with the same tag.
-- If publication fails, users keep the prior packages on `main`. Fix permissions,
-  missing/corrupt assets, or PR creation access, then rerun **Publish marketplace**
-  against that published release. Retain the original reviewed assets.
-- A retry of an already-published snapshot is a no-op. Same-version replacement
-  with different archive digests or a changed marketplace tree is refused, as
-  is publishing an older version.
-  An identical prepared branch and its existing PR are reused; retrying publication
-  does not start another CI run. Use the existing run's approval or rerun controls
-  when appropriate. If the branch differs from the update prepared
-  against current main, the publisher refuses to overwrite the existing PR;
-  review and update that PR through the normal process. Concurrent publication
-  branch updates reject the non-force push. Required checks and merge rules
-  govern source changes landing on main while the PR is open.
-- To roll back behavior, publish a **newer version** containing the corrected
-  implementation. Do not force-push `main` or replace existing assets.
-
-## Public listing materials
-
-Use the existing product wording:
-
-- Name: **Cuefluent Notes**.
-- Short description: **Capture and organize your knowledge for fast recall—right on cue.**
-- Details: **Capture selected parts of Codex and Claude sessions as private evidence,
-  then turn reviewed sources into clear, searchable Markdown. Keep decisions,
-  meeting summaries, tasks and knowledge-base notes with independent capture
-  and processing controls. Direct saves are also supported.**
-- Category: **Productivity**.
-- Starter prompts: **Set up Cuefluent Notes for this project.**;
-  **Check these notes for evidence and useful search vocabulary.**;
-  **Update this note while preserving my edits and its history.**
-- Source and support: [repository](https://github.com/martinmqz/cuefluent-notes)
-  and [issues](https://github.com/martinmqz/cuefluent-notes/issues).
-
-Before public submission, the publisher still needs to select the verified
-individual/business identity, final logo, website, public privacy-policy and
-terms URLs, project license, and supported countries/regions. Do not invent
-those details or treat the current contributor label as a verified identity.
-Any privacy statement must describe local note/configuration handling separately
-from the hosting agent's data processing. This package supplies no hosted MCP
-service; it should not claim that the host keeps all conversation data local.
-
-## OpenAI submission
-
-Use the [OpenAI plugin portal](https://platform.openai.com/plugins), create a
-**Skills only** submission, and upload the complete client plugin archive.
-The submitter needs Apps Management write access and a verified publisher
-identity in the same Platform organization/project. Complete listing fields,
-starter prompts, at least five positive and three negative cases, availability,
-release notes, and review. Approval precedes public publication.
-
-Describe the supported runtime accurately: bundled helpers need Node.js 22+,
-and command hooks need the Codex runtime, its environment, and trust. Hooks do
-not run in ordinary Chat. Test the imported package in its actual target surface;
-this repository does not certify ordinary Chat compatibility. A Claude-compatible
-archive can also be imported through the documented conversion path, but review
-the converted hook commands before submission.
-
-Official sources: [submission requirements](https://developers.openai.com/plugins/deploy/submission)
-and [Claude-to-OpenAI package support](https://developers.openai.com/plugins/guides/submit-claude-plugin).
-
-## Claude submission
-
-Validate the complete Claude package, then use the
-[Claude Console submission form](https://platform.claude.com/plugins/submit).
-Supply the released plugin location on `main` at
-`claude/cuefluent-notes`, with its exact commit, when asked for source details;
-the repository root is a marketplace, not an individual installable plugin.
-Follow the form's supported repository/ref/subdirectory fields rather than substituting a source-only URL.
-
-Approved third-party submissions enter **claude-community**. Users add
-`anthropics/claude-plugins-community` before installing from that catalog.
-**claude-plugins-official** is separately curated by Anthropic and has no
-application process. See [Claude's submission guidance](https://code.claude.com/docs/en/plugins#submit-your-plugin-to-the-community-marketplace).
-
-## Suggested review scenarios
-
-These are submission scenarios to run and record against the final upload,
-not claims that a marketplace reviewer or every model has already passed them.
-Use a disposable private project and notes directory outside the source/plugin.
-All facts and people below are fictional. Replace `<notes>` with that directory.
-
-| Positive case | Prompt / fixture | Expected behavior |
-| --- | --- | --- |
-| Manual onboarding | With no existing policy: “Set up Cuefluent Notes in Manual mode.” | Save a disabled preference; create no note; do not enable automatic capture. |
-| Capture a decision | “Record in `<notes>/orchid.md`: on 2026-09-01 the fictional Orchid team chose a 30-minute cache TTL for its prototype; production behavior is untested.” | Preserve the decision date, prototype scope, and uncertainty in searchable Markdown. |
-| Meeting summary | “Summarize this fictional meeting into `<notes>/meeting.md`: on 2026-09-02 Maya agreed to test Orchid's cache invalidation by September 4; deployment remains undecided.” | Capture the owner, action, due date, and unresolved decision without inventing approval. |
-| Maintain an existing note | Seed an Orchid note with an unrelated manually written paragraph. Ask to add the verified fact “the prototype cache expires after 30 minutes.” | Inspect the note, preserve the manual paragraph, and apply a guarded update without making a duplicate document. |
-| Fast-recall vocabulary | “Check `<notes>/orchid.md` for the lookup ‘Orchid cache expiry’; explain whether its headings or aliases support that lookup.” | Inspect headings/aliases and report useful vocabulary gaps; do not claim app ranking or alter the note during Check. |
-
-| Negative case | Prompt / fixture | Expected behavior |
-| --- | --- | --- |
-| Read-only opt-out | “Summarize the Orchid note here only. Do not save or capture this.” | Return the summary without writing notes or changing capture configuration. |
-| Unsupported evidence | “Record that Orchid's cache is production-proven,” while the only evidence says prototype behavior and no production tests. | Do not state production readiness as verified; explain the evidence gap or clearly preserve the claim as unverified. |
-| Concurrent manual edit | Prepare a guarded update, then edit the target before applying that inspected-hash plan. | Reject the stale update, preserve the manual edit, and require reinspection rather than overwriting it. |
+Review those artifacts and native acceptance evidence before requesting a
+separate publication action. Any future publication must be explicitly
+authorized, preserve immutable historical bytes, use reviewed checksums, and keep
+GitHub releases, native marketplace registration, public directory submissions,
+and repository visibility as distinct actions. Create package-update PRs as
+drafts; never merge, mark ready, or bypass repository rules without authorization.

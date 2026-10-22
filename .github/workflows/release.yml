@@ -1,53 +1,30 @@
-name: Prepare release
+name: Prepare release candidate
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact existing v2 tag on main history; must match package.json
+        required: true
+        type: string
+      confirm:
+        description: Authorize tests and candidate artifacts only; nothing is published
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: prepare-v2-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  checks:
+  prepare:
+    if: ${{ inputs.confirm && github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
-      actions: read
     uses: ./.github/workflows/ci.yml
-  prepare:
-    needs: checks
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          # Keep checkout credentials for the explicit main fetch, including private forks.
-          fetch-depth: 1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: '22'
-          package-manager-cache: false
-      - name: Require a stable version tag on main history
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: bash scripts/check-release-source.sh
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: release-preview-ubuntu-24.04
-          path: dist/release-assets
-      - run: npm ci --ignore-scripts
-      - name: Create a draft with complete release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          (cd dist/release-assets && sha256sum --check SHA256SUMS)
-          mkdir -p dist/prepared-marketplace
-          tar -xzf "dist/release-assets/cuefluent-notes-${RELEASE_TAG#v}-marketplace.tar.gz" -C dist/prepared-marketplace
-          node scripts/release-policy.mjs dist/prepared-marketplace "$RELEASE_TAG"
-          node scripts/marketplace-content.mjs snapshot dist/prepared-marketplace "$RELEASE_TAG"
-          gh release create "$RELEASE_TAG" dist/release-assets/* --verify-tag --draft --title "Cuefluent Notes $RELEASE_TAG" --notes-file packaging/release-notes.md
+    with:
+      release_tag: ${{ inputs.tag }}

@@ -1,74 +1,64 @@
 ---
-description: Runtime, consent, evidence integrity, and private storage
+description: V2 runtime, ownership, queue integrity, and private storage
 activation: path
 paths:
-  - scripts/**
+  - src/**
+  - test/**
   - SKILL.md
-  - references/session-workflow.md
-  - references/processing.md
-  - references/workflow-cli.md
-  - references/refresh.md
-  - references/hooks.md
-  - references/setup.md
+  - references/**
 ---
 # Runtime and storage
 
-Apply the shared consent, privacy, writer, and review boundaries in the root
-[repository guidance](/AGENTS.md). Use the module map below to load the relevant
-implementation and canonical product reference before changing behavior.
+Apply the shared boundaries in [repository guidance](/AGENTS.md).
 
-## Module map and invariants
+## Responsibilities
 
-- `scripts/safe-update.mjs`, `scripts/file-io.mjs`, and
-  `scripts/runtime-paths.mjs`: inspected hashes, filesystem boundaries, writer
-  locks, journals, and recovery. See [safe updates](/references/refresh.md).
-- `scripts/workflow-*.mjs` and `scripts/capture-contract.mjs`: session-workflow
-  contracts and guarded private settings. See
-  [session workflow](/references/session-workflow.md) for the current implementation
-  boundary and independent collection/processing consent.
-- `scripts/capture-selection.mjs` and `scripts/intake-*.mjs`: selection intervals,
-  guarded intake state, immutable publication, and recovery. Native-order proofs
-  come from trusted readers; they are not user JSON commands.
-- `scripts/session-jsonl.mjs`, `scripts/capture-evidence.mjs`,
-  `scripts/codex-reader.mjs`, and `scripts/claude-reader.mjs`: bounded native
-  session reads and selected capture extraction. Keep supported record formats
-  and required native identities in the session reference. Shared executable
-  format coverage belongs in the synthetic fixtures in `scripts/codex-reader.test.mjs`
-  and `scripts/claude-reader.test.mjs`; keep run-specific matrices and validation
-  history in ignored `.local/`. `scripts/reader-checkpoint.mjs` bounds
-  metadata-only incremental carry; `scripts/reader-pages.mjs` persists authenticated
-  pages with finite cumulative allocation. Preserve full hashes and native
-  identity metadata, fresh permission checks around cached bytes, and exact
-  cursor/root publication. `EVIDENCE_AFTER_CODEX_TERMINAL` requires a bounded
-  native reproducer before any reader change. Never discard late evidence to
-  make tests pass or collection advance. Claude pause freezes automatic
-  inspection at its saved EOF; suspension is not finality. Schema-2 captures
-  are immutable revisions; activate heads only with fresh selection and expected
-  hashes. Claude ordinary assistant parentage does not prove prompt ownership.
-- `scripts/workflow-storage.mjs`, `scripts/storage-platform.mjs`, and
-  `scripts/capture-maintenance.mjs`: current private-storage capabilities and
-  explicit whole-unit pruning. Preserve exact tombstones and processing evidence;
-  use intake-then-sorted-writer lock order for maintenance and processing.
-- `scripts/collection-*.mjs`, `scripts/workflow-budget.mjs`, and
-  `scripts/process-identity.mjs`: metadata-only hook ingress, bounded detached
-  collection, and native owner probes. `scripts/intake-recovery.mjs` requires an
-  externally established offline window; never infer it from a dead PID alone.
-- `scripts/processing*.mjs` and `scripts/writer-protocol.mjs`: exact input claims,
-  bounded evidence pages, immutable proposals, dispositions, and coordinated
-  Markdown receipts. See [processing](/references/processing.md). Hold intake then
-  writer locks only during helper calls. Never bypass pending transactions through
-  the public writer, infer page acknowledgment from delivery, or rewrite notes in
-  recovery after a durable save receipt exists.
-- `scripts/workflow.mjs`, `scripts/workflow-settings.mjs`, and
-  `scripts/capture-controls.mjs`: explicit CLI operations, settings CAS, and native
-  selection controls. Never accept serialized reader proofs or infer current
-  identity from cwd. Pending discovery reads metadata only; full preparation is
-  the evidence integrity gate. See [workflow CLI](/references/workflow-cli.md).
+- `src/core/` holds pure settings, ownership, run transitions, and validation.
+  Validate complete loaded state and freeze independent snapshots. Settings cannot
+  silently reassign a chat or alter a pending run's expectations.
+- `src/storage/` owns private paths, bounded reads, atomic publication, gates,
+  queues, and attempts. Keep it independent of client transcript shapes and models.
+  Metadata contains no conversation; only queue files hold selected conversation.
+- Client adapters resolve native identity and normalize main-conversation rows.
+  Recognize commands from invocation evidence, not ordinary prose. Resume, fork,
+  and compaction handling must preserve source identity.
+- Synchronization appends durable complete records before advancing its source
+  checkpoint. Processing cannot consume records until that checkpoint is durable.
+  Exact retained records may deduplicate an interrupted append; conflicting data
+  or a malformed complete line is an error. Repair a torn tail only from verified
+  uncommitted source, preserving ordinary conversation bytes.
+- Processing freezes selected record identities/hashes and context-sized ranges,
+  not a whole live queue hash. New appends survive cleanup. Completed drafts are
+  reused on retry; durable saved outcomes authorize cleanup without redrafting.
+  Skip preserves selected input and already-written notes unless saving is
+  durably complete and only cleanup remains.
 
-## Runtime review and verification
+## Ownership and filesystem rules
 
-Tests live in `scripts/*.test.mjs` and use Node's built-in test runner, detached
-packages, and disposable filesystem fixtures. Use meaningful failure reproductions
-and observable invariants rather than assertions that duplicate implementation.
-Follow the root [development and verification rules](/AGENTS.md#development-and-verification)
-for test selection, portability, and fixture isolation.
+Private stores live on a supported local filesystem outside repositories and note
+destinations. Validate links, hard links, ownership, parent identities, and Windows
+ACLs; refuse unverifiable locations. Read/status operations never create a store,
+gate, transcript registration, or model session.
+
+SQLite gate files are persistent rendezvous paths, not product data. Never unlink,
+replace, hash, or open them through generic file helpers while owned. Closing any
+other descriptor for the same inode in a process can release POSIX locks. Use only
+the gate module and its process-wide registry. Worker threads must not acquire
+gates. Missing/corrupt/replaced gates are errors, never stale owners.
+
+Acquire short gates in settings → project → notes-writer order. Hold the separate
+worker gate in the actual worker process for its entire attempt. Establish that
+ownership before publishing an active attempt. Every draft/save/cleanup publication
+rechecks the current run and attempt under the same short mutation gates. Parent
+death before activation releases the unstarted worker; a detached active worker
+may finish and publish a truthful result after its original call ends.
+
+Keep one latest result containing status, paths, counts, and warnings. It never
+authorizes writes and contains no conversation or input receipt history. Runtime
+failures preserve queue data, pending state, and manual note edits.
+
+## Verification
+
+Use synthetic process and filesystem fixtures under `test/`. Exercise observable
+interleavings and crash boundaries. Do not use inherited user hooks or Git
+configuration in fixtures. Report unverified platform and native-client cases.

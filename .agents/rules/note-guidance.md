@@ -1,33 +1,44 @@
 ---
-description: Product instructions, advisory note checks, and synthetic examples
+description: V2 product instructions, Markdown compatibility, and synthetic examples
 activation: path
 paths:
   - SKILL.md
   - references/**
   - examples/**
-  - scripts/check-notes*.mjs
-  - scripts/check-examples*.mjs
-  - scripts/note-*.mjs
+  - src/notes/**
+  - src/logs/**
+  - src/processing/**
+  - test/notes/**
+  - test/logs/**
+  - test/processing/**
 ---
 # Note guidance and examples
 
-`SKILL.md`, `references/`, and `examples/` contain installed product guidance,
-compatibility limits, and synthetic examples. Keep detailed user workflows here
-and repository-maintenance instructions in the root guidance, canonical rules and
-[build/publishing guide](/.agents/publishing.md). Do not ship those maintainer
-instructions in installed product references.
-Link to existing canonical explanations rather than duplicating behavior across
-references.
+Apply [repository guidance](/AGENTS.md). Keep installed workflows and format
+contracts in `SKILL.md` and `references/`; maintenance instructions belong in
+`.agents/`. Examples contain synthetic content only.
 
-Apply the shared boundaries and development checks in the root
-[repository guidance](/AGENTS.md).
+Portable notes use a topic H1 and useful visible H2 sections, with deeper headings
+where helpful. Preserve existing plain notes, useful aliases, identity, creation
+timestamps, sources, and unfamiliar metadata. Unsupported metadata stays exactly
+unchanged. Report malformed metadata instead of silently repairing it. The schema-1
+note format is independent of the plugin version. No useful change means unchanged
+bytes and timestamps.
 
-`scripts/check-notes.mjs` provides advisory Markdown structure and vocabulary
-checks. Run `npm run check:examples` when changing the checker, note guidance, or
-examples, plus relevant tests for affected helpers. Keep examples synthetic and
-verify that their instructions and commands match the implementation.
+Honor explicit file destinations and update suitable existing notes in place.
+Otherwise route new notes by purpose to `meetings/`, `tasks/`, `knowledge-base/`,
+`decisions/`, or the notes root. The entire `logs/` directory is reserved from
+ordinary drafts even when logging is off. Preserve pre-existing content there.
 
-Follow [safe updates](/references/refresh.md) for
-writer behavior and [processing](/references/processing.md) for captured evidence
-and proposed Markdown. Do not turn ordinary Markdown editing into authorization
-to collect sessions or enable processing.
+Logging is directory-only, opt-in, and best effort. Writer-managed annual logs
+share series identity and timezone, include a visible nonempty About section from
+creation, and receive one entry per changed note. Keep retry details only in the
+current run; log failure never prevents successful cleanup or reserves a project
+after completion. The agent can read bounded log entries to find notes, but must
+read those notes before making substantive claims about them.
+
+Validate generated output against the supported Cuefluent parser and a versioned
+compatibility profile before saving. Never truncate useful content, increase app
+safety limits, or invent provenance to make a draft pass. Preserve an over-limit
+draft and its input. Per-file validation does not prove admission into an already
+full app corpus. Keep product compatibility limits separate from private test logs.

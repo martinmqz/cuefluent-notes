@@ -1,26 +1,16 @@
-# Synthetic Atlas payment client task
+<!-- cuefluent
+schema_version: 1
+id: "8e27bd79-32c4-4c46-a502-1ad1aa7ce0e5"
+created: "2026-01-01T12:00:00.000Z"
+updated: "2026-01-01T12:00:00.000Z"
+type: task
+generation:
+  skill_version: "2.0.0-dev.0"
+-->
+# Synthetic retry documentation
 
-## Authorization conflict investigation
+## Outcome
+The fictional Cedar team documented how to preserve a changed original during a retry.
 
-<!-- aliases: client error mapping, conflict test, intent_demo_17, client-conflict-04 -->
-
-The task examined how the client handles an authorization conflict. It established
-the following bounded results:
-
-| Occurred | Finding | Evidence limits |
-| --- | --- | --- |
-| 2026-09-02, 16:20 UTC | A sandbox request for active-authorization fixture `intent_demo_17` received `409` from `POST /v2/payment-intents`. | The trace does not establish a charge outcome. |
-| 2026-09-03, 10:05 UTC | Test `client-conflict-04` mapped a fake-transport `409` to `AuthorizationConflict`, preserved the intent identifier, and issued no automatic retry during one invocation. | Live service behavior, repeated invocations, and deployment were not tested. |
-
-### Remaining work
-
-As of the September 4, 2026 recording, the live integration check was pending
-sandbox access. No result, owner, or due date is recorded. An undated note says
-the help text still describes automatic
-retries; when that wording appeared or was noticed, and whether it has since been
-corrected, are unknown.
-
-The trace annotation calls the fixture `Copperfinch`. The source gives that
-nickname no operational significance.
-
-<!-- source-review: The September 3 result was recorded on September 4 at 08:00 UTC. Fictional source TASK-12, ../references/evidence.md#task-12--client-investigation-record. -->
+## Remaining work
+Add a short walkthrough showing the difference between resuming a pending save and preparing a fresh draft.

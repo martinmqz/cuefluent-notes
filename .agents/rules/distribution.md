@@ -1,8 +1,10 @@
 ---
-description: Self-contained packages, installation, CI, and immutable releases
+description: V2 dependencies, self-contained distribution, and immutable releases
 activation: path
 paths:
   - package*.json
+  - .node-version
+  - tools/**
   - packaging/**
   - .github/workflows/**
   - .agents/plugins/**
@@ -14,60 +16,33 @@ paths:
   - LICENSE.md
   - .gitignore
   - .gitattributes
-  - scripts/*package*.mjs
-  - scripts/release*.mjs
-  - scripts/install*.mjs
-  - scripts/marketplace*
-  - scripts/publish-marketplace*
-  - scripts/published-marketplace*.mjs
-  - scripts/check-release-source.sh
-  - scripts/plugin-manifest*.mjs
-  - scripts/client-fixture/package*.json
-  - scripts/client-smoke*.mjs
-  - scripts/smoke-environment*.mjs
   - references/distribution.md
-  - .agents/publishing.md
   - references/verification.md
+  - .agents/publishing.md
 ---
 # Distribution and releases
 
-`scripts/install.mjs`, `scripts/package*.mjs`, `scripts/release*.mjs`,
-`scripts/publish-marketplace.sh`,
-`scripts/check-release-source.sh`, `packaging/`, and `.github/workflows/` implement
-installation, packages, releases, and CI.
-Follow [distribution](/references/distribution.md) and
-[publishing](/.agents/publishing.md), together with the shared boundaries in
-the root [repository guidance](/AGENTS.md).
+Apply [repository guidance](/AGENTS.md). Build v2 distribution from fresh source
+and an explicit shipped-file inventory, without the former runtime, legacy
+configuration, tests, development tools, repository guidance, or private planning.
+Both client packages include their runtime dependency closure and license notices.
+Pin current dependency versions and build from the lockfile.
 
-## Package and release boundaries
+Keep the source package version separate from the published version in
+`release.json`. Published files under `plugins/` and `claude/`, their checksums,
+tags, and release history are immutable. Updating source or building a candidate
+does not authorize replacing them or installing/trusting a plugin.
 
-- `scripts/marketplace-layout.mjs` defines generated-package paths on `main`.
-  Publish changed product content as a new version only when authorized. See the
-  [publication boundary](/.agents/publishing.md#publish-the-github-marketplace).
-- For version changes, align `package.json`, `package-lock.json`, and both client
-  plugin templates. Update release notes and release links for that version.
-  Distinguish the development source version from the published marketplace
-  version recorded in `release.json`; they can legitimately differ before
-  publication. Do not rewrite the published version to match development source.
-- An inventory verifies internal file consistency, not release provenance. An
-  inventory and its payload can be changed together. Use trusted release
-  checksums and the publication process when making authenticity claims.
-- Follow the publishing guide's privacy and repository-history checks before an
-  authorized publication.
+Builders use a fresh output directory and refuse to overwrite existing artifacts.
+Verify detached packages, inventory contents, dependency closure, and archives.
+An inventory proves internal consistency, not external provenance. Release
+authenticity depends on trusted checksums and an authorized publication.
 
-## Verification
+Target supported current Node versions on Windows, macOS, and Linux in CI. Keep
+permissions narrow, actions pinned, guidance checks separate, and third-party
+client downloads separate from artifact production. Passing deterministic tests
+and packages does not prove live desktop commands, hook activation, or app search.
 
-For packaging changes, verify detached packages and run `npm run release:build`.
-Builders refuse existing output directories: use a fresh destination with
-`-- --out /absolute/fresh-output` instead of deleting prior artifacts. Check
-generated inventories and archives, including the absence of maintenance-only
-files and development dependencies. Source dependency changes must not leak tools
-into runtime dependency closure.
-
-Real-client smoke checks download locked CLIs without lifecycle scripts into
-temporary profiles; run them explicitly with `node scripts/client-smoke.mjs`.
-They must never use the user's real profile, authentication, capture settings, or
-hook trust. Preserve the CI separation between these third-party client checks
-and artifact-producing jobs. Apply the root
-[development and verification rules](/AGENTS.md#development-and-verification)
-for CI portability and evidence limits.
+Use synthetic disposable profiles for client checks unless the user explicitly
+authorizes existing login use. Never read/copy credentials into fixtures or change
+authentication, installed plugins, capture settings, or trust implicitly.
