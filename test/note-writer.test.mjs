@@ -345,8 +345,11 @@ async function killedPublication(t, root, pin, intent, phase) {
     new URL('../src/storage/note-writer.mjs', import.meta.url).href, new URL('../src/storage/paths.mjs', import.meta.url).href], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
   const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
   t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+  // Windows performs several native PowerShell metadata checks before reaching
+  // these boundaries. Loaded CI can exceed 15s while those checks still succeed.
+  const boundaryTimeout = process.platform === 'win32' ? 60000 : 15000;
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Writer did not reach ${phase}`)), 15000);
+    const timer = setTimeout(() => reject(new Error(`Writer did not reach ${phase} within ${boundaryTimeout}ms`)), boundaryTimeout);
     child.once('message', message => { clearTimeout(timer); message === 'boundary' ? resolve() : reject(new Error(message)); });
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`Writer exited before boundary: ${code}/${signal}`)); });
