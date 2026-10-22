@@ -77,6 +77,13 @@ from the native transcript, no control applies anything and the reply names the
 nearest exact commands to type. That text stays evidence, as described under
 [capture prevention](#capture-prevention-and-limits).
 
+For a decision mixed with politeness or corrections, the agent calls
+`processing_status` without arguments and returns its reply before doing any
+note work. It must not reinterpret the correction as a direct save or inspect a
+note to decide whether the correction is already saved. Independent requests
+to author supplied material remain separate; use the
+[skill's routing rules](../SKILL.md#formal-processing-controls) to distinguish them.
+
 ### Capture commands
 
 `capture` captures the chat it is typed in: every finished turn since that

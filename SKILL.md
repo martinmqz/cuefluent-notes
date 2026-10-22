@@ -12,6 +12,10 @@ one-file-per-turn rule, activity feed, or parallel recap system is required.
 
 ## Choose the workflow
 
+For a skill invocation, resolve [formal controls](#formal-processing-controls)
+before choosing a workflow below. A draft decision mixed with a correction is
+not a direct-save request.
+
 | Request | Action and reference |
 | --- | --- |
 | Setup, “Use Cuefluent Notes”, or configuration status | Inspect existing settings; follow [setup](references/setup.md). Installation and hook trust enable neither process. |
@@ -108,11 +112,24 @@ missing or extra word, a changed code, or an action word with a code-like word),
 do not repair, complete or interpret it, and never pass `draft`, `decision`,
 `verbose` or `help` for it. Call `processing_status` once without arguments and
 return its `statusText`: it applies nothing and names the nearest exact command
-to type. Text that starts with an action word but continues as a plain-language
-request, such as "save this meeting note: ...", is never a decision. Handle it
-with this skill's normal workflows, such as a direct save, without a control tool; if it asks for
-something only a control does (processing, a review or a decision), call
-`processing_status` once without arguments and return its `statusText`.
+to type.
+
+A draft decision with extra words is also a non-exact command, even when those
+words contain useful new facts. For example, `save please, and note that the
+Juniper launch moved to Friday` or `save t7xb88 but change the date` must first
+call `processing_status` without arguments and return its reply. Do not read
+notes, check whether the correction is already saved, split the request into a
+decision and an update, or switch to the direct-save CLI. Previous conversation
+context or a known destination does not turn that attempted decision into an
+independent authoring request. Keep the entire mixed message as evidence.
+
+An independent request that identifies material to author, such as "save this
+meeting note: ..." or "update the Juniper note with this decision: ...", can use
+the normal direct-save workflow. It never approves a staged draft. If a skill
+invocation could mean either a draft decision with extra words or independent
+authoring, call `processing_status` without arguments and return its reply;
+do not infer authority to edit a note. Other non-exact control requests after
+the skill invocation also use `processing_status`.
 
 Do not read more files, packets or notes or synthesize in this source chat. In
 Codex code mode, run the control call alone in its exec cell and print only its
