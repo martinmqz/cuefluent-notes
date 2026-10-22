@@ -83,11 +83,37 @@ const WINDOWS_NATIVE = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $p = ConvertFrom-Json $env:CUEFLUENT_NOTE_NATIVE
+function SameSecurity($a,$b) {
+ $left=Get-Acl -LiteralPath $a -Audit; $right=Get-Acl -LiteralPath $b -Audit
+ $ld=New-Object Security.AccessControl.RawSecurityDescriptor($left.GetSecurityDescriptorBinaryForm(),0)
+ $rd=New-Object Security.AccessControl.RawSecurityDescriptor($right.GetSecurityDescriptorBinaryForm(),0)
+ return ($left.Sddl -ceq $right.Sddl -and [int]$ld.ControlFlags -eq [int]$rd.ControlFlags)
+}
 Add-Type -TypeDefinition @'
 using System; using System.IO; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
 public static class CuefluentNoteNative {
+ [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern bool SetFileSecurityW(string path,uint information,byte[] descriptor);
+ [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+ [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out SafeAccessTokenHandle token);
+ [StructLayout(LayoutKind.Sequential)] struct LUID { public uint Low; public int High; }
+ [StructLayout(LayoutKind.Sequential)] struct PRIVILEGES { public uint Count; public LUID Luid; public uint Attributes; }
+ [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool LookupPrivilegeValueW(string system,string name,out LUID luid);
+ [DllImport("advapi32.dll",SetLastError=true)] static extern bool AdjustTokenPrivileges(SafeAccessTokenHandle token,bool disable,ref PRIVILEGES value,uint size,out PRIVILEGES previous,out uint returned);
+ [DllImport("advapi32.dll",EntryPoint="AdjustTokenPrivileges",SetLastError=true)] static extern bool RestorePrivileges(SafeAccessTokenHandle token,bool disable,ref PRIVILEGES value,uint size,IntPtr previous,IntPtr returned);
+ public static void Security(string path,byte[] descriptor,uint information) {
+  SafeAccessTokenHandle token;
+  if(!OpenProcessToken(GetCurrentProcess(),0x28,out token)) throw new IOException("Unable to open helper privilege token: "+Marshal.GetLastWin32Error());
+  using(token) {
+   LUID luid; if(!LookupPrivilegeValueW(null,"SeSecurityPrivilege",out luid)) throw new IOException("Unable to locate audit privilege: "+Marshal.GetLastWin32Error());
+   PRIVILEGES value=new PRIVILEGES {Count=1,Luid=luid,Attributes=2},previous; uint returned;
+   if(!AdjustTokenPrivileges(token,false,ref value,(uint)Marshal.SizeOf(typeof(PRIVILEGES)),out previous,out returned)) throw new IOException("Unable to enable audit privilege: "+Marshal.GetLastWin32Error());
+   try {
+    int error=Marshal.GetLastWin32Error();if(error!=0)throw new IOException("Audit privilege unavailable: "+error);
+    if(!SetFileSecurityW(path,information,descriptor))throw new IOException("Unable to preserve exact security descriptor: "+Marshal.GetLastWin32Error());
+   } finally { RestorePrivileges(token,false,ref previous,0,IntPtr.Zero,IntPtr.Zero); }
+  }
+ }
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern bool CopyFileExW(string a,string b,IntPtr c,IntPtr d,ref bool cancel,uint flags);
- [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern bool ReplaceFileW(string a,string b,string backup,uint flags,IntPtr x,IntPtr y);
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string name,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
  public static byte[] ReadAlternate(string path,long expected) {
   if(expected<0 || expected>262144) throw new IOException("Alternate stream exceeds supported metadata profile");
@@ -116,10 +142,21 @@ public static class CuefluentNoteNative {
 if ($p.op -eq 'clone') {
  $cancel=$false
  if(-not [CuefluentNoteNative]::CopyFileExW($p.source,$p.stage,[IntPtr]::Zero,[IntPtr]::Zero,[ref]$cancel,0)) { throw ('CopyFileEx failed: '+[Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
- Set-Acl -LiteralPath $p.stage -AclObject (Get-Acl -LiteralPath $p.source -Audit)
+ if(SameSecurity $p.source $p.stage){return}
+ $acl=Get-Acl -LiteralPath $p.source -Audit
+ $binary=$acl.GetSecurityDescriptorBinaryForm()
+ $descriptor=New-Object Security.AccessControl.RawSecurityDescriptor($binary,0)
+ Set-Acl -LiteralPath $p.stage -AclObject $acl
+ # Modern setters convert ACLs to automatic inheritance. Restore only sections
+ # whose original representation predates that model, including an absent SACL.
+ $information=0
+ if((([int]$descriptor.ControlFlags) -band 1024) -eq 0){$information=$information -bor 4}
+ if((([int]$descriptor.ControlFlags) -band 2048) -eq 0){$information=$information -bor 8}
+ if($information -ne 0){[CuefluentNoteNative]::Security($p.stage,$binary,$information)}
 } elseif ($p.op -eq 'writable') {
  $attrs=[IO.File]::GetAttributes($p.source)
  [IO.File]::SetAttributes($p.source,($attrs -band (-bnot (1 -bor 2 -bor 4))))
+} elseif ($p.op -eq 'grant-write') {
  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
  $acl=New-Object Security.AccessControl.FileSecurity
  $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false)
@@ -131,8 +168,6 @@ if ($p.op -eq 'clone') {
  $attrs=([int][IO.File]::GetAttributes($p.source)) -band (-bnot 32)
  if($attrs -eq 0){$attrs=128}
  [IO.File]::SetAttributes($p.source,$attrs)
-} elseif ($p.op -eq 'replace') {
- if(-not [CuefluentNoteNative]::ReplaceFileW($p.source,$p.stage,$p.backup,0,[IntPtr]::Zero,[IntPtr]::Zero)) { throw ('ReplaceFile failed: '+[Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
 } elseif ($p.op -eq 'empty') {
  $acl=Get-Acl -LiteralPath $p.source
  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -171,7 +206,9 @@ if ($p.op -eq 'clone') {
  }
  # Reading audit rules requires SeSecurityPrivilege. Do not silently discard
  # an unverified SACL by falling back to the ordinary DACL-only Get-Acl call.
- @{acl=(Get-Acl -LiteralPath $p.source -Audit).Sddl;attributes=[int]$item.Attributes;streams=@($streams);eas=@($eas | Sort-Object name)} | ConvertTo-Json -Depth 8 -Compress
+ $acl=Get-Acl -LiteralPath $p.source -Audit
+ $descriptor=New-Object Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(),0)
+ @{acl=$acl.Sddl;control=[int]$descriptor.ControlFlags;attributes=[int]$item.Attributes;streams=@($streams);eas=@($eas | Sort-Object name)} | ConvertTo-Json -Depth 8 -Compress
 } else { throw 'Unsupported native note operation' }
 `;
 
@@ -334,6 +371,19 @@ async function outcome(pin, intent, { windowsRecovery = false } = {}) {
   const names = await location(pin, intent);
   const stat = await lstatOrNull(names.target), stageStat = await lstatOrNull(names.stage), backupStat = await lstatOrNull(names.backup);
   if (backupStat && (!intent.original || !sameIdentity(backupStat, intent.original))) conflict('The publication backup is not the exact inspected original inode.');
+  if (process.platform === 'win32' && intent.original && intent.stage && stat && backupStat && stageStat &&
+      sameIdentity(stat, intent.original) && sameIdentity(stageStat, intent.stage)) {
+    const original = await snapshot(names.target, { links: 2 }), backup = await snapshot(names.backup, { links: 2 });
+    const staged = await snapshot(names.stage);
+    if (!sameIdentity(original.stat, intent.original) || !sameIdentity(backup.stat, intent.original) || !sameIdentity(staged.stat, intent.stage) ||
+        original.hash !== intent.expectedHash || backup.hash !== intent.expectedHash) conflict('The prepared publication layout no longer contains the exact original and stage inodes.');
+    if (staged.hash === intent.hash && staged.bytes.length === intent.bytes && await metadata(names.stage) === intent.original.metadata) {
+      const originalArchive = await publishedMetadata(names.target, intent);
+      await publishedMetadata(names.backup, intent);
+      await assertChain(intent.parent); await assertDirectory(pin);
+      return { status: 'unapplied', prepared: true, originalArchive, ...names };
+    }
+  }
   if (stat && intent.stage && sameIdentity(stat, intent.stage)) {
     const links = stageStat ? 2 : 1;
     if (stageStat && !sameIdentity(stageStat, intent.stage)) conflict('The staging name was replaced after publication.');
@@ -385,6 +435,11 @@ export async function inspectPublicationOutcome(pin, input) {
  * finish an already-applied exact publication. Never refresh an expectation. */
 export async function readPublicationSource(pin, input) {
   const intent = validateNotePublication(input), current = await outcome(pin, intent, { windowsRecovery: true });
+  if (current.prepared) {
+    const original = await snapshot(current.target, { links: 2 });
+    if (!sameIdentity(original.stat, intent.original) || original.hash !== intent.expectedHash) conflict('The exact prepared original changed.');
+    return Object.freeze({ status: 'unapplied', bytes: original.bytes });
+  }
   if (current.status === 'metadata-pending') {
     const original = await snapshot(current.backup);
     if (!sameIdentity(original.stat, intent.original) || original.hash !== intent.expectedHash) conflict('The exact publication backup changed.');
@@ -433,6 +488,8 @@ async function finish(pin, intent, names) {
 
 async function reconcileOriginalBackup(pin, intent, names, { restore = false } = {}) {
   if (!await lstatOrNull(names.backup)) return;
+  const observed = await outcome(pin, intent, { windowsRecovery: true });
+  if (observed.prepared && observed.originalArchive) await windows('restore-archive', names.target);
   let target = await lstatOrNull(names.target);
   if (!target) {
     if (!restore) return;
@@ -446,6 +503,7 @@ async function reconcileOriginalBackup(pin, intent, names, { restore = false } =
   await originalMatches(names.backup, intent, 2);
   await assertChain(intent.parent); await assertDirectory(pin);
   await unlinkExact(names.backup, intent.original, 2);
+  await originalMatches(names.target, intent);
   await syncDirectory(names.directory); await assertChain(intent.parent);
 }
 
@@ -496,7 +554,16 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent 
     } finally { await permissions.close(); }
   }
   else if (original) await windows('writable', current.stage);
-  const handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW);
+  let handle;
+  try { handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW); }
+  catch (error) {
+    if (process.platform !== 'win32' || !original || error.code !== 'EACCES') throw error;
+    // Preserve a fresh inherited descriptor whenever it already permits writing.
+    // Grant access only to this exact owned stage if the native open needs it.
+    if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The staged inode changed before granting write access.');
+    await windows('grant-write', current.stage);
+    handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW);
+  }
   try {
     if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The staged inode changed before writing.');
     if (original) await cloneOriginal(source, current.stage);
@@ -523,7 +590,11 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent 
     catch (cause) { if (cause.code === 'EEXIST') conflict('A destination appeared before no-overwrite publication.'); throw cause; }
   } else if (process.platform === 'win32') {
     if (await lstatOrNull(current.backup)) conflict('An unexpected backup path prevents publication.');
-    await windows('replace', current.target, current.stage, current.backup);
+    // Preserve the exact security descriptor already verified on the stage.
+    // ReplaceFileW would merge and auto-inherit the original DACL again.
+    await fs.link(current.target, current.backup);
+    await outcome(pin, intent, { windowsRecovery: true });
+    await fs.rename(current.stage, current.target);
   } else await fs.rename(current.stage, current.target);
   return finish(pin, intent, current);
 }

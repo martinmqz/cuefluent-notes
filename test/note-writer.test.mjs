@@ -39,7 +39,9 @@ async function windowsMetadata(target, attributes) {
 $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
 $p=ConvertFrom-Json $env:CUEFLUENT_NOTE_FIXTURE
 if($null -ne $p.attributes){[IO.File]::SetAttributes($p.path,[int]$p.attributes)}
-@{attributes=[int][IO.File]::GetAttributes($p.path);acl=(Get-Acl -LiteralPath $p.path -Audit).Sddl} | ConvertTo-Json -Compress
+$acl=Get-Acl -LiteralPath $p.path -Audit
+$descriptor=New-Object Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(),0)
+@{attributes=[int][IO.File]::GetAttributes($p.path);acl=$acl.Sddl;control=[int]$descriptor.ControlFlags;accessProtected=$acl.AreAccessRulesProtected;auditProtected=$acl.AreAuditRulesProtected} | ConvertTo-Json -Compress
 `;
   const { stdout } = await execute(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
@@ -297,7 +299,7 @@ import {syncBuiltinESMExports} from 'node:module';
 const [root,journal,phase,writerURL,pathsURL] = process.argv.slice(1);
 const bytes=Buffer.from('# Synthetic note\n\nUpdated exact bytes.\n');
 const boundary=async()=>{setInterval(()=>{},1000);process.send('boundary');await new Promise(()=>{});};
-if(phase==='restored-target') {
+if(['restored-target','restored-original'].includes(phase)) {
  const execute=childProcess.execFile;
  const wrapped=(...args)=>execute(...args);
  wrapped[promisify.custom]=(...args)=>new Promise((resolve,reject)=>execute(...args,async(error,stdout,stderr)=>{
@@ -325,9 +327,9 @@ fs.open=async function(file,flags,...rest) {
  }
  return handle;
 };
-for(const method of ['link','rename']) {
+for(const method of ['link','rename','unlink']) {
  const original=fs[method];
- fs[method]=async function(...args) {const result=await original.apply(this,args);if(phase===method) await boundary();return result;};
+ fs[method]=async function(...args) {const result=await original.apply(this,args);if(phase===method || (phase==='backup-unlinked' && method==='unlink' && args[0].endsWith('.backup.tmp'))) await boundary();return result;};
 }
 const pin=await pinDirectory(root), intent=JSON.parse(await fs.readFile(journal,'utf8'));
 await publishNotePublication(pin,intent,bytes,{persistIntent:async value=>{
@@ -417,7 +419,7 @@ for (const phase of ['empty', 'journal', 'write', 'link']) {
   });
 }
 
-test('process death after replacement is recognized without refreshing the expected original', { skip: process.platform === 'win32' }, async t => {
+test('process death after replacement is recognized without refreshing the expected original', async t => {
   const { root, notes, pin } = await fixture(t), before = Buffer.from('original');
   await fs.writeFile(path.join(notes, 'note.md'), before);
   const intent = await prepare(pin, 'note.md', body, hashBytes(before));
@@ -485,3 +487,106 @@ test('a third hardlink after interrupted absent publication is preserved and rep
   assert.equal((await fs.stat(stagePath(journal))).nlink, 3);
   assert.deepEqual(await fs.readFile(path.join(root, 'unrelated-hardlink')), body);
 });
+
+async function windowsSecurityProfile(target, profile) {
+  const source = await fs.readFile(new URL('../src/storage/note-writer.mjs', import.meta.url), 'utf8');
+  const methods = source.match(/public static class CuefluentNoteNative \{([\s\S]*?) \[DllImport\("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true\)\] public static extern bool CopyFileExW/)?.[1];
+  assert.ok(methods, 'The audited native security fixture helper exists.');
+  const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'\nAdd-Type -TypeDefinition @'\nusing System; using System.IO; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;\npublic static class CuefluentNoteNative {\n" + methods + "\n}\n'@\n" + String.raw`
+$p=ConvertFrom-Json $env:CUEFLUENT_NOTE_FIXTURE
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$parent=[IO.Path]::GetDirectoryName($p.path)
+if($p.profile -eq 'legacy-parent') {
+ $acl=Get-Acl -LiteralPath $parent -Audit
+ [CuefluentNoteNative]::Security($parent,$acl.GetSecurityDescriptorBinaryForm(),4)
+ [IO.File]::WriteAllText($p.path,"original\n")
+} elseif($p.profile -eq 'creator-owner' -or $p.profile -eq 'inherited-audit') {
+ $acl=Get-Acl -LiteralPath $parent -Audit
+ if($p.profile -eq 'creator-owner'){
+  $creator=New-Object Security.Principal.SecurityIdentifier('S-1-3-0')
+  $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($creator,'FullControl','ContainerInherit,ObjectInherit','InheritOnly','Allow')))
+ } else {
+  $acl.AddAuditRule((New-Object Security.AccessControl.FileSystemAuditRule($sid,'WriteData','ContainerInherit,ObjectInherit','None','Success')))
+ }
+ Set-Acl -LiteralPath $parent -AclObject $acl
+ [IO.File]::WriteAllText($p.path,"original\n")
+} else {
+ [IO.File]::WriteAllText($p.path,"original\n")
+ $acl=Get-Acl -LiteralPath $p.path -Audit
+ $acl.AddAuditRule((New-Object Security.AccessControl.FileSystemAuditRule($sid,'WriteData','Success')))
+ if($p.profile -eq 'protected-audit'){$acl.SetAuditRuleProtection($true,$true)}
+ Set-Acl -LiteralPath $p.path -AclObject $acl
+}
+`;
+  await execute(path.win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+    { env: { ...process.env, CUEFLUENT_NOTE_FIXTURE: JSON.stringify({ path: target, profile }) } });
+}
+
+for (const profile of ['legacy-parent', 'creator-owner', 'inherited-audit', 'explicit-audit', 'protected-audit']) {
+  test(`Windows native ${profile} security descriptors retain exact controls through publication`, { skip: process.platform !== 'win32' }, async t => {
+    const { notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
+    await windowsSecurityProfile(target, profile);
+    await fs.writeFile(`${target}:synthetic-metadata`, 'preserved stream');
+    const metadata = await windowsMetadata(target, 128);
+    if (profile === 'legacy-parent') {
+      assert.equal(metadata.control & 1024, 0, 'The fixture has a legacy, non-auto-inherited DACL.');
+      assert.equal(metadata.accessProtected, false);
+    } else assert.notEqual(metadata.control & 1024, 0, 'The fixture retains its modern automatic-inheritance representation.');
+    if (profile.endsWith('audit')) assert.match(metadata.acl, /S:/);
+    const intent = await prepare(pin, 'note.md', body, hashBytes(await fs.readFile(target)));
+    const result = await publish(pin, intent);
+    assert.deepEqual(await windowsMetadata(target), metadata);
+    assert.equal(await fs.readFile(`${target}:synthetic-metadata`, 'utf8'), 'preserved stream');
+    assert.deepEqual(await fs.readFile(target), body);
+    await publishNotePublication(pin, result.intent, body);
+    assert.deepEqual(await windowsMetadata(target), metadata);
+    assert.deepEqual(await fs.readdir(notes), ['note.md']);
+  });
+}
+
+for (const [phase, action] of [['link', 'retry'], ['link', 'skip'], ['restored-original', 'retry'], ['backup-unlinked', 'skip']]) {
+  test(`Windows prepared original backup survives death at ${phase} before ${action}`, { skip: process.platform !== 'win32' }, async t => {
+    const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('original\n');
+    await fs.writeFile(target, before);
+    const metadata = await windowsMetadata(target, 128), intent = await prepare(pin, 'note.md', body, hashBytes(before));
+    let journal = await killedPublication(t, root, pin, intent, 'link');
+    const backup = stagePath(journal).replace(/\.tmp$/, '.backup.tmp');
+    assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'unapplied' });
+    assert.deepEqual(await readPublicationSource(pin, journal), { status: 'unapplied', bytes: before });
+    assert.equal((await windowsMetadata(target)).attributes, 32, 'Inspection must not restore the shared original.');
+    assert.deepEqual(await fs.readFile(stagePath(journal)), body);
+    if (phase !== 'link') journal = await killedPublication(t, root, pin, journal, phase);
+    if (action === 'skip') {
+      assert.deepEqual(await discardNoteStage(pin, journal), { discarded: true, applied: false });
+      assert.deepEqual(await fs.readFile(target), before);
+    } else {
+      assert.equal((await publish(pin, journal)).receipt.changed, true);
+      assert.deepEqual(await fs.readFile(target), body);
+    }
+    assert.deepEqual(await windowsMetadata(target), metadata);
+    assert.equal((await fs.stat(target)).nlink, 1);
+    assert.deepEqual(await fs.readdir(notes), ['note.md']);
+    await assert.rejects(fs.stat(backup), { code: 'ENOENT' });
+  });
+}
+
+for (const changed of ['incomplete-stage', 'third-alias', 'original-stream', 'original-acl']) {
+  test(`Windows prepared original backup refuses ${changed} without changing evidence`, { skip: process.platform !== 'win32' }, async t => {
+    const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('original\n');
+    await fs.writeFile(target, before); await windowsMetadata(target, 128);
+    const intent = await prepare(pin, 'note.md', body, hashBytes(before));
+    const journal = await killedPublication(t, root, pin, intent, 'link');
+    if (changed === 'incomplete-stage') await fs.truncate(stagePath(journal), 7);
+    else if (changed === 'third-alias') await fs.link(target, path.join(root, 'unrelated-original-alias'));
+    else if (changed === 'original-stream') await fs.writeFile(`${target}:manual-metadata`, 'preserve');
+    else await windowsSecurityProfile(target, 'explicit-audit');
+    const metadata = await windowsMetadata(target), bytes = await fs.readFile(target), names = (await fs.readdir(notes)).sort();
+    await assert.rejects(publish(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    await assert.rejects(readPublicationSource(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    await assert.rejects(discardNoteStage(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    assert.deepEqual(await windowsMetadata(target), metadata);
+    assert.deepEqual(await fs.readFile(target), bytes);
+    assert.deepEqual((await fs.readdir(notes)).sort(), names);
+  });
+}
