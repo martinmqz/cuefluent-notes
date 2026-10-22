@@ -248,12 +248,14 @@ test('Codex UserMessage is authoritative human input and response layer is autho
   assert.equal(textFor(observed.parts, 'tool-call'), 'exact code "λ🧠"\n');
 });
 
-test('unknown inherited history and ambiguous human shapes stay pending without import', async () => {
+test('unknown inherited history stays pending without import while origin-less prompts remain conversation', async () => {
   const unknown = await collect(source([{ type: 'session_meta', payload: { id: sessionId, history_base: { thread_id: 'parent', end_ordinal_exclusive: 26, end_byte_offset: 1000 } } }]), { client: 'codex' });
   assert.equal(unknown.parts.length, 0); assert.equal(unknown.pending, 'TRANSCRIPT_HISTORY_REQUIRED'); assert.equal(unknown.checkpoint.offset, 0);
+  // A prompt-shaped row that keeps its prompt identity but lacks origin fields is
+  // never dropped: it stays conversation, so no typed input is silently lost.
   const ambiguous = human(); delete ambiguous.turnOrigin; delete ambiguous.turnPosition;
   const observed = await collect(source([ambiguous, assistant()]));
-  assert.equal(observed.parts.length, 0); assert.equal(observed.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED');
+  assert.equal(observed.pending, undefined); assert.equal(observed.parts.length, 1); assert.equal(textFor(observed.parts, 'human'), 'A synthetic prompt');
 });
 
 test('incomplete tail, complete malformed row and changed anchor never advance over missing content', async () => {
@@ -314,8 +316,14 @@ test('producer bookkeeping rows do not stall Claude collection, including large 
   assert.equal(observed.pending, undefined); assert.equal(observed.parts.length, 1);
   assert.equal(textFor(observed.parts, 'human'), 'A synthetic prompt'); assert.equal(textFor(observed.parts, 'assistant'), 'A synthetic reply');
   assert(!JSON.stringify(observed).includes('SYNTHETIC_BOOKKEEPING_ONLY'));
-  const unknown = await collect(source([human(), { type: 'unknown-conversation-shape', sessionId, text: 'Do not silently discard' }, assistant()]));
+  const unlisted = await collect(source([human(), { type: 'relocated', sessionId, relocatedCwd: '/synthetic' },
+    { type: 'continued-in', sessionId, continuedInSessionId: 'synthetic-next-session' },
+    { type: 'unlisted-bookkeeping-shape', sessionId, text: 'SYNTHETIC_UNLISTED_ONLY' }, assistant()]));
+  assert.equal(unlisted.pending, undefined); assert.equal(unlisted.parts.length, 1); assert(!JSON.stringify(unlisted).includes('SYNTHETIC_UNLISTED_ONLY'));
+  const unknown = await collect(source([human(), { type: 'unknown-conversation-shape', text: 'Do not silently discard' }, assistant()]));
   assert.equal(unknown.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED'); assert.equal(unknown.parts.length, 0);
+  const typeless = await collect(source([human(), { type: 7, sessionId }, assistant()]));
+  assert.equal(typeless.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED'); assert.equal(typeless.parts.length, 0);
   const foreign = await collect(source([human(), { type: 'custom-title', sessionId: 'another-session' }, assistant()])).catch(error => error);
   assert.equal(foreign.code, 'TRANSCRIPT_IDENTITY_MISMATCH');
   const wide = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`${i}-${'x'.repeat(900)}`, 0]));
@@ -354,8 +362,9 @@ test('Claude image prompts and mixed tool results preserve text with explicit or
   assert(notices.every(item => item.kind === 'non-text-content-omitted'));
   const onlyImage = await collect(source([human('image-only', [image]), assistant()]));
   assert.equal(onlyImage.parts.length, 1); assert.equal(onlyImage.parts[0].notices.length, 1);
-  const interrupted = await collect(source([human(), { type: 'user', sessionId, uuid: 'originless-missing-prompt', message: { role: 'user', content: 'Ambiguous input' } }, assistant()]));
-  assert.equal(interrupted.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED'); assert.equal(interrupted.parts.length, 0);
+  const identityless = await collect(source([human(), { type: 'user', sessionId, uuid: 'originless-missing-prompt', message: { role: 'user', content: 'SYNTHETIC_IDENTITYLESS_ROW' } }, assistant()]));
+  assert.equal(identityless.pending, 'TRANSCRIPT_NATIVE_UNSUPPORTED'); assert.equal(identityless.parts.length, 0);
+  assert.equal(identityless.checkpoint.offset, 0);
 });
 
 test('non-text notices survive streaming retries once without hiding text output or bypassing output clipping', async () => {
@@ -383,4 +392,60 @@ test('Codex multimodal tool-output variants preserve their textual siblings and 
   assert.equal(observed.pending, undefined); assert.equal(textFor(observed.parts, 'tool-result'), 'Tool text');
   assert.deepEqual(observed.parts.flatMap(part => part.notices).map(item => item.contentType), ['input_image', 'input_audio', 'encrypted_content']);
   assert(!JSON.stringify(observed).includes('OPAQUE_'));
+});
+
+test('origin-less local command-looking text remains exact without stalling later conversation', async () => {
+  const originless = (id, text) => { const row = human(id, text); delete row.turnOrigin; delete row.turnPosition; return row; };
+  const echo = originless('local-echo', '<local-command-stdout>SYNTHETIC_LOCAL_OUTPUT</local-command-stdout>');
+  for (const row of [echo, originless('local-error', '<local-command-stderr>SYNTHETIC_LOCAL_ERROR</local-command-stderr>'),
+    originless('literal', '<local-command-example is an XML element I want you to explain')]) {
+    const observed = await collect(source([row, assistant()]), { limits: { readBytes: 3 } });
+    assert.equal(observed.pending, undefined); assert.equal(observed.parts.length, 1);
+    assert.equal(textFor(observed.parts, 'human'), row.message.content);
+    assert.equal(textFor(observed.parts, 'assistant'), 'A synthetic reply');
+    const verified = await collect(source([{ ...row, turnOrigin: 'human' }, assistant()]), { limits: { readBytes: 3 } });
+    assert.equal(verified.pending, undefined); assert.equal(textFor(verified.parts, 'human'), row.message.content);
+  }
+  const inspected = await inspectNativeRow(source([echo]), 0, { limits: { readBytes: 3 } });
+  assert(!JSON.stringify(inspected).includes('SYNTHETIC_LOCAL_OUTPUT'));
+  const input = source([human(), assistant(), echo, human('later', 'Later human input'), assistant('later-reply', 'Later answer')]);
+  const later = await collect(input, { limits: { readBytes: 3 } });
+  assert.equal(later.pending, undefined); assert.equal(later.parts.length, 3); assert.equal(later.checkpoint.offset, input.size);
+  assert.equal(textFor(later.parts, 'human'), 'A synthetic prompt' + echo.message.content + 'Later human input');
+  assert.equal(later.parts[1].exchangeId, echo.uuid); assert.equal(later.parts[1].outcome, 'observed');
+  assert.equal(textFor(later.parts, 'assistant'), 'A synthetic replyLater answer');
+});
+
+test('origin-less typed command wrappers remain classifiable and keep exact untrack boundaries', async () => {
+  const originless = (id, text) => { const row = human(id, text); delete row.turnOrigin; delete row.turnPosition; return row; };
+  const wrapper = originless('control', '<command-message>cuefluent-notes:cuefluent-notes</command-message>\n<command-name>/cuefluent-notes:cuefluent-notes</command-name>\n<command-args>status</command-args>');
+  const controls = [human(), assistant(), wrapper, assistant('control-reply', 'SYNTHETIC_CONTROL_REPLY'), human('human-2', 'Second prompt'), assistant('assistant-2', 'Second reply')];
+  const excluded = await collect(source(controls), { commands: [{ promptId: 'prompt:control', action: 'status' }] });
+  assert.equal(excluded.pending, undefined); assert.equal(excluded.parts.length, 2);
+  assert(!JSON.stringify(excluded).includes('SYNTHETIC_CONTROL_REPLY')); assert(!excluded.parts.some(part => part.exchangeId === 'control'));
+  const kept = await collect(source(controls));
+  assert.equal(kept.parts.length, 3); assert(textFor(kept.parts, 'human').includes('<command-message>')); assert(textFor(kept.parts, 'assistant').includes('SYNTHETIC_CONTROL_REPLY'));
+  const initial = [human(), assistant()];
+  const boundary = await collect(source([...initial, originless('stop', 'untrack'), assistant('control-reply'), human('later', 'Unauthorized later text')]), { beforePromptId: 'prompt:stop' });
+  assert.equal(boundary.parts.length, 1); assert.equal(boundary.checkpoint.boundary.start, encode(initial).length);
+});
+
+test('origin-less opening prompts survive interrupted and failed completion signals and bounded retries', async () => {
+  const prompt = 'Keep the opening prompt λ🧠 '.repeat(400);
+  const opening = human('opening', prompt); delete opening.turnOrigin; delete opening.turnPosition;
+  const companion = { ...opening, uuid: 'companion', message: { role: 'user', content: 'SYNTHETIC_COMPANION_ONLY' } };
+  const rows = [opening, assistant('partial', 'Observed partial reply.', { message: { role: 'assistant',
+    content: [{ type: 'text', text: 'Observed partial reply.' }], stop_reason: 'tool_use' } }), companion];
+  for (const kind of ['interrupted', 'failed']) {
+    const input = source(rows), parts = []; let checkpoint = null;
+    for (let attempt = 0; attempt < 50 && checkpoint?.offset !== input.size; attempt++) {
+      const observed = await collect(input, { checkpoint, completion: { kind, promptId: opening.promptId },
+        limits: { readBytes: 31, rows: 1, parts: 1, partBytes: 5000 } });
+      checkpoint = observed.checkpoint; parts.push(...observed.parts);
+    }
+    assert.equal(checkpoint.offset, input.size); assert(parts.length > 1);
+    assert.equal(textFor(parts, 'human'), prompt); assert.equal(textFor(parts, 'assistant'), 'Observed partial reply.');
+    assert(parts.every(part => part.outcome === kind)); assert(!JSON.stringify(parts).includes('SYNTHETIC_COMPANION_ONLY'));
+    assert.deepEqual(parts.map(part => part.partIndex), parts.map((_, index) => index));
+  }
 });

@@ -26,7 +26,7 @@ function contentFields(row, prefix, kind, acceptedType, options = {}, omittedTyp
 /** Classify only the observed CLI append shapes. Parent pointers identify native
  * structure; they do not assign a late row to an older human exchange.
  */
-export function classifyNativeRow(row, { client, sessionId, completion = null, currentPromptId = null, historyVerified = false } = {}) {
+export function classifyNativeRow(row, { client, sessionId, completion = null, currentPromptId = null, currentRowId = null, historyVerified = false } = {}) {
   const type = value(row, 'type');
   if (client === 'claude') {
     const nativeSession = value(row, 'sessionId');
@@ -37,7 +37,9 @@ export function classifyNativeRow(row, { client, sessionId, completion = null, c
     if (!['user', 'assistant'].includes(type)) {
       const known = ['queue-operation', 'attachment', 'system', 'last-prompt', 'atis-latch', 'cost-state', 'api-request', 'api-request-blob', 'api-request-shape', 'file-history-snapshot', 'file-history-delta', 'progress', 'summary', 'mode',
         'custom-title', 'ai-title', 'agent-name', 'agent-color', 'agent-setting', 'bridge-session', 'pr-link', 'permission-mode', 'tag', 'worktree-state', 'isolation-latch', 'attribution-snapshot'];
-      if (!known.includes(type)) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Claude native row kind');
+      // Unlisted producer bookkeeping is excluded only when it carries this exact
+      // native session identity; an unknown kind without it stays an explicit gap.
+      if (!known.includes(type) && (typeof type !== 'string' || nativeSession !== sessionId)) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Claude native row kind');
       if (type === 'api-request-shape' && nativeSession !== sessionId) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'API request shape bookkeeping requires its native session identity');
       if (type === 'mode' && (nativeSession !== sessionId || !hasString(row, ['mode']))) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'Unsupported Claude mode bookkeeping row');
       return { kind: 'ignore', rowId: value(row, 'uuid') };
@@ -61,8 +63,12 @@ export function classifyNativeRow(row, { client, sessionId, completion = null, c
       if (value(row, 'turnOrigin') === undefined && value(row, 'turnPosition', 'turnIndex') === undefined) {
         // Native companion/interruption rows share the actual human's prompt
         // identity and lack its origin/position fields. Never match their text.
-        if (promptId !== undefined && (promptId === currentPromptId || (completion && ['interrupted', 'failed'].includes(completion.kind) && completion.promptId === promptId))) return { kind: 'ignore', rowId };
-        transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'The native row does not prove an actual human prompt');
+        // The row that opened the current exchange is that human, not a companion.
+        if (promptId !== undefined && rowId !== currentRowId && promptId === currentPromptId) return { kind: 'ignore', rowId };
+        // A completion signal identifies a turn, not which row opened it. Keep
+        // any other prompt-shaped row verbatim, including local-command-looking
+        // text: without native provenance it may be literal human input.
+        if (promptId === undefined) transcriptError('TRANSCRIPT_NATIVE_UNSUPPORTED', 'The native user row has no prompt identity');
       }
       nativeId(promptId);
       if (hasString(row, ['message', 'content'])) fields.push(field(row, 'human', ['message', 'content']));

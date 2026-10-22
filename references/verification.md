@@ -15,9 +15,14 @@ metadata, the selected skill item, exact thread source metadata and current-turn
 checks. Different session/thread identity shapes remain unsupported until verified.
 No newest-file, working-directory or model-supplied identity fallback exists.
 
-Known native bookkeeping is excluded from collection. Supported non-text image
-and tool-reference blocks produce explicit omission notices while surrounding
-text remains intact. Unknown conversation shapes remain reported gaps.
+Known native bookkeeping is excluded from collection, as are unlisted Claude
+non-conversation row kinds that carry the chat's own session identity. Claude
+prompts with a prompt identity can be collected without origin fields. Their text
+is preserved even when it resembles local-command output; this may retain native
+bookkeeping text when provenance is absent. Rows without a prompt identity remain
+reported gaps unless native metadata identifies them as bookkeeping. Supported
+non-text image and tool-reference blocks produce explicit omission notices while
+surrounding text remains intact. Unknown conversation shapes remain reported gaps.
 
 A Stop hook may precede final transcript persistence. Durable retries and idle
 reconciliation handle delayed rows and supplementary output. Unsupported hook

@@ -5,7 +5,7 @@ import { inspectNativeRow, transcriptLimits, transcriptError, verifyRow, assertS
 
 const anchor = (row, rowId) => ({ start: row.start, end: row.end, hash: row.hash,
   rowId: rowId ?? (metaValue(row, 'ordinal') !== undefined ? `ordinal:${metaValue(row, 'ordinal')}` : `offset:${row.start}`) });
-const nativeOptions = (source, row, options, currentPromptId = null) => ({ ...options, currentPromptId,
+const nativeOptions = (source, row, options, currentPromptId = null, currentRowId = null) => ({ ...options, currentPromptId, currentRowId,
   sessionId: typeof source.nativeSessionIdAt === 'function' ? nativeId(source.nativeSessionIdAt(row.start)) : options.sessionId,
   historyVerified: source.historyResolved === true });
 const checkpoint = state => validateCheckpoint(state, { client: state.client, sessionId: state.sessionId });
@@ -86,7 +86,7 @@ async function* emitRange(source, initial, until, options) {
   while (offset < until) {
     const row = await inspectNativeRow(source, offset, { limits, end: until });
     if (row.pending) transcriptError('TRANSCRIPT_SOURCE_CHANGED', 'A planned complete native row became incomplete');
-    const rowOptions = nativeOptions(source, row, options, state.exchange?.promptId);
+    const rowOptions = nativeOptions(source, row, options, state.exchange?.promptId, state.exchange?.id);
     const classified = classifyNativeRow(row, rowOptions);
     await verify(source, row, limits);
     if (classified.kind === 'ignore' || !classified.fields?.length) {
@@ -210,7 +210,7 @@ export async function* normalizeTranscript(source, { client, sessionId, checkpoi
         for (; position < end;) {
           const row = await inspectNativeRow(source, position, { limits, end });
           if (row.pending) { yield { type: 'pending', reason: 'TRANSCRIPT_TAIL_PENDING', checkpoint: state }; return; }
-          const rowOptions = nativeOptions(source, row, options, state.exchange?.promptId);
+          const rowOptions = nativeOptions(source, row, options, state.exchange?.promptId, state.exchange?.id);
           const classified = classifyNativeRow(row, rowOptions);
           if (classified.kind === 'human') {
             if (state.exchange && !state.exchange.completed && state.exchange.id !== classified.rowId) {
