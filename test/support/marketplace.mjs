@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -18,7 +17,8 @@ export async function git(repo, args) {
   // Keep synthetic repositories and read-only inspection independent of user
   // Git redirection, global filters, hooks and credential configuration.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
-  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull, GIT_OPTIONAL_LOCKS: '0' });
+  // Git for Windows accepts /dev/null, but rejects Node's \\.\nul device path.
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_OPTIONAL_LOCKS: '0' });
   return (await execute('git', args, { cwd: repo, env, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 })).stdout;
 }
 
