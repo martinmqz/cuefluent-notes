@@ -4,7 +4,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { normalizeStat, readHandleStat, readPathStat } from '../src/storage/stat.mjs';
-import { createPrivateDirectory, fileIdentity, sameIdentity } from '../src/storage/paths.mjs';
+import { assertChain, createPrivateDirectory, fileIdentity, inspectAncestors, sameIdentity } from '../src/storage/paths.mjs';
 import { readSnapshot } from '../src/storage/files.mjs';
 import { establishWindowsPrivacy } from '../src/storage/platform.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
@@ -64,6 +64,49 @@ test('numeric metadata stays exact and type predicates bind to bigint mode', () 
   assert.equal(Object.isFrozen(raw), true);
 });
 
+test('signed high-bit filesystem IDs preserve their full unsigned identity', () => {
+  for (const [signed, unsigned] of [
+    [-9_223_372_036_854_775_808n, 9_223_372_036_854_775_808n],
+    [-9_223_372_036_854_775_425n, 9_223_372_036_854_776_191n],
+    [-1n, 18_446_744_073_709_551_615n],
+  ]) {
+    const stat = normalizeStat(rawStat({ dev: signed, ino: signed, mtimeNs: -1n }));
+    const expected = fileIdentity(normalizeStat(rawStat({ dev: unsigned, ino: unsigned })));
+    assert.equal(stat.dev, unsigned);
+    assert.equal(stat.ino, unsigned);
+    assert.equal(stat.mtimeNs, -1n);
+    assert.equal(sameIdentity(stat, expected), true);
+    const changed = normalizeStat(rawStat({ dev: unsigned, ino: unsigned ^ 1n }));
+    assert.equal(sameIdentity(changed, expected), false);
+  }
+});
+
+test('filesystem IDs outside signed or unsigned 64-bit range cannot wrap into another identity', () => {
+  for (const field of ['dev', 'ino']) {
+    for (const value of [-(1n << 63n) - 1n, 1n << 64n, (1n << 64n) + 2n, 2, '2']) {
+      assert.throws(() => normalizeStat(rawStat({ [field]: value })), { code: 'STAT_EXACT_REQUIRED' });
+    }
+  }
+});
+
+test('ancestor inspection accepts signed overlayfs inode IDs and still detects replacement', async (t) => {
+  const directory = path.resolve('synthetic', 'store');
+  let inode = -9_223_372_036_854_775_425n;
+  t.mock.method(fs, 'lstat', async (_file, options) => {
+    assert.deepEqual(options, { bigint: true });
+    return rawStat({ ino: inode, mode: 0o040700n });
+  });
+  const chain = await inspectAncestors(directory);
+  assert.equal(chain.at(-1).path, directory);
+  assert.ok(chain.length > 1);
+  assert.ok(chain.every(entry => entry.inode === '9223372036854776191'));
+  await assertChain(chain);
+  inode = 9_223_372_036_854_776_191n;
+  await assertChain(chain);
+  inode += 1n;
+  await assert.rejects(assertChain(chain), { code: 'PATH_CHANGED' });
+});
+
 test('nanosecond timestamps retain differences hidden by millisecond conversion', () => {
   const first = normalizeStat(rawStat());
   const second = normalizeStat(rawStat({ mtimeNs: first.mtimeNs + 1n, ctimeNs: first.ctimeNs + 1n }));
@@ -84,15 +127,15 @@ test('unrepresentable numeric fields and Number Stats fail closed', () => {
 });
 
 test('each read helper requests exactly one bigint observation', async (t) => {
-  const raw = rawStat();
+  const raw = rawStat({ ino: -9_223_372_036_854_775_425n });
   const calls = [];
   t.mock.method(fs, 'lstat', async (file, options) => { calls.push({ file, options }); return raw; });
   const observed = await readPathStat('/synthetic/stat-only');
   assert.deepEqual(calls, [{ file: '/synthetic/stat-only', options: { bigint: true } }]);
-  assert.equal(observed.ino, 2n);
+  assert.equal(observed.ino, 9_223_372_036_854_776_191n);
   let count = 0;
   const handle = { async stat(options) { assert.deepEqual(options, { bigint: true }); count++; return raw; } };
-  assert.equal((await readHandleStat(handle)).ino, 2n);
+  assert.equal((await readHandleStat(handle)).ino, observed.ino);
   assert.equal(count, 1);
 });
 

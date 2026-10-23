@@ -93,6 +93,36 @@ async function externalProbe(identity) {
 
 const gateTest = (name, fn) => test(name, { timeout: windows ? 30_000 : 10_000 }, fn);
 
+test('Linux gates retain high-bit inode identities through publication and ownership', { skip: process.platform !== 'linux' }, t => {
+  const directory = setup(t), file = join(directory, 'high-bit.sqlite');
+  let signed = true, replaced = false;
+  const remap = stat => {
+    if (stat.isFile()) {
+      const inode = BigInt.asUintN(64, stat.ino) | (1n << 63n);
+      stat.ino = signed ? BigInt.asIntN(64, inode) : inode;
+      if (replaced) stat.ino ^= 1n;
+    }
+    return stat;
+  };
+  for (const method of ['lstatSync', 'fstatSync']) {
+    const original = nativeFs[method];
+    t.mock.method(nativeFs, method, (...args) => remap(original(...args)));
+  }
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const identity = initializeGate(file, 'high-bit');
+  assert.ok(BigInt(identity.inode) >= (1n << 63n));
+  assert.deepEqual(inspectExistingGate(file, 'high-bit'), identity);
+  assert.deepEqual(probeGate(identity), { available: true });
+  signed = false;
+  const owner = tryAcquireExistingGate(identity).acquired;
+  assert.ok(owner);
+  try { assert.deepEqual(probeGate(identity), { busy: true }); }
+  finally { owner.release(); }
+  replaced = true;
+  assert.throws(() => probeGate(identity), { code: 'GATE_REPLACED' });
+});
+
 test('macOS gates reject file and parent ACL grants without a caller-supplied guard', { skip: process.platform !== 'darwin' }, t => {
   const directory = setup(t), file = join(directory, 'acl.sqlite');
   const gate = gates.initializeGate(file, 'acl');

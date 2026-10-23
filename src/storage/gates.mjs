@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { isMainThread } from 'node:worker_threads';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertMacosPrivateAccess } from './macos-acl.mjs';
+import { normalizeFilesystemId } from './stat.mjs';
 
 const MAX_GATE_BYTES = 64 * 1024;
 const MARKER_SQL = 'CREATE TABLE gate_marker (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), id TEXT NOT NULL, stage TEXT NOT NULL)';
@@ -106,7 +107,7 @@ function inspect(path, { guardPath, missing = false } = {}, allowedLinks = 1n) {
     if (error instanceof GateError) throw error;
     fail('GATE_STORAGE_ERROR', `Cannot inspect gate path: ${current}`, error);
   }
-  return Object.freeze({ path, device: String(stat.dev), inode: String(stat.ino) });
+  return Object.freeze({ path, device: String(normalizeFilesystemId(stat.dev)), inode: String(normalizeFilesystemId(stat.ino)) });
 }
 
 function descriptor(value) {
@@ -244,7 +245,7 @@ export function initializeGate(path, id, options = {}) {
     try {
       fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
       const stat = fstatSync(fd, { bigint: true });
-      identity = Object.freeze({ path: temporary, id, device: String(stat.dev), inode: String(stat.ino) });
+      identity = Object.freeze({ path: temporary, id, device: String(normalizeFilesystemId(stat.dev)), inode: String(normalizeFilesystemId(stat.ino)) });
     } finally { if (fd !== undefined) closeSync(fd); }
     if (options.initializePath) {
       // A Windows elevated token can make a newly created inode owned by the
@@ -281,7 +282,7 @@ export function initializeGate(path, id, options = {}) {
       // here; this is still our identity-checked unpublished stage.
       flush = openSync(temporary, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
       const stat = fstatSync(flush, { bigint: true });
-      if (String(stat.dev) !== identity.device || String(stat.ino) !== identity.inode) fail('GATE_REPLACED', 'Staged gate identity changed before flush.');
+      if (String(normalizeFilesystemId(stat.dev)) !== identity.device || String(normalizeFilesystemId(stat.ino)) !== identity.inode) fail('GATE_REPLACED', 'Staged gate identity changed before flush.');
       fsyncSync(flush);
     } finally { if (flush !== undefined) closeSync(flush); }
     verify(identity, options);
