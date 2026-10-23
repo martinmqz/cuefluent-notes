@@ -2,138 +2,114 @@
 
 # Repository guidance
 
-This guidance is for developing Cuefluent Notes. Installed product instructions
-live in [SKILL.md](/SKILL.md); setup is in the [README](/README.md). Keep detailed
-user workflows in the skill and its references. Paths and links beginning with
-`/` in this guidance are relative to the repository root, not the filesystem root.
+This repository develops Cuefluent Notes v2. Paths beginning with `/` below are
+repository-relative. Product instructions belong in `SKILL.md` and `references/`;
+development guidance belongs here. Keep private plans and verification records
+in ignored `.local/`, organized by purpose.
 
 ## Load the relevant rules
 
-Apply the relevant rules before implementation or review. Path scopes live only
-in each rule's `paths` frontmatter; apply all matching rules when scopes overlap.
-If a generated copy is already in context, use it without loading the canonical
-duplicate. Otherwise read the relevant canonical rule below. Codex and Claude
-must load these explicitly; `.agents/rules/` is not automatically loaded.
+Read all matching canonical rules before implementation or review. Their `paths`
+frontmatter owns routing. Codex and Claude must load them explicitly; an already
+loaded generated copy is sufficient.
 
-- [Runtime and storage](/.agents/rules/runtime.md): runtime, consent, evidence
-  integrity, and private storage.
-- [Note guidance and examples](/.agents/rules/note-guidance.md): product
-  instructions, advisory note checks, and synthetic examples.
-- [Distribution and releases](/.agents/rules/distribution.md): self-contained
+- [Runtime and storage](/.agents/rules/runtime.md): new source, settings, queues,
+  attempt ownership, filesystem integrity, and runtime tests.
+- [Note guidance and examples](/.agents/rules/note-guidance.md): installed workflows,
+  Markdown compatibility, and synthetic examples.
+- [Distribution and releases](/.agents/rules/distribution.md): dependencies,
   packages, installation, CI, and immutable releases.
 
-When editing a rule's canonical source or its generated adapters, read that rule
-and check its frontmatter against the affected repository paths.
+When changing a canonical rule, check its scopes and regenerate its adapters.
 
-## Shared boundaries
+## Product and integrity boundaries
 
-- Preserve independent collection and processing consent. Collection starts off;
-  processing starts Manual. Prompted requires approval, and Automatic stays within
-  the approved scope. Installation and hook trust enable neither. Read-only
-  requests and opt-outs override policy; keep interaction rules in `SKILL.md`.
-- Register bounded native metadata only where current policy allows it, including
-  processing-only bindings. Launch deterministic collection workers only after
-  fresh collection consent. Synchronous hooks must never scan transcripts, call
-  models, write notes, block a prompt, or request a continuation. Automatic ingress
-  for unconfigured or excluded projects must produce zero filesystem writes.
-  Configured projects that Automatic capture does not cover, including those with
-  capture mode Manual, may record only the metadata-only session start (the source
-  identity and byte boundary the first hook of the session observes, written once
-  per settings version) that lets a typed command verify its chat.
-- Validate complete proposed settings on writes and refuse unsupported newer
-  schemas. The replacement workflow has no legacy migration or mixed-version
-  compatibility requirement; do not restore obsolete policy or completion-marker
-  code. The v0.7.1 tag preserves the reference implementation.
-- Preserve exact inspected hashes, bounded reads, path and link checks, locks,
-  and journal recovery. Never bypass a conflict by refreshing hashes, discarding
-  state, or choosing another lock directory. Preserve user edits.
-- Maintain one writer state per notes collection, including overlapping routes.
-  Preserve explicit file destinations and folder routing. Keep authored and
-  derived ownership separate, including during interrupted updates.
-- Keep both client packages self-contained, including runtime dependencies and
-  license notices. Change `SOURCE_FILES` in `scripts/package-inputs.mjs` only for intended
-  shipped content. Exclude repository guidance, development tools, tests, and
-  private planning from installed packages. Keep `references/` focused on installed
-  product workflows, command/format contracts, compatibility and limitations;
-  repository build/publication/CI guidance belongs outside that folder.
-- Keep real user notes, private evidence, and private capture configuration outside
-  the repository. Use synthetic fixtures and disposable test locations by default;
-  test a user's installed plugin or capture settings only when explicitly
-  authorized.
-- Keep implementation plans, review notes, synthetic-test results, dated validation
-  logs, internal process history and machine-specific paths in ignored `.local/`,
-  never in committed documentation or installed packages. This does not permit
-  real user notes, captured session evidence or private capture configuration in
-  the checkout, even during authorized installed-plugin checks.
-- Keep secrets and credentials outside the repository, including ignored paths;
-  never include them in source, tests, logs or evidence.
-- Development and build work does not authorize installation, hook trust,
-  capture configuration changes, merging, publication, or visibility changes.
-  Perform those actions only within the user's explicit authorization.
+- V2 is a fresh implementation in `src/` with tests in `test/`. Reviewed history
+  may inform design; do not copy legacy modules, import the former runtime, or add
+  migration, compatibility modes, deprecated aliases, or old capture state.
+  Preserve Git history and immutable published packages and checksums.
+- Tracking defaults to `manual`, saving to `review`, and activity logging to off.
+  They are independent. Tracking `auto` enrolls eligible new native chats;
+  processing is always explicit. Installation and hook trust authorize neither.
+  Explicit opt-outs and read-only requests take precedence.
+- Bind commands from native current-chat and invocation context. Cwd, a newest
+  transcript, an agent-supplied identity, and ordinary command mentions are not
+  identity evidence. Synchronous hooks may dispatch bounded native metadata but
+  never scan transcripts, call models, write notes, block prompts, or ask to continue.
+  Unconfigured and ineligible automatic ingress must make zero filesystem writes.
+- Collect complete chronological exchanges, preserving prompts, assistant text,
+  and tool arguments through ordered parts. Clip tool output only with explicit
+  notices. Do not treat EOF or Stop as proof that every row has persisted. Retain
+  durable late-output reconciliation and retries without requiring another prompt.
+- Keep one owner per native chat, assigned to the nearest configured project at
+  first binding and stable thereafter. Keep one pending run per project. Validate
+  whole settings documents and reject unsupported schema versions. Refuse changes
+  that orphan work or redirect a pending run's destination or saving mode. Pin
+  logging preferences for each run.
+- Processing uses a separate untracked session with only bounded note reads and
+  private draft tools. It has no shell, network, tracking, or note-save capability.
+  Hooks and unrelated plugins must be effectively disabled for that session.
+- Preserve exact inspected hashes, root and parent identities, source checkpoints,
+  and journal state. Never refresh a hash to bypass a conflict, discard queued input,
+  break a live lock by age, or choose a new lock directory to evade an owner.
+  Use OS-owned liveness and attempt fencing. Keep mutation gates short so collection
+  continues during model work and review. Coordinate overlapping note routes.
+- Preserve user Markdown and manual edits. Stage writes under names ending in
+  `.tmp`, never `.md`. A new unread target must be absent. An unchanged note keeps
+  its bytes and timestamps. Cleanup removes successfully handled private input
+  and completed drafts, never notes or native transcripts.
+- Private state, real notes, conversation evidence, and credentials stay outside
+  this checkout, including `.local/`. Tests use synthetic data and disposable
+  locations. Installed profiles, settings, plugin trust, and authentication may
+  be used or changed only within the user's explicit authorization.
+- Development does not authorize installation, merging, publication, release
+  replacement, or visibility changes. Preserve published copies even when source
+  versions differ.
 
 ## Development and verification
 
-Use native Windows, macOS, or Linux with Node.js 22+ and npm. The full source suite
-also needs Bash, Git, `unzip`, and `tar`; these maintenance tools are not installed
-plugin requirements. In PowerShell use `npm.cmd` if needed. PowerShell 7 and Git
-Bash hook checks skip locally when unavailable; Windows CI requires both. The
-hook test locates Bash from Git for Windows rather than a possible WSL launcher.
+Use the latest supported Node 26 patch and npm; `.node-version` and `engines` pin
+the tested baseline. Check current library releases when adding dependencies and
+pin exact versions with licenses. Foundation storage uses Node's built-in SQLite.
 
 ```sh
 npm ci --ignore-scripts
 npm run check:guidance
 npm test
-npm run check:examples
 ```
 
-Run relevant tests while iterating and the full suite for runtime changes.
-Changes to `SKILL.md` or workflow references can change product behavior: review
-the affected consent and workflow rules and run relevant checks even when no
-JavaScript changes. For editorial or repository-guidance changes, verify factual
-claims, links, scope routing, and whitespace; do not add tests that merely mirror
-prose. Review staged and new files too: plain `git diff --check` covers only
-unstaged tracked changes.
-CI runs Node 22 on Windows, Linux, and macOS and compares release checksums across
-all three. Keep test discovery and fixtures independent of POSIX paths, shebangs,
-chmod privacy, shell globbing, and directory listing order. Isolate temporary Git
-fixtures from user configuration and hooks. Keep CI permissions narrow and actions
-pinned. Guidance checks run separately from artifact-producing jobs and are
-skipped for tag releases.
+Run relevant tests while iterating and the complete v2 suite for runtime changes.
+Use observable failure cases: concurrent writers, interruption, stale attempts,
+path replacement, malformed/torn records, and preservation of manual edits. Do not
+add tests that restate editorial prose. Keep fixtures and discovery portable
+across Windows, macOS, and Linux. Windows privacy requires ACL verification;
+chmod is not evidence. Keep native client tests separate from deterministic tests.
 
-Report what was actually verified. Emitted hook context and package validation do
-not prove live client behavior, native prompt rendering, or Cuefluent search
-ranking. Keep CI coverage and evidence limits in the
-[maintainer guide](/.agents/publishing.md#ci-evidence-limits), and product limits in
-[verification](/references/verification.md). Check CI for the current PR revision;
-separate local results, pending checks, and checks from an earlier commit.
+Report actual coverage. Local macOS tests do not establish Windows/Linux behavior,
+reboot recovery, client desktop rendering, or Cuefluent search ranking. Native CLI
+envelopes do not prove production adapter correctness. Record dated validation in
+ignored `.local/`; public documentation describes supported behavior and limits.
+Check CI for the current revision when reporting it.
 
 ## Change and review workflow
 
-- Use Conventional Commits: `<type>(<scope>): <description>` with a scope, or
-  `<type>: <description>` without one; omit the parentheses when no scope is needed.
-  Choose an appropriate type, such as `feat`, `fix`, `docs`, `refactor`, `test`, or
-  `chore`. Apply this convention to squash commit messages too. Use `!` before the
-  colon for a breaking change, for example `feat!: change the storage schema`.
-- Name branches `<type>/<short-kebab-case-description>` with a matching purpose
-  prefix, such as `fix/hook-context-limit` or `docs/agent-guidance`.
-- Follow the requested branch and PR scope. Keep unrelated work separate. Do not
-  introduce PR cross-references, dependencies, or new process steps unless asked.
-- Self-review each slice, validate findings against the current code, fix confirmed
-  issues, and complete relevant checks before committing. Read both review
-  summaries and inline PR comments; a summary alone is not the full review.
-  Follow the user's requested review workflow without adding extra review sweeps.
-- When asked to commit and push, verify the remote result. Keep behavior
-  documentation aligned with code and link to canonical guidance instead of
-  duplicating detailed rules across files.
-- Edit source templates rather than generated `dist/` or marketplace content.
-  Preserve immutable published versions and checksums; follow
-  [publishing](/.agents/publishing.md) for release changes.
+- Use the existing checkout and requested branch. Create worktrees only on an
+  explicit user request. Keep unrelated changes separate.
+- Use Conventional Commits and branches named `<type>/<short-kebab-description>`.
+  Open pull requests as drafts; never mark ready without a user request.
+- Self-review each slice, fix confirmed findings, and run relevant checks. Follow
+  the user's independent-review workflow without extra broad sweeps. Review new
+  and staged files as well as tracked unstaged diffs.
+- Follow explicit commit/push scope and verify remote results when authorized.
+  Do not add AI attribution to commits, pull requests, or published material.
+- Edit canonical source and templates, never generated packages. Keep installed
+  product references separate from repository build and publication instructions.
 
 ## Maintaining this guidance
 
-Edit [the canonical guide](/.agents/guide.md), [adapter configuration](/.agents/config.yaml),
-and the scoped rules linked above. The exact generator version is pinned in
-`package.json` and `package-lock.json` as a development dependency.
+Edit [this guide](/.agents/guide.md), [adapter configuration](/.agents/config.yaml),
+and canonical rules. Regenerate `AGENTS.md`, Copilot instructions, and Cursor rules
+through the pinned generator; do not edit those outputs directly.
 
 ```sh
 npm run guidance:sync -- --dry-run
@@ -141,21 +117,7 @@ npm run guidance:sync
 npm run check:guidance
 ```
 
-Commit the source and generated outputs together. `AGENTS.md`,
-`.github/copilot-instructions.md`, `.cursor/rules/agent-guidance/*.mdc`, and
-`.github/instructions/agent-guidance/*.instructions.md` are generated; do not edit
-them directly. There is no `CLAUDE.md` adapter or nested guidance. Claude Code must
-support reading `AGENTS.md` when `CLAUDE.md` is absent; see its
-[changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
-Cursor uses root `AGENTS.md` plus scoped rules; Copilot keeps its repository-wide
-instructions for GitHub.com consumers as well as scoped rules.
-The [VS Code workspace settings](/.vscode/settings.json) select Copilot instruction
-files for the Local agent, disabling its additional `AGENTS.md` and linked-file
-auto-loading. Other agent harnesses use their own discovery rules; see
-[VS Code instruction support](https://code.visualstudio.com/docs/agent-customization/custom-instructions).
-
-`check:guidance` detects generated-file drift; it does not validate routing prose,
-links, factual claims, or live client activation. Review those separately. Keep
-the combined UTF-8 size of root `AGENTS.md` and all canonical scoped rules below
-32 KiB to leave room for client instruction loading. Contributor-guidance changes
-alone do not require a product version bump or release.
+Commit source and generated adapters together. There is no `CLAUDE.md` adapter or
+nested guidance. Keep root `AGENTS.md` plus canonical rules below 32 KiB. Generator
+checks detect drift; review links, scopes, factual claims, and native activation
+separately. Contributor guidance alone does not require a product release.

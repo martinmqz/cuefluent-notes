@@ -1,0 +1,7 @@
+{
+  "name": "cuefluent-notes",
+  "version": "__SOURCE_VERSION__",
+  "description": "Track selected chats and explicitly process their queued conversation into Markdown notes.",
+  "author": { "name": "Cuefluent" },
+  "license": "SUL-1.0"
+}
