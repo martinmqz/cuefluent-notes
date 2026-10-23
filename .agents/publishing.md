@@ -90,6 +90,33 @@ registered, and no hook trust, project settings, or authentication is changed.
 Native registration and hook review are separate explicit user actions. Copying
 a package enables neither tracking nor note processing.
 
+## Marketplace snapshots
+
+The Codex and Claude catalogs select the released 0.16.0 packages at
+`plugins/0.16.0/cuefluent-notes/` and `claude/0.16.0/cuefluent-notes/`.
+`packaging/releases/0.16.0/build.json` is the unchanged build receipt from the
+[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.16.0).
+Its inventory hashes bind every catalog package file, including dependencies.
+The unversioned package folders and root `release.json` retain the 0.15.1 release.
+
+For a catalog update, verify the published archive and receipt digests, extract
+into a fresh temporary directory, and use the verified copy tool above to add new
+versioned folders. Copy the published receipt unchanged under
+`packaging/releases/VERSION/build.json`. Point each catalog at its new folder;
+preserve all existing snapshots. Add matching `.gitattributes` entries to disable
+line-ending conversion and mark generated package files. The generated folders
+are intentionally ignored for source searches; stage only the new version's
+folders explicitly, including bundled dependencies.
+
+```sh
+node --test test/marketplace.test.mjs
+```
+
+This check resolves each catalog path and verifies the complete package against
+its published inventory hash. It runs offline and does not install a native
+plugin, change trust, or activate tracking. Keep the catalog update PR in draft
+until review is requested; native registration remains a separate user action.
+
 ## CI evidence limits
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action

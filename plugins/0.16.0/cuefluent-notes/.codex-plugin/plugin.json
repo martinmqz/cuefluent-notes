@@ -1,0 +1,22 @@
+{
+  "name": "cuefluent-notes",
+  "version": "0.16.0",
+  "description": "Track selected chats and explicitly process their queued conversation into Markdown notes.",
+  "author": {
+    "name": "Cuefluent"
+  },
+  "license": "SUL-1.0",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "Cuefluent Notes",
+    "shortDescription": "Track chats and turn selected conversation into Markdown notes.",
+    "developerName": "Cuefluent",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}
