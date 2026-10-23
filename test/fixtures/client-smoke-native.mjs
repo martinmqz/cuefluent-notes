@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { createInterface } from 'node:readline';
 const [mode] = process.argv.slice(2), trace = process.env.CUEFLUENT_SMOKE_TRACE;
 const record = value => fs.appendFileSync(trace, `${JSON.stringify(value)}\n`);
-record({ environment: Object.keys(process.env), args: process.argv.slice(2), ...(process.platform === 'win32' ? { windowsProfile: { homePairMatchesDisposableProfile: process.env.HOMEDRIVE + process.env.HOMEPATH === process.env.USERPROFILE, blankIdentity: process.env.USERDOMAIN === '' && process.env.USERNAME === '' } } : {}) });
+record({ environment: Object.keys(process.env), args: process.argv.slice(2), ...(process.platform === 'win32' ? { windowsProfile: { homePairMatchesDisposableProfile: process.env.HOMEDRIVE + process.env.HOMEPATH === process.env.USERPROFILE, blankIdentity: process.env.USERDOMAIN === '' && process.env.USERNAME === '' && process.env.LOGONSERVER === '' } } : {}) });
 if (mode === 'fail') process.exit(7);
 else if (mode === 'output') process.stdout.write('x'.repeat(65536));
 else if (mode === 'wait') setInterval(() => {}, 1000);

@@ -30,6 +30,8 @@ async function fixture(t, { saving = 'review' } = {}) {
   let launches = 0, handle, prompt = 0;
   const execute = async (action, extra = {}) => {
     const result = await executeControl(store, { client: 'codex', sessionId: 'synthetic', promptId: `prompt-${++prompt}`, cwd, sourcePath: null, action }, {
+      // This flow verifies retry semantics, not cold-start speed on hosted Windows.
+      startupTimeoutMs: process.platform === 'win32' ? 15_000 : undefined,
       reconcileChat: async () => ({ status: 'caught-up' }),
       launchProcessing: context => {
         launches++;

@@ -62,7 +62,7 @@ export function smokeEnvironment(root, inherited = process.env, platform = proce
   requireSmoke(platform !== 'win32' || /^[A-Za-z]:\\$/.test(windowsRoot), 'CLIENT_PROFILE_INVALID');
   // Node/Windows fills omitted home and identity keys from the caller. Pin the
   // home pair explicitly and use empty identity keys to prevent that fallback.
-  const windowsProfile = platform === 'win32' ? { HOMEDRIVE: windowsRoot.slice(0, -1), HOMEPATH: home.slice(windowsRoot.length - 1), USERDOMAIN: '', USERNAME: '' } : {};
+  const windowsProfile = platform === 'win32' ? { HOMEDRIVE: windowsRoot.slice(0, -1), HOMEPATH: home.slice(windowsRoot.length - 1), USERDOMAIN: '', USERNAME: '', LOGONSERVER: '' } : {};
   return { ...env, ...windowsProfile, PATH: [path.dirname(process.execPath), ...systemPath].join(path.delimiter), HOME: home, USERPROFILE: home,
     CODEX_HOME: path.join(home, '.codex'), CLAUDE_CONFIG_DIR: path.join(home, '.claude'),
     APPDATA: path.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(home, 'AppData', 'Local'),

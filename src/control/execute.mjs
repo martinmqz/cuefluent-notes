@@ -10,7 +10,7 @@ import { readProjectStatus } from './status.mjs';
 /** Trusted invocation only: native binders own chat/action identity. A model tool
  * may trigger native-context resolution, but never supplies these fields. Runs
  * execute in a separate worker; client delivery deadlines cannot launch another. */
-export async function executeControl(store, invocation, { reconcileChat, launchProcessing } = {}) {
+export async function executeControl(store, invocation, { reconcileChat, launchProcessing, startupTimeoutMs } = {}) {
   const action = parseAction(invocation?.action);
   if (!store) return { state: 'unconfigured', message: 'Set up Cuefluent Notes for this project first.' };
   if (!['claude', 'codex'].includes(invocation?.client)) fail('NATIVE_CONTEXT_INVALID', 'A native command binding is required.');
@@ -48,5 +48,5 @@ export async function executeControl(store, invocation, { reconcileChat, launchP
     if (action === 'save' && (run.phase === 'drafting' || run.settings.saving !== 'review')) return status();
   }
   const workerAction = action === 'skip' ? 'skip' : action === 'save' ? 'save' : 'process';
-  return launchOwnedAttempt(store, project.id, { runId: run.id, launch: context => launchProcessing({ ...context, action: workerAction }) });
+  return launchOwnedAttempt(store, project.id, { runId: run.id, startupTimeoutMs, launch: context => launchProcessing({ ...context, action: workerAction }) });
 }

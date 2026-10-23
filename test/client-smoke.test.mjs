@@ -23,10 +23,11 @@ test('smoke profiles discard credentials, client overrides, private PATH and rea
   assert.equal(JSON.stringify(env).includes('/synthetic/real-home'), false);
   assert.equal(env.NODE_OPTIONS, undefined);
   for (const key of ['HOME', 'USERPROFILE', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'APPDATA', 'TMPDIR']) assert.equal(path.relative(root, env[key]).startsWith('..'), false);
-  const windows = smokeEnvironment(String.raw`C:\Synthetic smoke\fresh`, { SystemRoot: 'C:\\Windows', PATH: 'C:\\Private tools', ANTHROPIC_API_KEY: 'SYNTHETIC_SECRET' }, 'win32');
+  const windows = smokeEnvironment(String.raw`C:\Synthetic smoke\fresh`, { SystemRoot: 'C:\\Windows', PATH: 'C:\\Private tools', LOGONSERVER: 'SYNTHETIC_SERVER', ANTHROPIC_API_KEY: 'SYNTHETIC_SECRET' }, 'win32');
   assert.equal(windows.SYSTEMROOT, 'C:\\Windows'); assert.equal(windows.PATH.includes('Private tools'), false);
   assert.equal(windows.HOMEDRIVE + windows.HOMEPATH, windows.USERPROFILE);
   assert.equal(windows.USERDOMAIN, ''); assert.equal(windows.USERNAME, '');
+  assert.equal(windows.LOGONSERVER, '');
 });
 
 test('native pins select exact reviewed versions and refuse unsupported platforms', () => {
