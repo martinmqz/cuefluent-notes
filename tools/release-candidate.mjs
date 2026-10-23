@@ -122,7 +122,9 @@ export async function inspectChecksRun(c) {
     const workflow = await c.request(`${c.api}/actions/workflows/ci.yml`);
     requireRelease(positive(workflow.id) && workflow.path === '.github/workflows/ci.yml');
     const run = await c.request(`${c.api}/actions/runs/${c.runId}`);
-    requireRelease(run.id === c.runId && run.workflow_id === workflow.id && run.path === workflow.path &&
+    // Run paths may include an @ref suffix; workflow metadata paths do not.
+    const runPath = typeof run.path === 'string' ? run.path.split('@', 1)[0] : null;
+    requireRelease(run.id === c.runId && run.workflow_id === workflow.id && runPath === workflow.path &&
       run.repository?.id === c.repositoryId && run.repository?.full_name === c.repository &&
       run.head_repository?.id === c.repositoryId && run.head_repository?.full_name === c.repository &&
       run.status === 'completed' && run.conclusion === 'success' && positive(run.run_attempt) && SHA.test(run.head_sha) &&

@@ -150,6 +150,24 @@ test('manual Checks evidence can come from main or the exact release tag at its 
   }
 });
 
+test('release accepts ref-qualified workflow paths for PR, main and tag evidence', async t => {
+  const cases = [
+    ['pull_request', 'feat/change', 'refs/pull/9/merge'],
+    ['workflow_dispatch', 'main', 'main'],
+    ['workflow_dispatch', 'v0.16.0', 'v0.16.0'],
+    ['workflow_dispatch', 'v0.16.0', 'refs/tags/v0.16.0'],
+  ];
+  for (const [event, branch, ref] of cases) await t.test(ref, async t => {
+    const f = await fixture(t, event); f.run.path = `.github/workflows/ci.yml@${ref}`;
+    f.run.head_branch = branch;
+    for (const artifact of f.artifacts) artifact.workflow_run.head_branch = branch;
+    await selectReleaseCandidate(f.options); await f.populate();
+    const evidence = await verifyReleaseCandidate(f.options);
+    assert.equal(evidence.run.workflowId, 8); assert.equal(evidence.run.event, event);
+    assert.equal(evidence.source.checkoutTree, tree);
+  });
+});
+
 test('manual recovery refuses a different branch, tag or commit, and obsolete push-run evidence', async t => {
   const cases = [
     { name: 'push run', event: 'push', branch: 'main', commit: tagCommit },
@@ -176,6 +194,11 @@ test('selection refuses failed, skipped, foreign, missing, duplicate, expired an
     f => { f.run.head_repository = { id: 99, full_name: repository }; },
     f => { f.run.workflow_id = 99; },
     f => { f.run.path = '.github/workflows/other.yml'; },
+    f => { f.run.path = '.github/workflows/other.yml@main'; },
+    f => { f.run.path = '.github/workflows/ci.yml.extra@main'; },
+    f => { f.run.path = null; },
+    f => { f.run.path = { path: '.github/workflows/ci.yml' }; },
+    f => { f.run.path = '.github/workflows/ci.yml@main'; f.run.workflow_id = 99; },
     f => { f.run.event = 'workflow_run'; },
     f => { f.jobValues.at(-1).conclusion = 'skipped'; },
     f => { f.jobValues[0].conclusion = 'failure'; },

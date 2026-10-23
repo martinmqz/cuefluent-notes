@@ -41,7 +41,7 @@ async function fixture(t) {
   const unexpectedCall = text => { unexpected.push(text); assert.fail(text); };
   const request = async route => {
     requests.push(route);
-    if (route === `${api}/actions/workflows/ci.yml`) return { id: 9, path: run.path };
+    if (route === `${api}/actions/workflows/ci.yml`) return { id: 9, path: '.github/workflows/ci.yml' };
     if (route === `${api}/actions/workflows/ci.yml/runs?event=workflow_dispatch&head_sha=${target}&per_page=100&page=1`)
       return structuredClone({ total_count: state.manualRuns.length, workflow_runs: state.manualRuns });
     if (route === `${api}/commits/${target}/pulls?per_page=100&page=1`) return structuredClone(state.pulls);
@@ -92,7 +92,8 @@ async function fixture(t) {
 const sameArgs = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 
 test('main pushes verify one digest-bound primary artifact and reuse the successful PR tree', async t => {
-  const f = await fixture(t), selected = await selectMainEvidence(f.options);
+  const f = await fixture(t); f.state.run.path = '.github/workflows/ci.yml@refs/pull/7/merge';
+  const selected = await selectMainEvidence(f.options);
   assert.equal(selected.artifact.id, 50);
   assert.equal(await fs.readFile(f.options.env.GITHUB_OUTPUT, 'utf8'), 'artifact_id=50\nrun_id=42\n');
   await f.download();
