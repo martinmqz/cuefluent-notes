@@ -6,6 +6,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { verifyBuildArchives, compareBuilds } from '../tools/ci.mjs';
+import { EXPECTED_CHECK_JOBS } from '../tools/release-candidate.mjs';
 import { packageSource } from './fixtures/package-source.mjs';
 import YAML from 'yaml';
 
@@ -29,11 +30,12 @@ test('native shards and client smoke start independently and retain the required
   }
   assert.equal(rows.length, 6);
   for (const platform of smoke.strategy.matrix.os) names.add(smoke.name.replace('${{ matrix.os }}', platform));
+  assert.deepEqual([...names].sort(), [...EXPECTED_CHECK_JOBS].sort(), 'Release evidence must require every workflow job.');
   for (const required of ['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
   assert.deepEqual(reproducibility.needs, ['guidance', 'test', 'client-smoke']);
   assert.equal(reproducibility.if, '${{ always() && !cancelled() }}');
   for (const step of source.steps.filter(step => step.run === 'npm run check:examples' || step.run === 'node tools/ci.mjs build' || step.uses?.startsWith('actions/upload-artifact@'))) assert.equal(step.if, 'matrix.primary');
-  assert.equal(smoke.if, "${{ inputs.release_tag == '' }}");
+  assert.equal(smoke.if, undefined);
   assert(smoke.steps.some(step => step.run === 'node tools/client-smoke.mjs'));
   assert(!source.steps.some(step => /client-smoke/.test(step.run ?? '')));
 });
@@ -41,14 +43,11 @@ test('native shards and client smoke start independently and retain the required
 test('the final gate rejects failed, skipped or cancelled source shards and client smoke', async () => {
   const gate = (await checks()).jobs.reproducibility.steps.find(step => step.env?.TEST_RESULT);
   const script = /<<'NODE'\n([\s\S]*?)\nNODE\s*$/.exec(gate.run)?.[1]; assert.ok(script);
-  for (const tag of ['', 'v0.16.0']) {
-    const valid = { TEST_RESULT: 'success', GUIDANCE_RESULT: tag ? 'skipped' : 'success', CLIENT_SMOKE_RESULT: tag ? 'skipped' : 'success', RELEASE_TAG: tag };
-    await exec(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ...valid } });
-    for (const key of ['TEST_RESULT', 'GUIDANCE_RESULT', 'CLIENT_SMOKE_RESULT']) {
-      for (const result of ['success', 'failure', 'cancelled', 'skipped', '']) {
-        if (result === valid[key]) continue;
-        await assert.rejects(exec(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ...valid, [key]: result } }));
-      }
+  const valid = { TEST_RESULT: 'success', GUIDANCE_RESULT: 'success', CLIENT_SMOKE_RESULT: 'success' };
+  await exec(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ...valid } });
+  for (const key of Object.keys(valid)) {
+    for (const result of ['failure', 'cancelled', 'skipped', '']) {
+      await assert.rejects(exec(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ...valid, [key]: result } }));
     }
   }
 });
@@ -88,7 +87,22 @@ test('manual release candidate authorization requires confirmation on the main d
   const workflow = YAML.parse(await fs.readFile(path.resolve(import.meta.dirname, '../.github/workflows/release.yml'), 'utf8'));
   assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
   assert.equal(workflow.jobs.prepare.if, "${{ inputs.confirm && github.ref == 'refs/heads/main' }}");
-  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read', 'pull-requests': 'read' });
+  assert.equal(workflow.on.workflow_dispatch.inputs.checks_run_id.required, true);
+  assert.equal(workflow.jobs.prepare.uses, undefined);
+  assert.equal(workflow.jobs.prepare.strategy, undefined);
+  const steps = workflow.jobs.prepare.steps;
+  assert.deepEqual(steps.filter(step => step.run).map(step => step.run), ['node tools/release-candidate.mjs select', 'node tools/release-candidate.mjs verify']);
+  const download = steps.find(step => step.uses?.startsWith('actions/download-artifact@'));
+  assert.equal(download.with['artifact-ids'], '${{ steps.source.outputs.artifact_ids }}');
+  assert.equal(download.with['digest-mismatch'], 'error');
+  for (const value of Object.values(workflow.jobs.prepare.env)) assert.doesNotMatch(value, /\brunner\./, 'Runner context is unavailable in job env.');
+  const select = steps.find(step => step.run === 'node tools/release-candidate.mjs select');
+  const verify = steps.find(step => step.run === 'node tools/release-candidate.mjs verify');
+  assert.equal(select.env.CUEFLUENT_RELEASE_ROOT, '${{ runner.temp }}/${{ env.CUEFLUENT_RELEASE_NAME }}');
+  assert.equal(verify.env.CUEFLUENT_RELEASE_ROOT, select.env.CUEFLUENT_RELEASE_ROOT);
+  assert.equal(download.with.path, `${select.env.CUEFLUENT_RELEASE_ROOT}/artifacts`);
+  assert.equal(steps.find(step => step.uses?.startsWith('actions/upload-artifact@')).with.path, `${select.env.CUEFLUENT_RELEASE_ROOT}/candidate`);
 });
 
 test('candidate comparison verifies every archive and requires identical three-platform receipts', async t => {
@@ -126,12 +140,16 @@ test('candidate receipts carry the public version line and reject malformed or m
   }
 });
 
-test('release tag verification accepts any exact public version tag and keeps package, commit and main-history checks', async () => {
-  const text = await fs.readFile(path.resolve(import.meta.dirname, '../.github/workflows/ci.yml'), 'utf8');
-  const source = /if \(!\/(\^v[^/]+)\/\.test\(tag\)\)/.exec(text)?.[1]; assert.ok(source);
-  const pattern = new RegExp(source);
-  for (const tag of ['v0.16.0', 'v0.16.0-dev.0', 'v2.0.0', 'v10.4.1-rc.2', 'v0.16.0-0', 'v0.16.0-1.10', 'v0.16.0-01a', 'v0.16.0-01-a', 'v0.16.0-x-y-z.--']) assert.match(tag, pattern);
-  for (const tag of ['0.16.0', 'v0.16', 'v0.16.0+build.1', 'v01.16.0', 'v0.16.0 ', 'release-0.16.0', 'v0.16.0-01', 'v0.16.0-dev.01', 'v0.16.0-.', 'v0.16.0-.dev', 'v0.16.0-dev.', 'v0.16.0-dev..1']) assert.doesNotMatch(tag, pattern);
-  for (const end of ['\n', '\r', '\r\n', '\u2028', '\u2029']) assert.doesNotMatch(`v0.16.0-dev.0${end}`, pattern);
-  assert.match(text, /metadata\.version !== tag\.slice\(1\)/); assert.match(text, /refs\/tags\/\$\{tag\}\^\{commit\}/); assert.match(text, /'merge-base', '--is-ancestor', 'HEAD', 'origin\/main'/);
+test('checks run once per PR revision, with manual recovery and retained source evidence', async () => {
+  const workflow = await checks();
+  assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'workflow_dispatch']);
+  assert.deepEqual(workflow.on.pull_request.types, ['opened', 'synchronize', 'reopened']);
+  const steps = workflow.jobs.test.steps;
+  const record = steps.findIndex(step => step.run === 'node tools/ci.mjs record-source');
+  assert(record > steps.findIndex(step => step.run === 'node tools/ci.mjs build'));
+  assert.equal(steps[record].if, 'matrix.primary');
+  const upload = steps.findIndex(step => step.uses?.startsWith('actions/upload-artifact@'));
+  assert(upload > record);
+  assert.match(steps[upload].with.path, /source\.json/);
+  assert.equal(steps[upload].with['retention-days'], 30);
 });

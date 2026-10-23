@@ -58,6 +58,32 @@ export async function compareBuilds(root) {
   return { platforms: names.length, identical: true };
 }
 
+/** Bind retained candidates to the checkout actually tested, including PR merge
+ * commits. Keep run metadata out of the deterministic build receipt. */
+export async function recordBuildSource(root, { repoRoot = process.cwd(), env = process.env } = {}) {
+  const { bytes } = await verifyBuildArchives(root);
+  const git = args => execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const integer = value => /^[1-9][0-9]*$/.test(value ?? '') && Number.isSafeInteger(Number(value));
+  const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
+  requireCI(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.GITHUB_REPOSITORY ?? '') &&
+    ['GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'].every(key => integer(env[key])) &&
+    ['pull_request', 'workflow_dispatch', 'push'].includes(env.GITHUB_EVENT_NAME) &&
+    sha(env.GITHUB_SHA) && sha(env.CUEFLUENT_HEAD_SHA));
+  const isPR = env.GITHUB_EVENT_NAME === 'pull_request';
+  requireCI(!isPR || integer(env.CUEFLUENT_PULL_REQUEST));
+  const checkoutCommit = git(['rev-parse', 'HEAD']), checkoutTree = git(['rev-parse', 'HEAD^{tree}']);
+  requireCI(checkoutCommit === env.GITHUB_SHA);
+  if (isPR) requireCI(git(['show', '-s', '--format=%P', 'HEAD']).split(' ')[1] === env.CUEFLUENT_HEAD_SHA);
+  else requireCI(checkoutCommit === env.CUEFLUENT_HEAD_SHA);
+  git(['diff', '--exit-code', 'HEAD', '--']);
+  const source = { schema: 1, repository: env.GITHUB_REPOSITORY, repositoryId: Number(env.GITHUB_REPOSITORY_ID),
+    runId: Number(env.GITHUB_RUN_ID), runAttempt: Number(env.GITHUB_RUN_ATTEMPT), event: env.GITHUB_EVENT_NAME,
+    pullRequest: isPR ? Number(env.CUEFLUENT_PULL_REQUEST) : null, headSha: env.CUEFLUENT_HEAD_SHA,
+    checkoutCommit, checkoutTree, receiptSha256: digest(bytes) };
+  await fs.writeFile(path.join(root, 'source.json'), `${JSON.stringify(source, null, 2)}\n`, { flag: 'wx' });
+  return source;
+}
+
 export async function main(args) {
   if (args.length !== 1) requireCI(false);
   if (args[0] === 'build') {
@@ -66,6 +92,9 @@ export async function main(args) {
   } else if (args[0] === 'compare') {
     requireCI(typeof process.env.CUEFLUENT_ARTIFACT_ROOT === 'string' && path.isAbsolute(process.env.CUEFLUENT_ARTIFACT_ROOT));
     console.log(JSON.stringify(await compareBuilds(process.env.CUEFLUENT_ARTIFACT_ROOT)));
+  } else if (args[0] === 'record-source') {
+    requireCI(typeof process.env.CUEFLUENT_BUILD_ROOT === 'string' && path.isAbsolute(process.env.CUEFLUENT_BUILD_ROOT));
+    console.log(JSON.stringify(await recordBuildSource(process.env.CUEFLUENT_BUILD_ROOT)));
   } else requireCI(false);
 }
 if (import.meta.main) {
