@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { interruptRemoval } from '../fixtures/exact-removal-worker.mjs';
 import { setupProject } from '../../src/control/setup.mjs';
 import { createProject, validateSettings } from '../../src/core/settings.mjs';
 import { initializeStore, openStore, readSettings, updateSettings, withProject } from '../../src/storage/store.mjs';
@@ -189,6 +190,20 @@ test('SIGKILL after settings publication completes journal by exact equality wit
   const f = await fixture(t, { enabled: true }); await stopSetup(t, f, 'settings');
   const current = await f.current(), before = await fs.readFile(path.join(f.notes, 'logs/2026.md'));
   assert.equal(current.value.projects[0].activityLog.enabled, true);
+  const result = await setupProject({ ...f.options, expectedHash: current.hash });
+  assert.equal(result.recovered, true); assert.equal(result.settingsHash, current.hash);
+  assert.deepEqual(await fs.readFile(path.join(f.notes, 'logs/2026.md')), before);
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+});
+
+test('process exit after capturing the completed setup journal remains readable and exact setup retry finishes', async t => {
+  const f = await fixture(t, { enabled: true });
+  await interruptRemoval({ root: f.storeRoot, relative: 'config/setup.json', operation: 'setup', options: f.options });
+  const store = await openStore(f.storeRoot), current = await f.current();
+  const before = await fs.readFile(path.join(f.notes, 'logs/2026.md'));
+  const journal = await readJSON(store.pin, 'config/setup.json');
+  assert.equal(journal.value.logs.status, 'valid');
+  await assert.rejects(fs.lstat(path.join(f.storeRoot, 'config/setup.json')), { code: 'ENOENT' });
   const result = await setupProject({ ...f.options, expectedHash: current.hash });
   assert.equal(result.recovered, true); assert.equal(result.settingsHash, current.hash);
   assert.deepEqual(await fs.readFile(path.join(f.notes, 'logs/2026.md')), before);

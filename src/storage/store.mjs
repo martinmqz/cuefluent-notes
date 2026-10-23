@@ -8,7 +8,7 @@ import {
   assertAbsolute, assertChain, assertDirectory, assertPrivatePlacement, assertRegularFile,
   createPrivateDirectory, inspectAncestors, lstatOrNull, pinDirectory,
 } from './paths.mjs';
-import { readJSON, writeJSON, reclaimAtomicStages } from './files.mjs';
+import { readJSON, readSnapshot, writeJSON, reclaimAtomicStages } from './files.mjs';
 import { assertGatePlacement, initializeGate, inspectExistingGate, probeGate, withShortGate } from './gates.mjs';
 
 const LAYOUT = 'store/layout.json';
@@ -243,11 +243,9 @@ async function retainedFacts(store, settings, proposed) {
       if (!Object.hasOwn(layout.value.projects, project.id)) fail('STORE_LAYOUT_INVALID', 'The retained project has no mutation gate.');
       await withShortGate(layout.value.projects[project.id].stateGate, gateOptions, () => reclaimAtomicStages(store.pin, `store/projects/${projectKey(project.id)}/chats`, { matchesTarget: name => /^[a-f0-9]{64}\.json$/.test(name), maxBytes: 64 * 1024 }));
     }
-    const run = await lstatOrNull(path.join(directory, 'run.json'));
-    if (run) {
-      assertRegularFile(path.join(directory, 'run.json'), run, { private: true });
-      pendingRuns.push(project.id);
-    }
+    const projectDirectory = await lstatOrNull(directory);
+    const run = projectDirectory ? await readSnapshot(store.pin, `store/projects/${projectKey(project.id)}/run.json`, { missing: true }) : null;
+    if (run) pendingRuns.push(project.id);
     if (run || await hasDirectoryEntries(path.join(directory, 'chats'))) retainedProjectIds.push(project.id);
   }
   return { retainedProjectIds, pendingRuns };

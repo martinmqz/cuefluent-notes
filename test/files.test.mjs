@@ -5,13 +5,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { createPrivateDirectory, pinDirectory, assertPrivatePlacement, canonicalSelection } from '../src/storage/paths.mjs';
-import { hashBytes, readSnapshot, readJSON, writeAtomic, writeJSON, reclaimAtomicStages } from '../src/storage/files.mjs';
+import { hashBytes, readSnapshot, readJSON, writeAtomic, writeJSON, removeExact, removalContainerName, reclaimAtomicStages } from '../src/storage/files.mjs';
+
+import { establishWindowsPrivacy } from '../src/storage/platform.mjs';
+import { interruptRemoval } from './fixtures/exact-removal-worker.mjs';
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-files-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const pin = await createPrivateDirectory(path.join(root, 'private'));
   return { root, pin };
+}
+
+async function privateFixtureFile(file, bytes) {
+  await fs.writeFile(file, bytes, { mode: 0o600 });
+  establishWindowsPrivacy(file);
 }
 
 test('read-only lookup does not create absent settings or directories', async t => {
@@ -33,6 +41,138 @@ test('hash checks preserve edits and unchanged publication preserves the timesta
   await assert.rejects(writeAtomic(pin, 'note.md', Buffer.from('draft\n'), { expectedHash: inspected.hash }), { code: 'WRITE_CONFLICT' });
   assert.equal((await readSnapshot(pin, 'note.md')).bytes.toString(), 'manual edit\n');
   assert.deepEqual(await fs.readdir(pin.root), ['note.md']);
+});
+
+test('exact removal deletes the inspected file and preserves a replacement at its final namespace operation', async t => {
+  const clean = await fixture(t), bytes = Buffer.from('Synthetic original.');
+  await writeAtomic(clean.pin, 'state.json', bytes, { expectedHash: null });
+  await removeExact(clean.pin, 'state.json', hashBytes(bytes));
+  assert.equal(await readSnapshot(clean.pin, 'state.json', { missing: true }), null);
+  assert.deepEqual(await fs.readdir(clean.pin.root), []);
+  for (const replacement of [Buffer.from('Synthetic replacement.'), bytes]) {
+    const { pin } = await fixture(t), target = path.join(pin.root, 'state.json'), archived = path.join(pin.root, 'original.json');
+    await writeAtomic(pin, 'state.json', bytes, { expectedHash: null });
+    const unlink = fs.unlink, rename = fs.rename; let replaced = false;
+    const replace = async () => {
+      if (replaced) return;
+      replaced = true; await rename(target, archived); await privateFixtureFile(target, replacement);
+    };
+    const unlinkInjection = t.mock.method(fs, 'unlink', async (file, ...args) => { if (file === target) await replace(); return unlink(file, ...args); });
+    const renameInjection = t.mock.method(fs, 'rename', async (from, to, ...args) => { if (from === target) await replace(); return rename(from, to, ...args); });
+    try { await assert.rejects(removeExact(pin, 'state.json', hashBytes(bytes)), { code: 'WRITE_CONFLICT' }); }
+    finally { unlinkInjection.mock.restore(); renameInjection.mock.restore(); }
+    assert.equal(replaced, true); assert.deepEqual(await fs.readFile(target), replacement); assert.deepEqual(await fs.readFile(archived), bytes);
+  }
+});
+
+for (const boundary of ['capture', 'restore-link']) {
+  test(`exact removal recovery is read-only after process exit at ${boundary} and an exact writer resumes`, async t => {
+    const { pin } = await fixture(t), bytes = Buffer.from('Synthetic pending run.'), next = Buffer.from('Synthetic next attempt.');
+    await writeAtomic(pin, 'run.json', bytes, { expectedHash: null });
+    await interruptRemoval({ root: pin.root, relative: 'run.json', expectedHash: hashBytes(bytes) });
+    if (boundary === 'restore-link') await interruptRemoval({ root: pin.root, relative: 'run.json', expectedHash: hashBytes(bytes), operation: 'write', boundary, options: { bytes: next.toString('base64') } });
+    const before = await fs.readdir(pin.root);
+    const mutations = ['writeFile', 'mkdir', 'rmdir', 'rename', 'unlink', 'link'].map(method => t.mock.method(fs, method, () => assert.fail('Read-only recovery must never write.')));
+    try {
+      const snapshot = await readSnapshot(pin, 'run.json');
+      assert.deepEqual(snapshot.bytes, bytes);
+      assert.deepEqual(await fs.readdir(pin.root), before);
+      const publicPin = await pinDirectory(pin.root);
+      if (boundary === 'capture') assert.equal(await readSnapshot(publicPin, 'run.json', { missing: true }), null);
+      else await assert.rejects(readSnapshot(publicPin, 'run.json'), { code: 'PATH_UNSAFE' });
+    } finally { for (const mocked of mutations) mocked.mock.restore(); }
+    await assert.rejects(writeAtomic(pin, 'run.json', next, { expectedHash: null }), { code: 'WRITE_CONFLICT' });
+    await writeAtomic(pin, 'run.json', next, { expectedHash: hashBytes(bytes) });
+    assert.deepEqual((await readSnapshot(pin, 'run.json')).bytes, next);
+    assert.deepEqual(await fs.readdir(pin.root), ['run.json']);
+    assert.equal((await fs.lstat(path.join(pin.root, 'run.json'))).nlink, 1);
+  });
+}
+
+test('captured metadata resumes removal and an empty post-unlink container does not hide absence', async t => {
+  for (const boundary of ['capture', 'unlink']) {
+    const { pin } = await fixture(t), bytes = Buffer.from('Synthetic exact metadata.');
+    await writeAtomic(pin, 'state.json', bytes, { expectedHash: null });
+    await interruptRemoval({ root: pin.root, relative: 'state.json', expectedHash: hashBytes(bytes), boundary });
+    if (boundary === 'capture') {
+      assert.deepEqual((await readSnapshot(pin, 'state.json')).bytes, bytes);
+      await removeExact(pin, 'state.json', hashBytes(bytes));
+    } else {
+      assert.equal(await readSnapshot(pin, 'state.json', { missing: true }), null);
+      await writeAtomic(pin, 'state.json', bytes, { expectedHash: null });
+      await removeExact(pin, 'state.json', hashBytes(bytes));
+    }
+    assert.deepEqual(await fs.readdir(pin.root), []);
+  }
+});
+
+test('removal recovery preserves foreign inodes, changed bytes, extra artifacts and canonical collisions', async t => {
+  for (const change of ['inode', 'bytes', 'extra', 'canonical']) {
+    const { pin } = await fixture(t), bytes = Buffer.from('Synthetic original.');
+    await writeAtomic(pin, 'state.json', bytes, { expectedHash: null });
+    await interruptRemoval({ root: pin.root, relative: 'state.json', expectedHash: hashBytes(bytes) });
+    const directory = path.join(pin.root, removalContainerName('state.json')), capture = path.join(directory, (await fs.readdir(directory))[0]);
+    if (change === 'inode') { await fs.rename(capture, path.join(pin.root, 'retained.json')); await privateFixtureFile(capture, bytes); }
+    if (change === 'bytes') await fs.writeFile(capture, 'Synthetic changed.');
+    if (change === 'extra') await privateFixtureFile(path.join(directory, 'unknown'), 'Synthetic unknown.');
+    if (change === 'canonical') await privateFixtureFile(path.join(pin.root, 'state.json'), bytes);
+    const before = await fs.readFile(capture), entries = await fs.readdir(directory);
+    for (const operation of [() => readSnapshot(pin, 'state.json', { missing: true }), () => removeExact(pin, 'state.json', hashBytes(bytes)), () => writeAtomic(pin, 'state.json', bytes, { expectedHash: hashBytes(bytes) })]) {
+      await assert.rejects(operation(), { code: change === 'canonical' ? 'WRITE_CONFLICT' : 'REMOVAL_CONFLICT' });
+    }
+    assert.deepEqual(await fs.readFile(capture), before); assert.deepEqual(await fs.readdir(directory), entries);
+    if (change === 'canonical') assert.deepEqual(await fs.readFile(path.join(pin.root, 'state.json')), bytes);
+  }
+});
+
+test('moving a captured file to another parent cannot authorize recovery there', async t => {
+  const { pin } = await fixture(t), bytes = Buffer.from('Synthetic parent-bound metadata.');
+  await writeAtomic(pin, 'state.json', bytes, { expectedHash: null });
+  await interruptRemoval({ root: pin.root, relative: 'state.json', expectedHash: hashBytes(bytes) });
+  const other = await createPrivateDirectory(path.join(pin.root, 'other'));
+  const source = path.join(pin.root, removalContainerName('state.json')), moved = path.join(other.root, removalContainerName('state.json'));
+  await fs.rename(source, moved);
+  await assert.rejects(readSnapshot(other, 'state.json', { missing: true }), { code: 'REMOVAL_CONFLICT' });
+  await assert.rejects(writeAtomic(other, 'state.json', bytes, { expectedHash: hashBytes(bytes) }), { code: 'REMOVAL_CONFLICT' });
+  assert.deepEqual(await fs.readFile(path.join(moved, (await fs.readdir(moved))[0])), bytes);
+});
+
+test('retargeting a captured container within its parent cannot authorize another filename', async t => {
+  const { pin } = await fixture(t), bytes = Buffer.from('Synthetic target-bound metadata.');
+  await writeAtomic(pin, 'run.json', bytes, { expectedHash: null });
+  await interruptRemoval({ root: pin.root, relative: 'run.json', expectedHash: hashBytes(bytes) });
+  const source = path.join(pin.root, removalContainerName('run.json')), moved = path.join(pin.root, removalContainerName('other.json'));
+  await fs.rename(source, moved);
+  for (const operation of [() => readSnapshot(pin, 'other.json', { missing: true }), () => writeAtomic(pin, 'other.json', bytes, { expectedHash: hashBytes(bytes) }), () => removeExact(pin, 'other.json', hashBytes(bytes))]) {
+    await assert.rejects(operation(), { code: 'REMOVAL_CONFLICT' });
+  }
+  assert.deepEqual(await fs.readFile(path.join(moved, (await fs.readdir(moved))[0])), bytes);
+  await assert.rejects(fs.lstat(path.join(pin.root, 'other.json')), { code: 'ENOENT' });
+});
+
+test('a replacement during capture is restored without overwrite and restoration errors retain both conflicts', async t => {
+  for (const collision of [false, true]) {
+    const { pin } = await fixture(t), original = Buffer.from('Synthetic original.'), foreign = Buffer.from('Synthetic foreign.');
+    await writeAtomic(pin, 'state.json', original, { expectedHash: null });
+    const target = path.join(pin.root, 'state.json'), rename = fs.rename, link = fs.link;
+    const renamed = t.mock.method(fs, 'rename', async (from, to) => {
+      if (from === target) { await rename(target, path.join(pin.root, 'retained.json')); await privateFixtureFile(target, foreign); }
+      return rename(from, to);
+    });
+    const restored = t.mock.method(fs, 'link', async (from, to) => {
+      if (to === target) {
+        if (collision) { await privateFixtureFile(target, 'Synthetic newer replacement.'); return link(from, to); }
+        throw Object.assign(new Error('Synthetic restore refusal'), { code: 'EACCES' });
+      }
+      return link(from, to);
+    });
+    try { await assert.rejects(removeExact(pin, 'state.json', hashBytes(original)), error => error.code === 'WRITE_CONFLICT' && error.recoveryError.code === (collision ? 'EEXIST' : 'EACCES')); }
+    finally { renamed.mock.restore(); restored.mock.restore(); }
+    const directory = path.join(pin.root, removalContainerName('state.json'));
+    assert.deepEqual(await fs.readFile(path.join(directory, (await fs.readdir(directory))[0])), foreign);
+    assert.deepEqual(await fs.readFile(path.join(pin.root, 'retained.json')), original);
+    if (collision) assert.equal(await fs.readFile(target, 'utf8'), 'Synthetic newer replacement.');
+  }
 });
 
 test('two new-target publications cannot overwrite each other', async t => {

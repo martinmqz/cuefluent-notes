@@ -85,6 +85,30 @@ test('cleanup retry after durable progress preserves later appends and publishes
   });
 });
 
+for (const action of ['cleanup', 'skip']) {
+  test(`process exit after ${action} captures run metadata keeps status read-only and resumes the same run`, async t => {
+    const f = await fixture(t); await f.register('chat'); await f.append('chat', 'one');
+    const prepared = await prepareProcessing(f.store, 'project', { kind: 'chat', client: 'claude', sessionId: 'chat' }, { reconcileChat: async () => ({ status: 'caught-up' }) });
+    await launchOwnedAttempt(f.store, 'project', { runId: prepared.run.id, launch: f.launch(action === 'skip' ? 'capture-skip' : 'capture-run') });
+    assert.deepEqual(await f.children[0].exited, { code: 42, stderr: '' });
+    const { readProjectStatus } = await import('../src/control/status.mjs');
+    const mutations = ['writeFile', 'mkdir', 'rmdir', 'rename', 'unlink', 'link'].map(method => t.mock.method(fs, method, () => assert.fail('Status must never repair an interrupted removal.')));
+    try {
+      const status = await readProjectStatus(f.store, 'project');
+      assert.equal(status.run.id, prepared.run.id);
+    } finally { for (const mock of mutations) mock.mock.restore(); }
+    await launchOwnedAttempt(f.store, 'project', { runId: prepared.run.id, launch: f.launch(action === 'skip' ? 'resume-skip' : false) });
+    assert.deepEqual(await f.children[1].exited, { code: 0, stderr: '' });
+    const result = JSON.parse(await waitFile(path.join(f.root, 'outcome.json')));
+    assert.equal(result.runId, prepared.run.id); assert.equal(result.status, action === 'skip' ? 'skipped' : 'nothing-useful');
+    await withProject(f.store, 'project', async ({ directory }) => {
+      assert.equal(await readJSON(f.store.pin, `${directory}/run.json`, { missing: true }), null);
+      assert.equal((await fs.readdir(path.join(f.store.root, directory))).some(name => name.startsWith('.cuefluent-remove.')), false);
+    });
+    assert.equal((await inspectQueue(f.store.pin, queueRelative('claude', 'chat'))).records, action === 'skip' ? 1 : 0);
+  });
+}
+
 test('successful nothing-useful processing removes an untracked empty queue and retains its opt-out', async t => {
   const f = await fixture(t); await f.register('chat', 'untrack'); await f.append('chat', 'one');
   const prepared = await prepareProcessing(f.store, 'project', { kind: 'project' }, { reconcileChat: () => assert.fail('Read an untracked source') });

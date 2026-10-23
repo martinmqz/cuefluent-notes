@@ -7,7 +7,7 @@ import {
   assertChain, assertDirectory, assertRegularFile, createPrivateDirectory,
   inspectParent, lstatOrNull, pinDirectory, sameIdentity,
 } from './paths.mjs';
-import { hashBytes, jsonBytes, readJSON, readSnapshot, removeExact, reclaimAtomicStages, syncDirectory, writeJSON } from './files.mjs';
+import { hashBytes, jsonBytes, readJSON, readSnapshot, removeExact, removalContainerName, isEmptyRemoval, reclaimEmptyRemoval, reclaimAtomicStages, syncDirectory, writeJSON } from './files.mjs';
 import { establishWindowsPrivacy } from './platform.mjs';
 import { readHandleStat } from './stat.mjs';
 import {
@@ -597,7 +597,7 @@ export function validateCleanupCursor(value) {
 }
 async function removeIfExact(pin, relative, expectedHash, maxBytes) {
   const current = await readSnapshot(pin, relative, { missing: true, maxBytes });
-  if (!current) return;
+  if (!current) { await reclaimEmptyRemoval(pin, relative); return; }
   if (current.hash !== expectedHash) fail('QUEUE_CONFLICT', 'A selected queue segment changed before its exact removal.');
   await removeExact(pin, relative, expectedHash, { maxBytes });
 }
@@ -680,7 +680,15 @@ export async function acknowledgeQueueCleanup(pin, relative, value) {
 async function removalState(queue) {
   const journal = await metadata(queue, 'intent.json', true);
   if (!journal) {
-    if (await directoryEmpty(queue.root)) return { empty: true, queueId: initialState(queue).queueId };
+    const remaining = await fs.opendir(queue.root, { bufferSize: 1 });
+    let empty = true;
+    try {
+      for await (const entry of remaining) {
+        const target = ['state.json', 'intent.json'].find(name => removalContainerName(name) === entry.name);
+        if (!target || !await isEmptyRemoval(queue, target)) { empty = false; break; }
+      }
+    } finally { if (!remaining.closed) await remaining.close().catch(error => { if (error.code !== 'ERR_DIR_CLOSED') throw error; }); }
+    if (empty) return { empty: true, queueId: initialState(queue).queueId };
     return null;
   }
   if (journal.value?.op !== 'prune') return null;
@@ -712,6 +720,7 @@ export async function removeEmptyQueue(pin, relative, { queueId } = {}) {
     const proposal = { schema: 1, op: 'prune', queueId, root: queue.chain.at(-1), stateHash: current.hash, parts: parts.chain.at(-1), links: links.chain.at(-1) };
     await reclaimAtomicStages(queue, '', { matchesTarget: name => ['state.json', 'intent.json'].includes(name), proposed: new Map([['intent.json', jsonBytes(proposal)]]), maxBytes: METADATA_BYTES });
     await reclaimAtomicStages(queue, 'links', { matchesTarget: name => /^[a-f0-9]{64}\.json$/.test(name), maxBytes: METADATA_BYTES });
+    for (const target of ['state.json', 'intent.json']) await reclaimEmptyRemoval(queue, target);
     const allowed = new Set(['parts', 'links', 'state.json', 'intent.json']);
     const entries = await fs.opendir(queue.root, { bufferSize: 1 });
     try { for await (const entry of entries) if (!allowed.delete(entry.name)) fail('QUEUE_UNKNOWN_ARTIFACT', 'Unknown queue artifacts must be preserved.'); }
@@ -734,8 +743,10 @@ export async function removeEmptyQueue(pin, relative, { queueId } = {}) {
     }
     const current = await metadata(queue, 'state.json', true);
     if (current) await removeExact(queue, 'state.json', removal.stateHash, { maxBytes: METADATA_BYTES });
+    else await reclaimEmptyRemoval(queue, 'state.json');
     await removeExact(queue, 'intent.json', removal.journal.hash, { maxBytes: METADATA_BYTES });
   }
+  for (const target of ['state.json', 'intent.json']) await reclaimEmptyRemoval(queue, target);
   await assertDirectory(queue);
   await fs.rmdir(queue.root);
   await syncDirectory(path.dirname(queue.root));

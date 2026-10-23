@@ -6,16 +6,16 @@ import { fail } from '../core/errors.mjs';
 import { readHandleStat } from './stat.mjs';
 import {
   assertChain, assertDirectory, assertRegularFile, fileIdentity, inspectParent,
-  lstatOrNull, sameIdentity,
+  lstatOrNull, pinDirectory, sameIdentity,
 } from './paths.mjs';
-import { establishWindowsPrivacy } from './platform.mjs';
+import { assertPrivateAccess, establishWindowsPrivacy } from './platform.mjs';
 
 export const hashBytes = bytes => createHash('sha256').update(bytes).digest('hex');
 export const jsonBytes = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
 /** Read exactly the inspected bytes, bounded before allocation and after open. */
-export async function readSnapshot(pin, relative, { maxBytes = 2 * 1024 * 1024, missing = false } = {}) {
+async function readDirect(pin, relative, { maxBytes, missing = false, pairedIdentity } = {}) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) fail('READ_LIMIT_INVALID', 'The read limit must be a nonnegative integer.');
   const parent = await inspectParent(pin, relative);
   const before = await lstatOrNull(parent.file);
@@ -24,13 +24,13 @@ export async function readSnapshot(pin, relative, { maxBytes = 2 * 1024 * 1024, 
     if (missing) return null;
     fail('FILE_MISSING', 'The requested file does not exist.');
   }
-  assertRegularFile(parent.file, before, pin);
+  checkFile(parent.file, before, pin, pairedIdentity);
   if (before.size > maxBytes) fail('READ_LIMIT_EXCEEDED', 'The requested file exceeds the bounded read limit.');
   const identity = fileIdentity(before);
   const handle = await fs.open(parent.file, constants.O_RDONLY | NO_FOLLOW);
   try {
     const opened = await readHandleStat(handle);
-    assertRegularFile(parent.file, opened, pin);
+    checkFile(parent.file, opened, pin, pairedIdentity);
     if (!sameIdentity(opened, identity)) fail('FILE_CHANGED', 'The file changed while it was being opened.');
     if (opened.size > maxBytes) fail('READ_LIMIT_EXCEEDED', 'The requested file exceeds the bounded read limit.');
     const bytes = Buffer.alloc(opened.size);
@@ -46,11 +46,122 @@ export async function readSnapshot(pin, relative, { maxBytes = 2 * 1024 * 1024, 
         after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) {
       fail('FILE_CHANGED', 'The file changed during the read.');
     }
-    assertRegularFile(parent.file, current, pin);
+    checkFile(parent.file, current, pin, pairedIdentity);
     await assertChain(parent.chain);
     await assertDirectory(pin);
     return Object.freeze({ bytes, hash: hashBytes(bytes), identity, mode: opened.mode });
   } finally { await handle.close(); }
+}
+
+// Only a verified interrupted restore may expose two names for the same private
+// inode. Ordinary files and public notes retain the single-link requirement.
+function checkFile(file, stat, pin, pairedIdentity) {
+  if (pairedIdentity && stat?.isFile() && !stat.isSymbolicLink() && stat.nlink === 2 && sameIdentity(stat, pairedIdentity)) {
+    assertPrivateAccess(file, stat);
+  } else assertRegularFile(file, stat, pin);
+}
+
+export const removalContainerName = name => `.cuefluent-remove.${hashBytes(Buffer.from(name))}.tmp`;
+const CAPTURE = /^capture\.([a-f0-9]{64})\.([a-f0-9]{64})\.([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.tmp$/;
+const identityHash = identity => hashBytes(Buffer.from(JSON.stringify(identity)));
+const captureProvenance = (identity, pin, parent) => hashBytes(Buffer.from(JSON.stringify({
+  identity, target: parent.file, root: pin.chain.at(-1), parent: parent.chain.at(-1),
+})));
+
+async function removalContainer(pin, relative) {
+  const parent = await inspectParent(pin, relative);
+  const directory = path.join(path.dirname(parent.file), removalContainerName(path.basename(parent.file)));
+  if (!await lstatOrNull(directory)) return { parent, directory, container: null, name: null };
+  const container = await pinDirectory(directory, { private: true });
+  const entries = await fs.opendir(directory, { bufferSize: 1 });
+  let first, extra;
+  try { first = await entries.read(); if (first) extra = await entries.read(); }
+  finally { await entries.close(); }
+  await assertDirectory(container); await assertChain(parent.chain);
+  if (extra || first && !CAPTURE.test(first.name)) fail('REMOVAL_CONFLICT', 'Unknown removal recovery artifacts have been preserved.');
+  return { parent, directory, container, name: first?.name ?? null };
+}
+
+async function pendingRemoval(pin, relative, maxBytes) {
+  const saved = await removalContainer(pin, relative);
+  if (!saved.name) return saved;
+  const match = CAPTURE.exec(saved.name);
+  const canonical = await lstatOrNull(saved.parent.file);
+  const capturedFile = path.join(saved.directory, saved.name);
+  const captured = await lstatOrNull(capturedFile);
+  const pairedIdentity = canonical && captured && sameIdentity(canonical, fileIdentity(captured)) && canonical.nlink === 2 && captured.nlink === 2 ? fileIdentity(captured) : undefined;
+  const snapshot = await readDirect(saved.container, saved.name, { maxBytes, pairedIdentity });
+  if (captureProvenance(snapshot.identity, pin, saved.parent) !== match[1] || snapshot.hash !== match[2]) fail('REMOVAL_CONFLICT', 'Removal recovery identity or bytes changed; every artifact has been preserved.');
+  const current = await lstatOrNull(saved.parent.file);
+  if ((current && (!pairedIdentity || !sameIdentity(current, snapshot.identity) || current.nlink !== 2)) || (canonical && !current)) fail('WRITE_CONFLICT', 'The canonical file conflicts with its pending exact removal.');
+  await assertDirectory(saved.container); await assertChain(saved.parent.chain);
+  return { ...saved, snapshot, capturedFile, pairedIdentity };
+}
+
+/** Inspect one fixed recovery locator; never enumerate the metadata backlog. */
+export async function readSnapshot(pin, relative, { maxBytes = 2 * 1024 * 1024, missing = false } = {}) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) fail('READ_LIMIT_INVALID', 'The read limit must be a nonnegative integer.');
+  const recovered = async saved => {
+    if (saved.pairedIdentity) {
+      const canonical = await readDirect(pin, relative, { maxBytes, pairedIdentity: saved.pairedIdentity });
+      if (canonical.hash !== saved.snapshot.hash || identityHash(canonical.identity) !== identityHash(saved.snapshot.identity)) fail('REMOVAL_CONFLICT', 'Interrupted restore identity or bytes changed.');
+    }
+    const confirmed = await pendingRemoval(pin, relative, maxBytes);
+    if (!confirmed.snapshot || confirmed.snapshot.hash !== saved.snapshot.hash || identityHash(confirmed.snapshot.identity) !== identityHash(saved.snapshot.identity)) fail('REMOVAL_CONFLICT', 'The pending removal changed during inspection.');
+    return confirmed.snapshot;
+  };
+  if (pin?.private === true) {
+    const saved = await pendingRemoval(pin, relative, maxBytes);
+    if (saved.snapshot) return recovered(saved);
+  }
+  const snapshot = await readDirect(pin, relative, { maxBytes, missing: true });
+  if (snapshot) return snapshot;
+  // Capture may have occurred after the first locator probe. One bounded retry
+  // preserves logical visibility without scanning or writing the parent.
+  if (pin?.private === true) {
+    const saved = await pendingRemoval(pin, relative, maxBytes);
+    if (saved.snapshot) return recovered(saved);
+  }
+  if (missing) return null;
+  fail('FILE_MISSING', 'The requested file does not exist.');
+}
+
+/** Owner-only cleanup of a known target's empty pre/post-capture directory. */
+export async function reclaimEmptyRemoval(pin, relative) {
+  if (pin?.private !== true) fail('REMOVAL_PRIVATE_REQUIRED', 'Exact removal recovery requires private metadata.');
+  const saved = await removalContainer(pin, relative);
+  if (!saved.container) return false;
+  if (saved.name) fail('REMOVAL_CONFLICT', 'Pending exact removal must be completed before reclaiming its directory.');
+  await assertDirectory(saved.container); await assertChain(saved.parent.chain);
+  await fs.rmdir(saved.directory);
+  await syncDirectory(path.dirname(saved.directory));
+  return true;
+}
+
+export async function isEmptyRemoval(pin, relative) {
+  const saved = await removalContainer(pin, relative);
+  return Boolean(saved.container && !saved.name);
+}
+
+async function restoreRemoval(pin, relative, expectedHash, maxBytes) {
+  const saved = await pendingRemoval(pin, relative, maxBytes);
+  if (!saved.snapshot) { if (saved.container) await reclaimEmptyRemoval(pin, relative); return; }
+  if (saved.snapshot.hash !== expectedHash) fail('WRITE_CONFLICT', 'The pending exact removal differs from the inspected hash.');
+  if (!saved.pairedIdentity) {
+    await assertDirectory(saved.container); await assertChain(saved.parent.chain);
+    try { await fs.link(saved.capturedFile, saved.parent.file); }
+    catch (cause) { if (cause.code === 'EEXIST') fail('WRITE_CONFLICT', 'A replacement appeared during exact removal recovery.', cause); throw cause; }
+  }
+  // Also flush a link left by an interrupted owner before releasing its capture.
+  await syncDirectory(path.dirname(saved.parent.file));
+  // A stop after link leaves a verifiable two-name pair. Reads never repair it;
+  // the same owner command can resume this exact normalization.
+  const confirmed = await pendingRemoval(pin, relative, maxBytes);
+  if (!confirmed.pairedIdentity || confirmed.snapshot.hash !== saved.snapshot.hash || identityHash(confirmed.snapshot.identity) !== identityHash(saved.snapshot.identity)) fail('REMOVAL_CONFLICT', 'The restored exact file changed.');
+  await assertDirectory(confirmed.container); await assertChain(confirmed.parent.chain);
+  await fs.unlink(confirmed.capturedFile);
+  await syncDirectory(confirmed.directory);
+  await reclaimEmptyRemoval(pin, relative);
 }
 
 export async function readJSON(pin, relative, options) {
@@ -93,6 +204,7 @@ export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes
   if (bytes.length > maxBytes) fail('WRITE_LIMIT_EXCEEDED', 'The proposed file exceeds its size limit.');
   const parent = await inspectParent(pin, relative);
   const original = await compare(pin, relative, expectedHash, maxBytes);
+  if (pin.private) await restoreRemoval(pin, relative, expectedHash, maxBytes);
   const hash = hashBytes(bytes);
   if (original?.hash === hash) return { changed: false, hash };
   const stage = path.join(path.dirname(parent.file), `.${path.basename(parent.file)}.${randomUUID()}.tmp`);
@@ -168,11 +280,49 @@ export async function writeJSON(pin, relative, value, options) {
 export async function removeExact(pin, relative, expectedHash, { maxBytes = 2 * 1024 * 1024 } = {}) {
   expected(expectedHash);
   if (expectedHash === null) fail('EXPECTED_HASH_REQUIRED', 'Removal requires an inspected existing file.');
+  if (pin?.private !== true) fail('REMOVAL_PRIVATE_REQUIRED', 'Exact removal requires private metadata ownership.');
+  const original = await compare(pin, relative, expectedHash, maxBytes);
+  await restoreRemoval(pin, relative, expectedHash, maxBytes);
   const parent = await inspectParent(pin, relative);
-  await compare(pin, relative, expectedHash, maxBytes);
+  const directory = path.join(path.dirname(parent.file), removalContainerName(path.basename(parent.file)));
   await assertChain(parent.chain);
-  await fs.unlink(parent.file);
-  await syncDirectory(path.dirname(parent.file));
+  try { await fs.mkdir(directory, { mode: 0o700 }); }
+  catch (cause) { if (cause.code === 'EEXIST') fail('REMOVAL_CONFLICT', 'Another exact removal owns this recovery directory.', cause); throw cause; }
+  establishWindowsPrivacy(directory);
+  const container = await pinDirectory(directory, { private: true });
+  const name = `capture.${captureProvenance(original.identity, pin, parent)}.${expectedHash}.${randomUUID()}.tmp`;
+  const capturedFile = path.join(directory, name);
+  await syncDirectory(path.dirname(directory));
+  await assertDirectory(container); await assertChain(parent.chain);
+  await fs.rename(parent.file, capturedFile);
+  await syncDirectory(directory); await syncDirectory(path.dirname(parent.file));
+  let captured;
+  try {
+    captured = await readDirect(container, name, { maxBytes });
+    if (captured.hash !== expectedHash || identityHash(captured.identity) !== identityHash(original.identity)) fail('WRITE_CONFLICT', 'The exact inspected file was replaced before removal.');
+  } catch (failure) {
+    // Restore a captured replacement without clobbering any newly created name.
+    // On collision/failure both copies remain visible for explicit repair.
+    try {
+      const stat = await lstatOrNull(capturedFile);
+      assertRegularFile(capturedFile, stat, pin);
+      const identity = fileIdentity(stat);
+      await assertDirectory(container); await assertChain(parent.chain);
+      await fs.link(capturedFile, parent.file);
+      await syncDirectory(path.dirname(parent.file));
+      const restored = await lstatOrNull(parent.file), retained = await lstatOrNull(capturedFile);
+      if (!restored || !retained || !sameIdentity(restored, identity) || !sameIdentity(retained, identity) || restored.nlink !== 2 || retained.nlink !== 2) fail('REMOVAL_CONFLICT', 'The captured replacement changed during restoration.');
+      await fs.unlink(capturedFile); await syncDirectory(directory);
+      await reclaimEmptyRemoval(pin, relative);
+    } catch (recoveryError) { Object.defineProperty(failure, 'recoveryError', { value: recoveryError, configurable: true }); }
+    throw failure;
+  }
+  await assertDirectory(container); await assertChain(parent.chain);
+  await fs.unlink(capturedFile);
+  await syncDirectory(directory);
+  await assertDirectory(container); await assertChain(parent.chain);
+  await fs.rmdir(directory);
+  await syncDirectory(path.dirname(directory));
 }
 
 

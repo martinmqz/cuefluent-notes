@@ -6,7 +6,8 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { createPrivateDirectory, pinDirectory } from '../src/storage/paths.mjs';
-import { hashBytes, jsonBytes } from '../src/storage/files.mjs';
+import { hashBytes, jsonBytes, removalContainerName } from '../src/storage/files.mjs';
+import { interruptRemoval } from './fixtures/exact-removal-worker.mjs';
 import { establishWindowsPrivacy } from '../src/storage/platform.mjs';
 import {
   MAX_QUEUE_RECORD_BYTES, acknowledgeQueueCleanup, appendQueueRecord, cleanupQueueStep,
@@ -407,13 +408,41 @@ for (const boundary of ['parts', 'links', 'state.json', 'intent.json']) {
     const original = fs[method]; let failed = false;
     const mocked = t.mock.method(fs, method, async function(file, ...args) {
       const result = await original.call(this, file, ...args);
-      if (!failed && file === path.join(pin.root, relative, boundary)) {
+      if (!failed && (file === path.join(pin.root, relative, boundary) || boundary.endsWith('.json') && path.dirname(file) === path.join(pin.root, relative, removalContainerName(boundary)))) {
         failed = true; throw Object.assign(new Error('Synthetic interruption'), { code: 'SYNTHETIC_INTERRUPTION' });
       }
       return result;
     });
     await assert.rejects(removeEmptyQueue(pin, relative, { queueId }), { code: 'SYNTHETIC_INTERRUPTION' });
     mocked.mock.restore();
+    const observed = await inspectQueue(pin, relative);
+    assert.equal(observed.queueId, queueId); assert.equal(observed.records, 0);
+    await removeEmptyQueue(pin, relative, { queueId });
+    assert.deepEqual(await fs.readdir(pin.root), []);
+  });
+}
+
+for (const boundary of ['parts', 'links']) {
+  test(`process exit after capturing a queue ${boundary} file preserves retry and final pruning`, { timeout: recoveryTimeout }, async t => {
+    const { pin, relative } = await setup(t), item = record('captured-only');
+    await appendQueueRecord(pin, relative, item);
+    const { queueId } = await inspectQueue(pin, relative);
+    const target = `${relative}/${boundary}/${keyFor(item.id)}.${boundary === 'parts' ? 'jsonl' : 'json'}`;
+    await interruptRemoval({ root: pin.root, relative: target, operation: 'cleanup', options: { queue: relative, request: request(item) } });
+    assert.equal((await inspectQueue(pin, relative)).records, 0);
+    const result = await cleanupQueueStep(pin, relative, request(item));
+    await acknowledgeQueueCleanup(pin, relative, result.cursor);
+    await removeEmptyQueue(pin, relative, { queueId });
+    assert.deepEqual(await fs.readdir(pin.root), []);
+  });
+}
+
+for (const target of ['state.json', 'intent.json']) for (const boundary of ['capture', 'unlink']) {
+  test(`process exit at ${target} prune ${boundary} retains read-only identity and retries without artifacts`, { timeout: recoveryTimeout }, async t => {
+    const { pin, relative } = await setup(t), item = record('captured-prune');
+    await appendQueueRecord(pin, relative, item);
+    const { queueId } = await inspectQueue(pin, relative); await remove(pin, relative, item);
+    await interruptRemoval({ root: pin.root, relative: `${relative}/${target}`, operation: 'prune', boundary, options: { queue: relative, queueId } });
     const observed = await inspectQueue(pin, relative);
     assert.equal(observed.queueId, queueId); assert.equal(observed.records, 0);
     await removeEmptyQueue(pin, relative, { queueId });

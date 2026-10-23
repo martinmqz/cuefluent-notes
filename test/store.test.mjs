@@ -6,7 +6,8 @@ import os from 'node:os';
 import { createProject, emptySettings } from '../src/core/settings.mjs';
 import { initializeStore, openStore, readSettings, updateSettings, withProject, gateOptions } from '../src/storage/store.mjs';
 import { tryAcquireExistingGate } from '../src/storage/gates.mjs';
-import { writeJSON } from '../src/storage/files.mjs';
+import { interruptRemoval } from './fixtures/exact-removal-worker.mjs';
+import { readSnapshot, writeJSON } from '../src/storage/files.mjs';
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-store-')));
@@ -171,6 +172,24 @@ test('retained chats and pending runs guard removal, roots, destination and savi
   await assert.rejects(updateSettings(store, { schemaVersion: 1, projects: [{ ...f.project, saving: 'auto' }] }, { expectedHash: current.hash }), { code: 'SETTINGS_PENDING_RUN' });
   await updateSettings(store, { schemaVersion: 1, projects: [{ ...f.project, tracking: 'auto' }] }, { expectedHash: current.hash });
   assert.equal((await readSettings(store)).value.projects[0].tracking, 'auto');
+});
+
+test('captured-only pending run still refuses settings removal and destination or saving changes', async t => {
+  const f = await fixture(t), store = await initializeStore(f.privateRoot, f.settings);
+  const retained = await withProject(store, 'demo', async ({ directory }) => {
+    const relative = `${directory}/run.json`;
+    await writeJSON(store.pin, relative, { synthetic: 'Retain this pending run.' }, { expectedHash: null });
+    return { relative, snapshot: await readSnapshot(store.pin, relative) };
+  });
+  await interruptRemoval({ root: store.root, relative: retained.relative, expectedHash: retained.snapshot.hash });
+  const current = await readSettings(store);
+  await assert.rejects(updateSettings(store, emptySettings(), { expectedHash: current.hash }), { code: 'SETTINGS_RETAINED_PROJECT' });
+  for (const change of [{ saving: 'auto' }, { destination: { kind: 'directory', path: path.join(f.root, 'elsewhere') } }]) {
+    await assert.rejects(updateSettings(store, { schemaVersion: 1, projects: [{ ...f.project, ...change }] }, { expectedHash: current.hash }), { code: 'SETTINGS_PENDING_RUN' });
+  }
+  assert.equal((await readSettings(store)).hash, current.hash);
+  assert.deepEqual((await readSnapshot(store.pin, retained.relative)).bytes, retained.snapshot.bytes);
+  await assert.rejects(fs.lstat(path.join(store.root, retained.relative)), { code: 'ENOENT' });
 });
 
 test('long worker ownership does not block a short project mutation', async t => {

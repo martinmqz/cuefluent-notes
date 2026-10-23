@@ -178,6 +178,6 @@ export async function setupProject({ storeRoot, project: input, expectedHash, sk
   }) });
   // The successful exact settings receipt authorizes removing only this exact
   // setup journal. A crash here is completed by the equality path above.
-  await removeExact(store.pin, JOURNAL, intentHash);
+  await withShortGate(store.settingsGate, gateOptions, () => removeExact(store.pin, JOURNAL, intentHash));
   return Object.freeze({ status: 'configured', project: resultProject, settingsHash: result.hash, logs, recovered: false });
 }

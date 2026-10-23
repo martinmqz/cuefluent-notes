@@ -13,13 +13,13 @@ if (stop === 'annual') {
     }
   };
 } else if (stop === 'settings') {
-  const unlink = fs.unlink;
-  fs.unlink = async file => {
-    if (file === path.join(options.storeRoot, 'config', 'setup.json')) {
+  const rename = fs.rename;
+  fs.rename = async (from, to) => {
+    if (from === path.join(options.storeRoot, 'config', 'setup.json')) {
       await fs.writeFile(path.join(root, 'setup-boundary'), 'Settings published before setup journal removal.');
       await new Promise(() => {});
     }
-    return unlink(file);
+    return rename(from, to);
   };
 }
 try {
