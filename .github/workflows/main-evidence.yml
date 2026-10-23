@@ -1,0 +1,51 @@
+name: Main evidence
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: main-evidence-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CUEFLUENT_MAIN_EVIDENCE_NAME: cuefluent-main-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.12.1'
+          package-manager-cache: false
+      - name: Select existing Checks evidence for this main commit
+        id: source
+        run: node tools/main-evidence.mjs select
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CUEFLUENT_MAIN_EVIDENCE_ROOT: ${{ runner.temp }}/${{ env.CUEFLUENT_MAIN_EVIDENCE_NAME }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.source.outputs.artifact_id }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/${{ env.CUEFLUENT_MAIN_EVIDENCE_NAME }}/artifact
+          digest-mismatch: error
+      - name: Verify the exact tested tree and retained evidence
+        run: node tools/main-evidence.mjs verify
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CUEFLUENT_MAIN_EVIDENCE_ROOT: ${{ runner.temp }}/${{ env.CUEFLUENT_MAIN_EVIDENCE_NAME }}

@@ -94,7 +94,19 @@ a package enables neither tracking nor note processing.
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
 commits. It runs the complete synthetic source suite on native Linux, macOS, and
-Windows. Linux and macOS each run one source job; Windows runs four shards on
+Windows for ready PRs when opened, updated, reopened, or marked ready for review.
+Draft PR events skip every job before runner allocation. Converting a PR back to
+draft cancels its active Checks run. Merging into `main` does not repeat the matrix.
+Required PR checks protect ordinary merges. The separate
+[Main evidence workflow](../.github/workflows/main-evidence.yml) also checks every
+push to `main`, including direct pushes and administrator bypass merges. Its one
+read-only Ubuntu job verifies successful Checks evidence for the exact pushed
+tree using the retained source receipt and one digest-verified primary artifact.
+It runs no tests, native clients, or builds. Missing or mismatched evidence fails
+visibly; explicitly run Checks for that commit, then rerun the failed Main evidence
+job. Release preparation independently verifies the tested source against the
+release tag. Manual Checks dispatch remains available when explicitly requested.
+Linux and macOS each run one source job; Windows runs four shards on
 independent runners. Per-platform duration weights place the longest Windows
 test files first into the least-loaded shard. Both `npm test` and CI use `tools/test.mjs`
 for recursive test discovery. Test discovery determines coverage; new files
@@ -120,15 +132,18 @@ test work; dependency setup, the primary shard's build and artifact upload, and
 final reproducibility add to total runtime. Hosted runner availability also
 affects elapsed time.
 The reproducibility job verifies every retained archive against its receipt and
-compares all three receipts, including companion tools. Guidance checks run in a
-separate job and are omitted for an explicitly selected release tag. Separate
+compares all three receipts, including companion tools. Each primary build also
+records the actual checked-out commit and Git tree, run identity, PR identity,
+and build receipt digest in a separate `source.json`. This provenance stays out
+of the deterministic receipt. Candidates are retained for 30 days. Guidance
+checks run in a separate job. Separate
 macOS and Windows client smoke jobs exercise Claude Code 2.1.309 and Codex CLI
 0.163.0, with exact archive integrity pins in `tools/client-smoke.mjs`. The
 [adapter compatibility contract](../references/verification.md) describes the
 Claude Code 2.1.307 baseline and capability admission for newer stable 2.x clients.
 Smoke checks use disposable profiles without authenticated sessions or model
 calls. They do not establish plugin installation, hook trust, or end-to-end
-client acceptance, and are omitted for an explicitly selected release tag.
+client acceptance.
 These required smoke checks
 download native archives from `registry.npmjs.org`; a transient registry or
 network failure fails the smoke check and required gate and may require a rerun.
@@ -148,13 +163,42 @@ Pushing a branch or tag does not publish a v2 release or update a marketplace.
 The former release-published marketplace writer is removed. The
 [release preparation workflow](../.github/workflows/release.yml) has only a manual
 `workflow_dispatch` trigger, requires dispatch from `main` and an explicit
-confirmation. It accepts an
-existing exact version tag (`v` plus the `package.json` version, for example
-`v0.16.0`), verifies that the tag matches `package.json`, and requires
-its commit to be on `main` history before executing source tools. It runs the
-three-platform checks and uploads candidate artifacts with read-only repository
-permissions. It creates no GitHub release, commit, branch, PR, or marketplace
-update.
+confirmation. Supply an existing exact version tag (`v` plus the tagged
+`package.json` version, for example `v0.16.0`) and a successful Checks run ID.
+The single Ubuntu job verifies tag/package agreement and main-history ancestry,
+then downloads the three exact retained artifact IDs with GitHub digest checking.
+It verifies every archive hash, identical platform receipts, the tagged lockfile,
+and the actual tested Git tree. It neither rebuilds nor reruns the test matrix.
+
+A PR run must come from this repository, have merged into `main`, and match the
+recorded PR head and tested merge checkout. The PR head and tested checkout trees
+must both equal the tagged tree; this conservative rule refuses reuse when the
+PR head had different files even if its merge result matched. A manual Checks
+run on `main` or the exact release tag must match the tag commit. Push events are
+not accepted as source evidence. Every expected job, including
+all Windows shards, must have succeeded. Earlier successful artifact-producing
+attempts remain valid when only failed jobs are rerun. The selected run, tag, and
+artifact identities are checked again before accepting the candidate. The verifier
+pins the supported GitHub API representation that includes the merged commit SHA.
+Failures report their verification stage and a bounded reason code, including HTTP
+status and ancestry failures, without printing tokens or downloaded payloads.
+
+Missing, expired, incompatible, or incomplete evidence stops preparation. When
+fresh evidence is required, explicitly dispatch Checks on the existing release
+tag, for example `gh workflow run ci.yml --ref v0.16.0`. This tests the tagged
+commit even after `main` advances; the tag must contain this Checks workflow and
+source-recording support. A dispatch on `main` is also accepted when its tip is
+exactly the tagged commit. Preparation verifies main-history ancestry and never
+silently launches another full matrix. Candidates created before source provenance
+was recorded are not eligible for this automated reuse.
+Keep the intended package version in the implementation PR when practical: a
+later version change alters package contents and legitimately needs new checks.
+
+Verification tools come from the authorized main dispatch checkout. Downloaded
+candidate code is never executed. The output preserves the verified archives and
+`build.json`, with a `release-evidence.json` identifying the tag, source run, and
+artifact digests. Repository permissions remain read-only. The workflow creates
+no GitHub release, commit, branch, PR, or marketplace update.
 
 Review those artifacts and native acceptance evidence before requesting a
 separate publication action. Any future publication must be explicitly
