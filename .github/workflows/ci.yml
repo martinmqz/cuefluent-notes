@@ -49,10 +49,7 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-24.04, shard: '1/1', suffix: '', primary: true }
-          - { os: macos-14, shard: '1/4', suffix: '', primary: true }
-          - { os: macos-14, shard: '2/4', suffix: ', 2/4', primary: false }
-          - { os: macos-14, shard: '3/4', suffix: ', 3/4', primary: false }
-          - { os: macos-14, shard: '4/4', suffix: ', 4/4', primary: false }
+          - { os: macos-14, shard: '1/1', suffix: '', primary: true }
           - { os: windows-2025, shard: '1/4', suffix: '', primary: true }
           - { os: windows-2025, shard: '2/4', suffix: ', 2/4', primary: false }
           - { os: windows-2025, shard: '3/4', suffix: ', 3/4', primary: false }

@@ -20,14 +20,14 @@ test('native shards and client smoke start independently and retain the required
     assert.equal(job.strategy['max-parallel'], undefined);
   }
   const rows = source.strategy.matrix.include, names = new Set(['guidance', reproducibility.name]);
-  for (const [platform, count] of [['ubuntu-24.04', 1], ['macos-14', 4], ['windows-2025', 4]]) {
+  for (const [platform, count] of [['ubuntu-24.04', 1], ['macos-14', 1], ['windows-2025', 4]]) {
     const selected = rows.filter(row => row.os === platform);
     assert.deepEqual(selected.map(row => row.shard).sort(), Array.from({ length: count }, (_, index) => `${index + 1}/${count}`));
     assert.equal(selected.filter(row => row.primary).length, 1);
     assert.equal(selected.find(row => row.primary).suffix, '');
     for (const row of selected) names.add(source.name.replace('${{ matrix.os }}', row.os).replace('${{ matrix.suffix }}', row.suffix));
   }
-  assert.equal(rows.length, 9);
+  assert.equal(rows.length, 6);
   for (const platform of smoke.strategy.matrix.os) names.add(smoke.name.replace('${{ matrix.os }}', platform));
   for (const required of ['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
   assert.deepEqual(reproducibility.needs, ['guidance', 'test', 'client-smoke']);

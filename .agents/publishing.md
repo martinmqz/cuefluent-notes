@@ -94,9 +94,9 @@ a package enables neither tracking nor note processing.
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
 commits. It runs the complete synthetic source suite on native Linux, macOS, and
-Windows. Linux runs one source job; macOS and Windows each run four shards on
-independent runners. Per-platform duration weights place the longest test files
-first into the least-loaded shard. Both `npm test` and CI use `tools/test.mjs`
+Windows. Linux and macOS each run one source job; Windows runs four shards on
+independent runners. Per-platform duration weights place the longest Windows
+test files first into the least-loaded shard. Both `npm test` and CI use `tools/test.mjs`
 for recursive test discovery. Test discovery determines coverage; new files
 without measurements still run with a file-size estimate. Windows runs test files
 sequentially within each shard to limit native helper contention; concurrency
