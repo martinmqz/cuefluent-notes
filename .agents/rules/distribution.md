@@ -28,10 +28,14 @@ configuration, tests, development tools, repository guidance, or private plannin
 Both client packages include their runtime dependency closure and license notices.
 Pin current dependency versions and build from the lockfile.
 
-Keep the source package version separate from the published version in
-`release.json`. Published files under `plugins/` and `claude/`, their checksums,
-tags, and release history are immutable. Updating source or building a candidate
-does not authorize replacing them or installing/trusting a plugin.
+Keep the source package version separate from published distributions.
+`packaging/releases/<version>/build.json` holds the published archive and inventory
+checksums for each versioned marketplace release. Verify its digest against the
+authorized release before adding a receipt pin. Root `release.json` records only
+the historical 0.15.1 release. Both catalogs select the same released version.
+Published files under `plugins/` and `claude/`, their checksums, tags, and release
+history are immutable. Updating source or building a candidate does not authorize
+replacing them or installing/trusting a plugin.
 
 Builders use a fresh output directory and refuse to overwrite existing artifacts.
 Verify detached packages, inventory contents, dependency closure, and archives.

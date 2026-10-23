@@ -1,12 +1,12 @@
 {
   "name": "cuefluent",
-  "description": "Capture and organize knowledge as searchable, Cuefluent-ready Markdown.",
+  "description": "Track selected chats and explicitly process their queued conversation into Markdown notes.",
   "owner": { "name": "Cuefluent" },
   "plugins": [
     {
       "name": "cuefluent-notes",
-      "description": "Capture and organize your knowledge for fast recall—right on cue.",
-      "source": "./claude/cuefluent-notes",
+      "description": "Track selected chats and explicitly process their queued conversation into Markdown notes.",
+      "source": "./claude/0.16.0/cuefluent-notes",
       "category": "productivity",
       "license": "SUL-1.0"
     }

@@ -90,6 +90,49 @@ registered, and no hook trust, project settings, or authentication is changed.
 Native registration and hook review are separate explicit user actions. Copying
 a package enables neither tracking nor note processing.
 
+## Marketplace snapshots
+
+The Codex and Claude catalogs select the released 0.16.0 packages at
+`plugins/0.16.0/cuefluent-notes/` and `claude/0.16.0/cuefluent-notes/`.
+`packaging/releases/0.16.0/build.json` is the unchanged build receipt from the
+[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.16.0).
+Its inventory hashes bind every catalog package file, including dependencies.
+The unversioned package folders and root `release.json` retain the 0.15.1 release.
+
+For a catalog update, verify the published archive and receipt digests against
+the authorized release, extract into a fresh temporary directory, and use the
+verified copy tool above to add new versioned folders. Copy the published receipt
+unchanged under `packaging/releases/VERSION/build.json`. Add its independently
+verified SHA-256 to `published.releases` in `test/marketplace.test.mjs`; preserve
+all earlier pins and snapshots. Point both catalogs at the same new version.
+A receipt and inventory edited together are not independent release evidence.
+
+The directory-wide `.gitattributes` rules preserve every release's bytes, while
+`.gitignore` excludes `plugins/` and `claude/` from ordinary source searches.
+New versions need no additional attribute or ignore rules. Plain `git add` can
+omit ignored bundled dependencies, so force-stage only the exact new package
+folders. For example, when adding the 0.16.0 release:
+
+```sh
+git add -f -- plugins/0.16.0/cuefluent-notes claude/0.16.0/cuefluent-notes
+git add -- .agents/plugins/marketplace.json .claude-plugin/marketplace.json packaging/releases/0.16.0/build.json test/marketplace.test.mjs
+node --test test/marketplace.test.mjs
+```
+
+Substitute the actual new version in these paths and inspect the staged diff
+before committing. The test requires catalog files, receipts and complete package
+contents to be staged. It checks every retained release, including historical
+0.15.1, against pinned receipts and inventories, and verifies that tracked working
+bytes equal their Git blobs. Missing dependencies, changed retained files and
+mixed catalog versions fail locally. Untracked OS housekeeping files are ignored;
+if staged, extra package files fail the inventory check.
+
+These offline checks protect the reviewed release pins; they do not query GitHub
+or authenticate a newly added pin. Check each new pin against the published asset
+before committing it. The tests do not install a native plugin, change trust, or
+activate tracking. Keep the catalog update PR in draft until review is requested;
+native registration remains a separate user action.
+
 ## CI evidence limits
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
