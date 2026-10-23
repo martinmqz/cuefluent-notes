@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { runInNewContext } from 'node:vm';
 import { verifyBuildArchives, compareBuilds } from '../tools/ci.mjs';
 import { EXPECTED_CHECK_JOBS } from '../tools/release-candidate.mjs';
 import { packageSource } from './fixtures/package-source.mjs';
@@ -33,11 +34,42 @@ test('native shards and client smoke start independently and retain the required
   assert.deepEqual([...names].sort(), [...EXPECTED_CHECK_JOBS].sort(), 'Release evidence must require every workflow job.');
   for (const required of ['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
   assert.deepEqual(reproducibility.needs, ['guidance', 'test', 'client-smoke']);
-  assert.equal(reproducibility.if, '${{ always() && !cancelled() }}');
   for (const step of source.steps.filter(step => step.run === 'npm run check:examples' || step.run === 'node tools/ci.mjs build' || step.uses?.startsWith('actions/upload-artifact@'))) assert.equal(step.if, 'matrix.primary');
-  assert.equal(smoke.if, undefined);
   assert(smoke.steps.some(step => step.run === 'node tools/client-smoke.mjs'));
   assert(!source.steps.some(step => /client-smoke/.test(step.run ?? '')));
+});
+
+test('draft PRs allocate no job runners and ready PRs retain parallel checks and the failure gate', async () => {
+  const workflow = await checks();
+  const admitted = (job, { event = 'pull_request', action, draft, cancelled = false } = {}) => {
+    assert.match(job.if, /^\$\{\{[\s\S]*\}\}$/);
+    return runInNewContext(job.if.slice(3, -2), {
+      github: { event_name: event, event: { action, ...(draft === undefined ? {} : { pull_request: { draft } }) } },
+      always: () => true,
+      cancelled: () => cancelled,
+      // The final gate must still run when an upstream check fails.
+      success: () => false,
+    });
+  };
+  for (const action of ['opened', 'synchronize', 'reopened', 'converted_to_draft']) {
+    assert(workflow.on.pull_request.types.includes(action));
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      assert.equal(admitted(job, { action, draft: true }), false, `${name} must not start for draft ${action}`);
+    }
+  }
+  for (const action of ['opened', 'synchronize', 'reopened', 'ready_for_review']) {
+    assert(workflow.on.pull_request.types.includes(action));
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      assert.equal(admitted(job, { action, draft: false }), true, `${name} must start for ready ${action}`);
+    }
+  }
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    assert.equal(admitted(job, { event: 'workflow_dispatch' }), true, `${name} must allow explicit manual checks`);
+  }
+  assert.equal(admitted(workflow.jobs.reproducibility, { draft: false, cancelled: true }), false);
+  // Redrafting enters the same concurrency group and cancels the active PR run.
+  assert.equal(workflow.concurrency.group, 'checks-v2-${{ github.event_name }}-${{ github.ref }}');
+  assert.equal(workflow.concurrency['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}");
 });
 
 test('the final gate rejects failed, skipped or cancelled source shards and client smoke', async () => {
@@ -140,10 +172,10 @@ test('candidate receipts carry the public version line and reject malformed or m
   }
 });
 
-test('checks run once per PR revision, with manual recovery and retained source evidence', async () => {
+test('checks support PR readiness, manual recovery and retained source evidence without merge duplicates', async () => {
   const workflow = await checks();
   assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'workflow_dispatch']);
-  assert.deepEqual(workflow.on.pull_request.types, ['opened', 'synchronize', 'reopened']);
+  assert.deepEqual(workflow.on.pull_request.types, ['opened', 'synchronize', 'reopened', 'ready_for_review', 'converted_to_draft']);
   const steps = workflow.jobs.test.steps;
   const record = steps.findIndex(step => step.run === 'node tools/ci.mjs record-source');
   assert(record > steps.findIndex(step => step.run === 'node tools/ci.mjs build'));

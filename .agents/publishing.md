@@ -94,11 +94,13 @@ a package enables neither tracking nor note processing.
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
 commits. It runs the complete synthetic source suite on native Linux, macOS, and
-Windows for PRs when opened, updated, or reopened, including drafts. Marking a PR
-ready and merging it to `main` do not repeat the matrix. Main's strict required
-checks protect the merge; release preparation independently verifies the tested
-source against the release tag. Manual Checks dispatch remains available on
-`main` when a new run is needed. Linux and macOS each run one source job; Windows runs four shards on
+Windows for ready PRs when opened, updated, reopened, or marked ready for review.
+Draft PR events skip every job before runner allocation. Converting a PR back to
+draft cancels its active Checks run. Merging into `main` does not repeat the matrix.
+Main's strict required checks protect the merge; release preparation independently
+verifies the tested source against the release tag. Manual Checks dispatch remains
+available when explicitly requested, including on `main` when a new run is needed.
+Linux and macOS each run one source job; Windows runs four shards on
 independent runners. Per-platform duration weights place the longest Windows
 test files first into the least-loaded shard. Both `npm test` and CI use `tools/test.mjs`
 for recursive test discovery. Test discovery determines coverage; new files
