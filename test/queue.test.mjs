@@ -18,6 +18,8 @@ const context = hashBytes(Buffer.from('synthetic frozen run selection'));
 const record = (id, data = { text: id }) => encodeQueueRecord(id, Buffer.from(JSON.stringify(data)));
 const keyFor = id => hashBytes(Buffer.from(id));
 const partFor = (pin, relative, id) => path.join(pin.root, relative, 'parts', `${keyFor(id)}.jsonl`);
+// Recovery spans child startup and repeated native ACL checks on Windows.
+const recoveryTimeout = process.platform === 'win32' ? 60_000 : 15_000;
 async function setup(t) {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'cuefluent-queue-')));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -162,7 +164,7 @@ test('cleanup rejects wrong hash, context, index, token, and new removal from a 
   await assert.rejects(cleanupQueueStep(pin, relative, request(first, 0, result.cursor)), { code: 'QUEUE_CURSOR_MISMATCH' });
 });
 
-test('old durable ACK retry leaves a newer append intent untouched', { timeout: 15_000 }, async t => {
+test('old durable ACK retry leaves a newer append intent untouched', { timeout: recoveryTimeout }, async t => {
   const { pin, relative } = await setup(t);
   const old = record('old');
   await appendQueueRecord(pin, relative, old);
@@ -178,7 +180,7 @@ test('old durable ACK retry leaves a newer append intent untouched', { timeout: 
 });
 
 for (const phase of ['intent', 'new-link', 'manifest', 'completed']) {
-  test(`killed append at ${phase} recovers without duplicate or whole-backlog scan`, { timeout: 15_000 }, async t => {
+  test(`killed append at ${phase} recovers without duplicate or whole-backlog scan`, { timeout: recoveryTimeout }, async t => {
     const { pin, relative } = await setup(t);
     await appendQueueRecord(pin, relative, record('old'));
     const item = record('interrupted', { text: 'source ☃' });
@@ -191,7 +193,7 @@ for (const phase of ['intent', 'new-link', 'manifest', 'completed']) {
   });
 }
 
-test('killed torn segment requires exact native bytes and the inspected tail SHA', { timeout: 15_000 }, async t => {
+test('killed torn segment requires exact native bytes and the inspected tail SHA', { timeout: recoveryTimeout }, async t => {
   const { pin, relative } = await setup(t);
   const item = record('torn', { text: 'split ☃ native bytes' });
   await killAt(t, pin, relative, 'part', 'append', item);
@@ -208,7 +210,7 @@ test('killed torn segment requires exact native bytes and the inspected tail SHA
 });
 
 for (const phase of ['part', 'manifest']) {
-  test(`committed prefix remains selectable during ${phase} append failure after native source disappears`, { timeout: 15_000 }, async t => {
+  test(`committed prefix remains selectable during ${phase} append failure after native source disappears`, { timeout: recoveryTimeout }, async t => {
     const { pin, relative, directory } = await setup(t);
     const earlier = [record('already-collected:1'), record('already-collected:2')];
     for (const item of earlier) await appendQueueRecord(pin, relative, item);
@@ -233,7 +235,7 @@ for (const phase of ['part', 'manifest']) {
   });
 }
 
-test('missing native source never reserves prior saved cleanup; parked exact repair later uses the current baseline', { timeout: 15_000 }, async t => {
+test('missing native source never reserves prior saved cleanup; parked exact repair later uses the current baseline', { timeout: recoveryTimeout }, async t => {
   const { pin, relative } = await setup(t);
   const earlier = [record('committed:1'), record('committed:2')];
   for (const item of earlier) await appendQueueRecord(pin, relative, item);
@@ -261,7 +263,7 @@ test('missing native source never reserves prior saved cleanup; parked exact rep
 });
 
 for (const phase of ['neighbor', 'manifest', 'completed']) {
-  test(`killed cleanup at ${phase} resumes the same step until durable ACK`, { timeout: 15_000 }, async t => {
+  test(`killed cleanup at ${phase} resumes the same step until durable ACK`, { timeout: recoveryTimeout }, async t => {
     const { pin, relative } = await setup(t);
     const items = [record('first'), record('middle'), record('last')];
     for (const item of items) await appendQueueRecord(pin, relative, item);
