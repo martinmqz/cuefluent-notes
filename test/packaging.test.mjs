@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { gunzipSync } from 'node:zlib';
+import { pathToFileURL } from 'node:url';
+import MarkdownIt from 'markdown-it';
 import { buildPackages, verifyPackage, readProductionDependencies, readTar, tarArchive, zipArchive, packagePath, defaultNpmCache, REFERENCES, INVENTORY } from '../tools/packaging.mjs';
 
 const execute = promisify(execFile), repo = path.resolve(import.meta.dirname, '..');
@@ -124,6 +126,29 @@ test('fresh builds are deterministic and detached inventories bind exact shipped
   }
   await assert.rejects(f.build('one'), { code: 'PACKAGE_OUTPUT_EXISTS' });
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root, 'one/build.json'), 'utf8')), first);
+});
+
+test('README links reach the same reference bytes in source and both detached client packages', async t => {
+  const f = await fixture(t), readme = await fs.readFile(path.join(repo, 'README.md'), 'utf8');
+  await fs.writeFile(path.join(f.source, 'README.md'), readme);
+  const links = text => new MarkdownIt().parse(text, {}).flatMap(token => token.children ?? [])
+    .filter(token => token.type === 'link_open').map(token => token.attrGet('href'));
+  const sourceLinks = links(readme);
+  assert.ok(sourceLinks.some(href => href.startsWith('references/')));
+  const built = await f.build('linked');
+  for (const item of built.packages) {
+    const root = path.join(f.root, 'linked', item.path), packagedReadme = await fs.readFile(path.join(root, 'README.md'), 'utf8');
+    const packagedLinks = links(packagedReadme);
+    assert.equal(packagedLinks.length, sourceLinks.length);
+    for (const [index, href] of sourceLinks.entries()) {
+      if (!href.startsWith('references/')) { assert.equal(packagedLinks[index], href); continue; }
+      const sourceBytes = await fs.readFile(new URL(href, pathToFileURL(path.join(f.source, 'README.md'))));
+      const packagedBytes = await fs.readFile(new URL(packagedLinks[index], pathToFileURL(path.join(root, 'README.md'))));
+      assert.deepEqual(packagedBytes, sourceBytes);
+    }
+    await verifyPackage(root, { expectedInventorySha256: item.inventorySha256 });
+  }
+  assert.equal(await fs.readFile(path.join(f.source, 'README.md'), 'utf8'), readme);
 });
 
 test('standard tar and ZIP tools accept deterministic archives and extracted package executes without repository dependencies', async t => {

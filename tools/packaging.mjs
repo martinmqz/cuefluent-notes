@@ -231,7 +231,9 @@ export async function buildPackages({ repoRoot = path.resolve(path.dirname(fileU
   const shared = [{ path: 'package.json', bytes: json(dependencies.runtime) }, { path: 'package-lock.json', bytes: json(dependencies.lock) },
     { path: 'THIRD_PARTY_NOTICES.md', bytes: dependencies.notices }, ...dependencies.files];
   for (const name of [...sources, 'LICENSE.md', 'README.md', 'SKILL.md', ...REFERENCES.map(name => `references/${name}.md`)]) {
-    const bytes = await readFile(repoRoot, name);
+    let bytes = await readFile(repoRoot, name);
+    // The root README stays in place while its linked references move with the skill.
+    if (name === 'README.md') bytes = Buffer.from(bytes.toString('utf8').replaceAll('](references/', '](skills/cuefluent-notes/references/'));
     const target = name === 'SKILL.md' || name.startsWith('references/') ? `skills/cuefluent-notes/${name}` : name;
     shared.push({ path: target, bytes });
   }

@@ -4,9 +4,9 @@ Turn selected Claude Code and Codex working chats into durable Markdown notes.
 Tracking runs locally without a model. Processing starts only when requested and
 uses a separate session to prepare notes for review or automatic saving.
 
-This source is a development candidate. See the installed skill's verification
-reference for supported client formats and platform limitations. Published
-release snapshots remain separate from this source version.
+See [compatibility and limitations](references/verification.md) for supported
+client formats and platform coverage. The source version in `package.json` and
+published release snapshots are maintained separately.
 
 ## Workflow
 
