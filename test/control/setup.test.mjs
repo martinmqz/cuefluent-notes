@@ -151,6 +151,28 @@ test('stale whole-settings CAS and retained-work checks precede public directory
   await withProject(store, 'synthetic', async context => assert.deepEqual((await readJSON(store.pin, `${context.directory}/run.json`)).value, { synthetic: 'pending run' }));
 });
 
+test('setup cannot reinitialize missing metadata and redirect retained chats or pending drafts', async t => {
+  for (const missing of [['config/settings.json'], ['store/layout.json'], ['config/settings.json', 'store/layout.json']]) {
+    const f = await fixture(t); await setupProject(f.options);
+    const store = await openStore(f.storeRoot), retained = await withProject(store, 'synthetic', async ({ directory, gates }) => {
+      const files = [`${directory}/chats/synthetic.json`, `${directory}/run.json`, 'store/chats/synthetic.queue'];
+      for (const relative of files) await writeJSON(store.pin, relative, { synthetic: `Retain ${relative}` }, { expectedHash: null });
+      return { files, gates };
+    });
+    for (const relative of missing) await fs.unlink(path.join(store.root, relative));
+    const files = [...retained.files, ...['config/settings.json', 'store/layout.json'].filter(relative => !missing.includes(relative))];
+    const before = await Promise.all(files.map(relative => fs.readFile(path.join(store.root, relative))));
+    const gates = [store.settingsGate, store.writerGate, store.syncGate, ...Object.values(retained.gates)];
+    const identities = await Promise.all(gates.map(gate => fs.lstat(gate.path, { bigint: true })));
+    const moved = path.join(f.root, 'new-notes');
+    await assert.rejects(setupProject({ ...f.options, project: { ...f.options.project, saving: 'auto', destination: { kind: 'directory', path: moved } } }), { code: 'STORE_INCOMPLETE' });
+    assert.deepEqual(await Promise.all(files.map(relative => fs.readFile(path.join(store.root, relative)))), before);
+    assert.deepEqual((await Promise.all(gates.map(gate => fs.lstat(gate.path, { bigint: true })))).map(stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs]), identities.map(stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs]));
+    for (const relative of missing) await assert.rejects(fs.stat(path.join(store.root, relative)), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(moved), { code: 'ENOENT' });
+  }
+});
+
 test('SIGKILL after first annual publication leaves logging disabled until exact setup retry', async t => {
   const f = await fixture(t, { enabled: true }); await stopSetup(t, f, 'annual');
   const current = await f.current(); assert.deepEqual(current.value.projects, []);

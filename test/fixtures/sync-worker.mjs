@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStore } from '../../src/storage/store.mjs';
+import { readChat } from '../../src/storage/chats.mjs';
 import { collectChat } from '../../src/sync/collect.mjs';
 import { launchSyncAttempt, runSyncSteward } from '../../src/sync/ingress.mjs';
 
@@ -21,5 +22,7 @@ if (mode === 'sync-steward') {
   try { await fs.unlink(path.join(fixtureRoot, 'crash-next-collector')); await marker('collector-crashed.json', { pid: process.pid }); process.exit(23); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const result = await collectChat(store, { client, sessionId, classifyCommand: async () => null });
+  const saved = await readChat(store, client, sessionId);
+  await marker('collector-completed.json', { nextPart: saved.value.checkpoint.exchange?.nextPart ?? 0, result });
   process.send(result, () => process.disconnect());
 } else throw new Error('Unsupported synthetic worker mode');

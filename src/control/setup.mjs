@@ -114,11 +114,13 @@ export async function setupProject({ storeRoot, project: input, expectedHash, sk
   // Validate overlap, repositories, and every existing ancestor before even the
   // fresh private store is created. No enabled project is published by init.
   await checkStorePlacement(storeRoot, settingsWith(emptySettings(), request));
-  const initialized = !await lstatOrNull(path.join(storeRoot, 'store/layout.json')) || !await lstatOrNull(path.join(storeRoot, 'config/settings.json'));
-  if (initialized) requireSetup(expectedHash === null, 'SETTINGS_CONFLICT');
-  const store = initialized ? await initializeStore(storeRoot) : await openStore(storeRoot);
+  // Missing metadata may resume only the initializer's verified empty scaffold.
+  // A retained store never authorizes recreating its layout or settings.
+  const initializing = !await lstatOrNull(path.join(storeRoot, 'store/layout.json')) || !await lstatOrNull(path.join(storeRoot, 'config/settings.json'));
+  if (initializing) requireSetup(expectedHash === null, 'SETTINGS_CONFLICT');
+  const store = initializing ? await initializeStore(storeRoot) : await openStore(storeRoot);
   const inspected = await readSettings(store);
-  if (!initialized) {
+  if (!initializing) {
     // A crash after settings publication may leave only its private setup
     // journal. Equality proves completion; it never refreshes a stale CAS.
     const completed = await withShortGate(store.settingsGate, gateOptions, async () => {
@@ -131,7 +133,7 @@ export async function setupProject({ storeRoot, project: input, expectedHash, sk
     });
     if (completed) return completed;
   }
-  const comparedHash = initialized ? inspected.hash : expectedHash;
+  const comparedHash = initializing ? inspected.hash : expectedHash;
   requireSetup(inspected.hash === comparedHash, 'SETTINGS_CONFLICT');
   const proposed = settingsWith(inspected.value, request);
   await checkStorePlacement(storeRoot, proposed);

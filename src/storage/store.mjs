@@ -5,11 +5,11 @@ import { fail } from '../core/errors.mjs';
 import { emptySettings, validateSettings, assertSettingsChange } from '../core/settings.mjs';
 import { assertLocalFilesystem, assertPrivateAccess, establishWindowsPrivacy } from './platform.mjs';
 import {
-  assertAbsolute, assertChain, assertPrivatePlacement, assertRegularFile,
+  assertAbsolute, assertChain, assertDirectory, assertPrivatePlacement, assertRegularFile,
   createPrivateDirectory, inspectAncestors, lstatOrNull, pinDirectory,
 } from './paths.mjs';
 import { readJSON, writeJSON, reclaimAtomicStages } from './files.mjs';
-import { assertGatePlacement, initializeGate, inspectExistingGate, withShortGate } from './gates.mjs';
+import { assertGatePlacement, initializeGate, inspectExistingGate, probeGate, withShortGate } from './gates.mjs';
 
 const LAYOUT = 'store/layout.json';
 const SETTINGS = 'config/settings.json';
@@ -110,30 +110,110 @@ async function readLayout(store) {
   return { ...snapshot, value: validateLayout(store.root, snapshot.value) };
 }
 
+const incompleteStore = () => fail('STORE_INCOMPLETE', 'The existing private store is incomplete; preserve its metadata and retained work.');
+
+/** Only an empty first-setup scaffold may finish publishing its initial metadata. */
+async function assertInitializationEmpty(pin, layout, previous) {
+  await assertDirectory(pin);
+  if (layout && Object.keys(layout.projects).length) incompleteStore();
+  const observations = previous?.observations ?? [], parents = [];
+  if (previous) {
+    for (const parent of previous.parents) {
+      await assertDirectory(parent.pin);
+      // Our layout publication changes only the store parent's entry set. Keep
+      // all child observations and parent identities; enumerate them again.
+      parents.push(parent.pin.root === path.join(pin.root, 'store') ? { ...parent, stat: await lstatOrNull(parent.pin.root) } : parent);
+    }
+  } else for (const relative of ['config', 'store']) {
+    const directory = path.join(pin.root, relative), stat = await lstatOrNull(directory);
+    if (stat) parents.push({ pin: await pinDirectory(directory, { private: true }), stat });
+  }
+  if (!previous) for (const relative of ['store/projects', 'store/chats']) {
+    const directory = path.join(pin.root, relative), stat = await lstatOrNull(directory);
+    if (!stat && layout) incompleteStore();
+    observations.push({ directory, stat, pin: stat ? await pinDirectory(directory, { private: true }) : null });
+  }
+  if (!previous) for (const relative of ['config/setup.json', 'store/invocations']) {
+    const directory = path.join(pin.root, relative);
+    if (await lstatOrNull(directory)) incompleteStore();
+    observations.push({ directory, stat: null, pin: null });
+  }
+  const verify = async () => {
+    await assertDirectory(pin);
+    for (const parent of parents) {
+      const current = await lstatOrNull(parent.pin.root);
+      // Parent mtime detects renamed child entries without relying on Windows
+      // ctime semantics. No parent entries are changed during this read phase.
+      if (!current || !['dev', 'ino', 'mtimeNs', 'ctimeNs'].every(key => current[key] === parent.stat[key])) incompleteStore();
+      await assertDirectory(parent.pin);
+    }
+    for (const observed of observations) {
+      const current = await lstatOrNull(observed.directory);
+      // Timestamps also expose a swapped-and-restored directory whose path has
+      // regained the original inode after an empty replacement was enumerated.
+      if (observed.stat ? !current || !['dev', 'ino', 'mtimeNs', 'ctimeNs'].every(key => current[key] === observed.stat[key]) : current) incompleteStore();
+      if (observed.pin) await assertDirectory(observed.pin);
+    }
+  };
+  for (const observed of observations.filter(item => item.stat)) {
+    await verify();
+    const stream = await fs.opendir(observed.directory);
+    try { await verify(); if (await stream.read()) incompleteStore(); await verify(); }
+    finally { await stream.close(); }
+  }
+  await verify();
+  return { verify, observations, parents };
+}
+
 /** Explicit fresh setup only. No notes, hooks, plugins, or model are touched. */
 export async function initializeStore(root, initial = emptySettings()) {
   const settings = validateSettings(initial);
   await checkStorePlacement(root, settings); // Validate before any filesystem writes.
   const pin = await createPrivateDirectory(root);
-  for (const relative of ['config', 'store', 'store/locks', 'store/projects', 'store/chats']) {
-    await createPrivateDirectory(path.join(root, relative));
+  // Inspect existing parents before probing metadata paths. An existing layout
+  // owns its gate identities, including when another required file is missing.
+  for (const relative of ['config', 'store']) {
+    const directory = path.join(root, relative);
+    if (await lstatOrNull(directory)) await pinDirectory(directory, { private: true });
   }
-  const settingsGate = prepareGate(path.join(root, 'store/locks/settings.sqlite'), 'settings');
-  const writerGate = prepareGate(path.join(root, 'store/locks/writer.sqlite'), 'writer');
-  const syncGate = prepareGate(path.join(root, 'store/locks/sync.sqlite'), 'sync');
-  const store = Object.freeze({ root, pin, settingsGate, writerGate, syncGate });
-  await withShortGate(settingsGate, gateOptions, async () => {
+  await assertChain(pin.chain);
+  const existingLayout = await lstatOrNull(path.join(root, LAYOUT));
+  if (!existingLayout && await lstatOrNull(path.join(root, SETTINGS))) incompleteStore();
+  let store;
+  if (existingLayout) {
+    const layout = validateLayout(root, (await readJSON(pin, LAYOUT)).value);
+    store = Object.freeze({ root, pin, settingsGate: Object.freeze(layout.settingsGate), writerGate: Object.freeze(layout.writerGate), syncGate: Object.freeze(layout.syncGate) });
+  } else {
+    await assertInitializationEmpty(pin);
+    for (const relative of ['config', 'store', 'store/locks', 'store/projects', 'store/chats']) await createPrivateDirectory(path.join(root, relative));
+    const settingsGate = prepareGate(path.join(root, 'store/locks/settings.sqlite'), 'settings');
+    const writerGate = prepareGate(path.join(root, 'store/locks/writer.sqlite'), 'writer');
+    const syncGate = prepareGate(path.join(root, 'store/locks/sync.sqlite'), 'sync');
+    store = Object.freeze({ root, pin, settingsGate, writerGate, syncGate });
+  }
+  await withShortGate(store.settingsGate, gateOptions, async () => {
     const existing = await readJSON(pin, LAYOUT, { missing: true });
+    const current = await readJSON(pin, SETTINGS, { missing: true });
+    let initialization;
     if (existing) {
       validateLayout(root, existing.value);
-      if (!sameGate(existing.value.settingsGate, settingsGate) || !sameGate(existing.value.writerGate, writerGate) || !sameGate(existing.value.syncGate, syncGate)) {
+      if (!sameGate(existing.value.settingsGate, store.settingsGate) || !sameGate(existing.value.writerGate, store.writerGate) || !sameGate(existing.value.syncGate, store.syncGate)) {
         fail('STORE_LAYOUT_CHANGED', 'Existing setup records different gate identities.');
       }
+      // Published gates are verified without creating replacements, including
+      // when a sync owner is live or setup is only resuming its first write.
+      probeGate(store.writerGate, gateOptions); probeGate(store.syncGate, gateOptions);
     } else {
-      await writeJSON(pin, LAYOUT, { schemaVersion: 1, id: randomUUID(), settingsGate, writerGate, syncGate, projects: {} }, { expectedHash: null });
+      if (existingLayout || current) incompleteStore();
+      initialization = await assertInitializationEmpty(pin);
+      await initialization.verify();
+      await writeJSON(pin, LAYOUT, { schemaVersion: 1, id: randomUUID(), settingsGate: store.settingsGate, writerGate: store.writerGate, syncGate: store.syncGate, projects: {} }, { expectedHash: null });
     }
-    const current = await readJSON(pin, SETTINGS, { missing: true });
-    if (!current) await writeJSON(pin, SETTINGS, emptySettings(), { expectedHash: null });
+    if (!current) {
+      initialization = await assertInitializationEmpty(pin, existing?.value, initialization);
+      await initialization.verify();
+      await writeJSON(pin, SETTINGS, emptySettings(), { expectedHash: null });
+    }
     else validateSettings(current.value);
   });
   const current = await readSettings(store);

@@ -230,9 +230,14 @@ test('independent detached steward retries collector death and late native persi
   assert.deepEqual(await ensureSyncSteward(f.store, { launch: () => assert.fail('Started a duplicate live steward') }), { status: 'running' });
   assert.deepEqual(await selectChatQueue(f.store, 'project', 'claude', 'synthetic'), []);
   await fs.appendFile(f.sourcePath, line(assistant('final', 'Final persisted later')));
-  await waitFor(async () => (await selectChatQueue(f.store, 'project', 'claude', 'synthetic')).length === 1);
+  // Queue inspection performs fresh native ACL checks. Poll fixture metadata
+  // until collection commits, then assert the queue at the observed boundary.
+  await waitFor(async () => (await marker(path.join(f.root, 'collector-completed.json')))?.nextPart === 1);
+  assert.equal((await selectChatQueue(f.store, 'project', 'claude', 'synthetic')).length, 1);
   await fs.appendFile(f.sourcePath, line(assistant('late', 'Additional late useful text', false)));
-  const records = await waitFor(async () => { const all = await selectChatQueue(f.store, 'project', 'claude', 'synthetic'); return all.length === 2 && all; });
+  await waitFor(async () => (await marker(path.join(f.root, 'collector-completed.json')))?.nextPart === 2);
+  const records = await selectChatQueue(f.store, 'project', 'claude', 'synthetic');
+  assert.equal(records.length, 2);
   assert.equal(records[1].data.supplement, true); assert.equal(records[1].data.partIndex, 1);
   await fs.appendFile(f.sourcePath, line(user('untrack', 'Stop here')));
   await setChatTracking(f.store, { client: 'claude', sessionId: 'synthetic', sourcePath: f.sourcePath, cwd: f.cwd, promptId: 'untrack', action: 'untrack' });

@@ -91,7 +91,10 @@ jobs:
       - name: Full synthetic source suite on this native operating system
         # Includes all queue, gate, worker and filesystem tests. Test-owned
         # explicit unsupported cases do not claim native client acceptance.
-        run: npm test
+        # Each Windows test process owns native PowerShell helpers; overlapping
+        # files can exhaust helper deadlines on the hosted runner. Serialize
+        # files while retaining concurrency exercised inside the tests.
+        run: ${{ runner.os == 'Windows' && 'node --test --test-concurrency=1 "test/**/*.test.mjs"' || 'npm test' }}
       - run: npm run check:examples
       - name: Build, verify, copy and exercise detached actual entry points
         run: node tools/ci.mjs build
