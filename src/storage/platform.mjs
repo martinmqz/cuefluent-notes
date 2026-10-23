@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { queryWindowsAcl } from './windows-acl.mjs';
+import { assertMacosPrivateAccess } from './macos-acl.mjs';
 import { fail } from '../core/errors.mjs';
 
 function windowsAcl(file, create, { allowAdministratorsOwner = false } = {}) {
@@ -33,6 +34,7 @@ export function assertPrivateAccess(file, stat) {
   } else if (Number(stat.uid) !== process.getuid() || (Number(stat.mode) & 0o077) !== 0) {
     fail('PRIVATE_ACCESS_UNSAFE', 'Private storage must be owned by and restricted to the current user.');
   }
+  if (process.platform === 'darwin') assertMacosPrivateAccess(file, stat);
 }
 
 /** Only for a deterministic current-run reservation before ownership/content is

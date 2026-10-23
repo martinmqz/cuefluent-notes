@@ -12,6 +12,7 @@ import { readChat, queueRelative } from '../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
 import { attachAttemptChild, inspectAttempt } from '../src/storage/attempts.mjs';
 import { executeControl } from '../src/control/execute.mjs';
+import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
 async function waitFile(file) {
   for (let attempt = 0; attempt < 400; attempt++) {
@@ -35,7 +36,7 @@ async function fixture(t, { saving = 'review' } = {}) {
         const child = fork(fileURLToPath(new URL('./fixtures/processing-worker.mjs', import.meta.url)), [root, JSON.stringify({ ...context, ...extra })],
           { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
         let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
-        const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr })));
+        const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr: withoutFfiNotice(stderr, child.pid) })));
         t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
         handle = { child, exited, attemptId: context.attemptId }; return attachAttemptChild(child, context);
       },

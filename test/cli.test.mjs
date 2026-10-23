@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
 const entry = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
 async function fixture(t) {
@@ -14,7 +15,7 @@ async function fixture(t) {
   const run = (args, input = '', entryPath = entry) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [entryPath, ...args], { cwd, env: { ...process.env, CUEFLUENT_V2_HOME: storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
-    child.once('error', reject); child.once('close', code => resolve({ code, stdout, stderr })); child.stdin.end(input);
+    child.once('error', reject); child.once('close', code => resolve({ code, stdout, stderr: withoutFfiNotice(stderr, child.pid) })); child.stdin.end(input);
   });
   return { root, storeRoot, cwd, notes, run };
 }

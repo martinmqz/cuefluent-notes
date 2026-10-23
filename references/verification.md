@@ -36,6 +36,12 @@ variant, search ranking, or watcher behavior on another operating system.
 
 ## Processing and platform support
 
+Private macOS storage checks native ACLs as well as owner and mode bits. Explicit
+and inherited grants to other users or groups are refused, including grants that
+apply only to new children. Existing ACLs are never stripped. Unavailable native
+ACL verification returns `PRIVATE_ACCESS_UNVERIFIED`; use a supported Node build
+with `node:ffi` enabled (and `--allow-ffi` when using Node's permission model).
+
 macOS native checks cover GPT-6.1 and Claude Opus draft-only sessions and a complete
 private-draft → review → save flow. Native processing verifies an effective floor
 before providing source input: no inherited instructions/hooks/plugins, no general

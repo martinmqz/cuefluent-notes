@@ -12,6 +12,7 @@ import { setChatTracking, queueRelative } from '../../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../../src/storage/queue.mjs';
 import { launchOwnedAttempt, attachAttemptChild, inspectAttempt } from '../../src/storage/attempts.mjs';
 import { prepareProcessing } from '../../src/processing/prepare.mjs';
+import { withoutFfiNotice } from '../fixtures/runtime-stderr.mjs';
 
 async function waitFile(file) {
   for (let attempt = 0; attempt < 300; attempt++) {
@@ -34,7 +35,7 @@ async function fixture(t) {
     await launchOwnedAttempt(store, 'project', { runId: run.id, launch: context => {
       const child = fork(fileURLToPath(new URL('../fixtures/draft-worker.mjs', import.meta.url)), [root, JSON.stringify({ ...context, ...extra })], { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
       let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
-      const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr })));
+      const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr: withoutFfiNotice(stderr, child.pid) })));
       t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
       handle = { child, exited }; return attachAttemptChild(child, context);
     } });

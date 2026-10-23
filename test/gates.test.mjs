@@ -93,6 +93,17 @@ async function externalProbe(identity) {
 
 const gateTest = (name, fn) => test(name, { timeout: windows ? 30_000 : 10_000 }, fn);
 
+test('macOS gates reject file and parent ACL grants without a caller-supplied guard', { skip: process.platform !== 'darwin' }, t => {
+  const directory = setup(t), file = join(directory, 'acl.sqlite');
+  const gate = gates.initializeGate(file, 'acl');
+  execFileSync('/bin/chmod', ['+a', 'everyone allow read', file]);
+  assert.throws(() => gates.probeGate(gate), { code: 'GATE_UNSAFE_PATH' });
+  assert.throws(() => gates.tryAcquireExistingGate(gate), { code: 'GATE_UNSAFE_PATH' });
+  execFileSync('/bin/chmod', ['+a', 'everyone allow read,file_inherit,only_inherit', directory]);
+  assert.throws(() => gates.initializeGate(join(directory, 'new.sqlite'), 'new'), { code: 'GATE_UNSAFE_PATH' });
+  assert.deepEqual(readdirSync(directory), ['acl.sqlite']);
+});
+
 gateTest('created-file privacy initialization runs only on the exact exclusive unpublished stage', t => {
   const directory = setup(t), file = join(directory, 'created.sqlite'); let calls = 0;
   const initializePath = stage => {

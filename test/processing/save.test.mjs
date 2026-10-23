@@ -17,6 +17,7 @@ import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../../src/st
 import { attachAttemptChild, launchOwnedAttempt, inspectAttempt } from '../../src/storage/attempts.mjs';
 import { prepareProcessing } from '../../src/processing/prepare.mjs';
 import { openNoteWorkspace } from '../../src/processing/workspace.mjs';
+import { withoutFfiNotice } from '../fixtures/runtime-stderr.mjs';
 
 const original = '# Synthetic note\n\n## Choice\nKeep the original decision.\n';
 const proposed = '# Synthetic note\n\n## Choice\nUse the revised retry design.\n';
@@ -57,7 +58,7 @@ async function fixture(t, { target = 'design.md', existing = true } = {}) {
       const child = fork(fileURLToPath(new URL('../fixtures/save-worker.mjs', import.meta.url)), [root, JSON.stringify({ ...context, stopAfterNote, ...extra })],
         { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc', 'pipe'] });
       let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
-      const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr })));
+      const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr: withoutFfiNotice(stderr, child.pid) })));
       const boundary = stopAfterNote ? waitForReplacement(child, note, exited) : null;
       children.push({ child, exited, boundary });
       t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });

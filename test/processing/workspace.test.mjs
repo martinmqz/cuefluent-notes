@@ -22,6 +22,21 @@ async function fixture(t, options = {}) {
 }
 const finish = async workspace => { await workspace.finish_drafting({ outcome: 'drafted' }); return workspace.manifest(); };
 
+test('draft workspaces reject malformed SemVer and retain valid build metadata without imposing a new version length limit', async t => {
+  const f = await fixture(t);
+  for (const skillVersion of ['0.16.0-01', '0.16.0-.', '0.16.0-dev..1', '0.16.0+build..1', '01.16.0']) {
+    await assert.rejects(f.open({ skillVersion }), { code: 'WORKSPACE_CONTEXT_INVALID' });
+    assert.deepEqual(await fs.readdir(f.root), []);
+  }
+  for (const skillVersion of ['0.16.0-01a+001.build-0', `0.16.0-${'x'.repeat(300)}`]) {
+    const workspace = await f.open({ skillVersion });
+    await workspace.draft_note({ target: 'new.md', content: body, summary: 'Add synthetic answer' });
+    const metadata = inspectMetadata((await finish(workspace)).drafts[0].bytes);
+    assert.equal(metadata.value.generation.skill_version, skillVersion);
+    assert.deepEqual(await fs.readdir(f.root), []);
+  }
+});
+
 test('new note drafts stay private, receive fresh metadata, retain existing parent binding, and return independent manifest bytes', async t => {
   const f = await fixture(t), workspace = await f.open();
   await assert.rejects(workspace.manifest(), { code: 'WORKSPACE_NOT_FINISHED' });

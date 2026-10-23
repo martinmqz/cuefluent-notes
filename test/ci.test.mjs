@@ -52,7 +52,8 @@ test('release tag verification accepts any exact public version tag and keeps pa
   const text = await fs.readFile(path.resolve(import.meta.dirname, '../.github/workflows/ci.yml'), 'utf8');
   const source = /if \(!\/(\^v[^/]+)\/\.test\(tag\)\)/.exec(text)?.[1]; assert.ok(source);
   const pattern = new RegExp(source);
-  for (const tag of ['v0.16.0', 'v0.16.0-dev.0', 'v2.0.0', 'v10.4.1-rc.2']) assert.match(tag, pattern);
-  for (const tag of ['0.16.0', 'v0.16', 'v0.16.0+build.1', 'v01.16.0', 'v0.16.0 ', 'release-0.16.0']) assert.doesNotMatch(tag, pattern);
+  for (const tag of ['v0.16.0', 'v0.16.0-dev.0', 'v2.0.0', 'v10.4.1-rc.2', 'v0.16.0-0', 'v0.16.0-1.10', 'v0.16.0-01a', 'v0.16.0-01-a', 'v0.16.0-x-y-z.--']) assert.match(tag, pattern);
+  for (const tag of ['0.16.0', 'v0.16', 'v0.16.0+build.1', 'v01.16.0', 'v0.16.0 ', 'release-0.16.0', 'v0.16.0-01', 'v0.16.0-dev.01', 'v0.16.0-.', 'v0.16.0-.dev', 'v0.16.0-dev.', 'v0.16.0-dev..1']) assert.doesNotMatch(tag, pattern);
+  for (const end of ['\n', '\r', '\r\n', '\u2028', '\u2029']) assert.doesNotMatch(`v0.16.0-dev.0${end}`, pattern);
   assert.match(text, /metadata\.version !== tag\.slice\(1\)/); assert.match(text, /refs\/tags\/\$\{tag\}\^\{commit\}/); assert.match(text, /'merge-base', '--is-ancestor', 'HEAD', 'origin\/main'/);
 });

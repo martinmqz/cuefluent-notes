@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fail } from '../core/errors.mjs';
+import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
 import { pinRunLogging, confirmLogEvent, failLogEvent, setLogPublication, addRunWarning, validateRun, RUN_LIMITS } from '../core/run.mjs';
 import { withCurrentAttempt, withAttemptWriter } from '../storage/attempts.mjs';
 import { writeJSON, readSnapshot, hashBytes } from '../storage/files.mjs';
@@ -69,7 +70,7 @@ async function discardOwned(pin, publication, persistIntent) {
 /** One independently fenced log operation per event. Known failures are final
  * for that event; an interrupted publication retains exact expectations. */
 export async function flushRunLogs(store, owner, { skillVersion } = {}) {
-  if (typeof skillVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(skillVersion) || skillVersion.length > 256) fail('LOG_ARGUMENT', 'Activity logging requires the installed skill version.');
+  if (typeof skillVersion !== 'string' || !SEMVER_VERSION_PATTERN.test(skillVersion) || skillVersion.length > 256) fail('LOG_ARGUMENT', 'Activity logging requires the installed skill version.');
   const events = await withCurrentAttempt(owner, ({ run }) => [
     ...(run.logPublication ? [run.logPublication.eventId] : []),
     ...run.logEvents.filter(event => !event.confirmed && event.failure === null && event.id !== run.logPublication?.eventId).map(event => event.id),

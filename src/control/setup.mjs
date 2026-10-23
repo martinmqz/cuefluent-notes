@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
+import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
 import { createProject, emptySettings, validateSettings } from '../core/settings.mjs';
 import { validateNotePublication } from '../core/note-publication.mjs';
 import { checkStorePlacement, initializeStore, openStore, readSettings, updateSettings, withWriter, gateOptions } from '../storage/store.mjs';
@@ -14,7 +15,6 @@ import { logDiagnostic } from '../logs/index.mjs';
 const JOURNAL = 'config/setup.json';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
-const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const requireSetup = (condition, code = 'SETUP_INTENT_INVALID') => { if (!condition) fail(code, 'The setup intent does not match the exact inspected project, settings, or paths.'); };
 const settingsWith = (settings, project) => validateSettings({ schemaVersion: settings.schemaVersion, projects: settings.projects.some(item => item.id === project.id)
@@ -56,7 +56,7 @@ function validateIntent(input) {
   requireSetup(input && equal(Object.keys(input).sort(), ['createdAt', 'expectedHash', 'id', 'logParent', 'logs', 'noteId', 'notesParent', 'proposed', 'publication', 'request', 'schema', 'seriesId', 'skillVersion'].sort()));
   requireSetup(input.schema === 1 && UUID.test(input.id) && UUID.test(input.noteId) && UUID.test(input.seriesId) && HASH.test(input.expectedHash) &&
     typeof input.createdAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(input.createdAt) && Number.isFinite(Date.parse(input.createdAt)) && new Date(input.createdAt).toISOString() === input.createdAt &&
-    typeof input.skillVersion === 'string' && input.skillVersion.length <= 256 && VERSION.test(input.skillVersion));
+    typeof input.skillVersion === 'string' && input.skillVersion.length <= 256 && SEMVER_VERSION_PATTERN.test(input.skillVersion));
   const request = validateSettings({ schemaVersion: 1, projects: [input.request] }).projects[0], proposed = validateSettings(input.proposed), configured = proposed.projects.find(item => item.id === request.id);
   requireSetup(configured && configured.activityLog.enabled === request.activityLog.enabled && equal({ ...configured, activityLog: request.activityLog }, request));
   const root = notesRoot(request), notesParent = chainValue(input.notesParent, root);
@@ -108,7 +108,7 @@ async function inspectLogs(project) {
 export async function setupProject({ storeRoot, project: input, expectedHash, skillVersion, now = new Date().toISOString() } = {}) {
   assertAbsolute(storeRoot);
   requireSetup(expectedHash === null || (typeof expectedHash === 'string' && HASH.test(expectedHash)), 'EXPECTED_HASH_REQUIRED');
-  requireSetup(typeof skillVersion === 'string' && skillVersion.length <= 256 && VERSION.test(skillVersion) && typeof now === 'string' &&
+  requireSetup(typeof skillVersion === 'string' && skillVersion.length <= 256 && SEMVER_VERSION_PATTERN.test(skillVersion) && typeof now === 'string' &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(now) && Number.isFinite(Date.parse(now)) && new Date(now).toISOString() === now, 'SETUP_ARGUMENT');
   const request = createProject(input);
   // Validate overlap, repositories, and every existing ancestor before even the

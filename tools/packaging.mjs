@@ -9,11 +9,13 @@ import { fileURLToPath } from 'node:url';
 export const PACKAGE_LIMITS = Object.freeze({ files: 4096, fileBytes: 16 * 1024 * 1024, totalBytes: 128 * 1024 * 1024, inventoryBytes: 2 * 1024 * 1024 });
 export const REFERENCES = Object.freeze(['setup', 'commands', 'notes', 'metadata', 'storage', 'verification', 'distribution']);
 export const INVENTORY = 'package-inventory.json';
-const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 // The source package version names tags, archives and manifests: an exact SemVer
 // core with an optional prerelease and no build metadata. Companion copies of
 // this tool run without src/, so src/core/version.mjs keeps an identical copy.
-export const PACKAGE_VERSION = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/;
+export const PACKAGE_VERSION = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
+// Exact dependency pins may additionally carry nonempty build identifiers;
+// numeric build identifiers, unlike prerelease identifiers, may have leading zeros.
+const VERSION = new RegExp(`${PACKAGE_VERSION.source.slice(0, -1)}(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const json = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;

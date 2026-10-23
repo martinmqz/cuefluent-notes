@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, toN
 import { pathToFileURL } from 'node:url';
 import { isMainThread } from 'node:worker_threads';
 import { setTimeout as delay } from 'node:timers/promises';
+import { assertMacosPrivateAccess } from './macos-acl.mjs';
 
 const MAX_GATE_BYTES = 64 * 1024;
 const MARKER_SQL = 'CREATE TABLE gate_marker (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), id TEXT NOT NULL, stage TEXT NOT NULL)';
@@ -56,6 +57,10 @@ function privateEntry(stat, path, isParent, guardPath) {
     if ((stat.mode & 0o077n) !== 0n) fail('GATE_UNSAFE_PATH', `Gate ${isParent ? 'directory' : 'file'} is not private: ${path}`);
     const required = isParent ? 0o700n : 0o600n;
     if ((stat.mode & required) !== required) fail('GATE_UNSAFE_PATH', `Gate ${isParent ? 'directory' : 'file'} lacks required owner access: ${path}`);
+    if (process.platform === 'darwin') {
+      try { assertMacosPrivateAccess(path, stat); }
+      catch (cause) { fail('GATE_UNSAFE_PATH', 'Gate macOS ACL privacy could not be established.', cause); }
+    }
   }
   if (guardPath !== undefined) {
     if (typeof guardPath !== 'function') fail('GATE_INVALID_GUARD', 'guardPath must be a synchronous verifier.');

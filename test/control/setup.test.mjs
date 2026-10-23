@@ -12,6 +12,7 @@ import { createProject, validateSettings } from '../../src/core/settings.mjs';
 import { initializeStore, openStore, readSettings, updateSettings, withProject } from '../../src/storage/store.mjs';
 import { readJSON, writeJSON } from '../../src/storage/files.mjs';
 import { createAnnualLog, inspectAnnualLog } from '../../src/logs/index.mjs';
+import { inspectMetadata } from '../../src/notes/index.mjs';
 
 const now = '2026-10-22T01:00:00.000Z', skillVersion = '0.16.0-dev.0';
 async function fixture(t, { enabled = false, destinationKind = 'directory' } = {}) {
@@ -44,6 +45,20 @@ async function stopSetup(t, f, point) {
   }
   child.kill('SIGKILL'); await exited;
 }
+
+test('setup rejects malformed SemVer before creating storage and retains valid build metadata and its length limit', async t => {
+  const f = await fixture(t);
+  for (const skillVersion of ['0.16.0-01', '0.16.0-.', '0.16.0-dev..1', '0.16.0+build..1', '01.16.0', `0.16.0-${'x'.repeat(250)}`]) {
+    await assert.rejects(setupProject({ ...f.options, skillVersion }), { code: 'SETUP_ARGUMENT' });
+    assert.deepEqual(await fs.readdir(f.root), ['project']);
+  }
+  for (const skillVersion of ['0.16.0-01a+001.build-0', `0.16.0-${'x'.repeat(249)}`]) {
+    const configured = await fixture(t, { enabled: true });
+    assert.equal((await setupProject({ ...configured.options, skillVersion })).status, 'configured');
+    const annual = inspectMetadata(await fs.readFile(path.join(configured.notes, 'logs/2026.md')));
+    assert.equal(annual.value.generation.skill_version, skillVersion);
+  }
+});
 
 test('fresh explicit setup records independent defaults and destination without enrolling or writing notes', async t => {
   const f = await fixture(t), result = await setupProject(f.options), current = await f.current();

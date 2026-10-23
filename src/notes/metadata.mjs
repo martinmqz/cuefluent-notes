@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar } from 'yaml';
 import { fail } from '../core/errors.mjs';
+import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
 import { parseMarkdown } from './markdown.mjs';
 
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const hashPattern = /^sha256:[a-f0-9]{64}$/;
 const marker = /<!--[\t \r\n]*cuefluent(?=[\t \r\n]|-->|$)/giu;
 const block = /^(?:\uFEFF)?[ \t\r\n]*?( {0,3}<!-- cuefluent[ \t]*(?:\r\n|\r|\n)([\s\S]*?)(?:\r\n|\r|\n) {0,3}-->[ \t]*(?:(?:\r\n|\r|\n)|$))/;
@@ -99,7 +99,7 @@ export function validateMetadata(input) {
   optional(value, 'sprint', item => text(item, 128));
   if (Object.hasOwn(value, 'period')) requireValue(plain(value.period) && calendarDate(value.period.start) && calendarDate(value.period.end) && value.period.start <= value.period.end && timezone(value.period.timezone));
   if (Object.hasOwn(value, 'generation')) {
-    requireValue(plain(value.generation)); optional(value.generation, 'skill_version', item => typeof item === 'string' && versionPattern.test(item));
+    requireValue(plain(value.generation)); optional(value.generation, 'skill_version', item => typeof item === 'string' && SEMVER_VERSION_PATTERN.test(item));
     optional(value.generation, 'content_hash', item => typeof item === 'string' && hashPattern.test(item));
   }
   return value;
@@ -235,7 +235,7 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       else document.set('updated', quoted(updated));
     }
     if (skillVersion !== undefined) {
-      requireValue(typeof skillVersion === 'string' && versionPattern.test(skillVersion));
+      requireValue(typeof skillVersion === 'string' && SEMVER_VERSION_PATTERN.test(skillVersion));
       if (!document.has('generation')) document.set('generation', document.createNode({}));
       const current = document.getIn(['generation', 'skill_version'], true);
       if (isScalar(current)) current.value = skillVersion;

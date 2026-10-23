@@ -51,6 +51,7 @@
   "src/storage/draft-artifacts.mjs",
   "src/storage/files.mjs",
   "src/storage/gates.mjs",
+  "src/storage/macos-acl.mjs",
   "src/storage/note-writer.mjs",
   "src/storage/paths.mjs",
   "src/storage/platform.mjs",

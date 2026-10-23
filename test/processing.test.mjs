@@ -14,6 +14,7 @@ import { setChatTracking, readChat, queueRelative } from '../src/storage/chats.m
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
 import { attachAttemptChild, launchOwnedAttempt, inspectAttempt } from '../src/storage/attempts.mjs';
 import { prepareProcessing, readProcessingInput } from '../src/processing/prepare.mjs';
+import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-process-')));
@@ -28,7 +29,7 @@ async function fixture(t) {
       { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
     let stderr = '';
     child.stderr.on('data', bytes => { stderr = `${stderr}${bytes}`.slice(-2000); });
-    const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr })));
+    const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr: withoutFfiNotice(stderr, child.pid) })));
     t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
     f.children.push({ child, exited });
     return attachAttemptChild(child, context);

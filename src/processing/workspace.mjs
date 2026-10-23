@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
+import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
 import { validateSettings } from '../core/settings.mjs';
 import { assertChain, assertDirectory, assertRegularFile, inspectAncestors, lstatOrNull, pinDirectory, relativePath } from '../storage/paths.mjs';
 import { hashBytes, readSnapshot } from '../storage/files.mjs';
@@ -52,7 +53,7 @@ const continuation = (bytes, at) => at < bytes.length && (bytes[at] & 0xc0) === 
  */
 export async function openNoteWorkspace({ project: inputProject, runId, skillVersion, now = new Date().toISOString(), limits: inputLimits = {}, readActivityLog = null } = {}) {
   const project = validateSettings({ schemaVersion: 1, projects: [inputProject] }).projects[0];
-  if (typeof runId !== 'string' || !UUID.test(runId) || typeof skillVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(skillVersion) || !isNoteTimestamp(now)) fail('WORKSPACE_CONTEXT_INVALID', 'A validated run identity, plugin version and timestamp are required.');
+  if (typeof runId !== 'string' || !UUID.test(runId) || typeof skillVersion !== 'string' || !SEMVER_VERSION_PATTERN.test(skillVersion) || !isNoteTimestamp(now)) fail('WORKSPACE_CONTEXT_INVALID', 'A validated run identity, plugin version and timestamp are required.');
   if (readActivityLog !== null && typeof readActivityLog !== 'function') fail('WORKSPACE_CONTEXT_INVALID', 'The activity-log reader must be a trusted capability.');
   object(inputLimits, Object.keys(WORKSPACE_LIMITS));
   const limits = { ...WORKSPACE_LIMITS };

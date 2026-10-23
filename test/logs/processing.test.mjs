@@ -50,6 +50,20 @@ async function fixture(t, { saved = true, pinned = true } = {}) {
   return { root, notes, pin, project, store, run, draft, event, binding, read, own, mutate, annual: path.join(notes, 'logs', '2026.md'), target };
 }
 
+test('log flushing rejects malformed SemVer without changing the run or log and retains valid build metadata', async t => {
+  const f = await fixture(t), annual = await fs.readFile(f.annual);
+  await f.own(async owner => {
+    const before = await f.read();
+    for (const skillVersion of ['0.16.0-01', '0.16.0-.', '0.16.0-dev..1', '0.16.0+build..1', '01.16.0', `0.16.0-${'x'.repeat(250)}`]) {
+      await assert.rejects(flushRunLogs(f.store, owner, { skillVersion }), { code: 'LOG_ARGUMENT' });
+      assert.deepEqual(await f.read(), before); assert.deepEqual(await fs.readFile(f.annual), annual);
+    }
+    const flushed = await flushRunLogs(f.store, owner, { skillVersion: '0.16.0-01a+001.build-0' });
+    assert.equal(flushed.logEvents[0].confirmed, true);
+    assert.equal((await flushRunLogs(f.store, owner, { skillVersion: `0.16.0-${'x'.repeat(249)}` })).logEvents[0].confirmed, true);
+  });
+});
+
 test('series is pinned before drafting from existing metadata, not changed settings timezone', async t => {
   const f = await fixture(t, { saved: false, pinned: false });
   await f.own(async owner => { assert.deepEqual(await pinProcessingLogging(f.store, owner), f.binding); });

@@ -62,6 +62,49 @@ test('npm cache defaults match POSIX and Windows layouts without reading npm set
   assert.equal(defaultNpmCache({ platform: 'win32', env: { npm_config_cache: 'D:\\exact-cache', NPM_CONFIG_CACHE: 'D:\\other-cache' }, home: 'C:\\Users\\synthetic' }), 'D:\\exact-cache');
 });
 
+test('malformed public versions fail before package publication', async t => {
+  const f = await fixture(t), metadata = JSON.parse(await fs.readFile(path.join(f.source, 'package.json'), 'utf8'));
+  const lock = JSON.parse(await fs.readFile(path.join(f.source, 'package-lock.json'), 'utf8'));
+  const versions = ['0.16.0-01', '0.16.0-.', '0.16.0-dev..1', ...['\n', '\r', '\r\n', '\u2028', '\u2029'].map(end => `0.16.0-dev.0${end}`)];
+  for (const [index, version] of versions.entries()) {
+    metadata.version = version; lock.version = version; lock.packages[''].version = version;
+    await fs.writeFile(path.join(f.source, 'package.json'), JSON.stringify(metadata)); await fs.writeFile(path.join(f.source, 'package-lock.json'), JSON.stringify(lock));
+    const output = `bad-version-${index}`;
+    await assert.rejects(f.build(output), { code: 'PACKAGE_LOCK_INVALID' });
+    await assert.rejects(fs.stat(path.join(f.root, output)), { code: 'ENOENT' });
+  }
+});
+
+test('dependency pins and locked versions require SemVer identifiers while allowing build metadata', async t => {
+  const f = await fixture(t), metadata = JSON.parse(await fs.readFile(path.join(f.source, 'package.json'), 'utf8'));
+  const lock = JSON.parse(await fs.readFile(path.join(f.source, 'package-lock.json'), 'utf8')), cache = path.join(f.root, 'synthetic-cache');
+  await fs.mkdir(cache);
+  async function writeDependency(version) {
+    const name = 'synthetic-dependency', archive = tarArchive([
+      { path: 'package.json', bytes: Buffer.from(JSON.stringify({ name, version, license: 'MIT' })) },
+      { path: 'LICENSE', bytes: Buffer.from('Synthetic license.\n') },
+    ], { prefix: 'package' });
+    const encoded = createHash('sha512').update(archive).digest('hex'), file = path.join(cache, `_cacache/content-v2/sha512/${encoded.slice(0, 2)}/${encoded.slice(2, 4)}/${encoded.slice(4)}`);
+    await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, archive);
+    metadata.dependencies = { [name]: version };
+    lock.packages = { '': { ...lock.packages[''], dependencies: metadata.dependencies },
+      [`node_modules/${name}`]: { version, license: 'MIT', resolved: 'https://registry.npmjs.org/synthetic-dependency/-/synthetic-dependency.tgz', integrity: `sha512-${Buffer.from(encoded, 'hex').toString('base64')}` } };
+    await fs.writeFile(path.join(f.source, 'package.json'), JSON.stringify(metadata)); await fs.writeFile(path.join(f.source, 'package-lock.json'), JSON.stringify(lock));
+  }
+  for (const version of ['1.2.3', '1.2.3-0', '1.2.3-01a', '1.2.3-rc.1+001.build-0', '1.2.3+001']) {
+    await writeDependency(version);
+    const closure = await readProductionDependencies({ repoRoot: f.source, cacheRoot: cache });
+    assert.equal(closure.dependencies[0].version, version);
+  }
+  for (const version of ['1.2.3-01', '1.2.3-.', '1.2.3-dev..1', '1.2.3+', '1.2.3+.', '1.2.3+build..1', '01.2.3', ...['\n', '\r', '\r\n', '\u2028', '\u2029'].map(end => `1.2.3-rc.1+001${end}`)]) {
+    await writeDependency(version);
+    await assert.rejects(readProductionDependencies({ repoRoot: f.source, cacheRoot: cache }), { code: 'PACKAGE_DEPENDENCY_UNPINNED' });
+    metadata.dependencies['synthetic-dependency'] = '1.2.3'; lock.packages[''].dependencies = metadata.dependencies;
+    await fs.writeFile(path.join(f.source, 'package.json'), JSON.stringify(metadata)); await fs.writeFile(path.join(f.source, 'package-lock.json'), JSON.stringify(lock));
+    await assert.rejects(readProductionDependencies({ repoRoot: f.source, cacheRoot: cache }), { code: 'PACKAGE_LOCK_INVALID' });
+  }
+});
+
 test('fresh builds are deterministic and detached inventories bind exact shipped source/dependency files', async t => {
   const f = await fixture(t), first = await f.build('one'), second = await f.build('two');
   assert.deepEqual(first, second);

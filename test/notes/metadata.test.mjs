@@ -6,6 +6,24 @@ const body = '# Synthetic topic\n\n## Decision\n\nUse the checked result.\n';
 const options = { id: 'synthetic-note', now: '2026-10-22T01:00:00Z', skillVersion: '0.16.0-dev.0' };
 const metadata = payload => `<!-- cuefluent\n${payload}\n-->\n${body}`;
 
+test('generated and updated metadata require valid SemVer identifiers and retain build metadata', () => {
+  const original = createGeneratedNote(body, options), proposed = body.replace('checked', 'verified');
+  for (const skillVersion of ['0.16.0-0', '0.16.0-01a', '0.16.0-rc.1+001.build-0', `0.16.0-${'x'.repeat(2041)}`]) {
+    const created = inspectMetadata(createGeneratedNote(body, { ...options, skillVersion }));
+    assert.equal(created.status, 'supported'); assert.equal(created.value.generation.skill_version, skillVersion);
+    const updated = inspectMetadata(preserveMetadata(original, proposed, { skillVersion }).bytes);
+    assert.equal(updated.status, 'supported'); assert.equal(updated.value.generation.skill_version, skillVersion);
+  }
+  for (const skillVersion of ['0.16.0-01', '0.16.0-.', '0.16.0-dev..1', '0.16.0+build..1', '01.16.0', `0.16.0-${'x'.repeat(2042)}`, ...['\n', '\r', '\r\n', '\u2028', '\u2029'].map(end => `0.16.0-dev.0+001${end}`)]) {
+    assert.throws(() => createGeneratedNote(body, { ...options, skillVersion }), { code: 'NOTE_METADATA_INVALID' });
+    assert.throws(() => preserveMetadata(original, proposed, { skillVersion }), { code: 'NOTE_METADATA_INVALID' });
+    const malformed = metadata(`schema_version: 1\nid: stable\ngeneration:\n  skill_version: "${skillVersion}"`);
+    assert.equal(inspectMetadata(malformed).status, 'invalid');
+    assert.equal(preserveMetadata(malformed, malformed).bytes.toString(), malformed);
+    assert.throws(() => preserveMetadata(malformed, proposed), { code: 'NOTE_METADATA_INVALID' });
+  }
+});
+
 test('new generated metadata uses quoted timestamps and supported document provenance', () => {
   const bytes = createGeneratedNote(body, { ...options, metadata: { sources: [{ type: 'document', ref: 'chat:synthetic', locator: 'exchange one', source_hash: `sha256:${'a'.repeat(64)}` }] } });
   const result = inspectMetadata(bytes);
