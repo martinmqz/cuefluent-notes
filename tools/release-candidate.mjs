@@ -1,64 +1,80 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { AssertionError } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { compareBuilds, verifyBuildArchives } from './ci.mjs';
+import { compareBuilds, verifyBuildArchives, ARTIFACT_NAMES as ARTIFACTS, digest, decode as parse, bounded } from './ci.mjs';
 import { PACKAGE_VERSION } from './packaging.mjs';
 
-const PLATFORMS = ['ubuntu-24.04', 'macos-14', 'windows-2025'];
-const ARTIFACTS = PLATFORMS.map(platform => `v2-candidate-${platform}`);
 export const EXPECTED_CHECK_JOBS = Object.freeze(['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)',
   'test (windows-2025, 2/4)', 'test (windows-2025, 3/4)', 'test (windows-2025, 4/4)',
   'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']);
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
-const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const positive = value => Number.isSafeInteger(value) && value > 0;
-function requireRelease(condition) {
-  if (!condition) { const error = new Error('Release candidate evidence could not be verified.'); error.code = 'RELEASE_EVIDENCE_INVALID'; throw error; }
+function requireRelease(condition, reason = 'EVIDENCE_MISMATCH') {
+  if (!condition) {
+    const error = new Error(`Release candidate evidence could not be verified (${reason}).`);
+    error.code = 'RELEASE_EVIDENCE_INVALID'; error.reason = reason; throw error;
+  }
+}
+function reasonFor(error) {
+  if (/^[A-Z][A-Z0-9_]{1,63}$/.test(error?.reason ?? '')) return error.reason;
+  if (['ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'CI_CANDIDATE_INVALID'].includes(error?.code)) return error.code;
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'REQUEST_TIMEOUT';
+  if (error instanceof SyntaxError) return 'INVALID_JSON';
+  if (error instanceof TypeError) return 'INVALID_DATA_OR_CONNECTION';
+  return 'UNEXPECTED_FAILURE';
 }
 async function checked(stage, operation) {
   try { return await operation(); }
   catch (cause) {
-    if (cause.releaseStage) throw cause;
-    const error = new Error(`Release candidate ${stage} verification failed.`);
-    error.code = 'RELEASE_EVIDENCE_INVALID'; error.releaseStage = stage; throw error;
+    if (cause instanceof AssertionError) throw cause;
+    if (cause?.releaseStage) throw cause;
+    const error = new Error(`Release candidate ${stage} verification failed.`, { cause });
+    error.code = 'RELEASE_EVIDENCE_INVALID'; error.releaseStage = stage; error.reason = reasonFor(cause); throw error;
   }
 }
-const parse = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-async function readBounded(file, limit = 1024 * 1024) {
-  const stat = await fs.lstat(file);
-  requireRelease(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.size <= limit);
-  const bytes = await fs.readFile(file); requireRelease(bytes.length === stat.size); return bytes;
+const readBounded = file => bounded(file, 1024 * 1024);
+export function releaseErrorMessage(error) {
+  const stages = ['selection', 'tag', 'run', 'jobs', 'artifacts', 'source', 'api'];
+  const stage = stages.includes(error?.releaseStage) ? error.releaseStage : 'selection';
+  return `Release candidate ${stage} verification failed (RELEASE_EVIDENCE_INVALID; ${reasonFor(error)}).`;
 }
 
-function context({ env = process.env, git, request, now = Date.now } = {}) {
+export function createGitHubRequest({ token, fetchImpl = fetch } = {}) {
+  requireRelease(typeof token === 'string' && token.length > 0, 'GITHUB_TOKEN_MISSING');
+  return route => checked('api', async () => {
+    requireRelease(typeof route === 'string' && route.startsWith('/repos/'), 'API_ROUTE_INVALID');
+    const response = await fetchImpl(`https://api.github.com${route}`, {
+      // This supported representation retains merge_commit_sha, required to
+      // bind merged PR evidence to main ancestry; 2026-03-10 omits that field.
+      headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' },
+      signal: AbortSignal.timeout(30_000), redirect: 'error',
+    });
+    requireRelease(response.ok, Number.isInteger(response.status) && response.status >= 100 && response.status <= 599 ? `HTTP_${response.status}` : 'HTTP_INVALID_STATUS');
+    const declared = response.headers.get('content-length');
+    requireRelease(declared === null || (/^[0-9]+$/.test(declared) && Number(declared) <= 4 * 1024 * 1024), 'API_RESPONSE_TOO_LARGE');
+    const chunks = []; let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length; requireRelease(size <= 4 * 1024 * 1024, 'API_RESPONSE_TOO_LARGE'); chunks.push(chunk);
+    }
+    return parse(Buffer.concat(chunks));
+  });
+}
+
+function context({ env = process.env, git, request, fetchImpl, now = Date.now } = {}) {
   const { RELEASE_TAG: tag, CHECKS_RUN_ID: runText, GITHUB_REPOSITORY: repository,
     GITHUB_REPOSITORY_ID: repositoryText, CUEFLUENT_RELEASE_ROOT: root } = env;
-  requireRelease(typeof tag === 'string' && tag.startsWith('v') && PACKAGE_VERSION.exec(tag.slice(1))?.[0] === tag.slice(1));
+  requireRelease(typeof tag === 'string' && tag.startsWith('v') && PACKAGE_VERSION.exec(tag.slice(1))?.[0] === tag.slice(1), 'TAG_INVALID');
   requireRelease(typeof repository === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository));
   requireRelease(typeof runText === 'string' && /^[1-9][0-9]*$/.test(runText) && positive(Number(runText)));
   requireRelease(typeof repositoryText === 'string' && /^[1-9][0-9]*$/.test(repositoryText) && positive(Number(repositoryText)));
   requireRelease(typeof root === 'string' && path.isAbsolute(root));
   const runId = Number(runText), repositoryId = Number(repositoryText);
   git ??= args => execFileSync('git', args, { maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-  if (!request) {
-    requireRelease(typeof env.GITHUB_TOKEN === 'string' && env.GITHUB_TOKEN.length > 0);
-    request = async route => {
-      const response = await fetch(`https://api.github.com${route}`, {
-        headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${env.GITHUB_TOKEN}`, 'X-GitHub-Api-Version': '2026-03-10' },
-        signal: AbortSignal.timeout(30_000), redirect: 'error',
-      });
-      requireRelease(response.ok);
-      const chunks = []; let size = 0;
-      for await (const chunk of response.body) {
-        size += chunk.length; requireRelease(size <= 4 * 1024 * 1024); chunks.push(chunk);
-      }
-      return parse(Buffer.concat(chunks));
-    };
-  }
+  request ??= createGitHubRequest({ token: env.GITHUB_TOKEN, fetchImpl });
   return { env, tag, repository, repositoryId, root, runId, git, request, now, api: `/repos/${repository}` };
 }
 
@@ -68,7 +84,11 @@ async function readTag(c) {
     const commit = gitText(['rev-parse', '--verify', `refs/tags/${c.tag}^{commit}`]);
     const tree = gitText(['rev-parse', '--verify', `${commit}^{tree}`]);
     requireRelease(SHA.test(commit) && SHA.test(tree));
-    c.git(['merge-base', '--is-ancestor', commit, 'origin/main']);
+    try { c.git(['merge-base', '--is-ancestor', commit, 'origin/main']); }
+    catch (cause) {
+      if (cause instanceof AssertionError) throw cause;
+      const error = new Error('Release tag must belong to main history.', { cause }); error.reason = 'TAG_NOT_ON_MAIN'; throw error;
+    }
     const metadata = parse(Buffer.from(c.git(['show', `${commit}:package.json`])));
     requireRelease(metadata.name === 'cuefluent-notes' && metadata.version === c.tag.slice(1));
     const lockSha256 = digest(Buffer.from(c.git(['show', `${commit}:package-lock.json`])));
@@ -97,7 +117,7 @@ async function list(c, route, key) {
   requireRelease(false);
 }
 
-async function inspectRun(c) {
+export async function inspectChecksRun(c) {
   return checked('run', async () => {
     const workflow = await c.request(`${c.api}/actions/workflows/ci.yml`);
     requireRelease(positive(workflow.id) && workflow.path === '.github/workflows/ci.yml');
@@ -106,8 +126,8 @@ async function inspectRun(c) {
       run.repository?.id === c.repositoryId && run.repository?.full_name === c.repository &&
       run.head_repository?.id === c.repositoryId && run.head_repository?.full_name === c.repository &&
       run.status === 'completed' && run.conclusion === 'success' && positive(run.run_attempt) && SHA.test(run.head_sha) &&
-      ['pull_request', 'push', 'workflow_dispatch'].includes(run.event));
-    if (run.event !== 'pull_request') requireRelease(run.head_branch === 'main');
+      ['pull_request', 'workflow_dispatch'].includes(run.event), 'CHECKS_RUN_INVALID');
+    if (run.event !== 'pull_request') requireRelease(run.head_branch === 'main' || (c.tag && run.head_branch === c.tag), 'CHECKS_REF_INVALID');
     const jobs = await checked('jobs', async () => {
       const history = await list(c, `${c.api}/actions/runs/${c.runId}/jobs?filter=all`, 'jobs');
       requireRelease(new Set(history.map(job => job.id)).size === history.length);
@@ -142,8 +162,8 @@ async function inspectRun(c) {
 
 export async function selectReleaseCandidate(options = {}) {
   return checked('selection', async () => {
-    const c = context(options), tag = await readTag(c), run = await inspectRun(c);
-    if (run.event !== 'pull_request') requireRelease(run.headSha === tag.commit);
+    const c = context(options), tag = await readTag(c), run = await inspectChecksRun(c);
+    if (run.event !== 'pull_request') requireRelease(run.headSha === tag.commit, 'CHECKS_COMMIT_MISMATCH');
     await fs.mkdir(c.root);
     const snapshot = { schema: 1, tag, run };
     await fs.writeFile(path.join(c.root, 'selection.json'), json(snapshot), { flag: 'wx' });
@@ -153,11 +173,11 @@ export async function selectReleaseCandidate(options = {}) {
   });
 }
 
-async function verifySource(c, source, receiptBytes, tag, run, cache) {
+export async function verifyBuildSource(c, source, receiptBytes, tag, run, cache = new Map()) {
   requireRelease(source?.schema === 1 && source.repository === c.repository && source.repositoryId === c.repositoryId &&
     source.runId === c.runId && positive(source.runAttempt) && source.runAttempt <= run.runAttempt && source.event === run.event &&
     source.headSha === run.headSha && SHA.test(source.checkoutCommit) && source.checkoutTree === tag.tree &&
-    HASH.test(source.receiptSha256) && source.receiptSha256 === digest(receiptBytes));
+    HASH.test(source.receiptSha256) && source.receiptSha256 === digest(receiptBytes), 'SOURCE_BINDING_INVALID');
   const commit = async sha => {
     if (!cache.has(sha)) cache.set(sha, await c.request(`${c.api}/git/commits/${sha}`));
     const value = cache.get(sha); requireRelease(value?.sha === sha && SHA.test(value.tree?.sha)); return value;
@@ -172,42 +192,58 @@ async function verifySource(c, source, receiptBytes, tag, run, cache) {
     const pr = cache.get(key);
     requireRelease(pr?.number === source.pullRequest && pr.merged === true && pr.state === 'closed' &&
       pr.base?.ref === 'main' && pr.base.repo?.id === c.repositoryId && pr.base.repo?.full_name === c.repository &&
-      pr.head?.sha === run.headSha && pr.head.repo?.id === c.repositoryId && pr.head.repo?.full_name === c.repository && SHA.test(pr.merge_commit_sha));
-    c.git(['merge-base', '--is-ancestor', pr.merge_commit_sha, tag.commit]);
-  } else requireRelease(source.pullRequest === null && source.checkoutCommit === tag.commit && run.headSha === tag.commit);
+      pr.head?.sha === run.headSha && pr.head.repo?.id === c.repositoryId && pr.head.repo?.full_name === c.repository, 'PR_IDENTITY_INVALID');
+    requireRelease(SHA.test(pr.merge_commit_sha), 'PR_MERGE_SHA_MISSING');
+    try { c.git(['merge-base', '--is-ancestor', pr.merge_commit_sha, tag.commit]); }
+    catch (cause) {
+      if (cause instanceof AssertionError) throw cause;
+      const error = new Error('Merged PR must belong to release history.', { cause }); error.reason = 'PR_NOT_IN_RELEASE_HISTORY'; throw error;
+    }
+  } else requireRelease(source.pullRequest === null && source.checkoutCommit === tag.commit && run.headSha === tag.commit, 'SOURCE_COMMIT_MISMATCH');
   return { pullRequest: source.pullRequest, checkoutCommit: source.checkoutCommit, checkoutTree: source.checkoutTree, headSha: source.headSha };
 }
 
 export async function verifyReleaseCandidate(options = {}) {
   return checked('source', async () => {
     const c = context(options), selected = parse(await readBounded(path.join(c.root, 'selection.json')));
-    const tag = await readTag(c), run = await inspectRun(c);
-    requireRelease(selected.schema === 1 && same(selected.tag, tag) && same(selected.run, run));
+    requireRelease(selected.schema === 1 && selected.tag?.name === c.tag && selected.run?.runId === c.runId &&
+      selected.run?.repository === c.repository && selected.run.repositoryId === c.repositoryId, 'SELECTION_BINDING_INVALID');
+    const { tag, run } = selected;
+    requireRelease(SHA.test(tag.refSha) && SHA.test(tag.commit) && SHA.test(tag.tree) &&
+      tag.version === c.tag.slice(1) && HASH.test(tag.lockSha256) && SHA.test(run.headSha) &&
+      positive(run.runAttempt) && positive(run.workflowId) && ['pull_request', 'workflow_dispatch'].includes(run.event), 'SELECTION_IDENTITY_INVALID');
+    if (run.event === 'workflow_dispatch') requireRelease((run.headBranch === 'main' || run.headBranch === c.tag) &&
+      run.headSha === tag.commit, 'SELECTION_COMMIT_INVALID');
+    // Consume the captured selection, then revalidate it once immediately before
+    // output. Artifact names come from the fixed allowlist, never the selection.
+    requireRelease(Array.isArray(run.artifacts) && run.artifacts.length === ARTIFACTS.length &&
+      ARTIFACTS.every((name, index) => run.artifacts[index]?.name === name && positive(run.artifacts[index].id)), 'SELECTION_ARTIFACTS_INVALID');
     const artifactsRoot = path.join(c.root, 'artifacts');
     for (const directory of [artifactsRoot, ...ARTIFACTS.map(name => path.join(artifactsRoot, name))]) {
       const stat = await fs.lstat(directory); requireRelease(stat.isDirectory() && !stat.isSymbolicLink());
     }
-    await compareBuilds(artifactsRoot);
+    const { verified } = await compareBuilds(artifactsRoot, { includeVerified: true });
     let origin; const cache = new Map(), attempts = [];
     for (const artifact of run.artifacts) {
       const artifactRoot = path.join(artifactsRoot, artifact.name);
-      const { build, bytes } = await verifyBuildArchives(artifactRoot);
-      requireRelease(build.version === tag.version && build.sourceLockSha256 === tag.lockSha256);
+      const { build, bytes } = verified[artifact.name];
+      requireRelease(build.version === tag.version && build.sourceLockSha256 === tag.lockSha256, 'BUILD_IDENTITY_MISMATCH');
       const source = parse(await readBounded(path.join(artifactRoot, 'source.json')));
-      const verifiedSource = await verifySource(c, source, bytes, tag, run, cache);
-      if (origin) requireRelease(same(origin, verifiedSource)); else origin = verifiedSource;
+      const verifiedSource = await verifyBuildSource(c, source, bytes, tag, run, cache);
+      if (origin) requireRelease(same(origin, verifiedSource), 'PLATFORM_SOURCE_MISMATCH'); else origin = verifiedSource;
       attempts.push({ artifactId: artifact.id, runAttempt: source.runAttempt });
     }
     // Revalidate immediately before making a candidate available: reruns, tag moves,
     // artifact replacement or expiration require a new explicit selection.
-    requireRelease(same(tag, await readTag(c)) && same(run, await inspectRun(c)));
-    const primary = path.join(artifactsRoot, ARTIFACTS[0]), { build } = await verifyBuildArchives(primary);
+    requireRelease(same(tag, await readTag(c)) && same(run, await inspectChecksRun(c)), 'EVIDENCE_CHANGED');
+    const primary = path.join(artifactsRoot, ARTIFACTS[0]), { build, bytes } = verified[ARTIFACTS[0]];
     const output = path.join(c.root, 'candidate'); await fs.mkdir(output);
     for (const file of ['build.json', ...build.packages.flatMap(item => item.archives.map(archive => archive.path)), ...build.tools.map(archive => archive.path)]) {
       await fs.copyFile(path.join(primary, file), path.join(output, file), fs.constants.COPYFILE_EXCL);
     }
-    await verifyBuildArchives(output);
-    const evidence = { schema: 1, tag, run, source: origin, artifactAttempts: attempts, receiptSha256: digest(await readBounded(path.join(output, 'build.json'))) };
+    const copied = await verifyBuildArchives(output);
+    requireRelease(copied.bytes.equals(bytes), 'OUTPUT_RECEIPT_CHANGED');
+    const evidence = { schema: 1, tag, run, source: origin, artifactAttempts: attempts, receiptSha256: digest(bytes) };
     await fs.writeFile(path.join(output, 'release-evidence.json'), json(evidence), { flag: 'wx' });
     return evidence;
   });
@@ -220,7 +256,7 @@ export async function main(args, options = {}) {
 if (import.meta.main) {
   try { await main(process.argv.slice(2)); }
   catch (error) {
-    console.error(`Release candidate ${error.releaseStage ?? 'selection'} verification failed (RELEASE_EVIDENCE_INVALID).`);
+    console.error(releaseErrorMessage(error));
     process.exitCode = 1;
   }
 }

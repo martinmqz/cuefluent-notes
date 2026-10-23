@@ -97,9 +97,15 @@ commits. It runs the complete synthetic source suite on native Linux, macOS, and
 Windows for ready PRs when opened, updated, reopened, or marked ready for review.
 Draft PR events skip every job before runner allocation. Converting a PR back to
 draft cancels its active Checks run. Merging into `main` does not repeat the matrix.
-Main's strict required checks protect the merge; release preparation independently
-verifies the tested source against the release tag. Manual Checks dispatch remains
-available when explicitly requested, including on `main` when a new run is needed.
+Required PR checks protect ordinary merges. The separate
+[Main evidence workflow](../.github/workflows/main-evidence.yml) also checks every
+push to `main`, including direct pushes and administrator bypass merges. Its one
+read-only Ubuntu job verifies successful Checks evidence for the exact pushed
+tree using the retained source receipt and one digest-verified primary artifact.
+It runs no tests, native clients, or builds. Missing or mismatched evidence fails
+visibly; explicitly run Checks for that commit, then rerun the failed Main evidence
+job. Release preparation independently verifies the tested source against the
+release tag. Manual Checks dispatch remains available when explicitly requested.
 Linux and macOS each run one source job; Windows runs four shards on
 independent runners. Per-platform duration weights place the longest Windows
 test files first into the least-loaded shard. Both `npm test` and CI use `tools/test.mjs`
@@ -167,16 +173,24 @@ and the actual tested Git tree. It neither rebuilds nor reruns the test matrix.
 A PR run must come from this repository, have merged into `main`, and match the
 recorded PR head and tested merge checkout. The PR head and tested checkout trees
 must both equal the tagged tree; this conservative rule refuses reuse when the
-PR head had different files even if its merge result matched. A main push or
-manual Checks run must match the exact tag commit. Every expected job, including
+PR head had different files even if its merge result matched. A manual Checks
+run on `main` or the exact release tag must match the tag commit. Push events are
+not accepted as source evidence. Every expected job, including
 all Windows shards, must have succeeded. Earlier successful artifact-producing
 attempts remain valid when only failed jobs are rerun. The selected run, tag, and
-artifact identities are checked again before accepting the candidate.
+artifact identities are checked again before accepting the candidate. The verifier
+pins the supported GitHub API representation that includes the merged commit SHA.
+Failures report their verification stage and a bounded reason code, including HTTP
+status and ancestry failures, without printing tokens or downloaded payloads.
 
-Missing, expired, incompatible, or incomplete evidence stops preparation. Run
-Checks manually on the intended `main` commit when fresh evidence is required;
-preparation never silently launches another full matrix. Candidates created
-before source provenance was recorded are not eligible for this automated reuse.
+Missing, expired, incompatible, or incomplete evidence stops preparation. When
+fresh evidence is required, explicitly dispatch Checks on the existing release
+tag, for example `gh workflow run ci.yml --ref v0.16.0`. This tests the tagged
+commit even after `main` advances; the tag must contain this Checks workflow and
+source-recording support. A dispatch on `main` is also accepted when its tip is
+exactly the tagged commit. Preparation verifies main-history ancestry and never
+silently launches another full matrix. Candidates created before source provenance
+was recorded are not eligible for this automated reuse.
 Keep the intended package version in the implementation PR when practical: a
 later version change alters package contents and legitimately needs new checks.
 

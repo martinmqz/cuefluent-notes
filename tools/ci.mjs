@@ -7,9 +7,10 @@ import { buildPackages, verifyPackage, packagePath, PACKAGE_LIMITS, PACKAGE_VERS
 import { installPackage } from './install.mjs';
 
 const requireCI = condition => { if (!condition) { const error = new Error('Candidate build verification failed.'); error.code = 'CI_CANDIDATE_INVALID'; throw error; } };
-const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-const decode = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-async function bounded(file, limit) {
+export const ARTIFACT_NAMES = Object.freeze(['v2-candidate-ubuntu-24.04', 'v2-candidate-macos-14', 'v2-candidate-windows-2025']);
+export const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+export const decode = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+export async function bounded(file, limit) {
   const stat = await fs.lstat(file); requireCI(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.size <= limit);
   const bytes = await fs.readFile(file); requireCI(bytes.length === stat.size && bytes.length <= limit); return bytes;
 }
@@ -47,27 +48,30 @@ export async function verifyDetachedBuild(root, { copy = true } = {}) {
   return build;
 }
 
-export async function compareBuilds(root) {
-  const names = ['v2-candidate-ubuntu-24.04', 'v2-candidate-macos-14', 'v2-candidate-windows-2025'];
-  const entries = (await fs.readdir(root)).sort(); requireCI(JSON.stringify(entries) === JSON.stringify([...names].sort()));
+export async function compareBuilds(root, { includeVerified = false } = {}) {
+  const entries = (await fs.readdir(root)).sort(); requireCI(JSON.stringify(entries) === JSON.stringify([...ARTIFACT_NAMES].sort()));
+  const verified = {};
   let expected;
-  for (const name of names) {
-    const verified = await verifyBuildArchives(path.join(root, name));
-    if (expected) requireCI(expected.equals(verified.bytes)); else expected = verified.bytes;
+  for (const name of ARTIFACT_NAMES) {
+    const result = await verifyBuildArchives(path.join(root, name));
+    if (expected) requireCI(expected.equals(result.bytes)); else expected = result.bytes;
+    if (includeVerified) verified[name] = result;
   }
-  return { platforms: names.length, identical: true };
+  return { platforms: ARTIFACT_NAMES.length, identical: true, ...(includeVerified ? { verified } : {}) };
 }
 
 /** Bind retained candidates to the checkout actually tested, including PR merge
  * commits. Keep run metadata out of the deterministic build receipt. */
 export async function recordBuildSource(root, { repoRoot = process.cwd(), env = process.env } = {}) {
-  const { bytes } = await verifyBuildArchives(root);
+  // The build already verified its archives; bind only its bounded receipt here.
+  // Reproducibility and release preparation independently verify the archives.
+  const bytes = await bounded(path.join(root, 'build.json'), 1024 * 1024);
   const git = args => execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const integer = value => /^[1-9][0-9]*$/.test(value ?? '') && Number.isSafeInteger(Number(value));
   const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
   requireCI(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.GITHUB_REPOSITORY ?? '') &&
     ['GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'].every(key => integer(env[key])) &&
-    ['pull_request', 'workflow_dispatch', 'push'].includes(env.GITHUB_EVENT_NAME) &&
+    ['pull_request', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) &&
     sha(env.GITHUB_SHA) && sha(env.CUEFLUENT_HEAD_SHA));
   const isPR = env.GITHUB_EVENT_NAME === 'pull_request';
   requireCI(!isPR || integer(env.CUEFLUENT_PULL_REQUEST));

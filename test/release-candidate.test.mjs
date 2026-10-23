@@ -13,13 +13,27 @@ const platforms = ['ubuntu-24.04', 'macos-14', 'windows-2025'];
 const jobs = ['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)',
   'test (windows-2025, 2/4)', 'test (windows-2025, 3/4)', 'test (windows-2025, 4/4)',
   'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility'];
-const invalid = { code: 'RELEASE_EVIDENCE_INVALID' };
+function invalid(error) {
+  assert.equal(error.code, 'RELEASE_EVIDENCE_INVALID');
+  const seen = new Set();
+  for (let cause = error; cause && !seen.has(cause); cause = cause.cause) {
+    seen.add(cause); assert.notEqual(cause.code, 'ERR_ASSERTION', 'A fixture assertion is not an evidence rejection');
+  }
+  return true;
+}
 
-async function fixture(t, event = 'pull_request') {
+async function fixture(t, event = 'pull_request', version = '0.16.0') {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cue-release-evidence-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const fixtureFailures = [];
+  const checkFixture = (condition, message) => {
+    try { assert(condition, message); }
+    catch (error) { fixtureFailures.push(error); throw error; }
+  };
+  t.after(() => assert.deepEqual(fixtureFailures, [], 'Unexpected mock calls must fail even when an evidence rejection is expected'));
+  const tag = `v${version}`;
   const releaseRoot = path.join(root, 'release'), lock = Buffer.from('{"synthetic":"lock"}\n');
-  const metadata = { name: 'cuefluent-notes', version: '0.16.0' }, repo = { id: repositoryId, full_name: repository };
+  const metadata = { name: 'cuefluent-notes', version }, repo = { id: repositoryId, full_name: repository };
   const run = { id: runId, workflow_id: 8, path: '.github/workflows/ci.yml', repository: repo, head_repository: repo,
     status: 'completed', conclusion: 'success', run_attempt: 2, head_sha: event === 'pull_request' ? headSha : tagCommit,
     event, head_branch: event === 'pull_request' ? 'feat/change' : 'main' };
@@ -36,38 +50,50 @@ async function fixture(t, event = 'pull_request') {
     [tagCommit, { sha: tagCommit, tree: { sha: tree }, parents: [{ sha: baseSha }] }],
   ]);
   const pr = { number: 9, merged: true, state: 'closed', base: { ref: 'main', repo }, head: { sha: headSha, repo }, merge_commit_sha: tagCommit };
-  const reference = { ref: 'refs/tags/v0.16.0', object: { type: 'commit', sha: tagCommit } }, tagObjects = new Map();
+  const reference = { ref: `refs/tags/${tag}`, object: { type: 'commit', sha: tagCommit } }, tagObjects = new Map();
   const calls = [], gitCalls = [];
   const git = args => {
     gitCalls.push(args);
-    if (args[0] === 'rev-parse') return Buffer.from(args[2].endsWith('^{tree}') ? tree : tagCommit);
-    if (args[0] === 'merge-base') return Buffer.alloc(0);
-    if (args[0] === 'show' && args[1].endsWith(':package.json')) return Buffer.from(JSON.stringify(metadata));
-    if (args[0] === 'show' && args[1].endsWith(':package-lock.json')) return lock;
-    assert.fail(`Unexpected git arguments: ${JSON.stringify(args)}`);
+    if (sameArgs(args, ['rev-parse', '--verify', `refs/tags/${tag}^{commit}`])) return Buffer.from(tagCommit);
+    if (sameArgs(args, ['rev-parse', '--verify', `${tagCommit}^{tree}`])) return Buffer.from(tree);
+    if (sameArgs(args, ['merge-base', '--is-ancestor', tagCommit, 'origin/main']) ||
+      sameArgs(args, ['merge-base', '--is-ancestor', tagCommit, tagCommit])) return Buffer.alloc(0);
+    if (sameArgs(args, ['show', `${tagCommit}:package.json`])) return Buffer.from(JSON.stringify(metadata));
+    if (sameArgs(args, ['show', `${tagCommit}:package-lock.json`])) return lock;
+    checkFixture(false, `Unexpected git arguments: ${JSON.stringify(args)}`);
   };
   const request = async route => {
-    calls.push(route); const suffix = route.slice(`/repos/${repository}`.length);
-    if (suffix === '/git/ref/tags/v0.16.0') return structuredClone(reference);
-    if (suffix.startsWith('/git/tags/')) return structuredClone(tagObjects.get(suffix.slice('/git/tags/'.length)));
+    calls.push(route);
+    checkFixture(route.startsWith(`/repos/${repository}/`), `Unexpected API repository: ${route}`);
+    const suffix = route.slice(`/repos/${repository}`.length);
+    if (suffix === `/git/ref/tags/${encodeURIComponent(tag)}`) return structuredClone(reference);
+    if (suffix.startsWith('/git/tags/')) {
+      const id = suffix.slice('/git/tags/'.length);
+      checkFixture(tagObjects.has(id), `Unexpected annotated tag: ${id}`);
+      return structuredClone(tagObjects.get(id));
+    }
     if (suffix === '/actions/workflows/ci.yml') return { id: 8, path: '.github/workflows/ci.yml' };
     if (suffix === `/actions/runs/${runId}`) return structuredClone(run);
-    if (suffix.startsWith(`/actions/runs/${runId}/jobs?`)) {
-      assert(suffix.includes('filter=all')); return { total_count: jobValues.length, jobs: structuredClone(jobValues) };
+    if (suffix === `/actions/runs/${runId}/jobs?filter=all&per_page=100&page=1`) {
+      return { total_count: jobValues.length, jobs: structuredClone(jobValues) };
     }
-    if (suffix.startsWith(`/actions/runs/${runId}/artifacts?`)) return { total_count: artifacts.length, artifacts: structuredClone(artifacts) };
-    if (suffix.startsWith('/git/commits/')) return structuredClone(commits.get(suffix.slice('/git/commits/'.length)));
+    if (suffix === `/actions/runs/${runId}/artifacts?per_page=100&page=1`) return { total_count: artifacts.length, artifacts: structuredClone(artifacts) };
+    if (suffix.startsWith('/git/commits/')) {
+      const id = suffix.slice('/git/commits/'.length);
+      checkFixture(commits.has(id), `Unexpected commit: ${id}`);
+      return structuredClone(commits.get(id));
+    }
     if (suffix === '/pulls/9') return structuredClone(pr);
-    assert.fail(`Unexpected API request: ${route}`);
+    checkFixture(false, `Unexpected API request: ${route}`);
   };
-  const env = { RELEASE_TAG: 'v0.16.0', CHECKS_RUN_ID: String(runId), GITHUB_REPOSITORY: repository,
+  const env = { RELEASE_TAG: tag, CHECKS_RUN_ID: String(runId), GITHUB_REPOSITORY: repository,
     GITHUB_REPOSITORY_ID: String(repositoryId), CUEFLUENT_RELEASE_ROOT: releaseRoot, GITHUB_OUTPUT: path.join(root, 'outputs') };
   const options = { env, git, request }, archives = new Map();
   const entries = client => ['tar.gz', 'zip'].map(extension => {
-    const name = `cuefluent-notes-0.16.0-${client}.${extension}`, bytes = Buffer.from(`Synthetic ${client} ${extension} archive\n`);
+    const name = `cuefluent-notes-${version}-${client}.${extension}`, bytes = Buffer.from(`Synthetic ${client} ${extension} archive\n`);
     archives.set(name, bytes); return { path: name, bytes: bytes.length, sha256: hash(bytes) };
   });
-  const receipt = { schema: 1, version: '0.16.0', sourceLockSha256: hash(lock),
+  const receipt = { schema: 1, version, sourceLockSha256: hash(lock),
     packages: ['codex', 'claude'].map(client => ({ client, path: `${client}/cuefluent-notes`, inventorySha256: 'a'.repeat(64), archives: entries(client) })), tools: entries('tools') };
   const receiptBytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`);
   const source = { schema: 1, repository, repositoryId, runId, runAttempt: 1, event,
@@ -103,20 +129,43 @@ test('release reuses a checked PR tree after squash merge, retaining older succe
   assert(f.gitCalls.some(args => sameArgs(args, ['merge-base', '--is-ancestor', tagCommit, 'origin/main'])));
   assert(f.calls.some(route => route.endsWith(`/git/commits/${checkoutCommit}`)));
   assert(f.calls.some(route => route.endsWith(`/git/commits/${headSha}`)));
+  // Selection and the final verification read mutable remote metadata once each.
+  for (const suffix of ['/git/ref/tags/v0.16.0', '/actions/workflows/ci.yml', `/actions/runs/${runId}`,
+    `/actions/runs/${runId}/jobs?filter=all&per_page=100&page=1`, `/actions/runs/${runId}/artifacts?per_page=100&page=1`]) {
+    assert.equal(f.calls.filter(route => route === `/repos/${repository}${suffix}`).length, 2);
+  }
 });
 const sameArgs = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-test('manual and push Checks runs must be for the exact main tag commit', async t => {
-  for (const event of ['push', 'workflow_dispatch']) {
-    await t.test(event, async t => {
-      const f = await fixture(t, event); await selectReleaseCandidate(f.options); await f.populate();
+test('manual Checks evidence can come from main or the exact release tag at its original commit', async t => {
+  for (const branch of ['main', 'v0.16.0']) {
+    await t.test(branch, async t => {
+      const f = await fixture(t, 'workflow_dispatch'); f.run.head_branch = branch;
+      for (const artifact of f.artifacts) artifact.workflow_run.head_branch = branch;
+      await selectReleaseCandidate(f.options); await f.populate();
       assert.equal((await verifyReleaseCandidate(f.options)).source.checkoutCommit, tagCommit);
       assert(!f.calls.some(route => route.includes('/pulls/')));
+      assert(f.gitCalls.some(args => sameArgs(args, ['merge-base', '--is-ancestor', tagCommit, 'origin/main'])));
     });
   }
-  const f = await fixture(t, 'push'); f.run.head_sha = headSha;
-  for (const artifact of f.artifacts) artifact.workflow_run.head_sha = headSha;
-  await assert.rejects(selectReleaseCandidate(f.options), invalid);
+});
+
+test('manual recovery refuses a different branch, tag or commit, and obsolete push-run evidence', async t => {
+  const cases = [
+    { name: 'push run', event: 'push', branch: 'main', commit: tagCommit },
+    { name: 'unrelated branch', event: 'workflow_dispatch', branch: 'feat/change', commit: tagCommit },
+    { name: 'different tag', event: 'workflow_dispatch', branch: 'v0.15.1', commit: tagCommit },
+    { name: 'main has advanced', event: 'workflow_dispatch', branch: 'main', commit: headSha },
+    { name: 'wrong tag commit', event: 'workflow_dispatch', branch: 'v0.16.0', commit: headSha },
+  ];
+  for (const { name, event, branch, commit } of cases) await t.test(name, async t => {
+    const f = await fixture(t, event); f.run.head_sha = commit; f.run.head_branch = branch;
+    for (const artifact of f.artifacts) {
+      artifact.workflow_run.head_sha = commit; artifact.workflow_run.head_branch = branch;
+    }
+    await assert.rejects(selectReleaseCandidate(f.options), invalid);
+    await assert.rejects(fs.stat(f.releaseRoot), { code: 'ENOENT' });
+  });
 });
 
 test('selection refuses failed, skipped, foreign, missing, duplicate, expired and digestless evidence', async t => {
@@ -148,16 +197,49 @@ test('selection refuses failed, skipped, foreign, missing, duplicate, expired an
   });
 });
 
-test('tag input, package agreement and main ancestry are checked before artifact selection', async t => {
-  for (const tag of ['v0.16', 'v0.16.0\n', 'v0.16.0+build.1', '--option']) {
-    const f = await fixture(t); f.options.env.RELEASE_TAG = tag;
-    await assert.rejects(selectReleaseCandidate(f.options), invalid); assert.equal(f.calls.length, 0);
+test('selection accepts exact stable and prerelease version tags through the release context', async t => {
+  for (const version of ['0.16.0', '0.16.0-dev.0', '2.0.0', '10.4.1-rc.2', '0.16.0-0',
+    '0.16.0-1.10', '0.16.0-01a', '0.16.0-01-a', '0.16.0-x-y-z.--']) {
+    await t.test(`v${version}`, async t => {
+      const f = await fixture(t, 'pull_request', version), selection = await selectReleaseCandidate(f.options);
+      assert.equal(selection.tag.name, `v${version}`); assert.equal(selection.tag.version, version);
+      assert.equal(selection.tag.commit, tagCommit);
+      assert(f.calls.some(route => route.endsWith(`/git/ref/tags/${encodeURIComponent(`v${version}`)}`)));
+    });
   }
+});
+
+test('selection refuses malformed version tags before git or API access', async t => {
+  const tags = ['0.16.0', 'v0.16', 'v0.16.0+build.1', 'v0.16.0-dev.0+build.1', 'v01.16.0', 'v0.016.0', 'v0.16.00',
+    'v0.16.0 ', 'release-0.16.0', 'v0.16.0-01', 'v0.16.0-dev.01', 'v0.16.0-.', 'v0.16.0-.dev',
+    'v0.16.0-dev.', 'v0.16.0-dev..1', '--option',
+    ...['\n', '\r', '\r\n', '\u2028', '\u2029'].flatMap(end => [`v0.16.0${end}`, `v0.16.0-dev.0${end}`])];
+  for (const tag of tags) await t.test(JSON.stringify(tag), async t => {
+    const f = await fixture(t); f.options.env.RELEASE_TAG = tag;
+    await assert.rejects(selectReleaseCandidate(f.options), invalid);
+    assert.equal(f.gitCalls.length, 0); assert.equal(f.calls.length, 0);
+    await assert.rejects(fs.stat(f.releaseRoot), { code: 'ENOENT' });
+  });
+});
+
+test('unexpected git and API assertions cannot count as expected evidence rejections', async t => {
+  for (const method of ['git', 'request']) await t.test(method, async t => {
+    const f = await fixture(t), assertion = new assert.AssertionError({ message: `Synthetic unexpected ${method} invocation` });
+    f.options[method] = () => { throw assertion; };
+    await assert.rejects(selectReleaseCandidate(f.options), error => { assert.equal(error, assertion); return true; });
+    await assert.rejects(fs.stat(f.releaseRoot), { code: 'ENOENT' });
+  });
+});
+
+test('package agreement and main ancestry are checked before artifact selection', async t => {
   const f = await fixture(t); f.metadata.version = '0.17.0';
   await assert.rejects(selectReleaseCandidate(f.options), invalid); assert.equal(f.calls.length, 0);
   const g = await fixture(t), original = g.options.git;
   g.options.git = args => { if (args[0] === 'merge-base') throw new Error('Synthetic non-ancestor'); return original(args); };
-  await assert.rejects(selectReleaseCandidate(g.options), { ...invalid, releaseStage: 'tag' }); assert.equal(g.calls.length, 0);
+  await assert.rejects(selectReleaseCandidate(g.options), error => {
+    invalid(error); assert.equal(error.releaseStage, 'tag'); return true;
+  });
+  assert.equal(g.calls.length, 0);
 });
 
 test('release verification rejects forged source bindings and invalid selective rerun attempts', async t => {
@@ -204,9 +286,27 @@ test('metadata changes after selection, missing provenance, lock mismatches and 
         await fs.writeFile(path.join(root, 'source.json'), JSON.stringify({ ...f.source, receiptSha256: hash(bytes) }));
       }
     }
-    await assert.rejects(verifyReleaseCandidate(f.options));
+    await assert.rejects(verifyReleaseCandidate(f.options), invalid);
     await assert.rejects(fs.stat(path.join(f.releaseRoot, 'candidate')), { code: 'ENOENT' });
   });
+});
+
+test('a copied receipt must retain the inspected bytes even when its JSON and archives remain valid', async t => {
+  const f = await fixture(t); await selectReleaseCandidate(f.options); await f.populate();
+  const candidate = path.join(f.releaseRoot, 'candidate'), receiptFile = path.join(candidate, 'build.json');
+  const copyFile = fs.copyFile; let substitutions = 0;
+  t.mock.method(fs, 'copyFile', async (...args) => {
+    await copyFile(...args);
+    if (args[1] === receiptFile) { await fs.appendFile(receiptFile, '\n'); substitutions++; }
+  });
+  await assert.rejects(verifyReleaseCandidate(f.options), error => {
+    invalid(error); assert.equal(error.reason, 'OUTPUT_RECEIPT_CHANGED'); return true;
+  });
+  assert.equal(substitutions, 1);
+  const copied = await fs.readFile(receiptFile);
+  assert.deepEqual(copied, Buffer.concat([f.receiptBytes, Buffer.from('\n')]));
+  assert.deepEqual(JSON.parse(copied), f.receipt);
+  await assert.rejects(fs.stat(path.join(candidate, 'release-evidence.json')), { code: 'ENOENT' });
 });
 
 test('remote tag verification peels annotated tags and rejects moved, replaced or deleted refs', async t => {
@@ -234,12 +334,12 @@ test('remote tag verification peels annotated tags and rejects moved, replaced o
         g.options.request = async route => {
           if (route.includes('/git/ref/tags/')) {
             if (mode === 'deleted') throw new Error('Synthetic missing ref');
-            if (++reads === 2) g.reference.object.sha = baseSha;
+            if (++reads === 1) g.reference.object.sha = baseSha;
           }
           return original(route);
         };
       }
-      await assert.rejects(mode === 'moved-before-selection' ? selectReleaseCandidate(g.options) : verifyReleaseCandidate(g.options));
+      await assert.rejects(mode === 'moved-before-selection' ? selectReleaseCandidate(g.options) : verifyReleaseCandidate(g.options), invalid);
       await assert.rejects(fs.stat(path.join(g.releaseRoot, 'candidate')), { code: 'ENOENT' });
     });
   }

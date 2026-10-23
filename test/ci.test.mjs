@@ -6,7 +6,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { runInNewContext } from 'node:vm';
-import { verifyBuildArchives, compareBuilds } from '../tools/ci.mjs';
+import { verifyBuildArchives, compareBuilds, ARTIFACT_NAMES } from '../tools/ci.mjs';
 import { EXPECTED_CHECK_JOBS } from '../tools/release-candidate.mjs';
 import { packageSource } from './fixtures/package-source.mjs';
 import YAML from 'yaml';
@@ -145,6 +145,12 @@ test('candidate comparison verifies every archive and requires identical three-p
     for (const file of files) await fs.copyFile(path.join(f.output, file), path.join(root, file));
   }
   assert.deepEqual(await compareBuilds(artifacts), { platforms: 3, identical: true });
+  const comparison = await compareBuilds(artifacts, { includeVerified: true });
+  assert.deepEqual(Object.keys(comparison.verified), ARTIFACT_NAMES);
+  for (const result of Object.values(comparison.verified)) {
+    assert.deepEqual(result.build, f.built);
+    assert.deepEqual(result.bytes, await fs.readFile(path.join(f.output, 'build.json')));
+  }
   const windows = path.join(artifacts, 'v2-candidate-windows-2025'), receipt = path.join(windows, 'build.json'), original = await fs.readFile(receipt);
   await fs.appendFile(receipt, '\n');
   await assert.rejects(compareBuilds(artifacts), { code: 'CI_CANDIDATE_INVALID' });
