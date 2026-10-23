@@ -11,7 +11,7 @@
     "guidance:sync": "agent-guidance sync",
     "check:guidance": "agent-guidance check",
     "check:examples": "node tools/check-examples.mjs",
-    "test": "node --test \"test/**/*.test.mjs\""
+    "test": "node tools/test.mjs"
   },
   "devDependencies": {
     "@martinmqz/agent-guidance-sync": "0.1.2"

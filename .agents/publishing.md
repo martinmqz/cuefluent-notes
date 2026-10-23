@@ -94,7 +94,17 @@ a package enables neither tracking nor note processing.
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
 commits. It runs the complete synthetic source suite on native Linux, macOS, and
-Windows. It does not waive queue, gate, worker, or filesystem tests on Windows.
+Windows. Linux runs one source job; macOS and Windows each run four shards on
+independent runners. Per-platform duration weights place the longest test files
+first into the least-loaded shard. Both `npm test` and CI use `tools/test.mjs`
+for recursive test discovery. Test discovery determines coverage; new files
+without measurements still run with a file-size estimate. Windows runs test files
+sequentially within each shard to limit native helper contention; concurrency
+exercised by the tests is preserved.
+Guidance, all source shards and client smoke jobs can start concurrently. The
+required reproducibility gate waits for every shard and smoke job and rejects
+failed or unexpectedly skipped checks. It does not waive queue, gate, worker,
+or filesystem tests on Windows.
 Tests may explicitly exercise an unsupported native adapter or skip an actual
 platform-specific primitive. CI does not establish native client isolation, MXC
 sandbox availability, model access, or public-file security privileges. Separate
@@ -102,14 +112,28 @@ Windows native checks cover the explicit Codex MXC floor and a complete Claude
 owned-worker draft → review → save flow; see the platform limits in
 [verification](../references/verification.md).
 
-Every platform builds fresh candidates and runs `tools/ci.mjs build`: package
-verification, the actual detached `settings` command against a new absent private
-store, and checksum-bound copying. The unconfigured command must create no store.
+One primary shard per platform runs `tools/ci.mjs build` after its tests. This
+builds fresh candidates, verifies packages, exercises the actual detached
+`settings` command against a new absent private store, and checks checksum-bound
+copying. The unconfigured command must create no store. Timing weights cover
+test work; dependency setup, the primary shard's build and artifact upload, and
+final reproducibility add to total runtime. Hosted runner availability also
+affects elapsed time.
 The reproducibility job verifies every retained archive against its receipt and
 compares all three receipts, including companion tools. Guidance checks run in a
-separate job and are omitted for an explicitly selected release tag. No native
-client downloads, credentials, model calls, installations, or hook-trust changes
-are part of artifact-producing jobs.
+separate job and are omitted for an explicitly selected release tag. Separate
+macOS and Windows client smoke jobs exercise Claude Code 2.1.309 and Codex CLI
+0.163.0, with exact archive integrity pins in `tools/client-smoke.mjs`. The
+[adapter compatibility contract](../references/verification.md) describes the
+Claude Code 2.1.307 baseline and capability admission for newer stable 2.x clients.
+Smoke checks use disposable profiles without authenticated sessions or model
+calls. They do not establish plugin installation, hook trust, or end-to-end
+client acceptance, and are omitted for an explicitly selected release tag.
+These required smoke checks
+download native archives from `registry.npmjs.org`; a transient registry or
+network failure fails the smoke check and required gate and may require a rerun.
+No native client downloads, credentials, model calls, installations, or
+hook-trust changes are part of artifact-producing jobs.
 
 Passing CI establishes the tested synthetic and packaging behavior. It does not
 prove native desktop command rendering, live hook activation, native processing
