@@ -60,6 +60,15 @@ security metadata; missing native privileges are a refusal before replacement,
 not permission to discard ACLs.
 Do not describe deterministic test coverage as completed native platform support.
 
+Existing-note saves capture the destination in a recorded recovery directory
+before checking its exact identity, contents and metadata. Publication refuses a
+newly arrived destination. An interrupted save can briefly leave the original
+only in that recovery directory; retry or `skip` restores or completes the save
+without overwriting a newer note. Conflicting recovery files are preserved.
+If interruption occurs before the directory identity is recorded, the untouched
+original remains public and unknown temporary objects are retained; `skip`
+releases the run with a preservation warning so processing can start afresh.
+
 Automatic tracking requires supported, enabled native hooks. A processing session
 uses a private working directory outside configured projects and an ephemeral
 native launch with hook/plugin isolation; it is never enrolled into the queue.

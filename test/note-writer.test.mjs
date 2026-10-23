@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { pinDirectory } from '../src/storage/paths.mjs';
 import { hashBytes } from '../src/storage/files.mjs';
 import { MAX_NOTE_BYTES, validateNotePublication, prepareNotePublication, publishNotePublication,
-  inspectPublicationOutcome, readPublicationSource, discardNoteStage } from '../src/storage/note-writer.mjs';
+  inspectPublicationOutcome, readPublicationSource, discardNoteStage, discardRecordedNoteStage } from '../src/storage/note-writer.mjs';
 import { validateNotePublication as validatePurePublication } from '../src/core/note-publication.mjs';
 
 const execute = promisify(execFile);
@@ -33,6 +33,8 @@ async function publish(pin, intent, bytes = body) {
 }
 
 const stagePath = intent => path.join(path.dirname(path.join(intent.root, intent.relative)), `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+const capturePath = intent => stagePath(intent).replace(/\.tmp$/, '.backup.tmp');
+const backupPath = intent => path.join(capturePath(intent), 'original.tmp');
 
 async function windowsMetadata(target, attributes) {
   const script = String.raw`
@@ -79,7 +81,7 @@ test('the pure core publication validator supports explicit Windows path semanti
   assert.equal(validatePurePublication, validateNotePublication);
   const value = { schema: 1, runId: randomUUID(), draftId: randomUUID(), root: 'C:\\Notes', relative: 'nested/note.md',
     parent: [{ path: 'C:\\', device: '1', inode: '1' }, { path: 'C:\\Notes', device: '1', inode: '2' },
-      { path: 'C:\\Notes\\nested', device: '1', inode: '3' }], expectedHash: null, hash: hashBytes(body), bytes: body.length, original: null, stage: null };
+      { path: 'C:\\Notes\\nested', device: '1', inode: '3' }], expectedHash: null, hash: hashBytes(body), bytes: body.length, original: null, stage: null, capture: null };
   assert.deepEqual(validatePurePublication(value, { platform: 'win32' }), value);
   assert.throws(() => validatePurePublication({ ...value, root: '\\\\server\\notes' }, { platform: 'win32' }), { code: 'NOTE_PUBLICATION_INVALID' });
   assert.throws(() => validatePurePublication({ ...value, relative: 'nested/../note.md' }, { platform: 'win32' }), { code: 'NOTE_PUBLICATION_INVALID' });
@@ -181,6 +183,65 @@ test('manual edits and same-byte replacement inodes preserve the current public 
   await assert.rejects(publishNotePublication(pin, intent, body, { persistIntent() {} }), { code: 'NOTE_PUBLICATION_CONFLICT' });
   assert.deepEqual(await fs.readFile(target), before);
   assert.ok(!(await fs.readdir(notes)).some(name => name.endsWith('.tmp')));
+});
+
+for (const content of ['manual edit', 'original']) test(`a ${content} replacement at the final rename is preserved`, async t => {
+  const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
+  await fs.writeFile(target, 'original');
+  const intent = await prepare(pin, 'note.md', body, hashBytes(Buffer.from('original')));
+  const replacement = path.join(root, 'replacement'); await fs.writeFile(replacement, content);
+  const identity = (await fs.stat(replacement, { bigint: true })).ino;
+  const rename = fs.rename; let injected = false, journal = intent;
+  t.mock.method(fs, 'rename', async (from, to) => {
+    if (!injected && (from === target || to === target)) {
+      injected = true; await rename(replacement, target);
+    }
+    return rename(from, to);
+  });
+  await assert.rejects(publishNotePublication(pin, intent, body, { persistIntent: value => { journal = value; } }), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(injected, true);
+  assert.equal(await fs.readFile(target, 'utf8'), content);
+  assert.equal((await fs.stat(target, { bigint: true })).ino, identity);
+  await assert.rejects(publish(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(await fs.readFile(target, 'utf8'), content);
+  assert.deepEqual(await discardRecordedNoteStage(pin, journal), { discarded: true, backupPreserved: false });
+  assert.deepEqual(await fs.readdir(notes), ['note.md']);
+});
+
+test('an arrival at publication preserves both the arrival and captured original', async t => {
+  const { notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
+  await fs.writeFile(target, 'original');
+  const intent = await prepare(pin, 'note.md', body, hashBytes(Buffer.from('original')));
+  const link = fs.link; let journal = intent, injected = false;
+  t.mock.method(fs, 'link', async (from, to) => {
+    if (!injected && from === stagePath(intent) && to === target) {
+      injected = true; await fs.writeFile(target, 'arrival', { flag: 'wx' });
+    }
+    return link(from, to);
+  });
+  await assert.rejects(publishNotePublication(pin, intent, body, { persistIntent: value => { journal = value; } }), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(injected, true);
+  assert.equal(await fs.readFile(target, 'utf8'), 'arrival');
+  assert.equal(await fs.readFile(backupPath(journal), 'utf8'), 'original');
+  await assert.rejects(publish(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.deepEqual(await discardRecordedNoteStage(pin, journal), { discarded: true, backupPreserved: true });
+  assert.equal(await fs.readFile(target, 'utf8'), 'arrival');
+  assert.equal(await fs.readFile(backupPath(journal), 'utf8'), 'original');
+});
+
+test('a replaced capture directory is refused before any note is moved', async t => {
+  const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
+  await fs.writeFile(target, 'original');
+  const intent = await prepare(pin, 'note.md', body, hashBytes(Buffer.from('original'))); let fences = 0;
+  await assert.rejects(publishNotePublication(pin, intent, body, {
+    persistIntent() {}, beforePublish: async () => {
+      if (++fences !== 2) return;
+      await fs.rename(capturePath(intent), path.join(root, 'retained-directory'));
+      await fs.mkdir(capturePath(intent)); await fs.writeFile(backupPath(intent), 'unrelated capture');
+    },
+  }), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(await fs.readFile(target, 'utf8'), 'original');
+  assert.equal(await fs.readFile(backupPath(intent), 'utf8'), 'unrelated capture');
 });
 
 test('a new target created concurrently is never overwritten even with the desired bytes', async t => {
@@ -306,7 +367,7 @@ if(['restored-target','restored-original'].includes(phase)) {
   if(error){reject(error);return;}
   try {
    const native=JSON.parse(args[2]?.env?.CUEFLUENT_NOTE_NATIVE ?? 'null');
-   if(native?.op==='restore-archive' && native.source===path.join(root,'note.md')) await boundary();
+   if(native?.op==='restore-archive' && (phase==='restored-original' ? native.source.endsWith('original.tmp') : native.source===path.join(root,'note.md'))) await boundary();
    resolve({stdout,stderr});
   } catch(cause){reject(cause);}
  }));
@@ -327,14 +388,21 @@ fs.open=async function(file,flags,...rest) {
  }
  return handle;
 };
-for(const method of ['link','rename','unlink']) {
+for(const method of ['link','rename','unlink','rmdir','mkdir']) {
  const original=fs[method];
- fs[method]=async function(...args) {const result=await original.apply(this,args);if(phase===method || (phase==='backup-unlinked' && method==='unlink' && args[0].endsWith('.backup.tmp'))) await boundary();return result;};
+ fs[method]=async function(...args) {
+  if(phase==='captured-replacement' && method==='rename' && args[0]===path.join(root,'note.md')) {
+   const replacement=path.join(root,'editor.tmp');await fs.writeFile(replacement,'manual replacement');await original(replacement,args[0]);
+  }
+  const result=await original.apply(this,args);
+  if(phase===method || (phase==='captured-replacement' && method==='rename') ||
+     (phase==='backup-unlinked' && method==='unlink' && args[0].endsWith('original.tmp'))) await boundary();return result;
+ };
 }
 const pin=await pinDirectory(root), intent=JSON.parse(await fs.readFile(journal,'utf8'));
 await publishNotePublication(pin,intent,bytes,{persistIntent:async value=>{
  const handle=await open(journal,'w',0o600);try{await handle.writeFile(JSON.stringify(value));await handle.sync();}finally{await handle.close();}
- if(phase==='journal') await boundary();
+ if(phase==='journal' || phase==='capture-journal' && value.capture) await boundary();
 }});
 process.send('unexpected completion');
 `;
@@ -364,7 +432,7 @@ for (const [phase, action] of [['published', 'retry'], ['restored-target', 'retr
     await fs.writeFile(target, before);
     const original = await windowsMetadata(target, 128);
     const intent = await prepare(pin, 'note.md', body, hashBytes(before));
-    const journal = await killedPublication(t, root, pin, intent, phase), backup = stagePath(journal).replace(/\.tmp$/, '.backup.tmp');
+    const journal = await killedPublication(t, root, pin, intent, phase), backup = backupPath(journal);
     assert.deepEqual(await fs.readFile(target), body);
     assert.deepEqual(await fs.readFile(backup), before);
     assert.equal((await fs.stat(target, { bigint: true })).ino.toString(), journal.stage.inode);
@@ -389,7 +457,7 @@ for (const changed of ['target', 'target-stream', 'backup', 'missing-backup', 'p
     await fs.writeFile(target, before); await windowsMetadata(target, 128);
     let intent = await prepare(pin, 'note.md', body, hashBytes(before));
     if (changed !== 'public-original') intent = await killedPublication(t, root, pin, intent, 'published');
-    const backup = stagePath(intent).replace(/\.tmp$/, '.backup.tmp');
+    const backup = backupPath(intent);
     const selected = changed === 'backup' ? backup : target;
     if (changed === 'missing-backup') await fs.rename(backup, path.join(notes, 'preserved-original.md'));
     else if (changed === 'target-stream') await fs.writeFile(`${target}:manual-edit`, 'preserve this metadata');
@@ -422,14 +490,55 @@ for (const phase of ['empty', 'journal', 'write', 'link']) {
   });
 }
 
-test('process death after replacement is recognized without refreshing the expected original', async t => {
+test('process death after capture preserves the exact original for retry', async t => {
   const { root, notes, pin } = await fixture(t), before = Buffer.from('original');
   await fs.writeFile(path.join(notes, 'note.md'), before);
   const intent = await prepare(pin, 'note.md', body, hashBytes(before));
   const journal = await killedPublication(t, root, pin, intent, 'rename');
-  assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'applied' });
+  assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'unapplied' });
+  assert.deepEqual(await readPublicationSource(pin, journal), { status: 'unapplied', bytes: before });
   assert.equal((await publish(pin, journal)).receipt.changed, true);
   assert.deepEqual(await fs.readFile(path.join(notes, 'note.md')), body);
+});
+
+for (const phase of ['capture-journal', 'link', 'backup-unlinked', 'rmdir']) {
+  test(`existing-note recovery survives death after ${phase}`, async t => {
+    const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
+    await fs.writeFile(target, 'original');
+    const intent = await prepare(pin, 'note.md', body, hashBytes(Buffer.from('original')));
+    const journal = await killedPublication(t, root, pin, intent, phase);
+    await publish(pin, journal);
+    assert.deepEqual(await fs.readFile(target), body);
+    assert.deepEqual(await fs.readdir(notes), ['note.md']);
+  });
+}
+
+test('death before capture identity persistence preserves the untouched note and unknown directory', async t => {
+  const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
+  await fs.writeFile(target, 'original');
+  const intent = await prepare(pin, 'note.md', body, hashBytes(Buffer.from('original')));
+  const journal = await killedPublication(t, root, pin, intent, 'mkdir');
+  assert.equal(journal.capture, null);
+  const names = (await fs.readdir(notes)).sort();
+  await assert.rejects(publish(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  await assert.rejects(discardRecordedNoteStage(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(await fs.readFile(target, 'utf8'), 'original');
+  assert.deepEqual(await fs.readdir(capturePath(journal)), []);
+  assert.deepEqual((await fs.readdir(notes)).sort(), names);
+});
+
+for (const action of ['retry', 'skip']) test(`a replacement captured before death is restored on ${action}`, async t => {
+  const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
+  await fs.writeFile(target, 'original');
+  const intent = await prepare(pin, 'note.md', body, hashBytes(Buffer.from('original')));
+  const journal = await killedPublication(t, root, pin, intent, 'captured-replacement');
+  await assert.rejects(fs.stat(target), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(backupPath(journal), 'utf8'), 'manual replacement');
+  assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'conflict', code: 'NOTE_PUBLICATION_CONFLICT' });
+  await assert.rejects(action === 'retry' ? publish(pin, journal) : discardNoteStage(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.equal(await fs.readFile(target, 'utf8'), 'manual replacement');
+  assert.deepEqual(await discardRecordedNoteStage(pin, journal), { discarded: true, backupPreserved: false });
+  assert.deepEqual(await fs.readdir(notes), ['note.md']);
 });
 
 test('a torn existing-note stage resumes with its original metadata intact', async t => {
@@ -447,13 +556,12 @@ test('a torn existing-note stage resumes with its original metadata intact', asy
 });
 
 for (const action of ['resume', 'skip', 'skip-linked']) {
-  test(`a Windows-style partial replacement with its exact original backup can ${action}`, async t => {
+  test(`a captured exact original can ${action}`, async t => {
     const { root, notes, pin } = await fixture(t), before = Buffer.from('original note bytes');
     const target = path.join(notes, 'note.md'); await fs.writeFile(target, before);
     const intent = await prepare(pin, 'note.md', body, hashBytes(before));
-    const journal = await killedPublication(t, root, pin, intent, 'journal');
-    const backup = stagePath(journal).replace(/\.tmp$/, '.backup.tmp');
-    await fs.rename(target, backup);
+    const journal = await killedPublication(t, root, pin, intent, 'rename');
+    const backup = backupPath(journal);
     assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'unapplied' });
     if (action === 'resume') {
       await publish(pin, journal); assert.deepEqual(await fs.readFile(target), body);
@@ -548,21 +656,22 @@ for (const profile of ['legacy-parent', 'creator-owner', 'inherited-audit', 'exp
   });
 }
 
-for (const [phase, action] of [['link', 'retry'], ['link', 'skip'], ['restored-original', 'retry'], ['backup-unlinked', 'skip']]) {
-  test(`Windows prepared original backup survives death at ${phase} before ${action}`, { skip: process.platform !== 'win32' }, async t => {
+for (const [phase, action] of [['rename', 'retry'], ['rename', 'skip'], ['restored-original', 'retry'], ['backup-unlinked', 'skip']]) {
+  test(`Windows captured original survives death at ${phase} before ${action}`, { skip: process.platform !== 'win32' }, async t => {
     const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('original\n');
     await fs.writeFile(target, before);
     const metadata = await windowsMetadata(target, 128), intent = await prepare(pin, 'note.md', body, hashBytes(before));
-    let journal = await killedPublication(t, root, pin, intent, 'link');
-    const backup = stagePath(journal).replace(/\.tmp$/, '.backup.tmp');
+    let journal = await killedPublication(t, root, pin, intent, 'rename');
+    const backup = backupPath(journal);
     assert.deepEqual(await inspectPublicationOutcome(pin, journal), { status: 'unapplied' });
     assert.deepEqual(await readPublicationSource(pin, journal), { status: 'unapplied', bytes: before });
-    assert.equal((await windowsMetadata(target)).attributes, 32, 'Inspection must not restore the shared original.');
+    assert.equal((await windowsMetadata(backup)).attributes, 32, 'Inspection must not restore captured metadata.');
     assert.deepEqual(await fs.readFile(stagePath(journal)), body);
-    if (phase !== 'link') journal = await killedPublication(t, root, pin, journal, phase);
+    if (phase !== 'rename') journal = await killedPublication(t, root, pin, journal, phase);
     if (action === 'skip') {
-      assert.deepEqual(await discardNoteStage(pin, journal), { discarded: true, applied: false });
-      assert.deepEqual(await fs.readFile(target), before);
+      const applied = phase === 'backup-unlinked';
+      assert.deepEqual(await discardNoteStage(pin, journal), { discarded: true, applied });
+      assert.deepEqual(await fs.readFile(target), applied ? body : before);
     } else {
       assert.equal((await publish(pin, journal)).receipt.changed, true);
       assert.deepEqual(await fs.readFile(target), body);
@@ -575,22 +684,22 @@ for (const [phase, action] of [['link', 'retry'], ['link', 'skip'], ['restored-o
 }
 
 for (const changed of ['incomplete-stage', 'third-alias', 'original-stream', 'original-acl']) {
-  test(`Windows prepared original backup refuses ${changed} without changing evidence`, { skip: process.platform !== 'win32' }, async t => {
+  test(`Windows captured original refuses ${changed} without losing evidence`, { skip: process.platform !== 'win32' }, async t => {
     const { root, notes, pin } = await fixture(t), target = path.join(notes, 'note.md'), before = Buffer.from('original\n');
     await fs.writeFile(target, before); await windowsMetadata(target, 128);
     const intent = await prepare(pin, 'note.md', body, hashBytes(before));
-    const journal = await killedPublication(t, root, pin, intent, 'link');
+    const journal = await killedPublication(t, root, pin, intent, 'rename'), backup = backupPath(journal);
     if (changed === 'incomplete-stage') await fs.truncate(stagePath(journal), 7);
-    else if (changed === 'third-alias') await fs.link(target, path.join(root, 'unrelated-original-alias'));
-    else if (changed === 'original-stream') await fs.writeFile(`${target}:manual-metadata`, 'preserve');
-    else await windowsSecurityProfile(target, 'explicit-audit');
-    const metadata = await windowsMetadata(target), bytes = await fs.readFile(target), names = (await fs.readdir(notes)).sort();
-    await assert.rejects(publish(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    else if (changed === 'third-alias') await fs.link(backup, path.join(root, 'unrelated-original-alias'));
+    else if (changed === 'original-stream') await fs.writeFile(`${backup}:manual-metadata`, 'preserve');
+    else await windowsSecurityProfile(backup, 'explicit-audit');
+    const metadata = await windowsMetadata(backup), bytes = await fs.readFile(backup), names = (await fs.readdir(notes)).sort();
     await assert.rejects(readPublicationSource(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
-    await assert.rejects(discardNoteStage(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
-    assert.deepEqual(await windowsMetadata(target), metadata);
-    assert.deepEqual(await fs.readFile(target), bytes);
     assert.deepEqual((await fs.readdir(notes)).sort(), names);
+    await assert.rejects(discardNoteStage(pin, journal), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    const retained = changed === 'third-alias' ? backup : target;
+    assert.deepEqual(await windowsMetadata(retained), metadata);
+    assert.deepEqual(await fs.readFile(retained), bytes);
   });
 }
 

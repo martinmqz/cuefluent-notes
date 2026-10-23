@@ -336,7 +336,10 @@ async function location(pin, intent) {
   }
   await assertChain(intent.parent);
   const target = relativePath(pin, intent.relative), directory = path.dirname(target);
-  return { target, directory, stage: path.join(directory, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`), backup: path.join(directory, `.cuefluent-note.${intent.runId}.${intent.draftId}.backup.tmp`) };
+  const capture = path.join(directory, `.cuefluent-note.${intent.runId}.${intent.draftId}.backup.tmp`);
+  const captured = await lstatOrNull(capture);
+  if (captured && (!captured.isDirectory() || captured.isSymbolicLink() || !intent.capture || !sameIdentity(captured, intent.capture))) conflict('The publication capture directory is not the exact recorded directory.');
+  return { target, directory, stage: path.join(directory, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`), capture, backup: path.join(capture, 'original.tmp') };
 }
 
 async function originalMatches(file, intent, links = 1) {
@@ -344,6 +347,62 @@ async function originalMatches(file, intent, links = 1) {
   if (intent.expectedHash === null) { if (current) conflict('A new note destination appeared after inspection.'); return null; }
   if (!current || current.hash !== intent.expectedHash || !sameIdentity(current.stat, intent.original) || await metadata(file) !== intent.original.metadata) conflict('The exact inspected original note or its metadata changed.');
   return current;
+}
+
+async function prepareCapture(pin, intent, names, persistIntent) {
+  if (await lstatOrNull(names.capture)) { await location(pin, intent); return intent; }
+  if (intent.capture) conflict('The recorded capture directory disappeared before publication.');
+  if (typeof persistIntent !== 'function') invalid('Persist the capture directory before moving a note.');
+  try { await fs.mkdir(names.capture, { mode: 0o700 }); }
+  catch (cause) { if (cause.code === 'EEXIST') conflict('An unexpected capture directory prevents publication.'); throw cause; }
+  const created = await lstatOrNull(names.capture);
+  if (!created?.isDirectory() || created.isSymbolicLink()) conflict('The new capture directory changed.');
+  const updated = validateNotePublication({ ...intent, capture: fileIdentity(created) });
+  await syncDirectory(names.directory); await location(pin, updated);
+  await persistIntent(updated);
+  return updated;
+}
+
+async function removeEmptyCapture(pin, intent) {
+  const names = await location(pin, intent);
+  if (!await lstatOrNull(names.capture)) return;
+  // rmdir never removes a child that arrived during cleanup.
+  try { await fs.rmdir(names.capture); }
+  catch (cause) { if (['ENOTEMPTY', 'EEXIST'].includes(cause.code)) conflict('Unknown capture contents were preserved.'); throw cause; }
+  await syncDirectory(names.directory);
+}
+
+// A capture may contain an editor's replacement, including after process death.
+// Restore its identity, never adopt its bytes as the original expectation. If
+// another destination arrived, keep both files and let the caller report conflict.
+async function restoreCapturedConflict(pin, intent) {
+  const names = await location(pin, intent), captured = await lstatOrNull(names.backup);
+  if (!captured?.isFile() || captured.isSymbolicLink()) return;
+  const exact = fileIdentity(captured);
+  let target = await lstatOrNull(names.target);
+  if (!target) {
+    if (captured.nlink !== 1) return;
+    await location(pin, intent);
+    try { await fs.link(names.backup, names.target); }
+    catch (cause) { if (cause.code === 'EEXIST') return; throw cause; }
+    target = await lstatOrNull(names.target);
+  }
+  const retained = await lstatOrNull(names.backup);
+  if (!target || !retained || !sameIdentity(target, exact) || !sameIdentity(retained, exact) || target.nlink !== 2 || retained.nlink !== 2) return;
+  await syncDirectory(names.directory);
+  await location(pin, intent); await unlinkExact(names.backup, exact, 2);
+  await removeEmptyCapture(pin, intent);
+}
+
+async function mutationOutcome(pin, intent) {
+  try { return await outcome(pin, intent, { windowsRecovery: true }); }
+  catch (cause) {
+    if (cause.code === 'NOTE_PUBLICATION_CONFLICT' && intent.capture) {
+      // Restoration is best-effort and never replaces the primary conflict.
+      try { await restoreCapturedConflict(pin, intent); } catch { /* Keep recovery evidence. */ }
+    }
+    throw cause;
+  }
 }
 
 /** Read-only preparation. The caller persists this intent in the current run. */
@@ -354,7 +413,7 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   const parent = await inspectParent(pin, relative);
   if (expectedParentChain !== undefined) {
     const bound = validateNotePublication({ schema: 1, runId, draftId, root: pin.root, relative, parent: expectedParentChain,
-      expectedHash: null, hash, bytes: draft.length, original: null, stage: null });
+      expectedHash: null, hash, bytes: draft.length, original: null, stage: null, capture: null });
     if (JSON.stringify(bound.parent) !== JSON.stringify(parent.chain)) conflict('The draft target parent differs from its frozen inspected binding.');
     await assertChain(bound.parent);
   }
@@ -362,7 +421,7 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   if ((expectedHash === null && current) || (expectedHash !== null && (!current || current.hash !== expectedHash))) conflict('The note differs from the exact inspected original or absence.');
   const original = current ? { ...current.identity, metadata: await metadata(parent.file) } : null;
   const intent = validateNotePublication({ schema: 1, runId, draftId, root: pin.root, relative, parent: parent.chain,
-    expectedHash, hash, bytes: draft.length, original, stage: null });
+    expectedHash, hash, bytes: draft.length, original, stage: null, capture: null });
   await location(pin, intent);
   await originalMatches(parent.file, intent);
   return intent;
@@ -372,18 +431,23 @@ async function outcome(pin, intent, { windowsRecovery = false } = {}) {
   const names = await location(pin, intent);
   const stat = await lstatOrNull(names.target), stageStat = await lstatOrNull(names.stage), backupStat = await lstatOrNull(names.backup);
   if (backupStat && (!intent.original || !sameIdentity(backupStat, intent.original))) conflict('The publication backup is not the exact inspected original inode.');
-  if (process.platform === 'win32' && intent.original && intent.stage && stat && backupStat && stageStat &&
-      sameIdentity(stat, intent.original) && sameIdentity(stageStat, intent.stage)) {
-    const original = await snapshot(names.target, { links: 2 }), backup = await snapshot(names.backup, { links: 2 });
+  if (intent.original && intent.stage && backupStat && stageStat &&
+      (!stat || sameIdentity(stat, intent.original)) && sameIdentity(stageStat, intent.stage)) {
+    const links = stat ? 2 : 1, backup = await snapshot(names.backup, { links });
     const staged = await snapshot(names.stage);
-    if (!sameIdentity(original.stat, intent.original) || !sameIdentity(backup.stat, intent.original) || !sameIdentity(staged.stat, intent.stage) ||
-        original.hash !== intent.expectedHash || backup.hash !== intent.expectedHash) conflict('The prepared publication layout no longer contains the exact original and stage inodes.');
-    if (staged.hash === intent.hash && staged.bytes.length === intent.bytes && await metadata(names.stage) === intent.original.metadata) {
-      const originalArchive = await publishedMetadata(names.target, intent);
-      await publishedMetadata(names.backup, intent);
-      await assertChain(intent.parent); await assertDirectory(pin);
-      return { status: 'unapplied', prepared: true, originalArchive, ...names };
+    if (stat) {
+      const original = await snapshot(names.target, { links });
+      if (!sameIdentity(original.stat, intent.original) || original.hash !== intent.expectedHash) conflict('The restored original changed.');
+      await publishedMetadata(names.target, intent);
     }
+    if (!sameIdentity(backup.stat, intent.original) || !sameIdentity(staged.stat, intent.stage) ||
+        backup.hash !== intent.expectedHash) conflict('The prepared publication layout no longer contains the exact original and stage inodes.');
+    if (staged.hash === intent.hash && staged.bytes.length === intent.bytes && await metadata(names.stage) === intent.original.metadata) {
+      const originalArchive = await publishedMetadata(names.backup, intent);
+      await location(pin, intent);
+      return { status: 'unapplied', prepared: Boolean(stat), captured: !stat, originalArchive, ...names };
+    }
+    conflict('The captured original requires its exact completed stage.');
   }
   if (stat && intent.stage && sameIdentity(stat, intent.stage)) {
     const links = stageStat ? 2 : 1;
@@ -404,7 +468,7 @@ async function outcome(pin, intent, { windowsRecovery = false } = {}) {
       if (backupStat) await originalMatches(names.backup, intent);
     }
     if (stageStat) regular(stageStat, 2);
-    await assertChain(intent.parent); await assertDirectory(pin);
+    await location(pin, intent);
     return { status: targetArchive || backupArchive ? 'metadata-pending' : 'applied', targetArchive, backupArchive, ...names };
   }
   if (stat) {
@@ -420,7 +484,7 @@ async function outcome(pin, intent, { windowsRecovery = false } = {}) {
     if (intent.stage && !sameIdentity(stageStat, intent.stage)) conflict('The recorded staging inode was replaced.');
     if (!intent.stage) await safeEmptyStage(names.stage, stageStat);
   }
-  await assertChain(intent.parent); await assertDirectory(pin);
+  await location(pin, intent);
   return { status: intent.expectedHash === intent.hash ? 'existing' : 'unapplied', ...names };
 }
 
@@ -436,14 +500,16 @@ export async function inspectPublicationOutcome(pin, input) {
  * finish an already-applied exact publication. Never refresh an expectation. */
 export async function readPublicationSource(pin, input) {
   const intent = validateNotePublication(input), current = await outcome(pin, intent, { windowsRecovery: true });
-  if (current.prepared) {
-    const original = await snapshot(current.target, { links: 2 });
+  if (current.prepared || current.captured) {
+    const original = await snapshot(current.backup, { links: current.prepared ? 2 : 1 });
     if (!sameIdentity(original.stat, intent.original) || original.hash !== intent.expectedHash) conflict('The exact prepared original changed.');
+    await location(pin, intent);
     return Object.freeze({ status: 'unapplied', bytes: original.bytes });
   }
   if (current.status === 'metadata-pending') {
     const original = await snapshot(current.backup);
     if (!sameIdentity(original.stat, intent.original) || original.hash !== intent.expectedHash) conflict('The exact publication backup changed.');
+    await location(pin, intent);
     return Object.freeze({ status: 'pending', bytes: original.bytes });
   }
   if (current.status === 'applied') return Object.freeze({ status: 'applied', bytes: (await snapshot(current.target, { links: await lstatOrNull(current.stage) ? 2 : 1 })).bytes });
@@ -478,11 +544,16 @@ async function finish(pin, intent, names) {
   // Keep the original backup until both inodes have their exact original
   // metadata. A crash between restorations is retryable with the same proof.
   if ((await outcome(pin, intent)).status !== 'applied') conflict('The exact publication metadata was not restored.');
+  // Flush the new public name before releasing the last original recovery link,
+  // including a retry after death immediately following publication.
+  await syncDirectory(names.directory);
   if (await lstatOrNull(names.stage)) await unlinkExact(names.stage, intent.stage, 2);
   if (await lstatOrNull(names.backup)) {
     await originalMatches(names.backup, intent);
+    await location(pin, intent);
     await unlinkExact(names.backup, intent.original);
   }
+  await removeEmptyCapture(pin, intent);
   await syncDirectory(names.directory); await assertChain(intent.parent); await assertDirectory(pin);
   return Object.freeze({ draftId: intent.draftId, target: names.target, hash: intent.hash, changed: true });
 }
@@ -490,7 +561,7 @@ async function finish(pin, intent, names) {
 async function reconcileOriginalBackup(pin, intent, names, { restore = false } = {}) {
   if (!await lstatOrNull(names.backup)) return;
   const observed = await outcome(pin, intent, { windowsRecovery: true });
-  if (observed.prepared && observed.originalArchive) await windows('restore-archive', names.target);
+  if (observed.originalArchive) await windows('restore-archive', names.backup);
   let target = await lstatOrNull(names.target);
   if (!target) {
     if (!restore) return;
@@ -500,11 +571,15 @@ async function reconcileOriginalBackup(pin, intent, names, { restore = false } =
     target = await readPathStat(names.target);
   }
   if (!intent.original || !sameIdentity(target, intent.original)) conflict('The original backup cannot be reconciled with this destination.');
+  const restored = await outcome(pin, intent, { windowsRecovery: true });
+  if (restored.originalArchive) await windows('restore-archive', names.target);
   await originalMatches(names.target, intent, 2);
   await originalMatches(names.backup, intent, 2);
-  await assertChain(intent.parent); await assertDirectory(pin);
+  await syncDirectory(names.directory);
+  await location(pin, intent);
   await unlinkExact(names.backup, intent.original, 2);
   await originalMatches(names.target, intent);
+  // Keep the empty recorded directory for a subsequent capture on retry.
   await syncDirectory(names.directory); await assertChain(intent.parent);
 }
 
@@ -515,13 +590,17 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   if (typeof beforePublish !== 'function') invalid('Publication fencing requires a trusted callback.');
   let intent = validateNotePublication(input);
   const draft = exactBytes(bytes, intent.hash, intent.bytes);
-  let current = await outcome(pin, intent, { windowsRecovery: true });
+  let current = await mutationOutcome(pin, intent);
   if (current.status === 'existing') return Object.freeze({ draftId: intent.draftId, target: current.target, hash: intent.hash, changed: false });
   if (['applied', 'metadata-pending'].includes(current.status)) { await beforePublish(); return finish(pin, intent, current); }
   if (intent.stage && !await lstatOrNull(current.stage)) conflict('The recorded staging inode disappeared without publication.');
   if (await lstatOrNull(current.target) && await lstatOrNull(current.backup)) {
     await reconcileOriginalBackup(pin, intent, current);
     current = await outcome(pin, intent);
+  }
+  if (current.captured && current.originalArchive) {
+    await windows('restore-archive', current.backup);
+    current = await outcome(pin, intent, { windowsRecovery: true });
   }
   if (!intent.stage) {
     if (typeof persistIntent !== 'function') invalid('A durable current-run persistIntent callback is required before staging.');
@@ -590,29 +669,34 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   if (original) await originalMatches(source, intent); else await originalMatches(current.target, intent);
   const complete = await snapshot(current.stage);
   if (!sameIdentity(complete.stat, intent.stage) || complete.hash !== intent.hash || (intent.original && await metadata(current.stage) !== intent.original.metadata)) conflict('Staging did not preserve the exact bytes and original metadata.');
-  if (!original || source === current.backup) {
-    try { await fs.link(current.stage, current.target); }
-    catch (cause) { if (cause.code === 'EEXIST') conflict('A destination appeared before no-overwrite publication.'); throw cause; }
-  } else if (process.platform === 'win32') {
-    if (await lstatOrNull(current.backup)) conflict('An unexpected backup path prevents publication.');
-    // Preserve the exact security descriptor already verified on the stage.
-    // ReplaceFileW would merge and auto-inherit the original DACL again.
-    await fs.link(current.target, current.backup);
+  if (original && source !== current.backup) {
+    intent = await prepareCapture(pin, intent, current, persistIntent);
     await beforePublish();
-    const prepared = await outcome(pin, intent, { windowsRecovery: true });
-    if (prepared.status !== 'unapplied' || !prepared.prepared) conflict('The exact prepared publication changed during its ownership check.');
-    await fs.rename(current.stage, current.target);
-  } else await fs.rename(current.stage, current.target);
+    await location(pin, intent);
+    await originalMatches(current.target, intent);
+    if (await lstatOrNull(current.backup)) conflict('An unexpected captured file prevents publication.');
+    // Capture the name atomically before trusting its inode or bytes. The
+    // journaled, exclusively created directory reserves the recovery namespace.
+    await fs.rename(current.target, current.backup);
+    await syncDirectory(current.capture); await syncDirectory(current.directory);
+  }
+  if (original) {
+    const captured = await mutationOutcome(pin, intent);
+    if (!captured.captured) conflict('The destination is not the exact captured original.');
+  }
+  await location(pin, intent);
+  try { await fs.link(current.stage, current.target); }
+  catch (cause) { if (cause.code === 'EEXIST') conflict('A destination appeared before no-overwrite publication.'); throw cause; }
   return finish(pin, intent, current);
 }
 
 /** Skip may remove only this run's recorded staging inode. A completed public
- * note is never removed. A Windows recovery backup is restored by exact inode
+ * note is never removed. A captured original is restored by exact inode
  * without overwriting an arrival if it is the sole inspected original.
  */
 export async function discardNoteStage(pin, input, { persistIntent } = {}) {
   let intent = validateNotePublication(input);
-  const current = await outcome(pin, intent, { windowsRecovery: true });
+  const current = await mutationOutcome(pin, intent);
   if (!intent.stage) {
     const empty = await lstatOrNull(current.stage);
     if (!empty) return Object.freeze({ discarded: false });
@@ -623,6 +707,7 @@ export async function discardNoteStage(pin, input, { persistIntent } = {}) {
   }
   if (['applied', 'metadata-pending'].includes(current.status)) { await finish(pin, intent, current); return Object.freeze({ discarded: true, applied: true }); }
   if (await lstatOrNull(current.backup)) await reconcileOriginalBackup(pin, intent, current, { restore: true });
+  await removeEmptyCapture(pin, intent);
   if (!await lstatOrNull(current.stage)) return Object.freeze({ discarded: false, applied: false });
   await unlinkExact(current.stage, intent.stage);
   await syncDirectory(current.directory); await assertChain(intent.parent); await assertDirectory(pin);
@@ -634,6 +719,7 @@ export async function discardNoteStage(pin, input, { persistIntent } = {}) {
  * A backup is preserved and reported if ordinary recovery could not reconcile it. */
 export async function discardRecordedNoteStage(pin, input, { persistIntent } = {}) {
   let intent = validateNotePublication(input);
+  if (intent.capture) await restoreCapturedConflict(pin, intent);
   const names = await location(pin, intent), stage = await lstatOrNull(names.stage);
   if (stage) {
     if (!intent.stage) {
@@ -649,5 +735,5 @@ export async function discardRecordedNoteStage(pin, input, { persistIntent } = {
     await unlinkExact(names.stage, intent.stage, stage.nlink); await syncDirectory(names.directory);
   }
   await assertChain(intent.parent); await assertDirectory(pin);
-  return Object.freeze({ discarded: Boolean(stage), backupPreserved: Boolean(await lstatOrNull(names.backup)) });
+  return Object.freeze({ discarded: Boolean(stage), backupPreserved: Boolean(await lstatOrNull(names.capture)) });
 }

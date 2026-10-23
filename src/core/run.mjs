@@ -337,8 +337,9 @@ export function setNotePublication(run, attemptId, note, { event = null, ...opti
   const checked = assertAttempt(run, attemptId, options); phase(checked, ['saving']);
   if (checked.publication) {
     const previous = checked.publication.note;
-    if (JSON.stringify({ ...previous, stage: null }) !== JSON.stringify({ ...note, stage: null }) ||
+    if (JSON.stringify({ ...previous, stage: null, capture: null }) !== JSON.stringify({ ...note, stage: null, capture: null }) ||
         (previous.stage && JSON.stringify(previous.stage) !== JSON.stringify(note.stage)) ||
+        (previous.capture && JSON.stringify(previous.capture) !== JSON.stringify(note.capture)) ||
         (checked.publication.event && checked.publication.event.id !== event?.id)) fail('RUN_PUBLICATION_CHANGED', 'A pending publication cannot replace its original expectations or stage');
   }
   return validateRun({ ...checked, publication: { note, event } }, options);
@@ -362,8 +363,9 @@ export function failLogEvent(run, attemptId, eventId, code, options = {}) {
 
 export function setLogPublication(run, attemptId, eventId, note, options = {}) {
   const checked = assertAttempt(run, attemptId, options), prior = checked.logPublication;
-  if (prior && (prior.eventId !== eventId || JSON.stringify({ ...prior.note, stage: null }) !== JSON.stringify({ ...note, stage: null }) ||
-      (prior.note.stage && JSON.stringify(prior.note.stage) !== JSON.stringify(note.stage)))) fail('RUN_PUBLICATION_CHANGED', 'A pending log publication cannot replace its original expectations or stage');
+  if (prior && (prior.eventId !== eventId || JSON.stringify({ ...prior.note, stage: null, capture: null }) !== JSON.stringify({ ...note, stage: null, capture: null }) ||
+      (prior.note.stage && JSON.stringify(prior.note.stage) !== JSON.stringify(note.stage)) ||
+      (prior.note.capture && JSON.stringify(prior.note.capture) !== JSON.stringify(note.capture)))) fail('RUN_PUBLICATION_CHANGED', 'A pending log publication cannot replace its original expectations or stage');
   return validateRun({ ...checked, logPublication: { eventId, note } }, options);
 }
 

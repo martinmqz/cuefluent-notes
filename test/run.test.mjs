@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createProject } from '../src/core/settings.mjs';
 import { createRun, validateRun, replaceAttempt, assertAttempt, releaseAttempt, publishDrafts, readyForReview, beginSaving,
-  markNoteSaved, completeSaving, skipDisposition, RUN_LIMITS, cleanupContext, advanceCleanup, clearCleanupAcknowledgment } from '../src/core/run.mjs';
+  markNoteSaved, completeSaving, skipDisposition, RUN_LIMITS, cleanupContext, advanceCleanup, clearCleanupAcknowledgment,
+  setNotePublication, setLogPublication } from '../src/core/run.mjs';
 
 const options = { platform: 'posix' };
 const ids = ['10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002',
@@ -16,6 +17,31 @@ const active = changes => replaceAttempt(fresh(changes), ids[1], options);
 const draft = changes => ({ id: ids[3], target: '/notes/design.md', expectedHash: h('c'), hash: h('d'), summary: null, heading: null, byteLength: 100,
   binding: { root: '/notes', parent: [{ path: '/', device: '1', inode: '1' }, { path: '/notes', device: '1', inode: '2' }] }, ...changes });
 const error = (action, code = 'RUN_INVALID') => assert.throws(action, { code });
+
+test('note and log publication identities can be recorded once but never replaced or cleared', () => {
+  const original = { device: '1', inode: '3', metadata: h('a') }, stage = { device: '1', inode: '4' }, capture = { device: '1', inode: '5' };
+  const descriptor = draft({ summary: 'Updated note' });
+  const logsParent = [...descriptor.binding.parent, { path: '/notes/logs', device: '1', inode: '6' }];
+  const settings = { saving: 'auto', activityLog: { enabled: true, timezone: 'UTC' } };
+  const base = publishDrafts(active(settings), ids[1], [descriptor], options);
+  const event = { id: ids[4], savedAt: '2026-10-22T01:00:00.000Z' };
+  const note = { schema: 1, runId: base.id, draftId: descriptor.id, root: '/notes', relative: 'design.md',
+    parent: descriptor.binding.parent, expectedHash: descriptor.expectedHash, hash: descriptor.hash, bytes: descriptor.byteLength,
+    original, stage: null, capture: null };
+  const logRun = validateRun({ ...markNoteSaved(base, ids[1], descriptor.id, { ...options, event }),
+    logging: { root: '/notes', parent: logsParent, seriesId: 'synthetic', timezone: 'UTC' } }, options);
+  for (const kind of ['note', 'log']) {
+    const value = kind === 'note' ? note : { ...note, draftId: event.id, relative: 'logs/2026.md', parent: logsParent };
+    const set = (run, next) => kind === 'note' ? setNotePublication(run, ids[1], next, { ...options, event }) : setLogPublication(run, ids[1], event.id, next, options);
+    let run = set(kind === 'note' ? base : logRun, value);
+    run = set(run, { ...value, stage });
+    run = set(run, { ...value, stage, capture });
+    for (const change of [{ stage: null }, { stage: { device: '1', inode: '9' } }, { capture: null },
+      { capture: { device: '1', inode: '9' } }, { expectedHash: h('f') }]) {
+      error(() => set(run, { ...value, stage, capture, ...change }), 'RUN_PUBLICATION_CHANGED');
+    }
+  }
+});
 
 test('create a metadata-only frozen run with independently pinned project settings and selected hashes', () => {
   const inputProject = structuredClone(project()), selection = selected();

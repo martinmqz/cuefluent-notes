@@ -34,7 +34,7 @@ function boundedPath(value, paths) {
  */
 export function validateNotePublication(input, { platform = process.platform } = {}) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
-  data(input, ['schema', 'runId', 'draftId', 'root', 'relative', 'parent', 'expectedHash', 'hash', 'bytes', 'original', 'stage'], 'Note publication');
+  data(input, ['schema', 'runId', 'draftId', 'root', 'relative', 'parent', 'expectedHash', 'hash', 'bytes', 'original', 'stage', 'capture'], 'Note publication');
   if (input.schema !== 1 || typeof input.runId !== 'string' || !UUID.test(input.runId) ||
       typeof input.draftId !== 'string' || !UUID.test(input.draftId) || input.runId === input.draftId ||
       (input.expectedHash !== null && (typeof input.expectedHash !== 'string' || !HASH.test(input.expectedHash))) ||
@@ -67,8 +67,10 @@ export function validateNotePublication(input, { platform = process.platform } =
   if ((input.expectedHash === null) !== (original === null)) invalid('Absent and inspected-original expectations must agree.');
   const stage = input.stage === null ? null : identity(input.stage);
   if (stage && original && stage.device === original.device && stage.inode === original.inode) invalid('A stage cannot alias the original note.');
+  const capture = input.capture === null ? null : identity(input.capture);
+  if (capture && (!original || !stage)) invalid('A capture requires the inspected original and recorded stage.');
   const result = Object.freeze({ schema: 1, runId: input.runId, draftId: input.draftId, root, relative: input.relative,
-    parent: Object.freeze(parent), expectedHash: input.expectedHash, hash: input.hash, bytes: input.bytes, original, stage });
+    parent: Object.freeze(parent), expectedHash: input.expectedHash, hash: input.hash, bytes: input.bytes, original, stage, capture });
   if (Buffer.byteLength(JSON.stringify(result)) > 64 * 1024) invalid('The publication intent exceeds its metadata profile.');
   return result;
 }
