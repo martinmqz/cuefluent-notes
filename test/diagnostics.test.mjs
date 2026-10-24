@@ -50,10 +50,10 @@ test('unknown failures have a safe explanation without evaluating exception acce
 
 test('malformed store overrides identify the environment setting without disclosing its value or changing CLI errors', () => {
   const secret = 'synthetic-private-store-value';
-  const result = failureFrom(() => selectStoreRoot({ env: { CUEFLUENT_V2_HOME: `${secret}/../private` }, platform: 'linux', homedir: '/home/synthetic' }),
+  const result = failureFrom(() => selectStoreRoot({ env: { CUEFLUENT_HOME: `${secret}/../private` }, platform: 'linux', homedir: '/home/synthetic' }),
     { stage: 'command', operation: 'mcp', client: 'codex' });
   assert.equal(result.error, 'ENTRY_STORE_ROOT_INVALID');
-  assert.match(result.recovery, /CUEFLUENT_V2_HOME/);
+  assert.match(result.recovery, /CUEFLUENT_HOME/);
   assert.match(result.recovery, /normalized absolute path/);
   assert.equal(JSON.stringify(result).includes(secret), false);
   const cli = failureFrom(() => parseEntryArguments(['setup', '--config', `${secret}/setup.json`]), { stage: 'command', operation: 'setup' });

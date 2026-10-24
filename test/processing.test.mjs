@@ -17,7 +17,7 @@ import { prepareProcessing, readProcessingInput } from '../src/processing/prepar
 import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
 async function fixture(t) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-process-')));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-process-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'project'); await fs.mkdir(cwd);
   const project = createProject({ id: 'project', root: cwd, destination: { kind: 'directory', path: path.join(root, 'notes') } });

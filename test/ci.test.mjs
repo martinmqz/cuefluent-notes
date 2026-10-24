@@ -43,6 +43,12 @@ test('native shards and client smoke run in parallel after classification and re
   for (const required of ['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
   assert.deepEqual(reproducibility.needs, ['plan', 'guidance', 'test', 'client-smoke']);
   for (const step of source.steps.filter(step => step.run === 'npm run check:examples' || step.run === 'node tools/ci.mjs build' || step.uses?.startsWith('actions/upload-artifact@'))) assert.equal(step.if, "needs.plan.outputs.mode == 'full' && matrix.primary");
+  const upload = source.steps.find(step => step.uses?.startsWith('actions/upload-artifact@'));
+  assert.deepEqual(rows.filter(row => row.primary).map(row => upload.with.name.replace('${{ matrix.os }}', row.os)), ARTIFACT_NAMES);
+  const download = reproducibility.steps.find(step => step.uses?.startsWith('actions/download-artifact@') && step.if === "needs.plan.outputs.mode == 'full'");
+  assert.equal(download.with.pattern, 'candidate-*');
+  assert(ARTIFACT_NAMES.every(name => name.startsWith(download.with.pattern.slice(0, -1))));
+  assert.equal(download.with.path, reproducibility.steps.find(step => step.run === 'node tools/ci.mjs compare').env.CUEFLUENT_ARTIFACT_ROOT);
   assert(smoke.steps.some(step => step.run === 'node tools/client-smoke.mjs'));
   assert(!source.steps.some(step => /client-smoke/.test(step.run ?? '')));
 });
@@ -76,7 +82,7 @@ test('draft PRs allocate no job runners and ready PRs retain parallel checks and
   }
   assert.equal(admitted(workflow.jobs.reproducibility, { draft: false, cancelled: true }), false);
   // Redrafting enters the same concurrency group and cancels the active PR run.
-  assert.equal(workflow.concurrency.group, 'checks-v2-${{ github.event_name }}-${{ github.ref }}');
+  assert.equal(workflow.concurrency.group, 'checks-${{ github.event_name }}-${{ github.ref }}');
   assert.equal(workflow.concurrency['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}");
 });
 
@@ -200,6 +206,7 @@ test('manual release candidate authorization requires confirmation on the main d
   assert.equal(workflow.on.workflow_dispatch.inputs.checks_run_id.required, true);
   assert.equal(workflow.jobs.prepare.uses, undefined);
   assert.equal(workflow.jobs.prepare.strategy, undefined);
+  assert.equal(workflow.concurrency.group, 'prepare-${{ inputs.tag }}');
   const steps = workflow.jobs.prepare.steps;
   assert.deepEqual(steps.filter(step => step.run).map(step => step.run), ['node tools/release-candidate.mjs select', 'node tools/release-candidate.mjs verify']);
   const download = steps.find(step => step.uses?.startsWith('actions/download-artifact@'));
@@ -218,7 +225,7 @@ test('candidate comparison verifies every archive and requires identical three-p
   const f = await packageSource(t), artifacts = path.join(f.root, 'artifacts'); await fs.mkdir(artifacts);
   const files = ['build.json', ...f.built.packages.flatMap(item => item.archives.map(archive => archive.path)), ...f.built.tools.map(archive => archive.path)];
   for (const platform of ['ubuntu-24.04', 'macos-14', 'windows-2025']) {
-    const root = path.join(artifacts, `v2-candidate-${platform}`); await fs.mkdir(root);
+    const root = path.join(artifacts, `candidate-${platform}`); await fs.mkdir(root);
     for (const file of files) await fs.copyFile(path.join(f.output, file), path.join(root, file));
   }
   assert.deepEqual(await compareBuilds(artifacts), { platforms: 3, identical: true });
@@ -228,12 +235,21 @@ test('candidate comparison verifies every archive and requires identical three-p
     assert.deepEqual(result.build, f.built);
     assert.deepEqual(result.bytes, await fs.readFile(path.join(f.output, 'build.json')));
   }
-  const windows = path.join(artifacts, 'v2-candidate-windows-2025'), receipt = path.join(windows, 'build.json'), original = await fs.readFile(receipt);
+  const windows = path.join(artifacts, 'candidate-windows-2025'), receipt = path.join(windows, 'build.json'), original = await fs.readFile(receipt);
   await fs.appendFile(receipt, '\n');
   await assert.rejects(compareBuilds(artifacts), { code: 'CI_CANDIDATE_INVALID' });
   await fs.writeFile(receipt, original);
   await fs.appendFile(path.join(windows, f.built.tools[0].path), 'corruption');
   await assert.rejects(compareBuilds(artifacts), { code: 'CI_CANDIDATE_INVALID' });
+});
+
+test('candidate comparison rejects non-current artifact directories before reading their contents', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-candidate-names-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  for (const name of ARTIFACT_NAMES) await fs.mkdir(path.join(root, `unexpected-${name}`));
+  await assert.rejects(compareBuilds(root), { code: 'CI_CANDIDATE_INVALID' });
+  for (const name of ARTIFACT_NAMES.slice(1)) await fs.rename(path.join(root, `unexpected-${name}`), path.join(root, name));
+  await assert.rejects(compareBuilds(root), { code: 'CI_CANDIDATE_INVALID' });
 });
 
 test('candidate receipt cannot substitute another archive type or client', async t => {

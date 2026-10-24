@@ -37,7 +37,7 @@ async function fixture(t, event = 'pull_request', version = '0.16.0') {
   const run = { id: runId, workflow_id: 8, path: '.github/workflows/ci.yml', repository: repo, head_repository: repo,
     status: 'completed', conclusion: 'success', run_attempt: 2, head_sha: event === 'pull_request' ? headSha : tagCommit,
     event, head_branch: event === 'pull_request' ? 'feat/change' : 'main' };
-  const artifacts = platforms.map((platform, index) => ({ id: 100 + index, name: `v2-candidate-${platform}`, expired: false,
+  const artifacts = platforms.map((platform, index) => ({ id: 100 + index, name: `candidate-${platform}`, expired: false,
     size_in_bytes: 1234, digest: `sha256:${String(index + 1).repeat(64)}`, expires_at: '2099-01-01T00:00:00Z',
     workflow_run: { id: runId, repository_id: repositoryId, head_repository_id: repositoryId, head_sha: run.head_sha, head_branch: run.head_branch } }));
   const jobValues = jobs.map((name, index) => ({ id: 200 + index, name, run_id: runId, run_attempt: 1, status: 'completed', conclusion: 'success' }));
@@ -244,6 +244,8 @@ test('selection refuses failed, skipped, foreign, missing, duplicate, expired an
     f => { f.jobValues[0].run_attempt = 3; },
     f => { f.jobValues.push({ ...f.jobValues[0], id: 901, name: 'unexpected-job' }); },
     f => { f.artifacts.pop(); },
+    f => { for (const artifact of f.artifacts) artifact.name = `unexpected-${artifact.name}`; },
+    f => { f.artifacts[0].name = `unexpected-${f.artifacts[0].name}`; },
     f => { f.artifacts[1].name = f.artifacts[0].name; },
     f => { f.artifacts[1].id = f.artifacts[0].id; },
     f => { f.artifacts[0].expired = true; },

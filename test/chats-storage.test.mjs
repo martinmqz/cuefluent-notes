@@ -12,7 +12,7 @@ import { readProjectStatus } from '../src/control/status.mjs';
 import { prepareProcessing } from '../src/processing/prepare.mjs';
 
 async function fixture(t) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-chats-')));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-chats-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const projectRoot = path.join(root, 'project');
   await fs.mkdir(path.join(projectRoot, 'nested'), { recursive: true });

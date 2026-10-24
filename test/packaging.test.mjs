@@ -38,7 +38,7 @@ async function fixture(t) {
   await fs.writeFile(path.join(source, 'src/cli.mjs'), fixtureCLI); await fs.writeFile(path.join(source, 'src/support.mjs'), 'const keys = ["from", "to"]; export const label = "detached";\n');
   await fs.writeFile(path.join(source, 'packaging/plugin/source-files.json'), JSON.stringify(['src/cli.mjs', 'src/support.mjs']));
   // These plausible accidental inputs must not enter either distribution.
-  for (const name of ['scripts/legacy.mjs', 'test/private.test.mjs', '.local/private.md', 'AGENTS.md', 'references/unshipped.md']) {
+  for (const name of ['scripts/unshipped.mjs', 'test/private.test.mjs', '.local/private.md', 'AGENTS.md', 'references/unshipped.md']) {
     await fs.mkdir(path.dirname(path.join(source, name)), { recursive: true }); await fs.writeFile(path.join(source, name), 'Not shipped.');
   }
   return { root, source, build: output => buildPackages({ repoRoot: source, outputRoot: path.join(root, output), cacheRoot }) };

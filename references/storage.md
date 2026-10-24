@@ -56,6 +56,12 @@ hashes, draft content and durable cleanup progress. Do not infer owner death fro
 PID reuse or elapsed time, delete gate files, refresh conflict hashes or relocate
 locks. Unexpected files and user edits are preserved.
 
+Cleanup acknowledgments and pending queue-removal journals must match the current
+run's cleanup context. A mismatch is refused with `RUN_INVALID` or
+`QUEUE_CURSOR_MISMATCH`; retained state is not rewritten to force cleanup. Finish
+pending work before changing packages, and preserve any mismatched state for
+inspection.
+
 A note save and activity entry are separate writes. Logging failure does not block
 successful note cleanup. The current run can retry an interrupted entry with its
 original event ID and applied save timestamp. On completion or skip, unconfirmed

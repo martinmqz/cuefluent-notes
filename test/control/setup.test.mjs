@@ -158,7 +158,7 @@ test('setup reports only a bounded unrelated sibling count while preserving an e
 
 test('disabled setup reports pre-existing malformed logs once and preserves them without adoption', async t => {
   const f = await fixture(t); await fs.mkdir(path.join(f.notes, 'logs'), { recursive: true });
-  const target = path.join(f.notes, 'logs/2026.md'), bytes = Buffer.from('# Manual legacy activity\n'); await fs.writeFile(target, bytes);
+  const target = path.join(f.notes, 'logs/2026.md'), bytes = Buffer.from('# Manual activity\n'); await fs.writeFile(target, bytes);
   const result = await setupProject(f.options);
   assert.equal(result.logs.status, 'problem'); assert.equal(result.logs.warning, 'LOG_INVALID');
   assert.deepEqual(result.project.activityLog, { enabled: false }); assert.deepEqual(await fs.readFile(target), bytes);

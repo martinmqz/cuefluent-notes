@@ -173,6 +173,8 @@ test('a full run survives a multi-commit rebase merge ending in a distribution-o
 test('invalid full artifacts never fall back to a distribution hop', async t => {
   const changes = [
     state => { state.artifacts.pop(); },
+    state => { for (const artifact of state.artifacts) artifact.name = `unexpected-${artifact.name}`; },
+    state => { state.artifacts[0].name = `unexpected-${state.artifacts[0].name}`; },
     state => { state.artifacts[0].expired = true; },
     state => { state.artifacts[0].digest = 'invalid'; },
     state => { state.artifacts[0].workflow_run.head_sha = base; },
@@ -408,7 +410,7 @@ test('verification refreshes distribution PR and head-tree facts after selection
   });
 });
 
-test('new full workflows cannot omit their plan job while legacy full runs remain eligible', async t => {
+test('full workflow evidence requires its declared plan job', async t => {
   const f = await fixture(t); f.state.newWorkflow = true;
   await assert.rejects(selectMainEvidence(f.options), error => error.releaseStage === 'jobs');
   f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
@@ -429,13 +431,14 @@ test('a distribution gate proves its actual PR first parent without impersonatin
   assert.match(await fs.readFile(f.options.env.GITHUB_STEP_SUMMARY, 'utf8'), /PR base commit/);
 });
 
-test('PR base evidence rejects ordinary heads and failed or absent full baseline checks', async t => {
-  for (const mode of ['head-ref', 'one-parent', 'failed-baseline', 'missing-baseline']) {
+test('PR base evidence rejects ordinary heads and failed, absent or renamed full baseline evidence', async t => {
+  for (const mode of ['head-ref', 'one-parent', 'failed-baseline', 'missing-baseline', 'renamed-baseline']) {
     const f = await fixture(t), merge = sha('8');
     Object.assign(f.options.env, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: mode === 'head-ref' ? 'refs/pull/91/head' : 'refs/pull/91/merge', GITHUB_SHA: merge });
     Object.assign(f.state, { checkedOut: merge, mergeParents: mode === 'one-parent' ? [target] : [target, sha('7')] });
     if (mode === 'failed-baseline') f.state.run.conclusion = 'failure';
     if (mode === 'missing-baseline') { f.state.pulls = []; f.state.prRuns = []; }
+    if (mode === 'renamed-baseline') for (const artifact of f.state.artifacts) artifact.name = `unexpected-${artifact.name}`;
     await assert.rejects(main(['select-base'], f.options));
   }
 });

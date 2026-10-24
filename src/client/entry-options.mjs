@@ -10,7 +10,7 @@ import { readHandleStat } from '../storage/stat.mjs';
 const CLIENTS = new Set(['claude', 'codex']);
 const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const invalid = () => fail('ENTRY_ARGUMENT_INVALID', 'Use a supported command and its exact documented arguments.');
-const invalidStoreRoot = () => fail('ENTRY_STORE_ROOT_INVALID', 'CUEFLUENT_V2_HOME must identify the intended normalized absolute private-store location.');
+const invalidStoreRoot = () => fail('ENTRY_STORE_ROOT_INVALID', 'CUEFLUENT_HOME must identify the intended normalized absolute private-store location.');
 const invalidLocation = () => fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
 function absolute(value, platform = process.platform, reject = invalid) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
@@ -67,21 +67,21 @@ function environmentLocation(value, platform) {
 }
 
 /** Pure location selection. Opening/setup owns canonical ancestor verification,
- * privacy, local-filesystem and repository/note overlap checks. Nothing is read
- * from any former product location and this function never creates directories. */
+ * privacy, local-filesystem and repository/note overlap checks. This function
+ * performs no filesystem reads or writes. */
 export function selectStoreRoot({ env = process.env, platform = process.platform, homedir = os.homedir() } = {}) {
   if (!['darwin', 'linux', 'win32'].includes(platform)) fail('ENTRY_PLATFORM_UNSUPPORTED', 'This platform has no supported private-store location.');
-  const override = environment(env, 'CUEFLUENT_V2_HOME', invalidStoreRoot);
+  const override = environment(env, 'CUEFLUENT_HOME', invalidStoreRoot);
   if (override !== undefined) return absolute(override, platform, invalidStoreRoot);
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const home = environmentLocation(homedir, platform);
-  if (platform === 'darwin') return paths.join(home, 'Library', 'Application Support', 'Cuefluent Notes', 'v2');
+  if (platform === 'darwin') return paths.join(home, 'Library', 'Application Support', 'Cuefluent Notes');
   if (platform === 'win32') {
     const local = environment(env, 'LOCALAPPDATA');
-    return paths.join(local ? environmentLocation(local, platform) : paths.join(home, 'AppData', 'Local'), 'Cuefluent Notes', 'v2');
+    return paths.join(local ? environmentLocation(local, platform) : paths.join(home, 'AppData', 'Local'), 'Cuefluent Notes');
   }
   const state = environment(env, 'XDG_STATE_HOME');
-  return paths.join(state && paths.isAbsolute(state) ? environmentLocation(state, platform) : paths.join(home, '.local', 'state'), 'cuefluent-notes', 'v2');
+  return paths.join(state && paths.isAbsolute(state) ? environmentLocation(state, platform) : paths.join(home, '.local', 'state'), 'cuefluent-notes');
 }
 
 async function packageFile(pin, relative, { read = false, missing = false, maxBytes = 64 * 1024 } = {}) {
@@ -113,8 +113,8 @@ async function packageFile(pin, relative, { read = false, missing = false, maxBy
 }
 
 /** packageRoot comes from this executable module's installation, never an MCP
- * argument. Fixed paths only: no plugin discovery, user configuration or legacy
- * settings. The installed skill always takes precedence over development. */
+ * argument. Fixed paths only: no plugin discovery or user configuration.
+ * The installed skill always takes precedence over development. */
 export async function loadClientContract(packageRoot) {
   absolute(packageRoot);
   const pin = await pinDirectory(packageRoot);

@@ -65,7 +65,7 @@ function pathsFor(platform) { return platform === 'win32' || (platform === undef
 function key(target, paths) { return paths === path.win32 ? target.toLowerCase() : target; }
 const portableTargetKey = target => target.normalize('NFC').toLowerCase();
 
-export const cleanupContext = runId => createHash('sha256').update(`cuefluent-v2-cleanup\0${uuid(runId, 'run.id')}`).digest('hex');
+export const cleanupContext = runId => createHash('sha256').update(`cuefluent-cleanup\0${uuid(runId, 'run.id')}`).digest('hex');
 
 function cleanupState(input, runId, phase, selection) {
   record(input, ['next', 'ack'], 'cleanup');

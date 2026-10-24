@@ -10,7 +10,7 @@ import { interruptRemoval } from './fixtures/exact-removal-worker.mjs';
 import { readSnapshot, writeJSON } from '../src/storage/files.mjs';
 
 async function fixture(t) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-store-')));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-store-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const projectRoot = path.join(root, 'project');
   await fs.mkdir(projectRoot);

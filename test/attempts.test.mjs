@@ -40,7 +40,7 @@ function childProcess(t, mode, root, options) {
 }
 
 async function fixture(t, { direct = false } = {}) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-attempt-')));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-attempt-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'project'));
   const project = createProject({ id: 'demo', root: path.join(root, 'project'), destination: { kind: 'directory', path: path.join(root, 'notes') } });

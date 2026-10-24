@@ -20,7 +20,7 @@ async function fixture(t) {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const storeRoot = path.join(root, 'private'), cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd);
   const run = (args, input = '', entryPath = entry, nodeArgs = [], env = {}) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [...nodeArgs, entryPath, ...args], { cwd, env: { ...process.env, CUEFLUENT_V2_HOME: storeRoot, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [...nodeArgs, entryPath, ...args], { cwd, env: { ...process.env, CUEFLUENT_HOME: storeRoot, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
     child.once('error', reject); child.once('close', code => resolve({ code, stdout, stderr: withoutFfiNotice(stderr, child.pid) })); child.stdin.end(input);
   });
@@ -157,12 +157,12 @@ test('CLI and hook failures report a package version only after its identity is 
 test('valid CLI and hook commands explain an invalid store-root override without exposing its value', async t => {
   const f = await fixture(t), override = 'relative-private-value';
   for (const args of [['settings'], ['mcp', 'claude'], ['mcp', 'codex'], ['hook', 'claude'], ['hook', 'codex']]) {
-    const result = await f.run(args, '{}', entry, [], { CUEFLUENT_V2_HOME: override }), hook = args[0] === 'hook';
+    const result = await f.run(args, '{}', entry, [], { CUEFLUENT_HOME: override }), hook = args[0] === 'hook';
     assert.equal(result.code, hook ? 0 : 1);
     assert.equal(hook ? result.stderr : result.stdout, '');
     const message = hook ? JSON.parse(result.stdout).systemMessage : result.stderr;
     assert.match(message, /^Cuefluent Notes \[ENTRY_STORE_ROOT_INVALID\]:/);
-    assert.match(message, /Next step: Correct CUEFLUENT_V2_HOME/);
+    assert.match(message, /Next step: Correct CUEFLUENT_HOME/);
     assert.doesNotMatch(message, /relative-private-value/);
     const diagnostics = JSON.parse(message.split('Diagnostics: ')[1]);
     assert.equal(diagnostics.stage, 'command'); assert.equal(diagnostics.operation, args[0]);
@@ -316,7 +316,7 @@ test('already running MCP servers discover first-time setup without restarting o
   for (const client of ['claude', 'codex']) {
     const f = await fixture(t);
     const child = spawn(process.execPath, [entry, 'mcp', client], { cwd: f.cwd,
-      env: { ...process.env, CUEFLUENT_V2_HOME: f.storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+      env: { ...process.env, CUEFLUENT_HOME: f.storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
     const pending = new Map(), lines = createInterface({ input: child.stdout });
     let nextId = 0, stderr = '';
     child.stderr.on('data', chunk => { stderr += chunk; });

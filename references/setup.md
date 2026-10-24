@@ -97,15 +97,22 @@ links remain useful to agents and other Markdown readers.
 
 ## Private location
 
-Defaults are `~/Library/Application Support/Cuefluent Notes/v2` on macOS,
-`$XDG_STATE_HOME/cuefluent-notes/v2` (or `~/.local/state/cuefluent-notes/v2`) on
-Linux, and `%LOCALAPPDATA%/Cuefluent Notes/v2` on Windows. `CUEFLUENT_V2_HOME`
-selects an explicit fresh location consistently for the client and its workers.
+Defaults are `~/Library/Application Support/Cuefluent Notes` on macOS,
+`$XDG_STATE_HOME/cuefluent-notes` (or `~/.local/state/cuefluent-notes`) on
+Linux, and `%LOCALAPPDATA%/Cuefluent Notes` on Windows. `CUEFLUENT_HOME`
+selects an explicit location consistently for the client and its workers.
 A setup request may also name `storeRoot`; subsequent client invocations must
-select that same location with `CUEFLUENT_V2_HOME` in each native client's launch
+select that same location with `CUEFLUENT_HOME` in each native client's launch
 environment, so its hooks and MCP worker use the configured store. Never place
 it in a repository or notes destination.
 Private storage requires a supported local filesystem and verifiable permissions.
+
+Location selection reads or creates no files and does not search other locations.
+Changing the launch override does not move settings, queued input, or pending
+runs. Retained state must satisfy the current runtime's validation; preserve it
+when a conflict is reported. An existing directory can fail privacy or layout
+checks instead of appearing unconfigured. Read-only commands never initialize
+or repair it.
 
 Setup changes only Cuefluent Notes project state and the explicitly authorized
 notes/log destination. Native plugin registration, hook trust, authentication,

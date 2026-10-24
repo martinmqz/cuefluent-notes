@@ -220,6 +220,17 @@ network failure fails the smoke check and required gate and may require a rerun.
 No native client downloads, credentials, model calls, installations, or
 hook-trust changes are part of artifact-producing jobs.
 
+The retained artifact identities are `candidate-ubuntu-24.04`,
+`candidate-macos-14`, and `candidate-windows-2025`. Reproducibility, Main evidence,
+PR base evidence, and release preparation require this one exact set. Retained
+artifacts with other names cannot satisfy these checks; they are neither renamed
+nor deleted. The first full Checks run with these names establishes evidence for
+its tested tree. It does not establish evidence for earlier trees. Distribution-only
+base reuse must reach a full run with these names through its verified ancestry.
+Rerunning an unchanged historical workflow that emits different names cannot
+repair the mismatch. Published archives, snapshots, tags, and receipt pins remain
+immutable and keep their existing verification protections.
+
 ### Distribution-only changes
 
 A ready PR targeting `main` and confined to published snapshots, catalogs, release
@@ -305,9 +316,11 @@ status and ancestry failures, without printing tokens or downloaded payloads.
 
 Missing, expired, incompatible, or incomplete evidence stops preparation. When
 fresh evidence is required, explicitly dispatch Checks on the existing release
-tag, for example `gh workflow run ci.yml --ref v0.16.0`. This tests the tagged
-commit even after `main` advances; the tag must contain this Checks workflow and
-source-recording support. A dispatch on `main` is also accepted when its tip is
+tag. This tests the tagged commit even after `main` advances; the tag must contain
+the current candidate artifact names and source-recording support. A historical
+tag whose workflow emits different artifact names is ineligible for current
+automated preparation, including after a rerun; do not move the tag or relabel its
+retained evidence. A dispatch on `main` is also accepted when its tip is
 exactly the tagged commit. Preparation verifies main-history ancestry and never
 silently launches another full matrix. Candidates created before source provenance
 was recorded are not eligible for this automated reuse.
@@ -343,3 +356,6 @@ distinct actions. Merges follow the repository's branch protection.
 
 - Point both catalogs at the verified 0.17.0 release snapshots and retain the
   independently verified receipt pin alongside all historical release pins.
+- Use neutral CI artifact and concurrency names, with one exact candidate set
+  shared by producers and evidence readers. Existing artifacts under other names
+  remain retained but cannot supply current automated evidence.

@@ -24,7 +24,7 @@ diagnostics go to stderr; hook failures use the native `systemMessage` response
 and do not deliberately fail the user's prompt. An unavailable diagnostic pipe
 does not interrupt an operation's completion or resource cleanup.
 
-`ENTRY_STORE_ROOT_INVALID` identifies a malformed `CUEFLUENT_V2_HOME` override.
+`ENTRY_STORE_ROOT_INVALID` identifies a malformed `CUEFLUENT_HOME` override.
 Use the intended normalized absolute private-store path; preserve existing work
 and do not select a different store merely to bypass an error. Diagnostics name
 the variable without exposing its value. Loaded package versions are included
@@ -59,11 +59,13 @@ existing native login and authentication settings unchanged. Then explicitly set
 up the project and notes destination using [setup](setup.md). New installations
 track nothing; fresh settings default to manual tracking and review saving.
 
-Cuefluent Notes 0.16.0 and later do not read or migrate runtime state from 0.15.1
-or earlier or support mixing runtimes from those versions. Existing Markdown notes
-remain user content. Use fresh settings and private storage; do not copy old
-runtime state into it. Published versions and their checksums remain immutable;
-a development package does not replace historical releases.
+Cuefluent Notes maintains one current runtime and private-state contract. Runtime
+state is not automatically discovered or imported from another location. Finish
+pending work before changing packages, and restart the client so its connector,
+hooks and workers use the same package and store. Existing Markdown notes remain
+user content and are preserved independently of private runtime state. Published
+releases and their checksums remain immutable; a development package does not
+replace historical releases.
 
 See [verification](verification.md) before relying on native client or platform
 behavior. Repository build, CI and publication procedures are maintained separately

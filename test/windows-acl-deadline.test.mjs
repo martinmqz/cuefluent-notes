@@ -7,7 +7,7 @@ test('ACL deadlines expire before helper creation and nested scopes cannot exten
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
   t.after(() => Object.defineProperty(process, 'platform', platform));
-  const registry = Symbol.for('cuefluent.notes.v2.windows-acl');
+  const registry = Symbol.for('cuefluent.notes.windows-acl');
   assert.equal(globalThis[registry], undefined);
   await withWindowsAclDeadline(async () => {
     await delay(15);

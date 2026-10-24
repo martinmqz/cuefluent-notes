@@ -13,7 +13,7 @@ const MAX_GATE_BYTES = 64 * 1024;
 const MARKER_SQL = 'CREATE TABLE gate_marker (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), id TEXT NOT NULL, stage TEXT NOT NULL)';
 // Shared across duplicate module imports. Never open a second connection to an
 // owned inode: closing it can drop the first connection's POSIX process locks.
-const registryKey = Symbol.for('cuefluent.v2.storage.gates.owners');
+const registryKey = Symbol.for('cuefluent.storage.gates.owners');
 const owners = globalThis[registryKey] ??= new Map();
 
 export class GateError extends Error {

@@ -372,17 +372,22 @@ gateTest('two processes exclude each other while an independent gate remains ava
 });
 
 gateTest('same-process duplicates never release the original owner lock', async (t) => {
+  const duplicate = await import('../src/storage/gates.mjs?duplicate-owner');
   const directory = setup(t);
   const identity = initializeGate(join(directory, 'gate.sqlite'), 'local');
   const owner = tryAcquireExistingGate(identity).acquired;
   onCleanup(t, () => owner.release());
   assert.deepEqual(tryAcquireExistingGate({ ...identity }), { busy: true });
   assert.deepEqual(probeGate(identity), { busy: true });
+  assert.deepEqual(duplicate.tryAcquireExistingGate(identity), { busy: true });
+  assert.deepEqual(duplicate.probeGate(identity), { busy: true });
+  assert.throws(() => duplicate.inspectExistingGate(identity.path, identity.id), { code: 'GATE_BUSY' });
   assert.throws(() => probeGate({ ...identity, id: 'wrong-local-id' }), { code: 'GATE_INVALID_DATABASE' });
   assert.deepEqual(await externalProbe(identity), { busy: true });
   owner.release();
   owner.release();
   assert.deepEqual(await externalProbe(identity), { available: true });
+  assert.deepEqual(duplicate.probeGate(identity), { available: true });
 });
 
 gateTest('holder death releases ownership without deleting or repairing the gate', async (t) => {
