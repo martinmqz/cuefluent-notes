@@ -1,5 +1,35 @@
 # Commands and recovery
 
+## Error reports
+
+A failed MCP tool call retains its stable `error` code and includes a plain-language
+`message`, a `recovery` step, and bounded `diagnostics` in both the text result and
+`structuredContent`. Diagnostics identify the runtime version, platform,
+architecture, stage, and client/package version when known. Nested causes expose
+only bounded error codes. Unknown errors receive generic guidance rather than
+their raw exception messages, stacks, paths, arguments, or environment values.
+Recovery uses the actual operation: a note lookup failure calls for inspecting
+the selected destination and note, while a missing startup module calls for
+checking the installed package. Fatal framing or queue limits close the connector;
+reconnect and inspect retained work before retrying a mutation.
+
+A retained invocation with `state: failed` receives the same derived guidance and
+MCP error flag when read. Stored outcomes remain unchanged. Status and processing
+results may include `warningDetails`, with fixed explanations for code-only
+warnings and a scope of `status`, `run`, `latest` or `result`. These details identify
+where the warning belongs; they do not turn a successful status read into an error.
+Warnings belonging to completed outcomes are marked `historical` and do not advise
+retrying finished work. A newer pending run keeps its own recovery guidance.
+At most 16 details are returned, within the response size bound. Additional details
+can be omitted when space is exhausted; the original warnings remain intact.
+
+Explain the failure and next step to the user; include the code for support.
+Runtime details are available when investigating a problem. An error is not proof
+that no earlier write succeeded: inspect retained status before retrying mutations,
+and do not describe a previous run's result as a new status-command failure.
+Keep notes, pending drafts, and queued inputs intact during diagnosis. Connector
+startup failures are covered in [package requirements](distribution.md#startup-troubleshooting).
+
 ## Direct notes from supplied content
 
 Ask naturally, for example: “Use Cuefluent to save the meeting details above as

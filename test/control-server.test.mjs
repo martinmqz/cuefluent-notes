@@ -93,12 +93,26 @@ test('argument and result accessors are never evaluated', async () => {
   await assert.rejects(codex(async () => output).call('cuefluent_control', { action: 'process' }), { code: 'CONTROL_RESPONSE_INVALID' }); assert.equal(evaluated, 0);
 });
 
-test('unknown MCP methods cannot forward requests and failures reveal only stable codes', async () => {
+test('unknown MCP methods cannot forward requests and diagnostics omit private exception text', async () => {
   const call = await protocol(codex(async () => { throw new Error('private conversation or credential'); }));
   assert.equal((await call({ jsonrpc: '2.0', id: 2, method: 'command/exec', params: {} })).error.code, -32601);
   const result = await call({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'cuefluent_control', arguments: { action: 'process' }, _meta: metadata } });
   assert.equal(result.result.isError, true); assert.equal(JSON.stringify(result).includes('private conversation'), false);
-  assert.deepEqual(JSON.parse(result.result.content[0].text), { error: 'CONTROL_TOOL_FAILED' });
+  assert.equal(JSON.parse(result.result.content[0].text).error, 'CONTROL_TOOL_FAILED');
+  assert.deepEqual(JSON.parse(result.result.content[0].text), result.result.structuredContent);
+  assert.match(result.result.structuredContent.message, /could not complete/);
+  assert.match(result.result.structuredContent.recovery, /pending work unchanged/);
+});
+
+test('MCP command mismatches explain the direct-note alternative and expose bounded debug context', async () => {
+  const call = await protocol(codex(async () => assert.fail('must not execute'), async () => ({ status: 'ready', binding: { ...binding, action: 'track' } })));
+  const response = await call({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'cuefluent_control', arguments: { action: 'process' }, _meta: metadata } });
+  assert.equal(response.result.isError, true);
+  const result = response.result.structuredContent;
+  assert.equal(result.error, 'NATIVE_COMMAND_MISMATCH'); assert.match(result.message, /current chat command/);
+  assert.match(result.recovery, /direct note tools/); assert.equal(result.diagnostics.client, 'codex');
+  assert.equal(result.diagnostics.pluginVersion, '0.16.0-dev.0');
+  assert.equal(Object.hasOwn(result.diagnostics, 'sessionId'), false);
 });
 
 test('response profile bounds metadata and preserves truthful running/review/result states', async () => {
@@ -164,7 +178,7 @@ test('elicitation needs a supported host and exact accepted form response; other
   }
   const unavailable = approvalBridge(() => { approved++; }).protocol({ version: '0.16.0', sendRequest: () => assert.fail('No unsupported elicitation') });
   await initializeApproval(unavailable, { elicitation: { url: {} } });
-  assert.deepEqual(JSON.parse((await unavailable(approvalCall)).result.content[0].text), { error: 'DIRECT_NOTE_APPROVAL_UNSUPPORTED' });
+  assert.equal(JSON.parse((await unavailable(approvalCall)).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_UNSUPPORTED');
   assert.equal(approved, 0);
 });
 
@@ -176,12 +190,12 @@ test('elicitation cancellation, expiration and unmatched or replayed responses c
   const pending = call(approvalCall); await sentPromise;
   await call({ jsonrpc: '2.0', id: 'unrelated', result: { action: 'accept', content: { approve: true } } });
   await call({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } });
-  assert.deepEqual(JSON.parse((await pending).result.content[0].text), { error: 'DIRECT_NOTE_APPROVAL_CANCELLED' });
+  assert.equal(JSON.parse((await pending).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_CANCELLED');
   await call({ jsonrpc: '2.0', id: request.id, result: { action: 'accept', content: { approve: true } } });
   assert.equal(approved, 0);
   const expired = approvalBridge(() => { approved++; }).protocol({ version: '0.16.0', approvalMs: 10, sendRequest: () => {} });
   await initializeApproval(expired);
-  assert.deepEqual(JSON.parse((await expired(approvalCall)).result.content[0].text), { error: 'DIRECT_NOTE_APPROVAL_TIMEOUT' });
+  assert.equal(JSON.parse((await expired(approvalCall)).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_TIMEOUT');
   assert.equal(approved, 0);
   assert.equal((await call({})).error.code, -32600);
 });
@@ -228,7 +242,7 @@ test('a cancellation before the handler reaches elicitation remains bound to tha
   await initializeApproval(call);
   const pending = call({ ...approvalCall, params: { name: 'delayed_confirmation' } });
   call.receive({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } });
-  assert.deepEqual(JSON.parse((await pending).result.content[0].text), { error: 'DIRECT_NOTE_APPROVAL_CANCELLED' });
+  assert.equal(JSON.parse((await pending).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_CANCELLED');
   assert.equal(asked, 0); assert.equal(approved, 0);
   // A later request may legitimately reuse the now-completed JSON-RPC identity.
   assert.equal((await call({ ...approvalCall, params: { name: 'delayed_confirmation' } })).result.structuredContent.state, 'saved');

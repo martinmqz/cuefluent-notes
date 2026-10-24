@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createProject } from '../src/core/settings.mjs';
 import { initializeStore } from '../src/storage/store.mjs';
 import { claimInvocation, runClaimedInvocation, readInvocation, launchInvocationChild } from '../src/control/invocations.mjs';
+import { createControlBridge } from '../src/client/control-server.mjs';
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-invocation-')));
@@ -101,6 +102,27 @@ test('unconfigured claims and absent polling write nothing; failed delivery does
   assert.equal(failed.reason, 'COMMAND_FAILED'); assert.ok(!JSON.stringify(failed).includes('Sensitive'));
   const repeat = await runClaimedInvocation(f.store, first.ticket, { execute: () => assert.fail('Repeated failed command') });
   assert.equal(repeat.state, 'failed');
+});
+
+test('a persisted failed invocation gains public guidance without rewriting its retained result', async t => {
+  const f = await fixture(t), claim = await claimInvocation(f.store, f.binding);
+  const outcome = await runClaimedInvocation(f.store, claim.ticket, { execute: () => {
+    throw Object.assign(new Error('Synthetic private exception'), { code: 'PROCESSING_CLIENT_FAILED' });
+  } });
+  const directory = path.join(f.store.root, 'store/invocations');
+  const record = path.join(directory, (await fs.readdir(directory)).find(name => name.endsWith('.json')));
+  const before = await fs.readFile(record, 'utf8');
+  const call = createControlBridge({ client: 'claude', readInvocation: handle => readInvocation(f.store, handle) }).protocol({ version: '0.17.1' });
+  await call({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } });
+  await call({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  const response = await call({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'cuefluent_invocation', arguments: { handle: claim.ticket } } });
+  assert.equal(response.result.isError, true);
+  assert.equal(response.result.structuredContent.error, outcome.reason);
+  assert.match(response.result.structuredContent.recovery, /retained run/);
+  assert.equal(JSON.stringify(response).includes('Synthetic private'), false);
+  assert.equal(await fs.readFile(record, 'utf8'), before);
+  assert.deepEqual(JSON.parse(before).result, { state: 'failed', reason: 'PROCESSING_CLIENT_FAILED' });
+  assert.deepEqual(await readInvocation(f.store, claim.ticket), outcome);
 });
 
 

@@ -1,4 +1,5 @@
 import { fail } from '../core/errors.mjs';
+import { describeFailure } from '../diagnostics.mjs';
 import { randomUUID } from 'node:crypto';
 import { packageVersion } from '../core/version.mjs';
 import { bindClaudeCommand, parseAction } from './commands.mjs';
@@ -62,6 +63,47 @@ function metadata(value) {
   const result = copy(value, 0);
   if (!object(result) || typeof result.state !== 'string' || !/^[a-z][a-z-]{0,63}$/.test(result.state)) fail('CONTROL_RESPONSE_INVALID', 'The control result must describe its actual state.');
   if (Buffer.byteLength(JSON.stringify(result)) > CONTROL_LIMITS.responseBytes) fail('CONTROL_RESPONSE_LIMIT', 'The control response exceeds its metadata bound.');
+  return result;
+}
+
+/** Derive guidance only at the public boundary. Retained outcomes and their
+ * warning codes stay unchanged; a historical warning is not a failed status
+ * request. Only known result slots are inspected, never arbitrary nested data. */
+export function presentControlResult(value, context = {}, { bounded = true } = {}) {
+  // CLI/hook callers already hold validated store snapshots and had no MCP
+  // envelope limit. Do not impose that transport's bound on their status output.
+  const projection = input => bounded ? metadata(input) : input;
+  let result = projection(value);
+  const diagnosticContext = { ...context, stage: 'result' };
+  const isCode = code => typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(code);
+  if (result.state === 'failed') {
+    result = projection({ ...result, ...describeFailure({ code: isCode(result.reason) ? result.reason : 'COMMAND_FAILED' }, diagnosticContext) });
+  }
+  const warnings = [];
+  for (const [scope, item] of [['status', result], ['run', result.run], ['latest', result.latest], ['result', result.result]]) {
+    if (!object(item) || !Array.isArray(item.warnings)) continue;
+    const historical = ['saved', 'nothing-useful', 'skipped', 'empty'].includes(item.status ?? item.state);
+    for (const code of new Set(item.warnings.filter(isCode))) warnings.push({ scope, code, historical });
+  }
+  if (!warnings.length) return result;
+  const details = [];
+  for (const { scope, code, historical } of warnings.slice(0, 16)) {
+    const detail = { scope, ...describeFailure({ code }, diagnosticContext) };
+    if (historical) {
+      detail.historical = true;
+      detail.message = `Warning recorded during this completed run: ${detail.message}`;
+      detail.recovery = 'This run has finished. Do not retry it because of this warning. Inspect the recorded outcome and any remaining queued work before starting a new operation.';
+    }
+    details.push(detail);
+    try {
+      result = projection({ ...result, warningDetails: [...details], warningDetailsTruncated: details.length < warnings.length });
+    } catch (error) {
+      // The existing result has priority over optional explanatory expansion.
+      // It already carries every warning, including those without extra detail.
+      if (error.code !== 'CONTROL_RESPONSE_LIMIT') throw error;
+      break;
+    }
+  }
   return result;
 }
 function tool(client) {
@@ -206,10 +248,11 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
           const value = await bridge.call(input.name, input.arguments ?? {}, { meta: input._meta,
             session: native ?? connection, canResume: client === 'claude' || native !== null, canInspect: client === 'claude' || native !== null,
             approve: details => approve(details, state), assertActive: () => assertActive(state) });
-          return result(id, { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value, isError: false });
+          const presented = presentControlResult(value, { client, version: serverVersion, toolName: input.name });
+          return result(id, { content: [{ type: 'text', text: JSON.stringify(presented) }], structuredContent: presented, isError: value.state === 'failed' });
         } catch (caught) {
-          const code = typeof caught?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(caught.code) ? caught.code : 'CONTROL_TOOL_FAILED';
-          return result(id, { content: [{ type: 'text', text: JSON.stringify({ error: code }) }], isError: true });
+          const failure = describeFailure(caught, { fallback: 'CONTROL_TOOL_FAILED', stage: 'tool', client, version: serverVersion, toolName: input.name });
+          return result(id, { content: [{ type: 'text', text: JSON.stringify(failure) }], structuredContent: failure, isError: true });
         } finally { finish(state); }
       };
       protocol.begin = begin;

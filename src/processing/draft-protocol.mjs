@@ -1,4 +1,4 @@
-import { fail } from '../core/errors.mjs';
+import { fail, CuefluentError } from '../core/errors.mjs';
 import { packageVersion } from '../core/version.mjs';
 import { logDiagnostic } from '../logs/index.mjs';
 
@@ -22,22 +22,27 @@ export function readFrames(stream, onFrame, onFailure, { maxBytes = DRAFT_FRAME_
     while (start < chunk.length && !stopped) {
       const newline = chunk.indexOf(10, start), end = newline < 0 ? chunk.length : newline;
       const part = chunk.subarray(start, end);
-      if (tail.length + part.length > maxBytes) { stop(new Error('Frame exceeds the transport limit.')); return; }
+      if (tail.length + part.length > maxBytes) { stop(new CuefluentError('MCP_FRAME_LIMIT', 'Frame exceeds the transport limit.')); return; }
       tail = tail.length ? Buffer.concat([tail, part]) : Buffer.from(part);
       if (newline < 0) break;
       const frame = tail; tail = Buffer.alloc(0); start = newline + 1;
       pending += frame.length; pendingFrames++;
-      if (pending > queuedBytes || pendingFrames > 64) { stop(new Error('Queued requests exceed the transport limit.')); return; }
+      if (pending > queuedBytes || pendingFrames > 64) { stop(new CuefluentError('MCP_FRAME_LIMIT', 'Queued requests exceed the transport limit.')); return; }
       work = work.then(async () => {
         if (stopped) return;
-        try { await onFrame(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(frame))); }
+        try {
+          let message;
+          try { message = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(frame)); }
+          catch { fail('MCP_FRAME_INVALID', 'The transport message is not valid UTF-8 JSON.'); }
+          await onFrame(message);
+        }
         catch (error) { stop(error); }
         finally { pending -= frame.length; pendingFrames--; }
       });
     }
   });
   stream.on('error', stop);
-  stream.on('end', () => { if (tail.length) stop(new Error('Incomplete transport frame.')); });
+  stream.on('end', () => { if (tail.length) stop(new CuefluentError('MCP_FRAME_INCOMPLETE', 'Incomplete transport frame.')); });
   return { stop, idle: () => work };
 }
 

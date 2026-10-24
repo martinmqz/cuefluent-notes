@@ -52,9 +52,10 @@ test('fresh private defaults are platform appropriate and ignore former product 
 test('explicit override is canonical and pure, including on a missing path', async t => {
   const directory = await temporary(t), target = path.join(directory, 'missing-v2');
   assert.equal(selectStoreRoot({ env: { CUEFLUENT_V2_HOME: target } }), target); assert.deepEqual(await readdir(directory), []);
-  for (const value of ['', '.', '/tmp/../private', '/tmp/trailing/', '/']) assert.throws(() => selectStoreRoot({ env: { CUEFLUENT_V2_HOME: value }, platform: 'linux', homedir: '/home/synthetic' }), { code: 'ENTRY_ARGUMENT_INVALID' });
+  for (const value of ['', '.', '/tmp/../private', '/tmp/trailing/', '/', 17, null]) assert.throws(() => selectStoreRoot({ env: { CUEFLUENT_V2_HOME: value }, platform: 'linux', homedir: '/home/synthetic' }), { code: 'ENTRY_STORE_ROOT_INVALID' });
+  for (const value of ['C:\\', 'C:\\synthetic\\..\\private', 'C:\\synthetic\\NUL', 'C:/synthetic/private', '\\\\server\\share\\private']) assert.throws(() => selectStoreRoot({ env: { CUEFLUENT_V2_HOME: value }, platform: 'win32', homedir: 'C:\\Users\\Synthetic' }), { code: 'ENTRY_STORE_ROOT_INVALID' });
   let evaluated = false;
-  assert.throws(() => selectStoreRoot({ env: Object.defineProperty({}, 'CUEFLUENT_V2_HOME', { get() { evaluated = true; return '/other'; } }) }), { code: 'ENTRY_ARGUMENT_INVALID' });
+  assert.throws(() => selectStoreRoot({ env: Object.defineProperty({}, 'CUEFLUENT_V2_HOME', { get() { evaluated = true; return '/other'; } }) }), { code: 'ENTRY_STORE_ROOT_INVALID' });
   assert.equal(evaluated, false);
   assert.throws(() => selectStoreRoot({ platform: 'unsupported' }), { code: 'ENTRY_PLATFORM_UNSUPPORTED' });
 });
@@ -101,5 +102,6 @@ test('OS locations normalize separators without relaxing explicit arguments', ()
   assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic/', env: { LOCALAPPDATA: 'D:/Local Data/' } }), 'D:\\Local Data\\Cuefluent Notes\\v2');
   assert.throws(() => selectStoreRoot({ platform: 'linux', homedir: 'relative', env: {} }), { code: 'ENTRY_LOCATION_INVALID' });
   assert.throws(() => selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic', env: { LOCALAPPDATA: 'relative' } }), { code: 'ENTRY_LOCATION_INVALID' });
+  assert.throws(() => selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic', env: { LOCALAPPDATA: 17 } }), { code: 'ENTRY_LOCATION_INVALID' });
   assert.throws(() => parseEntryArguments(['setup', '--config', '/tmp/config/'], { platform: 'linux' }), { code: 'ENTRY_ARGUMENT_INVALID' });
 });

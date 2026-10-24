@@ -12,9 +12,10 @@ it.
 ## Commands
 
 Node 26.12.1 or a later 26.x release is required (`.node-version`, `engines`).
-Run `node --version` in the shell that runs the tests. Older builds fail with
-`GATE_UNSUPPORTED_RUNTIME`, or on macOS with `PRIVATE_ACCESS_UNVERIFIED`
-caused by a missing `node:ffi` module.
+Run `node --version` in the shell that runs the tests. The CLI rejects unsupported
+versions with `NODE_VERSION_UNSUPPORTED` before loading storage modules. Tests
+that import storage directly still require the supported runtime and can fail
+with `GATE_UNSUPPORTED_RUNTIME` or `PRIVATE_ACCESS_UNVERIFIED` on older builds.
 
 ```sh
 npm ci --ignore-scripts
@@ -41,7 +42,7 @@ There is no linter, formatter, or type checker.
   fresh candidate build.
 - A change to user-visible behavior or limits updates `SKILL.md` or
   `references/` in the same change.
-- A new runtime module is listed in `packaging/v2/source-files.json`; the build
+- A new runtime module is listed in `packaging/plugin/source-files.json`; the build
   rejects unlisted relative imports.
 - A dependency change pins an exact version after checking the current release
   and updates `package-lock.json`. The build enforces this only for runtime
@@ -56,7 +57,7 @@ There is no linter, formatter, or type checker.
 - `.agents/plugins/marketplace.json` (Codex) and
   `.claude-plugin/marketplace.json` (Claude) each select a published snapshot;
   both select the same version.
-- `packaging/v2/` holds client descriptors and `source-files.json`, the list of
+- `packaging/plugin/` holds client descriptors and `source-files.json`, the list of
   shipped `src/` modules. `packaging/releases/<version>/build.json` holds
   published checksums.
 - `tools/` holds build, CI, and release tooling. None of it ships in a

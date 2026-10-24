@@ -226,7 +226,7 @@ export async function buildPackages({ repoRoot = path.resolve(path.dirname(fileU
   }
   try { await fs.lstat(outputRoot); requirePackage(false, 'PACKAGE_OUTPUT_EXISTS'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const dependencies = await readProductionDependencies({ repoRoot, cacheRoot });
-  const sources = parse(await readFile(repoRoot, 'packaging/v2/source-files.json'));
+  const sources = parse(await readFile(repoRoot, 'packaging/plugin/source-files.json'));
   requirePackage(Array.isArray(sources) && sources.includes('src/cli.mjs') && sources.length <= 1024 && sources.every(name => typeof name === 'string' && /^src\/.+\.mjs$/.test(name)) && new Set(sources).size === sources.length, 'PACKAGE_SOURCE_INVENTORY');
   const shared = [{ path: 'package.json', bytes: json(dependencies.runtime) }, { path: 'package-lock.json', bytes: json(dependencies.lock) },
     { path: 'THIRD_PARTY_NOTICES.md', bytes: dependencies.notices }, ...dependencies.files];
@@ -251,10 +251,10 @@ export async function buildPackages({ repoRoot = path.resolve(path.dirname(fileU
   }
   const candidates = [];
   for (const client of ['codex', 'claude']) {
-    const manifest = parse(await readFile(repoRoot, `packaging/v2/${client}/plugin.json`));
+    const manifest = parse(await readFile(repoRoot, `packaging/plugin/${client}/plugin.json`));
     requirePackage(manifest.name === 'cuefluent-notes' && manifest.version === '__SOURCE_VERSION__', 'PACKAGE_MANIFEST_INVALID'); manifest.version = dependencies.source.version;
     const files = withInventory([...shared, { path: `.${client}-plugin/plugin.json`, bytes: json(manifest) },
-      { path: '.mcp.json', bytes: await readFile(repoRoot, `packaging/v2/${client}/mcp.json`) }, { path: 'hooks/hooks.json', bytes: await readFile(repoRoot, `packaging/v2/${client}/hooks.json`) }],
+      { path: '.mcp.json', bytes: await readFile(repoRoot, `packaging/plugin/${client}/mcp.json`) }, { path: 'hooks/hooks.json', bytes: await readFile(repoRoot, `packaging/plugin/${client}/hooks.json`) }],
     { client, version: dependencies.source.version, node: dependencies.runtime.engines.node, sourceLockSha256: dependencies.sourceLockSha256, dependencies: dependencies.dependencies });
     const archives = [ { extension: 'tar.gz', bytes: tarArchive(files) }, { extension: 'zip', bytes: zipArchive(files) } ];
     candidates.push({ client, files, archives });

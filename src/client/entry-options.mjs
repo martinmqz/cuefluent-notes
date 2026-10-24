@@ -3,16 +3,19 @@ import os from 'node:os';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { fail } from '../core/errors.mjs';
+import { ENTRY_COMMANDS as COMMAND } from '../core/entry-contract.mjs';
 import { pinDirectory, assertDirectory, inspectParent, assertChain, fileIdentity, sameIdentity, lstatOrNull } from '../storage/paths.mjs';
 import { readHandleStat } from '../storage/stat.mjs';
 
 const CLIENTS = new Set(['claude', 'codex']);
 const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const invalid = () => fail('ENTRY_ARGUMENT_INVALID', 'Use a supported command and its exact documented arguments.');
-function absolute(value, platform = process.platform) {
+const invalidStoreRoot = () => fail('ENTRY_STORE_ROOT_INVALID', 'CUEFLUENT_V2_HOME must identify the intended normalized absolute private-store location.');
+const invalidLocation = () => fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+function absolute(value, platform = process.platform, reject = invalid) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
-  if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value) || !paths.isAbsolute(value) || paths.normalize(value) !== value || value.endsWith(paths.sep) || paths.parse(value).root === value) invalid();
-  if (platform === 'win32' && (!/^[A-Za-z]:\\/.test(value) || value.slice(3).split('\\').some(part => /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part)))) invalid();
+  if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value) || !paths.isAbsolute(value) || paths.normalize(value) !== value || value.endsWith(paths.sep) || paths.parse(value).root === value) reject();
+  if (platform === 'win32' && (!/^[A-Za-z]:\\/.test(value) || value.slice(3).split('\\').some(part => /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part)))) reject();
   return value;
 }
 function token(value, maximum = 256) {
@@ -30,23 +33,23 @@ function invocationHandle(value) {
 export function parseEntryArguments(argv, { platform = process.platform } = {}) {
   if (!Array.isArray(argv) || argv.length > 8 || argv.some(value => typeof value !== 'string' || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value))) invalid();
   const [command, ...args] = argv; let result;
-  if (['hook', 'mcp'].includes(command) && args.length === 1) result = { command, client: client(args[0]) };
-  else if (command === 'setup' && args.length === 2 && args[0] === '--config') result = { command, configPath: absolute(args[1], platform) };
-  else if (command === 'settings' && args.length === 0) result = { command };
-  else if (command === 'status' && args.length === 2 && args[0] === '--project') {
+  if ([COMMAND.hook, COMMAND.mcp].includes(command) && args.length === 1) result = { command, client: client(args[0]) };
+  else if (command === COMMAND.setup && args.length === 2 && args[0] === '--config') result = { command, configPath: absolute(args[1], platform) };
+  else if (command === COMMAND.settings && args.length === 0) result = { command };
+  else if (command === COMMAND.status && args.length === 2 && args[0] === '--project') {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(args[1])) invalid();
     result = { command, projectId: args[1] };
-  } else if (command === 'sync-steward' && args.length === 1) result = { command, storeRoot: absolute(args[0], platform) };
-  else if (command === 'sync-collect' && args.length === 3) result = { command, storeRoot: absolute(args[0], platform), client: client(args[1]), sessionId: token(args[2]) };
-  else if (command === 'command-worker' && args.length === 2) result = { command, storeRoot: absolute(args[0], platform), handle: invocationHandle(args[1]) };
+  } else if (command === COMMAND.syncSteward && args.length === 1) result = { command, storeRoot: absolute(args[0], platform) };
+  else if (command === COMMAND.syncCollect && args.length === 3) result = { command, storeRoot: absolute(args[0], platform), client: client(args[1]), sessionId: token(args[2]) };
+  else if (command === COMMAND.commandWorker && args.length === 2) result = { command, storeRoot: absolute(args[0], platform), handle: invocationHandle(args[1]) };
   else invalid();
   return Object.freeze(result);
 }
 
-function environment(env, key) {
-  if (!env || typeof env !== 'object' || Array.isArray(env)) invalid();
+function environment(env, key, reject = invalidLocation) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) reject();
   const descriptor = Object.getOwnPropertyDescriptor(env, key);
-  if (descriptor && (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string')) invalid();
+  if (descriptor && (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string')) reject();
   return descriptor?.value;
 }
 
@@ -55,11 +58,11 @@ function environment(env, key) {
 function environmentLocation(value, platform) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value) || !paths.isAbsolute(value))
-    fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+    invalidLocation();
   const normalized = paths.normalize(value), root = paths.parse(normalized).root;
   const result = normalized === root ? root : normalized.replace(platform === 'win32' ? /\\+$/ : /\/+$/, '');
   if (platform === 'win32' && (!/^[A-Za-z]:\\/.test(result) || result.slice(3).split('\\').filter(Boolean).some(part => /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part))))
-    fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+    invalidLocation();
   return result;
 }
 
@@ -68,8 +71,8 @@ function environmentLocation(value, platform) {
  * from any former product location and this function never creates directories. */
 export function selectStoreRoot({ env = process.env, platform = process.platform, homedir = os.homedir() } = {}) {
   if (!['darwin', 'linux', 'win32'].includes(platform)) fail('ENTRY_PLATFORM_UNSUPPORTED', 'This platform has no supported private-store location.');
-  const override = environment(env, 'CUEFLUENT_V2_HOME');
-  if (override !== undefined) return absolute(override, platform);
+  const override = environment(env, 'CUEFLUENT_V2_HOME', invalidStoreRoot);
+  if (override !== undefined) return absolute(override, platform, invalidStoreRoot);
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const home = environmentLocation(homedir, platform);
   if (platform === 'darwin') return paths.join(home, 'Library', 'Application Support', 'Cuefluent Notes', 'v2');
