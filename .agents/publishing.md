@@ -91,12 +91,13 @@ a package enables neither tracking nor note processing.
 
 ## Marketplace snapshots
 
-The Codex and Claude catalogs select the released 0.16.0 packages at
-`plugins/0.16.0/cuefluent-notes/` and `claude/0.16.0/cuefluent-notes/`.
-`packaging/releases/0.16.0/build.json` is the unchanged build receipt from the
-[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.16.0).
+The Codex and Claude catalogs select the released 0.17.0 packages at
+`plugins/0.17.0/cuefluent-notes/` and `claude/0.17.0/cuefluent-notes/`.
+`packaging/releases/0.17.0/build.json` is the unchanged build receipt from the
+[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.17.0).
 Its inventory hashes bind every catalog package file, including dependencies.
-The unversioned package folders and root `release.json` retain the 0.15.1 release.
+The versioned 0.16.0 snapshots and receipt remain intact. The unversioned package
+folders and root `release.json` retain the 0.15.1 release.
 
 For a catalog update, verify the published archive and receipt digests against
 the published release, extract into a fresh temporary directory, and use the
@@ -110,11 +111,11 @@ The directory-wide `.gitattributes` rules preserve every release's bytes, while
 `.gitignore` excludes `plugins/` and `claude/` from ordinary source searches.
 New versions need no additional attribute or ignore rules. Plain `git add` can
 omit ignored bundled dependencies, so force-stage only the exact new package
-folders. For example, when adding the 0.16.0 release:
+folders. For example, when adding the 0.17.0 release:
 
 ```sh
-git add -f -- plugins/0.16.0/cuefluent-notes claude/0.16.0/cuefluent-notes
-git add -- .agents/plugins/marketplace.json .claude-plugin/marketplace.json packaging/releases/0.16.0/build.json test/marketplace.test.mjs
+git add -f -- plugins/0.17.0/cuefluent-notes claude/0.17.0/cuefluent-notes
+git add -- .agents/plugins/marketplace.json .claude-plugin/marketplace.json packaging/releases/0.17.0/build.json test/marketplace.test.mjs
 node --test test/marketplace.test.mjs
 ```
 
@@ -337,3 +338,8 @@ distinct actions. Merges follow the repository's branch protection.
 - Preserve complete full evidence after rebase merges; bound distribution walks
   and reserve capacity for a pending merge. Keep evidence records compact and
   revalidate current facts before accepting reuse.
+
+### 2026-10-24
+
+- Point both catalogs at the verified 0.17.0 release snapshots and retain the
+  independently verified receipt pin alongside all historical release pins.

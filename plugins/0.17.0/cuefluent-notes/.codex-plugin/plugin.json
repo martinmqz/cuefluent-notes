@@ -1,0 +1,22 @@
+{
+  "name": "cuefluent-notes",
+  "version": "0.17.0",
+  "description": "Create Markdown notes from assistant-supplied content or process selected tracked chats.",
+  "author": {
+    "name": "Cuefluent"
+  },
+  "license": "SUL-1.0",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "requires_local_executor": true,
+  "interface": {
+    "displayName": "Cuefluent Notes",
+    "shortDescription": "Save requested information as Markdown notes.",
+    "developerName": "Cuefluent",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}
