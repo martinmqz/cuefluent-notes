@@ -1,7 +1,10 @@
 # Setup and preferences
 
 Setup is an explicit user operation. Agree on the configured project root, exact
-notes destination, tracking and saving modes, and optional activity logging.
+notes destination, tracking and saving modes, and activity logging. Offer logging
+on for a new directory destination and show its reserved `logs/` path. Preserve
+the user's explicit opt-out and the current setting when editing an existing
+configuration.
 Do not infer consent from installation, hook trust or an ordinary chat message.
 
 ## Find the package and inspect settings
@@ -33,10 +36,16 @@ chosen notes directory or an explicit file's parent after checking its ancestors
     "destination": { "kind": "directory", "path": "/absolute/notes" },
     "tracking": "manual",
     "saving": "review",
-    "activityLog": { "enabled": false }
+    "activityLog": { "enabled": true, "timezone": "America/Los_Angeles" }
   }
 }
 ```
+
+The timezone above is an example. Use the user's chosen IANA timezone or the
+system's detected IANA timezone for a new log series, and show it with the setup
+choices. An established series retains its recorded timezone. To opt out, use
+`"activityLog": { "enabled": false }`. Existing configurations keep their
+explicit setting; loading settings never applies creation defaults.
 
 On Windows use JSON-escaped local drive paths, for example `C:\\Work\\Project`.
 Apply only after the user has approved the complete choices:
@@ -55,7 +64,7 @@ proposing a different change. Do not delete recovery state to force setup.
 | --- | --- |
 | Tracking | `manual` (default), `auto` for new chats going forward |
 | Saving | `review` (default), `auto` after explicit processing |
-| Activity log | `{ "enabled": false }` (default), or enabled with an IANA timezone |
+| Activity log | On by default for directory destinations, with a recorded IANA timezone; explicit off is supported. Single-file destinations default to off. |
 
 Mode changes do not untrack existing chats or override opt-outs. A pending run
 pins its destination, saving preference and logging settings. Settle it before
@@ -65,12 +74,16 @@ move when nested projects are added.
 
 ## Activity logging
 
-Logging requires a directory destination. Use, for example,
+Logging defaults to on when creating a project with a directory destination.
+If omitted during project creation, its timezone defaults to the system's
+detected IANA timezone. Use, for example,
 `"activityLog": { "enabled": true, "timezone": "America/Los_Angeles" }`.
 Setup shows and records the exact `logs/` path, establishes the first valid annual
 file under the writer lock, then enables logging. An existing valid series supplies
 its authoritative identity and timezone; machine-local preferences do not change it.
-A single-file destination rejects logging without creating siblings.
+A single-file destination defaults to logging off and rejects explicit enablement
+without creating siblings. Installation and read-only commands create no log;
+the log is established during the approved setup.
 
 Setup reports pre-existing `logs/` content even when logging is off. Those files
 remain readable and untouched by ordinary note drafts. Unrecognized or malformed

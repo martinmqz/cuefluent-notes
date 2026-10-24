@@ -26,15 +26,24 @@ When changing a canonical rule, check its scopes and regenerate its adapters.
   may inform design; do not copy legacy modules, import the former runtime, or add
   migration, compatibility modes, deprecated aliases, or old capture state.
   Preserve Git history and immutable published packages and checksums.
-- Tracking defaults to `manual`, saving to `review`, and activity logging to off.
+- Tracking defaults to `manual`, saving to `review`, and activity logging to on
+  for new directory destinations. Preserve explicit logging opt-outs and loaded
+  settings; single-file destinations keep logging off.
   They are independent. Tracking `auto` enrolls eligible new native chats;
   processing is always explicit. Installation and hook trust authorize neither.
   Explicit opt-outs and read-only requests take precedence.
-- Bind commands from native current-chat and invocation context. Cwd, a newest
+- Bind tracking and processing commands from native current-chat and invocation context. Cwd, a newest
   transcript, an agent-supplied identity, and ordinary command mentions are not
   identity evidence. Synchronous hooks may dispatch bounded native metadata but
   never scan transcripts, call models, write notes, block prompts, or ask to continue.
   Unconfigured and ineligible automatic ingress must make zero filesystem writes.
+- Direct notes accept explicitly requested assistant-authored content for
+  a chosen configured destination. They claim no native chat provenance, enroll no
+  chat and select no queue input. Keep review/auto saving, one pending run, exact
+  draft bytes and the safe writer. New targets must be absent; existing-note updates
+  require the exact inspected whole-file hash and preserve useful content, metadata,
+  aliases and manual edits. Reconcile conflicts instead of refreshing hashes to
+  force an old draft over changed content.
 - Collect complete chronological exchanges, preserving prompts, assistant text,
   and tool arguments through ordered parts. Clip tool output only with explicit
   notices. Do not treat EOF or Stop as proof that every row has persisted. Retain
@@ -44,7 +53,7 @@ When changing a canonical rule, check its scopes and regenerate its adapters.
   whole settings documents and reject unsupported schema versions. Refuse changes
   that orphan work or redirect a pending run's destination or saving mode. Pin
   logging preferences for each run.
-- Processing uses a separate untracked session with only bounded note reads and
+- Queued processing uses a separate untracked session with only bounded note reads and
   private draft tools. It has no shell, network, tracking, or note-save capability.
   Hooks and unrelated plugins must be effectively disabled for that session.
 - Preserve exact inspected hashes, root and parent identities, source checkpoints,

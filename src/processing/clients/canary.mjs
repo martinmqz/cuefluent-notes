@@ -1,15 +1,19 @@
-import { mkdtemp, writeFile, rm, realpath, lstat } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { requireClient } from './protocol.mjs';
+import { lstatOrNull } from '../../storage/paths.mjs';
 import { randomUUID } from 'node:crypto';
 
-// No model chooses this program. Only disposable synthetic data is touched.
-const program = `const fs=require('node:fs'),net=require('node:net');
-const [outside,inside,writeOutside,port]=process.argv.slice(1);const blocked=fn=>{try{fn();return false}catch(e){return ['EPERM','EACCES','EROFS'].includes(e.code)}};
-const result={read:blocked(()=>fs.readFileSync(outside)),write:blocked(()=>fs.writeFileSync(inside,'synthetic')),outsideWrite:blocked(()=>fs.writeFileSync(writeOutside,'synthetic'))};
-const socket=net.createConnection({host:'127.0.0.1',port:Number(port)});socket.once('error',e=>{result.network=['EPERM','EACCES'].includes(e.code);console.log(JSON.stringify(result))});socket.once('connect',()=>{result.network=false;socket.destroy();console.log(JSON.stringify(result))});`;
+// No model chooses these programs. Arguments are literal synthetic paths only.
+const fileProgram = `const fs=require('node:fs');const [operation,file]=process.argv.slice(1);
+try{if(operation==='read')process.stdout.write(fs.readFileSync(file));else fs.writeFileSync(file,'SYNTHETIC',{flag:'wx'})}
+catch(e){process.exitCode=['EPERM','EACCES','EROFS'].includes(e.code)?1:2}`;
+const networkProgram = `const net=require('node:net');const socket=net.createConnection({host:'127.0.0.1',port:Number(process.argv[1])});
+const timer=setTimeout(()=>{socket.destroy();process.exitCode=2},3000);
+socket.once('error',e=>{clearTimeout(timer);process.exitCode=['EPERM','EACCES'].includes(e.code)?7:2});
+socket.once('connect',()=>{clearTimeout(timer);socket.destroy()});`;
 
 /** Paths enter only a quoted environment expansion. Delayed expansion is off;
  * no path bytes are interpolated into cmd source or a shell command argument. */
@@ -20,41 +24,66 @@ export function windowsCanaryCommand(systemRoot, operation, file) {
     env: { CUEFLUENT_CANARY_FILE: `"${file}"` } };
 }
 
-async function verifyWindowsSandbox(transport, cwd, outside, directory, port, connected) {
-  const systemRoot = await realpath(process.env.SystemRoot), suffix = randomUUID();
-  const readable = path.join(cwd, `.cuefluent-readable & % ${suffix}.txt`), write = path.join(cwd, `.cuefluent-denied & % ${suffix}.txt`), outsideWrite = path.join(directory, 'denied & %.txt');
+export function macosCanaryCommand(operation, file) {
+  requireClient(typeof file === 'string' && path.posix.isAbsolute(file) && !/[\r\n\0]/.test(file));
+  requireClient(['read', 'write'].includes(operation));
+  // touch has one defined failure status and no /bin/sh implementation choice.
+  return { command: [operation === 'read' ? '/bin/cat' : '/usr/bin/touch', file] };
+}
+
+export function networkCanaryCommand(platform, port, systemRoot) {
+  requireClient(['darwin', 'win32', 'linux'].includes(platform) && Number.isInteger(port) && port > 0 && port <= 65535);
+  if (platform === 'linux') return { command: [process.execPath, '--openssl-config=/dev/null', '-e', networkProgram, String(port)] };
+  requireClient(platform !== 'win32' || typeof systemRoot === 'string' && path.win32.isAbsolute(systemRoot));
+  // Disable curl config and every proxy so only this exact live local listener
+  // can determine the result. A stale user proxy is not sandbox evidence.
+  return { command: [platform === 'darwin' ? '/usr/bin/curl' : path.win32.join(systemRoot, 'System32', 'curl.exe'),
+    '-q', '--noproxy', '*', '--connect-timeout', '2', '--max-time', '3', '-sS', `http://127.0.0.1:${port}/cuefluent-synthetic-canary`] };
+}
+
+async function verifyCommandSandbox(transport, cwd, outside, port, connected, permissionProfile) {
+  const platform = process.platform, systemRoot = platform === 'win32' ? await realpath(process.env.SystemRoot) : undefined;
+  const command = platform === 'darwin' ? macosCanaryCommand : platform === 'win32' ?
+    (operation, file) => windowsCanaryCommand(systemRoot, operation, file) :
+    (operation, file) => ({ command: [process.execPath, '--openssl-config=/dev/null', '-e', fileProgram, operation, file] });
+  const suffix = randomUUID(), readable = path.join(cwd, `.cuefluent-readable & % ${suffix}.txt`);
+  const writes = [path.join(cwd, `.cuefluent-denied & % ${suffix}.txt`), ...outside.map(file => path.join(path.dirname(file), 'denied & %.txt'))];
   const marker = 'CUEFLUENT_CANARY_READABLE'; await writeFile(readable, marker, { flag: 'wx' });
-  const request = command => transport.request('command/exec', { ...command, cwd, permissionProfile: 'cuefluent_processing', disableTimeout: true, outputBytesCap: 2048 });
+  const request = value => transport.request('command/exec', { ...value, cwd, permissionProfile, disableTimeout: true, outputBytesCap: 2048 });
   try {
-    const allowed = await request(windowsCanaryCommand(systemRoot, 'read', readable));
-    requireClient(allowed?.exitCode === 0 && allowed.stdout === marker);
-    const denied = await request(windowsCanaryCommand(systemRoot, 'read', outside));
-    requireClient(denied?.exitCode === 1 && denied.stdout === '');
-    for (const target of [write, outsideWrite]) {
-      const result = await request(windowsCanaryCommand(systemRoot, 'write', target));
-      requireClient(result?.exitCode === 1 && result.stdout === '');
-      let absent = false; try { await lstat(target); } catch (error) { if (error.code !== 'ENOENT') throw error; absent = true; } requireClient(absent);
+    const probes = [{ command: command('read', readable), exitCode: 0, stdout: marker },
+      ...outside.map(file => ({ command: command('read', file), exitCode: 1, stdout: '' })),
+      ...writes.map(file => ({ command: command('write', file), exitCode: 1, stdout: '' })),
+      { command: networkCanaryCommand(platform, port, systemRoot), exitCode: 7, stdout: '' }];
+    // Independent probes run together; drain every request before removing any
+    // canary, even when a peer rejects or the client dies.
+    const results = await Promise.allSettled(probes.map(probe => request(probe.command)));
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]; if (result.status === 'rejected') throw result.reason;
+      requireClient(result.value?.exitCode === probes[index].exitCode && result.value.stdout === probes[index].stdout);
     }
-    // Native curl works under MXC on hosts where Node/PowerShell DLL startup is
-    // unavailable. The listener is live; offline MXC must refuse its connection.
-    const network = await request({ command: [path.join(systemRoot, 'System32', 'curl.exe'), '--connect-timeout', '2', '--max-time', '3', '-sS', `http://127.0.0.1:${port}/cuefluent-synthetic-canary`] });
-    requireClient(network?.exitCode === 7 && network.stdout === '' && !connected());
+    for (const file of writes) requireClient(await lstatOrNull(file) === null);
+    requireClient(!connected());
   } finally { await rm(readable, { force: true }); }
 }
 
-export async function verifySandbox(transport, cwd) {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), 'cuefluent-processing-check-')), directory = await realpath(temporary);
-  const outside = path.join(directory, 'synthetic-readable.txt'); await writeFile(outside, 'SYNTHETIC CANARY', { mode: 0o600 });
-  let connected = false;
+export async function verifySandbox(transport, cwd, permissionProfile = 'cuefluent_processing') {
+  const directories = [], outside = []; let connected = false;
   const server = net.createServer(socket => { connected = true; socket.destroy(); });
   try {
+    const roots = [await realpath(os.tmpdir())];
+    // macOS admits /private/tmp implicitly unless explicitly denied. Test it
+    // even when the process normally uses a per-user TMPDIR elsewhere.
+    if (process.platform === 'darwin') roots.push(await realpath('/tmp'));
+    for (const root of new Set(roots)) {
+      const directory = await mkdtemp(path.join(root, 'cuefluent-processing-check-')); directories.push(directory);
+      const file = path.join(directory, 'synthetic-readable.txt'); outside.push(file);
+      await writeFile(file, 'SYNTHETIC CANARY', { mode: 0o600 });
+    }
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-    if (process.platform === 'win32') return await verifyWindowsSandbox(transport, cwd, outside, directory, server.address().port, () => connected);
-    const result = await transport.request('command/exec', { command: [process.execPath, '--openssl-config=/dev/null', '-e', program, outside, path.join(cwd, '.cuefluent-canary'), path.join(directory, 'write.txt'), String(server.address().port)], cwd, permissionProfile: 'cuefluent_processing', disableTimeout: true, outputBytesCap: 2048 });
-    requireClient(result?.exitCode === 0);
-    let value; try { value = JSON.parse(result.stdout); } catch { requireClient(false); }
-    requireClient(!connected && value.read === true && value.write === true && value.outsideWrite === true && value.network === true);
+    await verifyCommandSandbox(transport, cwd, outside, server.address().port, () => connected, permissionProfile);
   } finally {
-    await new Promise(resolve => server.close(resolve)); await rm(temporary, { recursive: true, force: true });
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+    await Promise.all(directories.map(directory => rm(directory, { recursive: true, force: true })));
   }
 }

@@ -1,7 +1,7 @@
 # Private storage and cleanup
 
 Project settings, chat metadata, queues, complete draft bytes and current-run
-recovery records live in a fresh v2 private store outside repositories and note
+recovery records live in a private store outside repositories and note
 destinations. Use a supported local filesystem with verifiable ownership and
 permissions. Symbolic links, hard links, replaced parents and unsupported storage
 are refused. See [setup](setup.md) for locations.
@@ -22,9 +22,18 @@ Native source transcripts are never deleted or rewritten.
 
 A processing run pins selected record identities, inspected note hashes, routing,
 saving and logging preferences. Its draft bytes remain private until save. The
-latest result contains only paths, counts and warnings; it is never write authority.
+latest result contains outcome metadata, paths, counts and warnings; a direct
+result also retains its request hash to reject conflicting retries. It contains
+no note body and is never write authority.
 Current command delivery keeps one replaceable metadata entry per chat, not an
 accumulating command or conversation history.
+
+A direct note run selects no queue records and carries no native session identity.
+It retains a request hash and the proposed note in the same private draft storage.
+Creation pins an absent target; an update pins the exact inspected original hash.
+Review saving, conflict checks, logging and recovery use the regular writer.
+Completing or discarding a direct note removes its private drafts without changing
+chat enrollment or consuming any queued conversation.
 
 ## Cleanup
 

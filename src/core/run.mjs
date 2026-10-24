@@ -87,9 +87,9 @@ function cleanupState(input, runId, phase, selection) {
   return Object.freeze({ next: input.next, ack });
 }
 
-function selectionRecords(input) {
+function selectionRecords(input, scope) {
   const records = array(input, RUN_LIMITS.selection, 'selection'), seen = new Set();
-  if (!records.length) invalid('A run must select input');
+  if (scope.kind === 'direct' ? records.length !== 0 : !records.length) invalid('Direct notes select no queue input; processing runs must select input');
   return Object.freeze(records.map(item => {
     record(item, ['client', 'sessionId', 'recordId', 'hash'], 'selected record');
     if (!['claude', 'codex'].includes(item.client)) invalid('A selected record requires a supported client');
@@ -102,6 +102,10 @@ function selectionRecords(input) {
 
 export function validateRunScope(input) {
   if (input?.kind === 'project') { record(input, ['kind'], 'scope'); return Object.freeze({ kind: 'project' }); }
+  if (input?.kind === 'direct') {
+    record(input, ['kind', 'requestHash'], 'scope');
+    return Object.freeze({ kind: 'direct', requestHash: hash(input.requestHash, 'scope.requestHash') });
+  }
   record(input, ['kind', 'client', 'sessionId'], 'scope');
   if (input.kind !== 'chat' || !['claude', 'codex'].includes(input.client)) invalid('Run scope must select a project or a native chat');
   return Object.freeze({ kind: 'chat', client: input.client, sessionId: token(input.sessionId, 'scope.sessionId') });
@@ -179,7 +183,7 @@ export function validateRun(input, { platform } = {}) {
   if (input.schemaVersion !== RUN_SCHEMA_VERSION) fail('RUN_SCHEMA_UNSUPPORTED', 'Unsupported run schema version');
   const project = validateSettings({ schemaVersion: 1, projects: [input.settings] }, { platform }).projects[0];
   if (input.projectId !== project.id) invalid('The run project must match its pinned settings');
-  const id = uuid(input.id, 'run.id'), selection = selectionRecords(input.selection), scope = validateRunScope(input.scope);
+  const id = uuid(input.id, 'run.id'), scope = validateRunScope(input.scope), selection = selectionRecords(input.selection, scope);
   if (scope.kind === 'chat' && selection.some(item => item.client !== scope.client || item.sessionId !== scope.sessionId)) invalid('A chat run can only select its bound native chat');
   let attempt = null;
   if (input.attempt !== null) {

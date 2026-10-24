@@ -9,7 +9,8 @@ const options = { platform: 'posix' };
 const ids = ['10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002',
   '30000000-0000-4000-8000-000000000003', '40000000-0000-4000-8000-000000000004', '50000000-0000-4000-8000-000000000005'];
 const h = character => character.repeat(64);
-const project = changes => createProject({ id: 'work', root: '/projects/work', destination: { kind: 'directory', path: '/notes' }, ...changes }, options);
+const project = changes => createProject({ id: 'work', root: '/projects/work', destination: { kind: 'directory', path: '/notes' },
+  activityLog: { enabled: false }, ...changes }, options);
 const selected = () => [{ client: 'codex', sessionId: 'native-session', recordId: 'exchange:part-1', hash: h('a') },
   { client: 'claude', sessionId: 'second-session', recordId: 'record-2', hash: h('b') }];
 const fresh = changes => createRun(project(changes), selected(), { ...options, id: ids[0] });
@@ -221,7 +222,7 @@ test('portable draft collisions and reserved Logs variants fail before any save'
 });
 
 test('Windows destination containment and reserved paths use case-insensitive segment boundaries', () => {
-  const win = { platform: 'win32' }, pinned = createProject({ id: 'work', root: 'C:\\Project', destination: { kind: 'directory', path: 'D:\\Notes' } }, win);
+  const win = { platform: 'win32' }, pinned = createProject({ id: 'work', root: 'C:\\Project', destination: { kind: 'directory', path: 'D:\\Notes' }, activityLog: { enabled: false } }, win);
   const run = replaceAttempt(createRun(pinned, selected(), { ...win, id: ids[0] }), ids[1], win);
   const binding = { root: 'D:\\Notes', parent: [{ path: 'D:\\', device: '1', inode: '1' }, { path: 'D:\\Notes', device: '1', inode: '2' }] };
   assert.equal(publishDrafts(run, ids[1], [draft({ target: 'd:\\NOTES\\design.md', binding })], win).drafts.length, 1);

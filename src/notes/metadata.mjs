@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar } from 'yaml';
 import { fail } from '../core/errors.mjs';
 import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
@@ -143,9 +143,13 @@ function parseYaml(payload) {
 }
 
 /** Mask actual block code and paired inline code; raw HTML comments remain raw. */
-function activeMarkers(source, tokens) {
+export function lineStarts(source) {
   const starts = [0];
   for (const match of source.matchAll(/\r\n|\r|\n/g)) starts.push(match.index + match[0].length);
+  return starts;
+}
+function activeMarkers(source, tokens) {
+  const starts = lineStarts(source);
   const ranges = [];
   for (const token of tokens) if (['fence', 'code_block'].includes(token.type) && token.map) ranges.push([starts[token.map[0]], starts[token.map[1]] ?? source.length]);
   let masked = source.split('');
@@ -213,6 +217,12 @@ export function inspectMetadata(input) {
 function withoutMetadata(source, inspection) {
   return inspection.raw === null ? source : source.slice(inspection.end);
 }
+/** Visible authored content, retaining any prefix and exact newline style. */
+export function noteContent(input) {
+  const source = decodeNote(input), inspection = inspectMetadata(source);
+  if (inspection.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be hidden in a review.');
+  return (inspection.raw === null ? '' : source.slice(0, inspection.start)) + withoutMetadata(source, inspection);
+}
 function quoted(value) { const scalar = new Scalar(value); scalar.type = Scalar.QUOTE_DOUBLE; return scalar; }
 
 /** Existing metadata owns identity/descriptions. Agent-supplied replacements do
@@ -225,8 +235,9 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
   if (before.status === 'invalid' || after.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be repaired by a note update.');
   const oldBody = withoutMetadata(original, before), newBody = withoutMetadata(proposed, after);
   if (oldBody === newBody) return unchanged();
+  const prefix = before.raw === null ? '' : original.slice(0, before.start);
   let raw = before.raw ?? '';
-  if (before.status === 'supported' && (updated !== undefined || skillVersion !== undefined)) {
+  if (before.status === 'supported' && (updated !== undefined || skillVersion !== undefined || before.value.generation?.content_hash !== undefined)) {
     const matched = block.exec(raw), { document } = parseYaml(matched[2]);
     if (updated !== undefined) {
       requireValue(isNoteTimestamp(updated));
@@ -241,12 +252,16 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       if (isScalar(current)) current.value = skillVersion;
       else document.setIn(['generation', 'skill_version'], skillVersion);
     }
+    if (before.value.generation?.content_hash !== undefined) {
+      // The optional digest covers the exact note bytes outside its metadata block.
+      const value = `sha256:${createHash('sha256').update(prefix + newBody).digest('hex')}`;
+      document.getIn(['generation', 'content_hash'], true).value = value;
+    }
     validateMetadata(document.toJS({ maxAliasCount: 0 }));
     const newline = raw.includes('\r\n') ? '\r\n' : '\n';
     raw = `<!-- cuefluent\n${document.toString({ lineWidth: 0 })}-->\n`.replace(/\n/g, newline);
     requireValue(Buffer.byteLength(raw) <= P.metadataBytes);
   }
-  const prefix = before.raw === null ? '' : original.slice(0, before.start);
   const bytes = Buffer.from(prefix + raw + newBody);
   return { bytes, changed: !bytes.equals(Buffer.from(original)), diagnostics: before.diagnostics };
 }

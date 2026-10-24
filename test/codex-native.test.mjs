@@ -55,6 +55,23 @@ test('unavailable or ambiguous exact user items stay pending', async () => {
   }
 });
 
+test('native linked-skill history keeps exact current-turn checks before and after binding', async () => {
+  for (const advanced of [false, true]) {
+    let reads = 0;
+    const { adapter, calls } = fixture({
+      items: () => ({ data: [{ ...user(), item: { ...user().item, content: [
+        { type: 'text', text: `[$${selection.name}](${selection.skillPath}) status\n`, text_elements: [] },
+      ] } }], nextCursor: null }),
+      turns: () => ({ data: [{ id: ++reads > 1 && advanced ? 'newer-turn' : turn, items: [], itemsView: 'notLoaded', status: 'inProgress' }] }),
+    });
+    const result = await adapter.bindCommand(meta, selection);
+    if (advanced) assert.equal(result.reason, 'NATIVE_COMMAND_NOT_CURRENT');
+    else { assert.equal(result.status, 'ready'); assert.equal(result.binding.action, 'status'); }
+    assert.equal(calls.filter(call => call.method === 'thread/turns/list').length, 2);
+    await adapter.close();
+  }
+});
+
 test('rejects mismatched transport, native thread/turn and skill selection', async () => {
   const cases = [
     { input: { ...meta, threadId: 'other' }, code: 'NATIVE_COMMAND_MISMATCH' },

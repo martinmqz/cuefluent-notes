@@ -82,7 +82,7 @@ export async function inspectActivityLogSeries(destination) {
   return Object.freeze({ binding: Object.freeze({ root: pin.root, parent, seriesId: series.seriesId, timezone: series.timezone }), years: series.years, unrelatedEntries });
 }
 
-/** Explicit opt-in only, under the caller's destination writer gate. The setup
+/** Approved setup only, under the caller's destination writer gate. The setup
  * operation owns and durably persists its publication intent; settings are not
  * changed here. Existing valid shared series wins over requested defaults. */
 export async function establishActivityLogSeries(pin, { year, timezone, seriesId, noteId, createdAt, skillVersion, runId, publication = null, persistIntent } = {}) {

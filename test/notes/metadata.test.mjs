@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createGeneratedNote, inspectMetadata, preserveMetadata, validateMetadata } from '../../src/notes/metadata.mjs';
 
 const body = '# Synthetic topic\n\n## Decision\n\nUse the checked result.\n';
@@ -82,6 +83,39 @@ test('useful edits preserve unknown metadata and stable identity while updating 
   assert.equal(inspected.value.updated, options.now);
   assert.match(changed.bytes.toString(), /# keep timestamp explanation/);
   assert.match(changed.bytes.toString(), /# keep generation explanation/);
+});
+
+test('body edits maintain an existing content hash over exact bytes outside the metadata block', () => {
+  const hash = content => `sha256:${createHash('sha256').update(content).digest('hex')}`;
+  const prefix = '\uFEFF\r\n', originalBody = body.replaceAll('\n', '\r\n');
+  const proposed = originalBody.replace('checked', 'verified');
+  const original = prefix + `<!-- cuefluent\r\nschema_version: 1\r\nid: stable\r\ngeneration:\r\n  content_hash: "${hash(prefix + originalBody)}" # Retain digest explanation\r\n  extra: retained\r\n-->\r\n` + originalBody;
+  for (const update of [{}, { updated: options.now, skillVersion: options.skillVersion }]) {
+    const result = preserveMetadata(original, proposed, update), inspection = inspectMetadata(result.bytes);
+    assert.equal(result.changed, true);
+    assert.equal(inspection.value.generation.content_hash, hash(prefix + proposed));
+    assert.equal(inspection.value.id, 'stable');
+    assert.equal(inspection.value.generation.extra, 'retained');
+    assert.ok(result.bytes.toString().startsWith(prefix));
+    assert.ok(result.bytes.toString().endsWith(proposed));
+    assert.match(result.bytes.toString(), /# Retain digest explanation/);
+  }
+});
+
+test('content hash maintenance does not enrich metadata or rewrite unchanged notes', () => {
+  const proposed = body.replace('checked', 'verified');
+  const original = metadata(`schema_version: 1\nid: stable\ngeneration:\n  content_hash: "sha256:${'a'.repeat(64)}"`);
+  for (const result of [preserveMetadata(original, original), preserveMetadata(original, body),
+    preserveMetadata(original, proposed, { usefulChange: false, updated: options.now })]) {
+    assert.equal(result.changed, false); assert.equal(result.bytes.toString(), original);
+  }
+  for (const original of [body, createGeneratedNote(body, options)]) {
+    const result = preserveMetadata(original, proposed, { updated: options.now, skillVersion: options.skillVersion });
+    assert.equal(inspectMetadata(result.bytes).value?.generation?.content_hash, undefined);
+  }
+  const future = metadata(`schema_version: 2\ngeneration:\n  content_hash: "sha256:${'a'.repeat(64)}"`);
+  const result = preserveMetadata(future, proposed, { updated: options.now, skillVersion: options.skillVersion });
+  assert.equal(inspectMetadata(result.bytes).raw, inspectMetadata(future).raw);
 });
 
 test('unsupported metadata including BOM and CRLF is preserved exactly; malformed edits are refused', () => {

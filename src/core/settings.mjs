@@ -95,7 +95,9 @@ function validateProject(input, paths, defaults = false) {
   if (!['manual', 'auto'].includes(tracking)) invalid('tracking must be manual or auto');
   if (!['review', 'auto'].includes(saving)) invalid('saving must be review or auto');
   const target = destination(input.destination, paths);
-  const logging = activityLog(Object.hasOwn(input, 'activityLog') ? input.activityLog : { enabled: false }, target, paths, defaults);
+  const logging = activityLog(Object.hasOwn(input, 'activityLog') ? input.activityLog : target.kind === 'directory'
+    ? { enabled: true, timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone }
+    : { enabled: false }, target, paths, defaults);
   if (target.kind === 'file' && logging.enabled) invalid('Activity logging requires a directory destination');
   return Object.freeze({ id: projectId(input.id), root: canonicalPath(input.root, paths, 'project.root'),
     destination: target, tracking, saving, activityLog: logging });

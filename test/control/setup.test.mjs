@@ -9,10 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { interruptRemoval } from '../fixtures/exact-removal-worker.mjs';
 import { setupProject } from '../../src/control/setup.mjs';
+import { createDirectNoteTools } from '../../src/control/direct-notes.mjs';
 import { createProject, validateSettings } from '../../src/core/settings.mjs';
 import { initializeStore, openStore, readSettings, updateSettings, withProject } from '../../src/storage/store.mjs';
 import { readJSON, writeJSON } from '../../src/storage/files.mjs';
 import { createAnnualLog, inspectAnnualLog } from '../../src/logs/index.mjs';
+import { readActivityLog, logYear } from '../../src/logs/storage.mjs';
 import { inspectMetadata } from '../../src/notes/index.mjs';
 
 const now = '2026-10-22T01:00:00.000Z', skillVersion = '0.16.0-dev.0';
@@ -61,7 +63,7 @@ test('setup rejects malformed SemVer before creating storage and retains valid b
   }
 });
 
-test('fresh explicit setup records independent defaults and destination without enrolling or writing notes', async t => {
+test('explicit logging opt-out creates no annual file and preserves independent tracking and saving defaults', async t => {
   const f = await fixture(t), result = await setupProject(f.options), current = await f.current();
   assert.equal(result.status, 'configured'); assert.equal(result.settingsHash, current.hash);
   assert.equal(result.project.tracking, 'manual'); assert.equal(result.project.saving, 'review'); assert.deepEqual(result.project.activityLog, { enabled: false });
@@ -73,6 +75,54 @@ test('fresh explicit setup records independent defaults and destination without 
     assert.deepEqual(await fs.readdir(path.join(f.storeRoot, context.directory, 'drafts')), []);
   });
   assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+});
+
+test('default directory setup establishes logging and records one entry for a saved direct note', async t => {
+  const f = await fixture(t);
+  delete f.options.project.activityLog;
+  const result = await setupProject(f.options), store = await openStore(f.storeRoot);
+  assert.equal(result.project.tracking, 'manual'); assert.equal(result.project.saving, 'review');
+  assert.equal(result.project.activityLog.enabled, true);
+  assert.equal(result.project.activityLog.timezone, new Intl.DateTimeFormat().resolvedOptions().timeZone);
+  assert.equal(result.logs.status, 'valid');
+  assert.deepEqual(await fs.readdir(f.notes), ['logs']);
+  const tools = createDirectNoteTools({ store, client: 'codex', skillVersion });
+  const input = { projectId: result.project.id, requestId: randomUUID(), target: 'decision.md',
+    content: '# Release choice\n\n## Decision\nKeep the release small.\n', summary: 'Recorded the release choice.' };
+  const draft = await tools.call('cuefluent_create_note', input);
+  assert.equal(draft.state, 'review');
+  const initialYear = logYear(now, result.project.activityLog.timezone);
+  assert.equal((await readActivityLog(result.project.destination, { year: initialYear })).entries.length, 0);
+  const reference = { projectId: result.project.id, runId: draft.runId };
+  const earliestYear = logYear(new Date().toISOString(), result.project.activityLog.timezone);
+  let confirmations = 0;
+  const saved = await tools.call('cuefluent_save_note', reference, { approve: async confirmation => {
+    assert.equal(confirmation.action, 'save'); assert.equal(confirmation.runId, draft.runId);
+    confirmations++; return true;
+  } });
+  assert.equal(confirmations, 1);
+  assert.equal(saved.state, 'saved');
+  const latestYear = logYear(new Date().toISOString(), result.project.activityLog.timezone);
+  const entries = [];
+  for (const year of new Set([earliestYear, latestYear])) {
+    try { entries.push(...(await readActivityLog(result.project.destination, { year })).entries); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].action, 'created'); assert.equal(entries[0].target, input.target);
+  assert.equal(entries[0].summary, input.summary);
+  assert.deepEqual(await tools.call('cuefluent_save_note', reference), saved);
+  await withProject(store, result.project.id, async context => {
+    assert.deepEqual(await fs.readdir(path.join(f.storeRoot, context.directory, 'chats')), []);
+  });
+});
+
+test('a single-file destination defaults to logging off without creating a sibling logs directory', async t => {
+  const f = await fixture(t, { destinationKind: 'file' }); delete f.options.project.activityLog;
+  const result = await setupProject(f.options);
+  assert.deepEqual(result.project.activityLog, { enabled: false });
+  assert.equal(result.logs.status, 'not-applicable');
+  assert.deepEqual(await fs.readdir(f.notes), []);
 });
 
 test('logging records and shows exact reserved path only after a valid first annual note exists', async t => {

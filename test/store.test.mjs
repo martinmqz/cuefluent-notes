@@ -184,7 +184,8 @@ test('captured-only pending run still refuses settings removal and destination o
   await interruptRemoval({ root: store.root, relative: retained.relative, expectedHash: retained.snapshot.hash });
   const current = await readSettings(store);
   await assert.rejects(updateSettings(store, emptySettings(), { expectedHash: current.hash }), { code: 'SETTINGS_RETAINED_PROJECT' });
-  for (const change of [{ saving: 'auto' }, { destination: { kind: 'directory', path: path.join(f.root, 'elsewhere') } }]) {
+  const destination = { kind: 'directory', path: path.join(f.root, 'elsewhere') };
+  for (const change of [{ saving: 'auto' }, { destination, activityLog: { ...f.project.activityLog, path: path.join(destination.path, 'logs') } }]) {
     await assert.rejects(updateSettings(store, { schemaVersion: 1, projects: [{ ...f.project, ...change }] }, { expectedHash: current.hash }), { code: 'SETTINGS_PENDING_RUN' });
   }
   assert.equal((await readSettings(store)).hash, current.hash);

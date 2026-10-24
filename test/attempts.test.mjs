@@ -11,7 +11,7 @@ import { createProject } from '../src/core/settings.mjs';
 import { createRun, replaceAttempt } from '../src/core/run.mjs';
 import { initializeStore, withProject } from '../src/storage/store.mjs';
 import { readJSON, writeJSON } from '../src/storage/files.mjs';
-import { attachAttemptChild, inspectAttempt, launchOwnedAttempt } from '../src/storage/attempts.mjs';
+import { attachAttemptChild, inspectAttempt, launchOwnedAttempt, ownDirectAttempt, withCurrentAttempt } from '../src/storage/attempts.mjs';
 
 const worker = fileURLToPath(new URL('./fixtures/attempt-worker.mjs', import.meta.url));
 
@@ -39,13 +39,14 @@ function childProcess(t, mode, root, options) {
   return { child, exited };
 }
 
-async function fixture(t) {
+async function fixture(t, { direct = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-attempt-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'project'));
   const project = createProject({ id: 'demo', root: path.join(root, 'project'), destination: { kind: 'directory', path: path.join(root, 'notes') } });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
-  const run = createRun(project, [{ client: 'codex', sessionId: 'synthetic', recordId: 'one', hash: 'a'.repeat(64) }]);
+  const run = direct ? createRun(project, [], { scope: { kind: 'direct', requestHash: 'a'.repeat(64) } }) :
+    createRun(project, [{ client: 'codex', sessionId: 'synthetic', recordId: 'one', hash: 'a'.repeat(64) }]);
   await withProject(store, 'demo', async ({ directory }) => {
     await writeJSON(store.pin, `${directory}/run.json`, run, { expectedHash: null });
   });
@@ -212,6 +213,41 @@ test('an unawaited failed publication still fails the attempt and releases owner
   const state = await inspectAttempt(f.store, 'demo');
   assert.equal(state.active, false);
   assert.deepEqual(state.run.warnings, []);
+});
+
+test('direct ownership drains outstanding publications before releasing its worker gate', async t => {
+  const f = await fixture(t, { direct: true });
+  let entered, release, settled = false, owner;
+  const publishing = new Promise(resolve => { entered = resolve; });
+  const hold = new Promise(resolve => { release = resolve; });
+  const operation = ownDirectAttempt(f.store, 'demo', f.run.id, (current, run) => {
+    owner = current;
+    assert.equal(run.id, f.run.id);
+    assert.equal(run.attempt.id, current.attemptId);
+    withCurrentAttempt(current, async () => { entered(); await hold; });
+    return 'finished';
+  });
+  operation.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await publishing;
+    const { probeGate } = await import('../src/storage/gates.mjs');
+    const { gateOptions } = await import('../src/storage/store.mjs');
+    const layout = await readJSON(f.store.pin, 'store/layout.json');
+    assert.equal(probeGate(layout.value.projects.demo.workerGate, gateOptions).busy, true);
+    assert.equal(settled, false);
+  } finally { release(); }
+  assert.equal(await operation, 'finished');
+  assert.equal((await inspectAttempt(f.store, 'demo')).active, false);
+  assert.throws(() => withCurrentAttempt(owner, () => {}), { code: 'ATTEMPT_NOT_OWNED' });
+});
+
+test('direct ownership surfaces unobserved publication failures and releases its worker gate', async t => {
+  const f = await fixture(t, { direct: true });
+  await assert.rejects(ownDirectAttempt(f.store, 'demo', f.run.id, owner => {
+    withCurrentAttempt(owner, () => { throw Object.assign(new Error('Synthetic publication failure.'), { code: 'SYNTHETIC_PUBLICATION_FAILED' }); });
+  }), { code: 'SYNTHETIC_PUBLICATION_FAILED' });
+  assert.equal((await inspectAttempt(f.store, 'demo')).active, false);
+  assert.deepEqual((await inspectAttempt(f.store, 'demo')).run.warnings, []);
 });
 
 test('startup publication that exhausts the budget never activates the worker', async t => {

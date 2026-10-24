@@ -32,6 +32,7 @@ async function* candidates(store, projectId, scope, onWarning) {
 export async function prepareProcessing(store, projectId, inputScope, { reconcileChat,
   inputBytes = INPUT_BUDGET.bytes, maxRecords = INPUT_BUDGET.records } = {}) {
   const scope = validateRunScope(inputScope);
+  if (scope.kind === 'direct') fail('PROCESSING_SCOPE_INVALID', 'Direct notes do not select queued conversation.');
   if (typeof reconcileChat !== 'function') fail('PROCESSING_RECONCILER_REQUIRED', 'Provide the native chat reconciler.');
   if (!Number.isSafeInteger(inputBytes) || inputBytes < 64 * 1024 || inputBytes > 8 * 1024 * 1024 ||
       !Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > INPUT_BUDGET.records) fail('PROCESSING_BUDGET_INVALID', 'Use a verified bounded model input budget.');

@@ -2,6 +2,7 @@ import { spawn as nativeSpawn } from 'node:child_process';
 import { lstat, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { TextDecoder } from 'node:util';
 import { CuefluentError, fail } from '../../core/errors.mjs';
 import { pinDirectory, assertDirectory } from '../../storage/paths.mjs';
 import { readPathStat } from '../../storage/stat.mjs';
@@ -10,7 +11,13 @@ export { executablePath } from '../../client/executable.mjs';
 
 export const requireClient = (condition, code = 'PROCESSING_ISOLATION_UNSUPPORTED') => { if (!condition) fail(code, 'The native processing session could not be safely established.'); };
 export const boundedText = (value, bytes) => typeof value === 'string' && Buffer.byteLength(value) <= bytes && !/\u0000|\p{Cs}/u.test(value);
-export const sameNames = (actual, expected) => Array.isArray(actual) && actual.length === expected.length && [...actual].sort().every((name, index) => name === [...expected].sort()[index]);
+export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+export const token = value => boundedText(value, 256) && value.length > 0 && !/\s|\p{Cc}/u.test(value);
+export function sameNames(actual, expected) {
+  if (!Array.isArray(actual) || !Array.isArray(expected) || actual.length !== expected.length) return false;
+  const sorted = [...expected].sort();
+  return [...actual].sort().every((name, index) => name === sorted[index]);
+}
 
 export async function privateCwd(directory) {
   requireClient(typeof directory === 'string' && path.isAbsolute(directory), 'PROCESSING_ARGUMENT');
@@ -50,9 +57,11 @@ export class JsonProcess {
     this.pending = new Map(); this.queue = []; this.queueBytes = 0; this.waiters = []; this.sequence = 0; this.failure = null; this.buffer = ''; this.closed = false;
     this.exit = new Promise(resolve => { this.resolveExit = resolve; });
     this.child.stderr.on('data', () => {});
-    this.child.stdout.setEncoding('utf8');
+    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
     this.child.stdout.on('data', chunk => {
-      this.buffer += chunk;
+      if (this.failure) return;
+      try { this.buffer += decoder.decode(chunk, { stream: true }); }
+      catch { return this.reject('PROCESSING_PROTOCOL'); }
       if (Buffer.byteLength(this.buffer) > 8 * 1024 * 1024) return this.reject('PROCESSING_PROTOCOL_LIMIT');
       let end;
       while ((end = this.buffer.indexOf('\n')) !== -1) {
@@ -69,7 +78,16 @@ export class JsonProcess {
     });
     this.child.on('error', () => this.reject('PROCESSING_CLIENT_FAILED'));
     this.child.stdin.on('error', () => this.reject('PROCESSING_CLIENT_FAILED'));
-    this.child.on('close', (code, signalName) => { this.closed = true; this.resolveExit({ code, signal: signalName }); if (!this.failure) this.reject('PROCESSING_CLIENT_EXITED', false); });
+    this.child.on('close', (code, signalName) => {
+      this.closed = true;
+      if (!this.failure) {
+        try { this.buffer += decoder.decode(); }
+        catch { this.reject('PROCESSING_PROTOCOL', false); }
+        if (this.buffer.length) this.reject('PROCESSING_PROTOCOL', false);
+      }
+      this.resolveExit({ code, signal: signalName });
+      if (!this.failure) this.reject('PROCESSING_CLIENT_EXITED', false);
+    });
     this.signal = signal; this.abortListener = () => this.reject('PROCESSING_ABORTED'); signal?.addEventListener('abort', this.abortListener, { once: true });
   }
   reject(code, terminate = true) {
@@ -91,6 +109,14 @@ export class JsonProcess {
     });
   }
   next() { if (this.queue.length) { const item = this.queue.shift(); this.queueBytes -= item.bytes; return Promise.resolve(item.value); } if (this.failure) return Promise.reject(this.failure); return new Promise((resolve, reject) => this.waiters.push({ resolve, reject })); }
-  async finish() { this.signal?.removeEventListener('abort', this.abortListener); if (!this.closed) this.child.stdin.end(); return this.exit; }
+  async finish() {
+    this.signal?.removeEventListener('abort', this.abortListener);
+    if (!this.closed) this.child.stdin.end();
+    const exit = await this.exit;
+    // Clean closure wakes unfinished readers, but never hides a protocol or
+    // policy failure that occurred after the caller saw a terminal message.
+    if (this.failure && this.failure.code !== 'PROCESSING_CLIENT_EXITED') throw this.failure;
+    return exit;
+  }
   async dispose() { this.signal?.removeEventListener('abort', this.abortListener); if (!this.closed) { this.child.stdin.destroy(); this.child.kill(); } await this.exit; }
 }
