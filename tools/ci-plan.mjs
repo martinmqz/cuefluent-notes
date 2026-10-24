@@ -10,7 +10,7 @@ const DISTRIBUTION_FILES = new Set([
   '.github/copilot-instructions.md',
 ]);
 const DISTRIBUTION_ROOTS = [
-  'plugins/', 'claude/', 'packaging/releases/', '.agents/', '.cursor/rules/', '.github/instructions/',
+  'plugins/', 'claude/', 'packaging/releases/', '.agents/',
 ];
 const requirePlan = (condition, reason) => {
   if (!condition) {
