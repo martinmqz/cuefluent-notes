@@ -76,6 +76,6 @@ npm test
 ```
 
 The source runtime is in `src/`, synthetic tests in `test/`, and distribution
-sources in `packaging/v2/`. Maintainer build and release instructions live in
+sources in `packaging/plugin/`. Maintainer build and release instructions live in
 `.agents/publishing.md` in the source checkout. Building a candidate does not
 publish, install, or change immutable release snapshots.

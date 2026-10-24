@@ -7,9 +7,9 @@ and [setup](../references/setup.md).
 ## Source and published artifacts
 
 The source is `src/`, the root skill, and the seven installed workflow references.
-`packaging/v2/source-files.json` is the explicit runtime input list. Update it when
+`packaging/plugin/source-files.json` is the explicit runtime input list. Update it when
 adding a runtime module; build checks reject missing relative imports. Client
-descriptors live under `packaging/v2/{codex,claude}/`. Both packages contain one
+descriptors live under `packaging/plugin/{codex,claude}/`. Both packages contain one
 native skill at `skills/cuefluent-notes/SKILL.md`; Claude has no duplicate command
 file. Development tools, tests, repository guidance, and private planning are not
 part of either plugin.

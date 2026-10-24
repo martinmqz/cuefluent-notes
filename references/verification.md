@@ -1,5 +1,16 @@
 # Compatibility and limitations
 
+## Diagnostic coverage
+
+CLI startup, fatal connector transport errors, and failed control/direct-note MCP
+calls provide fixed explanations and recovery guidance alongside stable codes.
+Checks cover early runtime refusal, missing runtime files, nonblocking hook error
+responses, malformed or incomplete protocol frames, and exclusion of private
+exception text. They do not establish how every desktop client renders diagnostics.
+Host failures before process creation remain host-reported errors, and executable
+discovery or automatic runtime installation is not provided. Existing retained
+run warnings and results are not rewritten into the new tool-error format.
+
 ## Native clients
 
 Direct note creation and updates use ordinary MCP content submission to an

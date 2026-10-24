@@ -13,13 +13,59 @@ async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-cli-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const storeRoot = path.join(root, 'private'), cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd);
-  const run = (args, input = '', entryPath = entry) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [entryPath, ...args], { cwd, env: { ...process.env, CUEFLUENT_V2_HOME: storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const run = (args, input = '', entryPath = entry, nodeArgs = []) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [...nodeArgs, entryPath, ...args], { cwd, env: { ...process.env, CUEFLUENT_V2_HOME: storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
     child.once('error', reject); child.once('close', code => resolve({ code, stdout, stderr: withoutFfiNotice(stderr, child.pid) })); child.stdin.end(input);
   });
   return { root, storeRoot, cwd, notes, run };
 }
+
+test('unsupported runtimes report the detected version before importing a missing runtime module', async t => {
+  const f = await fixture(t), copy = path.join(f.root, 'incomplete-package'), src = path.join(copy, 'src');
+  await fs.mkdir(path.join(src, 'core'), { recursive: true });
+  for (const file of ['cli.mjs', 'diagnostics.mjs', 'core/errors.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  const preload = path.join(f.root, 'synthetic-runtime.mjs');
+  for (const version of ['24.22.1', '26.2.0']) {
+    await fs.writeFile(preload, `Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(version)} });`);
+    const result = await f.run(['mcp', 'codex'], '', path.join(src, 'cli.mjs'), ['--import', preload]);
+    assert.equal(result.code, 1); assert.equal(result.stdout, '');
+    assert.match(result.stderr, /NODE_VERSION_UNSUPPORTED/); assert.match(result.stderr, /26\.12\.1/);
+    assert.match(result.stderr, /Next step:/); assert.match(result.stderr, /restart/);
+    const details = JSON.parse(result.stderr.split('Diagnostics: ')[1]);
+    assert.equal(details.nodeVersion, version); assert.equal(details.executable, process.execPath);
+    assert.equal(details.stage, 'runtime-check'); assert.equal(details.client, 'codex');
+    assert.doesNotMatch(result.stderr, /ERR_MODULE_NOT_FOUND/);
+    const hook = await f.run(['hook', 'claude'], '{}', path.join(src, 'cli.mjs'), ['--import', preload]);
+    assert.equal(hook.code, 0); assert.equal(hook.stderr, '');
+    assert.match(JSON.parse(hook.stdout).systemMessage, /NODE_VERSION_UNSUPPORTED/);
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('a missing runtime module produces reinstall guidance without dumping its exception path or stack', async t => {
+  const f = await fixture(t), src = path.join(f.root, 'synthetic-private-path', 'src');
+  await fs.mkdir(path.join(src, 'core'), { recursive: true });
+  for (const file of ['cli.mjs', 'diagnostics.mjs', 'core/errors.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  const result = await f.run(['mcp', 'claude'], '', path.join(src, 'cli.mjs'));
+  assert.equal(result.code, 1); assert.equal(result.stdout, '');
+  assert.match(result.stderr, /ERR_MODULE_NOT_FOUND/); assert.match(result.stderr, /Reinstall/);
+  assert.equal(JSON.parse(result.stderr.split('Diagnostics: ')[1]).stage, 'module-load');
+  assert.doesNotMatch(result.stderr, /synthetic-private-path|node:internal/);
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('fatal MCP framing failures are reported on stderr without echoing input or corrupting protocol output', async t => {
+  const f = await fixture(t);
+  for (const [input, code] of [['{"synthetic-private-input": broken}\n', 'MCP_FRAME_INVALID'], ['{"synthetic-private-input":', 'MCP_FRAME_INCOMPLETE']]) {
+    const result = await f.run(['mcp', 'claude'], input);
+    assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.ok(result.stderr.includes(code));
+    assert.match(result.stderr, /Next step:/); assert.doesNotMatch(result.stderr, /synthetic-private-input/);
+    assert.equal(JSON.parse(result.stderr.split('Diagnostics: ')[1]).stage, 'transport');
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
 test('CLI no-create reads and unconfigured native hooks leave no private store', async t => {
   const f = await fixture(t);
   const settings = await f.run(['settings']); assert.equal(settings.code, 0); assert.equal(JSON.parse(settings.stdout).settingsHash, null);

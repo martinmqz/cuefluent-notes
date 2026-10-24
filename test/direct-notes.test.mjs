@@ -372,7 +372,7 @@ test('Codex calls without host chat metadata cannot borrow a previous unidentifi
   const read = await native.protocol({ jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'cuefluent_read_note', arguments: { projectId: 'demo', target } } });
   assert.equal(read.result.structuredContent.state, 'read');
   const result = await native.protocol({ jsonrpc: '2.0', id: 32, method: 'tools/call', params: { name: 'cuefluent_update_note', arguments: { ...f.request, target, expectedHash: read.result.structuredContent.hash, content: content + '\nChanged.\n' } } });
-  assert.deepEqual(JSON.parse(result.result.content[0].text), { error: 'DIRECT_NOTE_CONTEXT_UNAVAILABLE' });
+  assert.equal(JSON.parse(result.result.content[0].text).error, 'DIRECT_NOTE_CONTEXT_UNAVAILABLE');
   assert.equal(await fs.readFile(target, 'utf8'), content);
 });
 
