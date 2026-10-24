@@ -117,8 +117,8 @@ Check CI for the current revision when reporting it.
 ## Maintaining this guidance
 
 Edit [this guide](/.agents/guide.md), [adapter configuration](/.agents/config.yaml),
-and canonical rules. Regenerate `AGENTS.md`, Copilot instructions, and Cursor rules
-through the pinned generator; do not edit those outputs directly.
+and canonical rules. Regenerate `AGENTS.md` and Copilot instructions through the
+pinned generator; do not edit those outputs directly.
 
 ```sh
 npm run guidance:sync -- --dry-run
