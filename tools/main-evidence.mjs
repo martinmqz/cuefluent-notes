@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ARTIFACT_NAMES, bounded, decode } from './ci.mjs';
 import { PACKAGE_VERSION } from './packaging.mjs';
-import { createGitHubRequest, inspectChecksRun, verifyBuildSource } from './release-candidate.mjs';
+import { createGitHubRequest, inspectChecksRun, verifyBuildSource, checksRequirePlan } from './release-candidate.mjs';
+import { classifyCIChanges } from './ci-plan.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
 const positive = value => Number.isSafeInteger(value) && value > 0;
@@ -17,22 +18,29 @@ function requireEvidence(condition, reason) {
   }
 }
 
-function context({ env = process.env, git, request, fetchImpl, now = Date.now } = {}) {
+function context({ env = process.env, git, request, fetchImpl, now = Date.now, repoRoot = process.cwd(), classify = classifyCIChanges, base = false } = {}) {
   const { GITHUB_REPOSITORY: repository, GITHUB_REPOSITORY_ID: repositoryText, GITHUB_SHA: commit,
     CUEFLUENT_MAIN_EVIDENCE_ROOT: root } = env;
-  requireEvidence(['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) && env.GITHUB_REF === 'refs/heads/main', 'MAIN_EVENT_REQUIRED');
+  requireEvidence(base ? env.GITHUB_EVENT_NAME === 'pull_request' && /^refs\/pull\/[1-9][0-9]*\/merge$/.test(env.GITHUB_REF ?? '') :
+    ['push', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME) && env.GITHUB_REF === 'refs/heads/main', base ? 'PR_EVENT_REQUIRED' : 'MAIN_EVENT_REQUIRED');
   requireEvidence(typeof repository === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository), 'REPOSITORY_INVALID');
   requireEvidence(typeof repositoryText === 'string' && /^[1-9][0-9]*$/.test(repositoryText) && positive(Number(repositoryText)), 'REPOSITORY_ID_INVALID');
   requireEvidence(SHA.test(commit ?? '') && typeof root === 'string' && path.isAbsolute(root), 'MAIN_CONTEXT_INVALID');
   git ??= args => execFileSync('git', args, { maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
   request ??= createGitHubRequest({ token: env.GITHUB_TOKEN, fetchImpl });
-  return { env, repository, repositoryId: Number(repositoryText), commit, root, git, request, now, api: `/repos/${repository}` };
+  return { env, repository, repositoryId: Number(repositoryText), commit, root, git, request, now, repoRoot, classify, base, api: `/repos/${repository}` };
 }
 
 function readTarget(c) {
   const text = args => Buffer.from(c.git(args)).toString('utf8').trim();
-  const commit = text(['rev-parse', '--verify', 'HEAD']), tree = text(['rev-parse', '--verify', 'HEAD^{tree}']);
+  let commit = text(['rev-parse', '--verify', 'HEAD']), tree = text(['rev-parse', '--verify', 'HEAD^{tree}']);
   requireEvidence(commit === c.commit && SHA.test(tree), 'MAIN_CHECKOUT_MISMATCH');
+  if (c.base) {
+    const parents = text(['show', '-s', '--format=%P', 'HEAD']).split(' ');
+    requireEvidence(parents.length === 2 && parents.every(parent => SHA.test(parent)), 'PR_MERGE_CHECKOUT_REQUIRED');
+    commit = parents[0]; tree = text(['rev-parse', '--verify', `${commit}^{tree}`]);
+    requireEvidence(SHA.test(tree), 'BASE_TREE_INVALID');
+  }
   try { c.git(['merge-base', '--is-ancestor', commit, 'origin/main']); }
   catch (cause) {
     if (cause instanceof AssertionError) throw cause;
@@ -79,13 +87,57 @@ function selectedContext(c, candidate) {
   return { ...c, runId: candidate.id, tag: versionTag(candidate.headBranch) ? candidate.headBranch : undefined };
 }
 
+async function distributionParent(c, target, candidate) {
+  const pr = await c.request(`${c.api}/pulls/${candidate.pullRequest}`);
+  requireEvidence(pr?.number === candidate.pullRequest && pr.merged === true && pr.state === 'closed' && pr.merge_commit_sha === target.commit &&
+    pr.base?.ref === 'main' && pr.base.repo?.id === c.repositoryId && pr.base.repo?.full_name === c.repository &&
+    pr.head?.sha === candidate.headSha && pr.head.repo?.id === c.repositoryId && pr.head.repo?.full_name === c.repository, 'DISTRIBUTION_PR_INVALID');
+  const head = await c.request(`${c.api}/git/commits/${candidate.headSha}`);
+  requireEvidence(head?.sha === candidate.headSha && head.tree?.sha === target.tree, 'DISTRIBUTION_TREE_MISMATCH');
+  const parentCommit = Buffer.from(c.git(['rev-parse', '--verify', `${target.commit}^1`])).toString('utf8').trim();
+  const parentTree = Buffer.from(c.git(['rev-parse', '--verify', `${parentCommit}^{tree}`])).toString('utf8').trim();
+  requireEvidence(SHA.test(parentCommit) && SHA.test(parentTree), 'DISTRIBUTION_PARENT_INVALID');
+  return { commit: parentCommit, tree: parentTree };
+}
+
+async function traceEvidence(c, target, expectedSelection) {
+  const distribution = []; let cursor = target;
+  for (;;) {
+    const candidate = await latestRun(c, cursor), runContext = selectedContext(c, candidate);
+    if (expectedSelection) {
+      const expected = expectedSelection.distribution.find(hop => hop.target.commit === cursor.commit) ??
+        (expectedSelection.fullTarget.commit === cursor.commit ? expectedSelection : null);
+      requireEvidence(expected && same(candidate, expected.candidate), 'EVIDENCE_CHANGED');
+    }
+    const requirePlan = checksRequirePlan(c, cursor.commit);
+    let parent, changes;
+    // Historical full runs and explicit dispatches retain their original exact
+    // tree checks. Only a merged PR using the planner can introduce a cheap hop.
+    if (requirePlan && candidate.event === 'pull_request') {
+      const parentCommit = Buffer.from(c.git(['rev-parse', '--verify', `${cursor.commit}^1`])).toString('utf8').trim();
+      requireEvidence(SHA.test(parentCommit), 'DISTRIBUTION_PARENT_INVALID');
+      changes = await c.classify({ repoRoot: c.repoRoot, baselineRevision: parentCommit, revision: cursor.commit, git: c.git });
+      requireEvidence(['full', 'distribution'].includes(changes?.mode), 'DISTRIBUTION_CLASSIFICATION_INVALID');
+      if (changes.mode === 'distribution') parent = await distributionParent(c, cursor, candidate);
+    }
+    const mode = parent ? 'distribution' : 'full';
+    const run = await inspectChecksRun(runContext, { mode, requirePlan });
+    requireEvidence(run.event === candidate.event && run.headSha === candidate.headSha && run.headBranch === candidate.headBranch, 'RUN_SELECTION_CHANGED');
+    if (!parent) {
+      const artifact = run.artifacts.find(value => value.name === ARTIFACT_NAMES[0]);
+      requireEvidence(positive(artifact?.id), 'PRIMARY_ARTIFACT_MISSING');
+      return { fullTarget: cursor, candidate, run, artifact, distribution };
+    }
+    requireEvidence(distribution.length < 10, 'DISTRIBUTION_ANCESTRY_LIMIT');
+    requireEvidence(Array.isArray(changes.changedFiles) && changes.changedFiles.length > 0, 'DISTRIBUTION_CLASSIFICATION_INVALID');
+    distribution.push({ target: cursor, parent, candidate, run, changedFiles: changes.changedFiles });
+    cursor = parent;
+  }
+}
+
 export async function selectMainEvidence(options = {}) {
-  const c = context(options), target = readTarget(c), candidate = await latestRun(c, target);
-  const run = await inspectChecksRun(selectedContext(c, candidate));
-  requireEvidence(run.event === candidate.event && run.headSha === candidate.headSha && run.headBranch === candidate.headBranch, 'RUN_SELECTION_CHANGED');
-  const artifact = run.artifacts.find(value => value.name === ARTIFACT_NAMES[0]);
-  requireEvidence(positive(artifact?.id), 'PRIMARY_ARTIFACT_MISSING');
-  const selected = { schema: 1, target, candidate, run, artifact };
+  const c = context(options), target = readTarget(c), traced = await traceEvidence(c, target);
+  const selected = { schema: 1, scope: c.base ? 'base' : 'main', target, ...traced }, { artifact, run } = traced;
   await fs.mkdir(c.root);
   await fs.writeFile(path.join(c.root, 'selection.json'), `${JSON.stringify(selected, null, 2)}\n`, { flag: 'wx' });
   if (c.env.GITHUB_OUTPUT) await fs.appendFile(c.env.GITHUB_OUTPUT, `artifact_id=${artifact.id}\nrun_id=${run.runId}\n`);
@@ -95,9 +147,10 @@ export async function selectMainEvidence(options = {}) {
 export async function verifyMainEvidence(options = {}) {
   const c = context(options), selected = decode(await bounded(path.join(c.root, 'selection.json'), 1024 * 1024));
   const target = readTarget(c);
-  requireEvidence(selected?.schema === 1 && same(selected.target, target) && selected.run?.repository === c.repository &&
+  requireEvidence(selected?.schema === 1 && selected.scope === (c.base ? 'base' : 'main') && same(selected.target, target) && selected.run?.repository === c.repository &&
     selected.run.repositoryId === c.repositoryId && selected.run.runId === selected.candidate?.id && Array.isArray(selected.run.artifacts) &&
-    selected.artifact?.name === ARTIFACT_NAMES[0] && same(selected.artifact, selected.run.artifacts?.find(value => value.name === ARTIFACT_NAMES[0])), 'SELECTION_BINDING_INVALID');
+    selected.artifact?.name === ARTIFACT_NAMES[0] && same(selected.artifact, selected.run.artifacts?.find(value => value.name === ARTIFACT_NAMES[0])) &&
+    SHA.test(selected.fullTarget?.commit ?? '') && SHA.test(selected.fullTarget?.tree ?? '') && Array.isArray(selected.distribution) && selected.distribution.length <= 10, 'SELECTION_BINDING_INVALID');
   const artifactRoot = path.join(c.root, 'artifact');
   for (const directory of [c.root, artifactRoot]) {
     const stat = await fs.lstat(directory);
@@ -110,12 +163,16 @@ export async function verifyMainEvidence(options = {}) {
   const source = decode(await bounded(path.join(artifactRoot, 'source.json'), 1024 * 1024));
   requireEvidence(source?.pullRequest === selected.candidate.pullRequest, 'SOURCE_PR_MISMATCH');
   const runContext = selectedContext(c, selected.candidate);
-  const origin = await verifyBuildSource(runContext, source, receipt, target, selected.run);
-  requireEvidence(same(target, readTarget(c)) && same(selected.candidate, await latestRun(c, target)) &&
-    same(selected.run, await inspectChecksRun(runContext)), 'EVIDENCE_CHANGED');
-  const evidence = { schema: 1, target, runId: selected.run.runId, artifactId: selected.artifact.id, source: origin };
+  const origin = await verifyBuildSource(runContext, source, receipt, selected.fullTarget, selected.run);
+  requireEvidence(same(target, readTarget(c)) && same(await traceEvidence(c, target, selected), {
+    fullTarget: selected.fullTarget, candidate: selected.candidate, run: selected.run, artifact: selected.artifact, distribution: selected.distribution,
+  }), 'EVIDENCE_CHANGED');
+  const evidence = { schema: 1, target, fullTarget: selected.fullTarget, distribution: selected.distribution,
+    runId: selected.run.runId, artifactId: selected.artifact.id, source: origin };
   if (c.env.GITHUB_STEP_SUMMARY) await fs.appendFile(c.env.GITHUB_STEP_SUMMARY,
-    `Main commit \`${target.commit}\` matches the tested tree from [Checks ${selected.run.runId}](https://github.com/${c.repository}/actions/runs/${selected.run.runId}). No platform checks were repeated.\n`);
+    selected.distribution.length
+      ? `${c.base ? 'PR base' : 'Main'} commit \`${target.commit}\`: runtime unchanged since \`${selected.fullTarget.commit}\` (${selected.distribution.length} distribution-only commits, ${selected.distribution.reduce((count, hop) => count + hop.changedFiles.length, 0)} changed files). Full evidence: [Checks ${selected.run.runId}](https://github.com/${c.repository}/actions/runs/${selected.run.runId}).\n`
+      : `${c.base ? 'PR base' : 'Main'} commit \`${target.commit}\` matches the tested tree from [Checks ${selected.run.runId}](https://github.com/${c.repository}/actions/runs/${selected.run.runId}). No platform checks were repeated.\n`);
   return evidence;
 }
 
@@ -126,8 +183,9 @@ export function mainEvidenceErrorMessage(error) {
 }
 
 export async function main(args, options = {}) {
-  requireEvidence(args.length === 1 && ['select', 'verify'].includes(args[0]), 'COMMAND_INVALID');
-  return args[0] === 'select' ? selectMainEvidence(options) : verifyMainEvidence(options);
+  requireEvidence(args.length === 1 && ['select', 'verify', 'select-base', 'verify-base'].includes(args[0]), 'COMMAND_INVALID');
+  const selectedOptions = { ...options, base: args[0].endsWith('-base') };
+  return args[0].startsWith('select') ? selectMainEvidence(selectedOptions) : verifyMainEvidence(selectedOptions);
 }
 if (import.meta.main) {
   try { await main(process.argv.slice(2)); }

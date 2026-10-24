@@ -14,9 +14,10 @@ import YAML from 'yaml';
 const exec = promisify(execFile);
 const checks = async () => YAML.parse(await fs.readFile(path.resolve(import.meta.dirname, '../.github/workflows/ci.yml'), 'utf8'));
 
-test('native shards and client smoke start independently and retain the required check names', async () => {
-  const workflow = await checks(), { guidance, test: source, 'client-smoke': smoke, reproducibility } = workflow.jobs;
-  for (const job of [guidance, source, smoke]) assert.equal(job.needs, undefined);
+test('native shards and client smoke run in parallel after classification and retain required names', async () => {
+  const workflow = await checks(), { plan, guidance, test: source, 'client-smoke': smoke, reproducibility } = workflow.jobs;
+  for (const job of [plan, guidance]) assert.equal(job.needs, undefined);
+  for (const job of [source, smoke]) assert.equal(job.needs, 'plan');
   for (const job of [source, smoke]) {
     assert.equal(job.strategy['fail-fast'], false);
     assert.equal(job.strategy['max-parallel'], undefined);
@@ -33,8 +34,8 @@ test('native shards and client smoke start independently and retain the required
   for (const platform of smoke.strategy.matrix.os) names.add(smoke.name.replace('${{ matrix.os }}', platform));
   assert.deepEqual([...names].sort(), [...EXPECTED_CHECK_JOBS].sort(), 'Release evidence must require every workflow job.');
   for (const required of ['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
-  assert.deepEqual(reproducibility.needs, ['guidance', 'test', 'client-smoke']);
-  for (const step of source.steps.filter(step => step.run === 'npm run check:examples' || step.run === 'node tools/ci.mjs build' || step.uses?.startsWith('actions/upload-artifact@'))) assert.equal(step.if, 'matrix.primary');
+  assert.deepEqual(reproducibility.needs, ['plan', 'guidance', 'test', 'client-smoke']);
+  for (const step of source.steps.filter(step => step.run === 'npm run check:examples' || step.run === 'node tools/ci.mjs build' || step.uses?.startsWith('actions/upload-artifact@'))) assert.equal(step.if, "needs.plan.outputs.mode == 'full' && matrix.primary");
   assert(smoke.steps.some(step => step.run === 'node tools/client-smoke.mjs'));
   assert(!source.steps.some(step => /client-smoke/.test(step.run ?? '')));
 });
@@ -75,13 +76,49 @@ test('draft PRs allocate no job runners and ready PRs retain parallel checks and
 test('the final gate rejects failed, skipped or cancelled source shards and client smoke', async () => {
   const gate = (await checks()).jobs.reproducibility.steps.find(step => step.env?.TEST_RESULT);
   const script = /<<'NODE'\n([\s\S]*?)\nNODE\s*$/.exec(gate.run)?.[1]; assert.ok(script);
-  const valid = { TEST_RESULT: 'success', GUIDANCE_RESULT: 'success', CLIENT_SMOKE_RESULT: 'success' };
+  const valid = { PLAN_RESULT: 'success', PLAN_MODE: 'full', TEST_RESULT: 'success', GUIDANCE_RESULT: 'success', CLIENT_SMOKE_RESULT: 'success' };
   await exec(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ...valid } });
+  await exec(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ...valid, PLAN_MODE: 'distribution' } });
   for (const key of Object.keys(valid)) {
     for (const result of ['failure', 'cancelled', 'skipped', '']) {
       await assert.rejects(exec(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ...valid, [key]: result } }));
     }
   }
+});
+
+test('distribution mode tests marketplaces on all three OSes without suites, builds or native client downloads', async () => {
+  const workflow = await checks(), source = workflow.jobs.test, smoke = workflow.jobs['client-smoke'];
+  const enabled = (step, mode, matrix) => step.if === undefined || runInNewContext(step.if, { needs: { plan: { outputs: { mode } } }, matrix });
+  for (const row of source.strategy.matrix.include) {
+    const active = source.steps.filter(step => enabled(step, 'distribution', row));
+    assert.equal(active.filter(step => step.run === 'node --test test/marketplace.test.mjs').length, row.primary ? 1 : 0);
+    assert(!active.some(step => /tools\/(?:test|ci)\.mjs/.test(step.run ?? '')));
+    assert(!active.some(step => step.uses?.startsWith('actions/upload-artifact@')));
+    const platform = runInNewContext(source['runs-on'].slice(3, -2), { needs: { plan: { outputs: { mode: 'distribution' } } }, matrix: row });
+    assert.equal(platform, row.primary ? row.os : 'ubuntu-24.04');
+    const full = source.steps.filter(step => enabled(step, 'full', row));
+    assert(full.some(step => step.run?.includes('tools/test.mjs')));
+    assert.equal(full.filter(step => step.run === 'node tools/ci.mjs build').length, row.primary ? 1 : 0);
+  }
+  assert(!smoke.steps.filter(step => enabled(step, 'distribution')).some(step => /tools\/client-smoke\.mjs|npm ci/.test(step.run ?? '')));
+  assert(smoke.steps.filter(step => enabled(step, 'full')).some(step => step.run === 'node tools/client-smoke.mjs'));
+  assert.equal(source.if, smoke.if, 'Both matrix jobs must expand for distribution PRs to report every required context.');
+});
+
+test('distribution gate rederives its class and requires digest-verified evidence for the actual PR base', async () => {
+  const workflow = await checks(), gate = workflow.jobs.reproducibility;
+  const steps = gate.steps, verifyClass = steps.findIndex(step => step.run === 'node tools/ci-plan.mjs verify');
+  const select = steps.findIndex(step => step.run === 'node tools/main-evidence.mjs select-base');
+  const verify = steps.findIndex(step => step.run === 'node tools/main-evidence.mjs verify-base');
+  assert(verifyClass >= 0 && select > verifyClass && verify > select);
+  assert.equal(steps[verifyClass].env.CUEFLUENT_CI_MODE, '${{ needs.plan.outputs.mode }}');
+  const download = steps.slice(select, verify).find(step => step.uses?.startsWith('actions/download-artifact@'));
+  assert.equal(download.with['artifact-ids'], '${{ steps.base.outputs.artifact_id }}');
+  assert.equal(download.with['run-id'], '${{ steps.base.outputs.run_id }}');
+  assert.equal(download.with['digest-mismatch'], 'error');
+  for (const step of [steps[select], download, steps[verify]]) assert.equal(step.if, "needs.plan.outputs.mode == 'distribution'");
+  assert.equal(steps.find(step => step.run === 'node tools/ci.mjs compare').if, "needs.plan.outputs.mode == 'full'");
+  assert.equal(steps.find(step => step.uses?.startsWith('actions/checkout@')).with['fetch-depth'], 0);
 });
 
 test('the Windows workflow weighted runner discovers each file once and propagates a shard failure', async t => {
@@ -185,7 +222,7 @@ test('checks support PR readiness, manual recovery and retained source evidence 
   const steps = workflow.jobs.test.steps;
   const record = steps.findIndex(step => step.run === 'node tools/ci.mjs record-source');
   assert(record > steps.findIndex(step => step.run === 'node tools/ci.mjs build'));
-  assert.equal(steps[record].if, 'matrix.primary');
+  assert.equal(steps[record].if, "needs.plan.outputs.mode == 'full' && matrix.primary");
   const upload = steps.findIndex(step => step.uses?.startsWith('actions/upload-artifact@'));
   assert(upload > record);
   assert.match(steps[upload].with.path, /source\.json/);

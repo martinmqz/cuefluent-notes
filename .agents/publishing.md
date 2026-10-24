@@ -136,8 +136,12 @@ native registration remains a separate user action.
 ## CI evidence limits
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
-commits. It runs the complete synthetic source suite on native Linux, macOS, and
-Windows for ready PRs when opened, updated, reopened, or marked ready for review.
+commits. For ready PRs, a short planning job classifies the exact merge change
+against its native base. Source, dependency, runtime guidance, package version,
+build-tool, test and workflow changes run the complete synthetic suite on native
+Linux, macOS, and Windows. The two marketplace test files and development
+guidance have a separate distribution-only path described below. Ready PRs are
+checked when opened, updated, reopened, or marked ready for review.
 Draft PR events skip every job before runner allocation. Converting a PR back to
 draft cancels its active Checks run. Merging into `main` does not repeat the matrix.
 Required PR checks protect ordinary merges. The separate
@@ -145,6 +149,9 @@ Required PR checks protect ordinary merges. The separate
 push to `main`, including direct pushes and administrator bypass merges. Its one
 read-only Ubuntu job verifies successful Checks evidence for the exact pushed
 tree using the retained source receipt and one digest-verified primary artifact.
+For distribution-only merges it verifies each merged PR's focused checks and
+first-parent diff, then walks at most ten such commits to the last full-check
+tree. It never substitutes an older green run for a newer failed or pending run.
 It runs no tests, native clients, or builds. Missing or mismatched evidence fails
 visibly; explicitly run Checks for that commit, then rerun the failed Main evidence
 job. Release preparation independently verifies the tested source against the
@@ -156,7 +163,8 @@ for recursive test discovery. Test discovery determines coverage; new files
 without measurements still run with a file-size estimate. Windows runs test files
 sequentially within each shard to limit native helper contention; concurrency
 exercised by the tests is preserved.
-Guidance, all source shards and client smoke jobs can start concurrently. The
+Guidance starts alongside planning. After planning, all source shards and client
+smoke jobs can start concurrently; no platform waits for another platform. The
 required reproducibility gate waits for every shard and smoke job and rejects
 failed or unexpectedly skipped checks. It does not waive queue, gate, worker,
 or filesystem tests on Windows.
@@ -193,6 +201,26 @@ network failure fails the smoke check and required gate and may require a rerun.
 No native client downloads, credentials, model calls, installations, or
 hook-trust changes are part of artifact-producing jobs.
 
+### Distribution-only changes
+
+A ready PR confined to published snapshots, catalogs, release receipts, the two
+marketplace test files, and development guidance runs `check:guidance` plus
+`test/marketplace.test.mjs` on Linux, macOS, and Windows. It runs no source suite,
+native client download, candidate build, or artifact upload. The exact allowlist
+is in `tools/ci-plan.mjs`. Shipped skill/reference files, README, package/lock
+versions, workflow/build tools, `.gitattributes`, and `.gitignore` require full
+checks. Manual dispatch and empty changes also select full checks.
+
+All existing required check names remain present. Unneeded secondary shards and
+smoke jobs report why no native work ran on lightweight Ubuntu runners. Their
+success is accepted only by a final gate that independently reclassifies the
+change, requires all three native marketplace checks and guidance to pass, and
+verifies successful full-check evidence for the actual PR base. Missing, expired,
+failed or mismatched evidence fails that gate; it never silently starts a matrix.
+These runs have no candidate artifacts and cannot be selected for release
+preparation. Previously published bytes and independently verified receipt pins
+retain their existing marketplace protections.
+
 Passing CI establishes the tested synthetic and packaging behavior. It does not
 prove native desktop command rendering, live hook activation, native processing
 isolation on an unaudited platform, reboot recovery, Cuefluent corpus admission,
@@ -201,6 +229,28 @@ and separate native acceptance evidence distinctly. Product limits belong in
 [verification](../references/verification.md).
 
 ## Manual release preparation
+
+Set the next release's final version in the first ordinary feature or fix PR of
+the cycle, updating `package.json` and both root lockfile version fields together.
+For example, use `0.17.0` throughout its development cycle, then `0.17.1` for a
+patch or `0.18.0` for the next minor cycle. Do not create a separate preparation
+PR or use a development suffix merely to change it before publication. Real
+prerelease versions such as `0.17.0-rc.1` remain supported.
+
+Once an implementation PR is merged and its Checks and Main evidence succeed:
+
+1. Select that green main commit and its retained full Checks run.
+2. With publication authorization, create the exact version tag on that commit.
+3. Dispatch the release preparation workflow below to reuse its tested archives.
+4. Review the candidate and publish the authorized release from those same bytes.
+5. Open a draft marketplace PR using the verified published archives and receipts.
+   That PR runs the focused distribution checks, then Main evidence on merge.
+
+There is no release-purpose local suite, rebuild, or repeated detached-package
+check: the retained native CI candidates provide that evidence. Marketplace
+copying still checks published digests and runs its targeted test locally before
+pushing. A forgotten version bump requires a normal checked change before a new
+tag can be created; existing tags and published packages are never replaced.
 
 Pushing a branch or tag does not publish a v2 release or update a marketplace.
 The former release-published marketplace writer is removed. The
@@ -234,8 +284,9 @@ source-recording support. A dispatch on `main` is also accepted when its tip is
 exactly the tagged commit. Preparation verifies main-history ancestry and never
 silently launches another full matrix. Candidates created before source provenance
 was recorded are not eligible for this automated reuse.
-Keep the intended package version in the implementation PR when practical: a
-later version change alters package contents and legitimately needs new checks.
+Keep the intended package version in the ordinary implementation PR so its full
+checks already cover the exact release bytes. Tag a commit with full candidate
+artifacts, not a later distribution-only merge.
 
 Verification tools come from the authorized main dispatch checkout. Downloaded
 candidate code is never executed. The output preserves the verified archives and

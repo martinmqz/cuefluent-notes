@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
 
 concurrency:
   group: checks-v2-${{ github.event_name }}-${{ github.ref }}
@@ -17,6 +19,26 @@ defaults:
     shell: bash
 
 jobs:
+  plan:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.12.1'
+          package-manager-cache: false
+      - name: Classify the exact changes against the PR base
+        id: classify
+        run: node tools/ci-plan.mjs plan
+
   guidance:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-24.04
@@ -34,6 +56,7 @@ jobs:
 
   test:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    needs: plan
     name: test (${{ matrix.os }}${{ matrix.suffix }})
     strategy:
       fail-fast: false
@@ -45,7 +68,9 @@ jobs:
           - { os: windows-2025, shard: '2/4', suffix: ', 2/4', primary: false }
           - { os: windows-2025, shard: '3/4', suffix: ', 3/4', primary: false }
           - { os: windows-2025, shard: '4/4', suffix: ', 4/4', primary: false }
-    runs-on: ${{ matrix.os }}
+    # Keep existing required contexts; distribution-only secondary rows report
+    # their exemption on a small runner. The gate verifies the tested base.
+    runs-on: ${{ needs.plan.outputs.mode == 'distribution' && !matrix.primary && 'ubuntu-24.04' || matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,6 +85,7 @@ jobs:
       - name: Record native host and pinned runtime
         run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.version})"
       - name: Select fresh runner-local cache and output paths
+        if: needs.plan.outputs.mode == 'full'
         run: |
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
@@ -69,26 +95,34 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_ENV, `npm_config_cache=${cache}\nCUEFLUENT_TEST_NPM_CACHE=${cache}\nCUEFLUENT_BUILD_ROOT=${build}\n`);
           NODE
       - run: npm ci --ignore-scripts
+        if: needs.plan.outputs.mode == 'full' || matrix.primary
       - name: Run this shard of the complete native source suite
+        if: needs.plan.outputs.mode == 'full'
         # Discover every test file, then place the longest measured files into
         # separate, least-loaded shards. Each shard has its own runner; Windows
         # runs files sequentially there to limit native helper contention.
         run: node tools/test.mjs ${{ runner.os == 'Windows' && '--test-concurrency=1' || '' }}
         env:
           CUEFLUENT_TEST_SHARD: ${{ matrix.shard }}
+      - name: Verify all published snapshots and catalogs on this native OS
+        if: needs.plan.outputs.mode == 'distribution' && matrix.primary
+        run: node --test test/marketplace.test.mjs
+      - name: Report distribution-only shard coverage
+        if: needs.plan.outputs.mode == 'distribution' && !matrix.primary
+        run: echo "Marketplace checks run on the three native primary jobs. The final gate verifies prior full checks for the unchanged runtime."
       - run: npm run check:examples
-        if: matrix.primary
+        if: needs.plan.outputs.mode == 'full' && matrix.primary
       - name: Build, verify, copy and exercise detached actual entry points
-        if: matrix.primary
+        if: needs.plan.outputs.mode == 'full' && matrix.primary
         run: node tools/ci.mjs build
       - name: Record the tested checkout and build receipt
-        if: matrix.primary
+        if: needs.plan.outputs.mode == 'full' && matrix.primary
         run: node tools/ci.mjs record-source
         env:
           CUEFLUENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CUEFLUENT_PULL_REQUEST: ${{ github.event.pull_request.number }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: matrix.primary
+        if: needs.plan.outputs.mode == 'full' && matrix.primary
         with:
           name: v2-candidate-${{ matrix.os }}
           path: |
@@ -101,12 +135,15 @@ jobs:
 
   client-smoke:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    needs: plan
     name: client-smoke (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [macos-14, windows-2025]
-    runs-on: ${{ matrix.os }}
+    # A job-level skip would leave literal matrix placeholders in check names.
+    # Retain each required context while avoiding native clients in this mode.
+    runs-on: ${{ needs.plan.outputs.mode == 'distribution' && 'ubuntu-24.04' || matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,13 +154,18 @@ jobs:
           node-version: '26.12.1'
           package-manager-cache: false
       - run: npm ci --ignore-scripts
+        if: needs.plan.outputs.mode == 'full'
       - name: Check pinned native client capabilities in disposable profiles
+        if: needs.plan.outputs.mode == 'full'
         run: node tools/client-smoke.mjs
+      - name: Report unchanged native client inputs
+        if: needs.plan.outputs.mode == 'distribution'
+        run: echo "Native client inputs are unchanged. The final gate requires successful smoke evidence for the tested base."
 
   reproducibility:
     name: reproducibility
     if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    needs: [guidance, test, client-smoke]
+    needs: [plan, guidance, test, client-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -132,9 +174,13 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           GUIDANCE_RESULT: ${{ needs.guidance.result }}
           CLIENT_SMOKE_RESULT: ${{ needs.client-smoke.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_MODE: ${{ needs.plan.outputs.mode }}
         run: |
           node --input-type=module <<'NODE'
-          if (process.env.TEST_RESULT !== 'success' ||
+          if (process.env.PLAN_RESULT !== 'success' ||
+              !['full', 'distribution'].includes(process.env.PLAN_MODE) ||
+              process.env.TEST_RESULT !== 'success' ||
               process.env.GUIDANCE_RESULT !== 'success' ||
               process.env.CLIENT_SMOKE_RESULT !== 'success') {
             throw new Error('Required CI checks did not pass.');
@@ -143,16 +189,42 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26.12.1'
           package-manager-cache: false
+      - name: Independently verify the selected change class
+        run: node tools/ci-plan.mjs verify
+        env:
+          CUEFLUENT_CI_MODE: ${{ needs.plan.outputs.mode }}
+      - name: Select successful runtime evidence from the distribution PR base
+        if: needs.plan.outputs.mode == 'distribution'
+        id: base
+        run: node tools/main-evidence.mjs select-base
+        env: &base-evidence-env
+          GITHUB_TOKEN: ${{ github.token }}
+          CUEFLUENT_MAIN_EVIDENCE_ROOT: ${{ runner.temp }}/cuefluent-ci-base-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.mode == 'distribution'
+        with:
+          artifact-ids: ${{ steps.base.outputs.artifact_id }}
+          run-id: ${{ steps.base.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/cuefluent-ci-base-${{ github.run_id }}-${{ github.run_attempt }}/artifact
+          digest-mismatch: error
+      - name: Verify the unchanged runtime has successful full-check evidence
+        if: needs.plan.outputs.mode == 'distribution'
+        run: node tools/main-evidence.mjs verify-base
+        env: *base-evidence-env
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.plan.outputs.mode == 'full'
         with:
           pattern: v2-candidate-*
           path: ${{ runner.temp }}/cuefluent-v2-artifacts
       - name: Verify every archive hash and compare all three build receipts
+        if: needs.plan.outputs.mode == 'full'
         env:
           CUEFLUENT_ARTIFACT_ROOT: ${{ runner.temp }}/cuefluent-v2-artifacts
         run: node tools/ci.mjs compare

@@ -117,8 +117,15 @@ async function list(c, route, key) {
   requireRelease(false);
 }
 
-export async function inspectChecksRun(c) {
+export function checksRequirePlan(c, revision) {
+  requireRelease(SHA.test(revision ?? ''), 'WORKFLOW_REVISION_INVALID');
+  const workflow = Buffer.from(c.git(['show', `${revision}:.github/workflows/ci.yml`])).toString('utf8');
+  return /^  plan:\s*(?:#.*)?$/m.test(workflow) || workflow.includes('tools/ci-plan.mjs');
+}
+
+export async function inspectChecksRun(c, { mode = 'full', requirePlan = false } = {}) {
   return checked('run', async () => {
+    requireRelease(['full', 'distribution'].includes(mode), 'CHECKS_MODE_INVALID');
     const workflow = await c.request(`${c.api}/actions/workflows/ci.yml`);
     requireRelease(positive(workflow.id) && workflow.path === '.github/workflows/ci.yml');
     const run = await c.request(`${c.api}/actions/runs/${c.runId}`);
@@ -133,9 +140,10 @@ export async function inspectChecksRun(c) {
     const jobs = await checked('jobs', async () => {
       const history = await list(c, `${c.api}/actions/runs/${c.runId}/jobs?filter=all`, 'jobs');
       requireRelease(new Set(history.map(job => job.id)).size === history.length);
-      for (const job of history) requireRelease(positive(job.id) && job.run_id === c.runId && EXPECTED_CHECK_JOBS.includes(job.name) &&
+      for (const job of history) requireRelease(positive(job.id) && job.run_id === c.runId && (EXPECTED_CHECK_JOBS.includes(job.name) || job.name === 'plan') &&
         positive(job.run_attempt) && job.run_attempt <= run.run_attempt);
-      return EXPECTED_CHECK_JOBS.map(name => {
+      const expected = requirePlan || mode === 'distribution' || history.some(job => job.name === 'plan') ? ['plan', ...EXPECTED_CHECK_JOBS] : EXPECTED_CHECK_JOBS;
+      return expected.map(name => {
         const matches = history.filter(job => job.name === name).sort((a, b) => b.run_attempt - a.run_attempt);
         requireRelease(matches.length > 0 && new Set(matches.map(job => job.run_attempt)).size === matches.length);
         const latest = matches[0]; requireRelease(latest.status === 'completed' && latest.conclusion === 'success');
@@ -144,6 +152,7 @@ export async function inspectChecksRun(c) {
     });
     const artifacts = await checked('artifacts', async () => {
       const values = await list(c, `${c.api}/actions/runs/${c.runId}/artifacts`, 'artifacts');
+      if (mode === 'distribution') { requireRelease(values.length === 0, 'DISTRIBUTION_ARTIFACTS_UNEXPECTED'); return []; }
       requireRelease(values.length === ARTIFACTS.length && new Set(values.map(item => item.name)).size === ARTIFACTS.length);
       const selected = ARTIFACTS.map(name => {
         const item = values.find(value => value.name === name), source = item?.workflow_run;
@@ -164,7 +173,7 @@ export async function inspectChecksRun(c) {
 
 export async function selectReleaseCandidate(options = {}) {
   return checked('selection', async () => {
-    const c = context(options), tag = await readTag(c), run = await inspectChecksRun(c);
+    const c = context(options), tag = await readTag(c), run = await inspectChecksRun(c, { requirePlan: checksRequirePlan(c, tag.commit) });
     if (run.event !== 'pull_request') requireRelease(run.headSha === tag.commit, 'CHECKS_COMMIT_MISMATCH');
     await fs.mkdir(c.root);
     const snapshot = { schema: 1, tag, run };
@@ -237,7 +246,7 @@ export async function verifyReleaseCandidate(options = {}) {
     }
     // Revalidate immediately before making a candidate available: reruns, tag moves,
     // artifact replacement or expiration require a new explicit selection.
-    requireRelease(same(tag, await readTag(c)) && same(run, await inspectChecksRun(c)), 'EVIDENCE_CHANGED');
+    requireRelease(same(tag, await readTag(c)) && same(run, await inspectChecksRun(c, { requirePlan: checksRequirePlan(c, tag.commit) })), 'EVIDENCE_CHANGED');
     const primary = path.join(artifactsRoot, ARTIFACTS[0]), { build, bytes } = verified[ARTIFACTS[0]];
     const output = path.join(c.root, 'candidate'); await fs.mkdir(output);
     for (const file of ['build.json', ...build.packages.flatMap(item => item.archives.map(archive => archive.path)), ...build.tools.map(archive => archive.path)]) {
