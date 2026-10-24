@@ -137,7 +137,10 @@ native registration remains a separate user action.
 
 [Checks](../.github/workflows/ci.yml) pins Node 26.12.1 and exact upstream action
 commits. For ready PRs, a short planning job classifies the exact merge change
-against its native base. Source, dependency, runtime guidance, package version,
+against the checked-out merge commit's first parent. The checkout must match
+the run's `GITHUB_SHA` and its second parent must match the event's PR head.
+The event's base SHA can be stale and is not used to select the diff base.
+Source, dependency, runtime guidance, package version,
 build-tool, test and workflow changes run the complete synthetic suite on native
 Linux, macOS, and Windows. The two marketplace test files and development
 guidance have a separate distribution-only path described below. Ready PRs are

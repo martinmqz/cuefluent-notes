@@ -96,7 +96,9 @@ async function eventPlan({ repoRoot = process.cwd(), env = process.env, git } = 
   requirePlan(Number.isSafeInteger(number) && number > 0 && pr?.number === number &&
     env.GITHUB_REF === 'refs/pull/' + number + '/merge' && SHA.test(pr?.base?.sha ?? '') && SHA.test(pr?.head?.sha ?? ''), 'PR_CONTEXT_INVALID');
   const parents = (await gitText(git, ['show', '-s', '--format=%P', checkout])).trim().split(' ');
-  requirePlan(parents.length === 2 && parents[0] === pr.base.sha && parents[1] === pr.head.sha, 'PR_MERGE_MISMATCH');
+  // The event's base SHA can predate the base used for this tested merge. Its
+  // first parent supplies that base; the exact checkout and PR head stay bound.
+  requirePlan(parents.length === 2 && parents.every(parent => SHA.test(parent)) && parents[1] === pr.head.sha, 'PR_MERGE_MISMATCH');
   return classifyCIChanges({ repoRoot, baselineRevision: parents[0], revision: checkout, git });
 }
 

@@ -162,12 +162,27 @@ test('plan binds the exact merge checkout, first parent base and second parent P
   await assert.rejects(main(['plan'], { repoRoot: f.repoRoot, env: { ...f.env, GITHUB_REF: 'refs/heads/feature' } }), planError('PR_CONTEXT_INVALID'));
 });
 
+test('plan and verify use the tested merge parent when the event base SHA is stale', async t => {
+  const f = await mergeFixture(t);
+  const event = { ...f.event, pull_request: { ...f.event.pull_request, base: { sha: f.initial } } };
+  await fs.writeFile(f.eventFile, JSON.stringify(event));
+  // The merge includes a newer runtime change from main. Only this PR's
+  // guidance change belongs in its diff, even with a stale event snapshot.
+  assert.notEqual(f.base, event.pull_request.base.sha);
+  await fs.writeFile(path.join(f.repoRoot, '.git', 'shallow'), f.base + '\n' + f.head + '\n');
+  for (const command of ['plan', 'verify']) {
+    assert.deepEqual(await main([command], { repoRoot: f.repoRoot, env: { ...f.env, CUEFLUENT_CI_MODE: 'distribution' } }), {
+      mode: 'distribution', changedFiles: ['.agents/publishing.md'], reason: 'DISTRIBUTION_ONLY',
+    });
+  }
+});
+
 test('missing PR identity, mismatched parents and nonmerge checkouts cannot claim distribution', async t => {
   const f = await mergeFixture(t);
   for (const event of [
     { ...f.event, number: null },
     { ...f.event, pull_request: { ...f.event.pull_request, number: 44 } },
-    { ...f.event, pull_request: { ...f.event.pull_request, base: { sha: f.initial } } },
+    { ...f.event, pull_request: { ...f.event.pull_request, base: { sha: 'invalid' } } },
     { ...f.event, pull_request: { ...f.event.pull_request, head: { sha: f.base } } },
   ]) {
     await fs.writeFile(f.eventFile, JSON.stringify(event));
