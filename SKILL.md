@@ -120,9 +120,11 @@ conversation has been queued or processed; report queued counts separately.
 
 ## Consent and setup
 
-Fresh defaults are **manual tracking**, **review saving**, and **activity logging
-off**. Queued processing always requires an explicit command. Automatic tracking applies
-to new chats going forward; it does not import old chats. Explicit untrack survives
+Fresh project defaults are **manual tracking**, **review saving**, and **activity
+logging on for directory destinations**. Respect explicit logging opt-outs; existing
+settings are not changed by installing an update. Single-file destinations keep
+logging off. Queued processing always requires an explicit command. Automatic
+tracking applies to new chats going forward; it does not import old chats. Explicit untrack survives
 cleanup and automatic mode. Read-only requests and opt-outs take priority.
 
 An unconfigured command writes no tracking or conversation data. Explain setup

@@ -12,21 +12,24 @@ const throwsCode = (action, code = 'SETTINGS_INVALID') => assert.throws(action, 
 test('fresh project defaults are independent and settings start empty', () => {
   assert.deepEqual(emptySettings(), { schemaVersion: 1, projects: [] });
   assert.deepEqual(project(), { id: 'work', root: '/projects/work', destination: { kind: 'directory', path: '/notes' },
-    tracking: 'manual', saving: 'review', activityLog: { enabled: false } });
+    tracking: 'manual', saving: 'review', activityLog: { enabled: true, timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone, path: '/notes/logs' } });
   assert.equal(project({ tracking: 'auto' }).saving, 'review');
   assert.equal(project({ saving: 'auto' }).tracking, 'manual');
   assert.equal(project({ activityLog: { enabled: true, timezone: 'America/Los_Angeles' } }).tracking, 'manual');
+  const optedOut = project({ activityLog: { enabled: false } });
+  assert.deepEqual(optedOut.activityLog, { enabled: false });
+  assert.deepEqual(validateSettings(settings(optedOut), posix).projects[0].activityLog, { enabled: false });
 });
 
 test('settings snapshots detach from caller objects and freeze every nested object', () => {
   const input = structuredClone(settings(project()));
   const snapshot = validateSettings(input, posix);
   input.projects[0].root = '/changed'; input.projects[0].destination.path = '/changed-notes';
-  input.projects[0].activityLog.enabled = true; input.projects.push(project({ id: 'other', root: '/other' }));
+  input.projects[0].activityLog.enabled = false; input.projects.push(project({ id: 'other', root: '/other' }));
   assert.equal(snapshot.projects.length, 1);
   assert.equal(snapshot.projects[0].root, '/projects/work');
   assert.equal(snapshot.projects[0].destination.path, '/notes');
-  assert.equal(snapshot.projects[0].activityLog.enabled, false);
+  assert.equal(snapshot.projects[0].activityLog.enabled, true);
   for (const value of [snapshot, snapshot.projects, snapshot.projects[0], snapshot.projects[0].destination, snapshot.projects[0].activityLog]) {
     assert(Object.isFrozen(value));
   }
@@ -86,6 +89,7 @@ test('validate IANA activity zones and prohibit logging through single-file rout
   }
   const destination = { kind: 'file', path: '/notes/work.md' };
   assert.equal(project({ destination }).destination.kind, 'file');
+  assert.deepEqual(project({ destination }).activityLog, { enabled: false });
   throwsCode(() => project({ destination, activityLog: { enabled: true, timezone: 'UTC' } }));
   for (const target of ['/notes/work.txt', '/notes/.md', '/notes/work.md/']) {
     throwsCode(() => project({ destination: { kind: 'file', path: target } }));
@@ -150,7 +154,7 @@ test('pending runs independently prevent removal, destination and saving changes
 });
 
 test('tracking and future logging can change during a pending run without modifying its original snapshot', () => {
-  const current = validateSettings(settings(project()), posix);
+  const current = validateSettings(settings(project({ activityLog: { enabled: false } })), posix);
   const changed = settings(project({ tracking: 'auto', activityLog: { enabled: true, timezone: 'America/New_York' } }));
   const next = assertSettingsChange(current, changed, { ...posix, pendingRuns: ['work'] });
   assert.equal(next.projects[0].tracking, 'auto');

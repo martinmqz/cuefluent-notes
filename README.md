@@ -29,9 +29,10 @@ Use `untrack` to stop new collection while keeping queued input. `process projec
 includes all queues owned by the project. `skip` releases inactive pending work
 without rolling back saved notes. `status` is read-only.
 
-Defaults are manual tracking, review saving and logging off. Automatic tracking
-follows new chats only; processing remains explicit. Optional annual activity logs
-record successful note changes at `logs/YYYY.md` within a directory destination.
+Defaults are manual tracking, review saving and activity logging on for directory
+destinations. Logging can be disabled. Automatic tracking follows new chats only;
+processing remains explicit. Annual activity logs record successful note changes
+at `logs/YYYY.md` within a directory destination.
 
 ## Requirements and setup
 

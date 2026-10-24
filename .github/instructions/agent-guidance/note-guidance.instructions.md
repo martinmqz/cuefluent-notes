@@ -22,7 +22,10 @@ Otherwise route new notes by purpose to `meetings/`, `tasks/`, `knowledge-base/`
 `decisions/`, or the notes root. The entire `logs/` directory is reserved from
 ordinary drafts even when logging is off. Preserve pre-existing content there.
 
-Logging is directory-only, opt-in, and best effort. Writer-managed annual logs
+Logging is directory-only, on by default for new projects, and best effort.
+Preserve explicit opt-outs and stored settings. Record the selected IANA timezone
+at setup, defaulting to the detected system timezone for a new series; existing
+series retain their timezone. Writer-managed annual logs
 share series identity and timezone, include a visible nonempty About section from
 creation, and receive one entry per changed note. Keep retry details only in the
 current run; log failure never prevents successful cleanup or reserves a project

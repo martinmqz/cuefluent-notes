@@ -28,7 +28,9 @@ When changing a canonical rule, check its scopes and regenerate its adapters.
   may inform design; do not copy legacy modules, import the former runtime, or add
   migration, compatibility modes, deprecated aliases, or old capture state.
   Preserve Git history and immutable published packages and checksums.
-- Tracking defaults to `manual`, saving to `review`, and activity logging to off.
+- Tracking defaults to `manual`, saving to `review`, and activity logging to on
+  for new directory destinations. Preserve explicit logging opt-outs and loaded
+  settings; single-file destinations keep logging off.
   They are independent. Tracking `auto` enrolls eligible new native chats;
   processing is always explicit. Installation and hook trust authorize neither.
   Explicit opt-outs and read-only requests take precedence.
