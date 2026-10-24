@@ -1,4 +1,5 @@
 import { fail } from '../core/errors.mjs';
+import { describeFailure } from '../diagnostics.mjs';
 import { randomUUID } from 'node:crypto';
 import { packageVersion } from '../core/version.mjs';
 import { bindClaudeCommand, parseAction } from './commands.mjs';
@@ -208,8 +209,8 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
             approve: details => approve(details, state), assertActive: () => assertActive(state) });
           return result(id, { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value, isError: false });
         } catch (caught) {
-          const code = typeof caught?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(caught.code) ? caught.code : 'CONTROL_TOOL_FAILED';
-          return result(id, { content: [{ type: 'text', text: JSON.stringify({ error: code }) }], isError: true });
+          const failure = describeFailure(caught, { fallback: 'CONTROL_TOOL_FAILED', stage: 'tool', client, version: serverVersion });
+          return result(id, { content: [{ type: 'text', text: JSON.stringify(failure) }], structuredContent: failure, isError: true });
         } finally { finish(state); }
       };
       protocol.begin = begin;

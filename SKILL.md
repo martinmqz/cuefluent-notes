@@ -131,6 +131,14 @@ conversation has been queued or processed; report queued counts separately.
 
 ## Consent and setup
 
+For a failed tool call, explain its `message` and `recovery` guidance and retain
+the stable error code for support. Use `diagnostics` when investigating the failure;
+do not expose raw exception text, conversation content, or credentials. Distinguish
+a current call failure from an older run result returned by a successful status
+read. Do not infer that an error rolled back earlier writes. If the connector tools
+are missing, diagnose startup using [package requirements](references/distribution.md#startup-troubleshooting)
+before asking the user to repeat note or tracking commands.
+
 Fresh project defaults are **manual tracking**, **review saving**, and **activity
 logging on for directory destinations**. Respect explicit logging opt-outs; existing
 settings are not changed by installing an update. Single-file destinations keep

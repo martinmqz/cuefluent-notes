@@ -1,5 +1,7 @@
 [
   "src/cli.mjs",
+  "src/diagnostics.mjs",
+  "src/runtime-entry.mjs",
   "src/client/codex-native.mjs",
   "src/client/commands.mjs",
   "src/client/control-server.mjs",

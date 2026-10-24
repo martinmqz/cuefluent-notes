@@ -1,5 +1,21 @@
 # Commands and recovery
 
+## Error reports
+
+A failed MCP tool call retains its stable `error` code and includes a plain-language
+`message`, a `recovery` step, and bounded `diagnostics` in both the text result and
+`structuredContent`. Diagnostics identify the runtime version, platform,
+architecture, stage, and client/package version when known. Nested causes expose
+only bounded error codes. Unknown errors receive generic guidance rather than
+their raw exception messages, stacks, paths, arguments, or environment values.
+
+Explain the failure and next step to the user; include the code for support.
+Runtime details are available when investigating a problem. An error is not proof
+that no earlier write succeeded: inspect retained status before retrying mutations,
+and do not describe a previous run's result as a new status-command failure.
+Keep notes, pending drafts, and queued inputs intact during diagnosis. Connector
+startup failures are covered in [package requirements](distribution.md#startup-troubleshooting).
+
 ## Direct notes from supplied content
 
 Ask naturally, for example: “Use Cuefluent to save the meeting details above as
