@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { selectReleaseCandidate, verifyReleaseCandidate } from '../tools/release-candidate.mjs';
+import { selectReleaseCandidate, verifyReleaseCandidate, inspectChecksRun, releaseErrorMessage } from '../tools/release-candidate.mjs';
 
 const sha = digit => digit.repeat(40), hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const repository = 'example/cuefluent-notes', repositoryId = 12, runId = 42;
@@ -33,7 +33,7 @@ async function fixture(t, event = 'pull_request', version = '0.16.0') {
   t.after(() => assert.deepEqual(fixtureFailures, [], 'Unexpected mock calls must fail even when an evidence rejection is expected'));
   const tag = `v${version}`;
   const releaseRoot = path.join(root, 'release'), lock = Buffer.from('{"synthetic":"lock"}\n');
-  const metadata = { name: 'cuefluent-notes', version }, repo = { id: repositoryId, full_name: repository };
+  const metadata = { name: 'cuefluent-notes', version }, repo = { id: repositoryId, full_name: repository }, workflow = { text: 'jobs:\n  test: {}\n' };
   const run = { id: runId, workflow_id: 8, path: '.github/workflows/ci.yml', repository: repo, head_repository: repo,
     status: 'completed', conclusion: 'success', run_attempt: 2, head_sha: event === 'pull_request' ? headSha : tagCommit,
     event, head_branch: event === 'pull_request' ? 'feat/change' : 'main' };
@@ -60,6 +60,7 @@ async function fixture(t, event = 'pull_request', version = '0.16.0') {
       sameArgs(args, ['merge-base', '--is-ancestor', tagCommit, tagCommit])) return Buffer.alloc(0);
     if (sameArgs(args, ['show', `${tagCommit}:package.json`])) return Buffer.from(JSON.stringify(metadata));
     if (sameArgs(args, ['show', `${tagCommit}:package-lock.json`])) return lock;
+    if (sameArgs(args, ['show', `${tagCommit}:.github/workflows/ci.yml`])) return Buffer.from(workflow.text);
     checkFixture(false, `Unexpected git arguments: ${JSON.stringify(args)}`);
   };
   const request = async route => {
@@ -112,7 +113,7 @@ async function fixture(t, event = 'pull_request', version = '0.16.0') {
     await fs.writeFile(file, JSON.stringify({ ...JSON.parse(await fs.readFile(file, 'utf8')), ...changes }));
   };
   return { root, releaseRoot, options, run, artifacts, jobValues, commits, pr, metadata, calls, gitCalls, source,
-    receipt, receiptBytes, archives, populate, editSource, reference, tagObjects };
+    receipt, receiptBytes, archives, populate, editSource, reference, tagObjects, workflow };
 }
 
 test('release reuses a checked PR tree after squash merge, retaining older successful shard artifacts', async t => {
@@ -134,6 +135,42 @@ test('release reuses a checked PR tree after squash merge, retaining older succe
     `/actions/runs/${runId}/jobs?filter=all&per_page=100&page=1`, `/actions/runs/${runId}/artifacts?per_page=100&page=1`]) {
     assert.equal(f.calls.filter(route => route === `/repos/${repository}${suffix}`).length, 2);
   }
+});
+
+test('new workflows require a successful plan while historical full workflows remain eligible', async t => {
+  const f = await fixture(t); f.workflow.text = 'jobs:\n  plan:\n    run: node tools/ci-plan.mjs plan\n';
+  await assert.rejects(selectReleaseCandidate(f.options), error => error.releaseStage === 'jobs');
+  f.jobValues.push({ id: 700, name: 'plan', run_id: runId, run_attempt: 2, status: 'completed', conclusion: 'success' });
+  await selectReleaseCandidate(f.options); await f.populate();
+  assert.equal((await verifyReleaseCandidate(f.options)).run.jobs[0].name, 'plan');
+});
+
+test('distribution runs are admitted only explicitly and cannot supply a release candidate', async t => {
+  const f = await fixture(t); f.workflow.text = 'jobs:\n  plan:\n    run: node tools/ci-plan.mjs plan\n';
+  f.jobValues.push({ id: 700, name: 'plan', run_id: runId, run_attempt: 2, status: 'completed', conclusion: 'success' });
+  f.artifacts.splice(0);
+  const c = { repository, repositoryId, runId, api: `/repos/${repository}`, request: f.options.request, now: Date.now };
+  assert.deepEqual((await inspectChecksRun(c, { mode: 'distribution' })).artifacts, []);
+  assert.deepEqual((await inspectChecksRun(c, { mode: 'auto' })).artifacts, []);
+  await assert.rejects(selectReleaseCandidate(f.options), error => error.releaseStage === 'artifacts');
+  f.jobValues.at(-1).conclusion = 'skipped';
+  await assert.rejects(inspectChecksRun(c, { mode: 'distribution' }), error => error.releaseStage === 'jobs');
+  await assert.rejects(inspectChecksRun(c, { mode: 'auto' }), error => error.releaseStage === 'jobs');
+});
+
+test('release selection distinguishes workflow read failures without exposing raw Git diagnostics', async t => {
+  const f = await fixture(t), git = f.options.git;
+  f.options.git = args => {
+    if (args[0] === 'show' && args[1]?.endsWith(':.github/workflows/ci.yml')) throw new Error('synthetic private Git stderr');
+    return git(args);
+  };
+  await assert.rejects(selectReleaseCandidate(f.options), error => {
+    assert.equal(error.reason, 'WORKFLOW_READ_FAILED');
+    assert.match(releaseErrorMessage(error), /WORKFLOW_READ_FAILED/);
+    assert.doesNotMatch(releaseErrorMessage(error), /synthetic private Git stderr/);
+    return true;
+  });
+  await assert.rejects(fs.stat(f.releaseRoot), { code: 'ENOENT' });
 });
 const sameArgs = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -205,6 +242,7 @@ test('selection refuses failed, skipped, foreign, missing, duplicate, expired an
     f => { f.jobValues.shift(); },
     f => { f.jobValues.push({ ...f.jobValues[0], id: 900 }); },
     f => { f.jobValues[0].run_attempt = 3; },
+    f => { f.jobValues.push({ ...f.jobValues[0], id: 901, name: 'unexpected-job' }); },
     f => { f.artifacts.pop(); },
     f => { f.artifacts[1].name = f.artifacts[0].name; },
     f => { f.artifacts[1].id = f.artifacts[0].id; },

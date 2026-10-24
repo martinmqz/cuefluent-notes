@@ -119,7 +119,7 @@ test('future snapshot directories preserve CRLF and force-stage ignored dependen
     const name = `${directory}/0.17.0/cuefluent-notes/node_modules/synthetic/index.js`;
     await git(f.root, ['rm', '--cached', '--', name]);
     await git(f.root, ['check-ignore', '--', name]);
-    await git(f.root, ['add', '--', `${directory}/0.17.0/cuefluent-notes`]).catch(error => assert.equal(error.code, 1));
+    await git(f.root, ['add', '--', `${directory}/0.17.0/cuefluent-notes`]).catch(error => assert.equal(error.status, 1));
     await assert.rejects(verifyMarketplaces(f.root, f.pins), /Staged package file set differs/);
     await f.stage(`${directory}/0.17.0/cuefluent-notes`);
     const blob = await git(f.root, ['show', `:${name}`]);

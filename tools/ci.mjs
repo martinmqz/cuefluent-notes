@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { buildPackages, verifyPackage, packagePath, PACKAGE_LIMITS, PACKAGE_VERSION } from './packaging.mjs';
 import { installPackage } from './install.mjs';
+import { createGitRunner } from './git.mjs';
 
 const requireCI = condition => { if (!condition) { const error = new Error('Candidate build verification failed.'); error.code = 'CI_CANDIDATE_INVALID'; throw error; } };
 export const ARTIFACT_NAMES = Object.freeze(['v2-candidate-ubuntu-24.04', 'v2-candidate-macos-14', 'v2-candidate-windows-2025']);
@@ -66,7 +67,7 @@ export async function recordBuildSource(root, { repoRoot = process.cwd(), env = 
   // The build already verified its archives; bind only its bounded receipt here.
   // Reproducibility and release preparation independently verify the archives.
   const bytes = await bounded(path.join(root, 'build.json'), 1024 * 1024);
-  const git = args => execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const readGit = createGitRunner(repoRoot), git = args => readGit(args).toString('utf8').trim();
   const integer = value => /^[1-9][0-9]*$/.test(value ?? '') && Number.isSafeInteger(Number(value));
   const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
   requireCI(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.GITHUB_REPOSITORY ?? '') &&

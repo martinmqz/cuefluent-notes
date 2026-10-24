@@ -2,11 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { INVENTORY, PACKAGE_VERSION, packagePath } from '../../tools/packaging.mjs';
+import { createGitRunner } from '../../tools/git.mjs';
 
-const execute = promisify(execFile);
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export const clients = [
   { client: 'codex', catalog: '.agents/plugins/marketplace.json', directory: 'plugins' },
@@ -14,12 +12,7 @@ export const clients = [
 ];
 
 export async function git(repo, args) {
-  // Keep synthetic repositories and read-only inspection independent of user
-  // Git redirection, global filters, hooks and credential configuration.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
-  // Git for Windows accepts /dev/null, but rejects Node's \\.\nul device path.
-  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_OPTIONAL_LOCKS: '0' });
-  return (await execute('git', args, { cwd: repo, env, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 })).stdout;
+  return createGitRunner(repo)(args);
 }
 
 /** Check staged package bytes without executing distributed code.
