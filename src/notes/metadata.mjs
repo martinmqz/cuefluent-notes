@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar } from 'yaml';
 import { fail } from '../core/errors.mjs';
 import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
@@ -225,8 +225,9 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
   if (before.status === 'invalid' || after.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be repaired by a note update.');
   const oldBody = withoutMetadata(original, before), newBody = withoutMetadata(proposed, after);
   if (oldBody === newBody) return unchanged();
+  const prefix = before.raw === null ? '' : original.slice(0, before.start);
   let raw = before.raw ?? '';
-  if (before.status === 'supported' && (updated !== undefined || skillVersion !== undefined)) {
+  if (before.status === 'supported' && (updated !== undefined || skillVersion !== undefined || before.value.generation?.content_hash !== undefined)) {
     const matched = block.exec(raw), { document } = parseYaml(matched[2]);
     if (updated !== undefined) {
       requireValue(isNoteTimestamp(updated));
@@ -241,12 +242,16 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       if (isScalar(current)) current.value = skillVersion;
       else document.setIn(['generation', 'skill_version'], skillVersion);
     }
+    if (before.value.generation?.content_hash !== undefined) {
+      // The optional digest covers the exact note bytes outside its metadata block.
+      const value = `sha256:${createHash('sha256').update(prefix + newBody).digest('hex')}`;
+      document.getIn(['generation', 'content_hash'], true).value = value;
+    }
     validateMetadata(document.toJS({ maxAliasCount: 0 }));
     const newline = raw.includes('\r\n') ? '\r\n' : '\n';
     raw = `<!-- cuefluent\n${document.toString({ lineWidth: 0 })}-->\n`.replace(/\n/g, newline);
     requireValue(Buffer.byteLength(raw) <= P.metadataBytes);
   }
-  const prefix = before.raw === null ? '' : original.slice(0, before.start);
   const bytes = Buffer.from(prefix + raw + newBody);
   return { bytes, changed: !bytes.equals(Buffer.from(original)), diagnostics: before.diagnostics };
 }

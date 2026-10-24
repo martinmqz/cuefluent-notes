@@ -9,6 +9,7 @@
   "src/client/history.mjs",
   "src/client/hooks.mjs",
   "src/client/source.mjs",
+  "src/control/direct-notes.mjs",
   "src/control/execute.mjs",
   "src/control/invocations.mjs",
   "src/control/setup.mjs",

@@ -67,7 +67,8 @@ test('CLI Claude MCP polling is read-only and accepts no caller native identitie
   const server = await f.run(['mcp', 'claude'], input); assert.equal(server.code, 0); assert.equal(server.stderr, '');
   const responses = server.stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(responses.find(item => item.id === 1).result.serverInfo, { name: 'cuefluent-control', version: JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version });
-  assert.equal(responses.find(item => item.id === 2).result.tools.length, 1);
+  assert.deepEqual(responses.find(item => item.id === 2).result.tools.map(item => item.name),
+    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_create_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note']);
   assert.equal(responses.find(item => item.id === 3).result.structuredContent.state, 'expired');
   assert.equal(responses.find(item => item.id === 4).result.isError, true);
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
@@ -85,4 +86,29 @@ test('the CLI accepts any exact public package version and refuses malformed ide
     const result = await attempt(name, version); assert.equal(result.code, 1); assert.match(result.stderr, /PACKAGE_INVALID/);
   }
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('both CLI MCP entrypoints save supplied context and return completion without native transcript access', async t => {
+  for (const client of ['claude', 'codex']) {
+    const f = await fixture(t), configPath = path.join(f.root, 'setup.json');
+    await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
+      destination: { kind: 'directory', path: f.notes }, saving: 'auto' } }));
+    assert.equal((await f.run(['setup', '--config', configPath])).code, 0);
+    // Escaping makes this valid note request larger than the former 64 KiB frame.
+    const content = '# Selected context\n\n## Details\n' + 'Use "the chosen detail".\n'.repeat(2600);
+    const frames = [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } },
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'cuefluent_create_note', arguments: {
+        projectId: 'demo', requestId: 'b37a7cde-a8a3-4b04-9d45-e288a67a8af2', target: 'context.md', content, summary: 'The requested details.' } } },
+    ];
+    assert.ok(Buffer.byteLength(JSON.stringify(frames[2])) > 64 * 1024);
+    const result = await f.run(['mcp', client], frames.map(frame => JSON.stringify(frame)).join('\n') + '\n');
+    assert.equal(result.code, 0, result.stderr);
+    const reply = result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(item => item.id === 2);
+    assert.equal(reply.result.isError, false, JSON.stringify(reply));
+    assert.equal(reply.result.structuredContent.state, 'saved');
+    assert.ok((await fs.readFile(path.join(f.notes, 'context.md'), 'utf8')).endsWith(content));
+    assert.equal(JSON.parse((await f.run(['status', '--project', 'demo'])).stdout).counts.chats, 0);
+  }
 });

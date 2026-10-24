@@ -1,14 +1,25 @@
-# Cuefluent Notes v2
+# Cuefluent Notes
 
-Turn selected Claude Code and Codex working chats into durable Markdown notes.
-Tracking runs locally without a model. Processing starts only when requested and
-uses a separate session to prepare notes for review or automatic saving.
+Create Markdown notes from content your assistant prepares at your request,
+with review or automatic saving. You can also track Claude Code and Codex chats
+for later explicit processing in a separate session.
 
 See [compatibility and limitations](references/verification.md) for supported
 client formats and platform coverage. The source version in `package.json` and
 published release snapshots are maintained separately.
 
 ## Workflow
+
+To create a note from conversation details, supplied material, or task results, ask:
+
+> Use Cuefluent to save the meeting details above as a note.
+
+The current assistant drafts the requested information. Cuefluent validates and
+saves it, or returns the draft for approval according to your saving setting.
+This creates a new note without tracking, reading raw transcripts, or running a
+second model. Existing notes are protected from overwrites.
+
+For ongoing conversation collection:
 
 ```text
 track → work in the chat → process → review → save
@@ -49,9 +60,9 @@ Original native transcripts are never deleted. Successful saves consume only the
 selected queue records; later arrivals remain. Hash checks preserve manual edits.
 Activity-log failures are reported without blocking successful note cleanup.
 
-V2 uses fresh settings and storage. It does not migrate or interpret earlier
-runtime state. Existing Markdown notes remain user content and can be updated
-under the current writer's conflict rules.
+Starting with 0.16.0, Cuefluent Notes uses fresh settings and storage. It does not
+migrate or interpret runtime state from 0.15.1 or earlier. Existing Markdown notes
+remain user content and can be updated under the current writer's conflict rules.
 
 ## Source development
 

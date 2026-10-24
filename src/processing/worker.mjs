@@ -25,6 +25,7 @@ export async function runProcessingWork(store, owner, { action, client, model, e
         await writeJSON(store.pin, `${directory}/run.json`, next, { expectedHash: hash }); return next;
       });
     } else if (run.phase === 'drafting') {
+      if (run.scope.kind === 'direct') fail('DIRECT_NOTE_CONTENT_REQUIRED', 'Retry the original direct note submission to finish its draft.');
       const binding = await pinProcessingLogging(store, owner);
       run = await prepareRunDrafts(store, owner, { client, model, effort, skillVersion, runClient, signal,
         readActivityLog: run.settings.destination.kind === 'directory' ? query => readActivityLog(run.settings.destination,

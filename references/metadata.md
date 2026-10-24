@@ -31,6 +31,13 @@ Do not manufacture capture IDs, revisions or retrievable-source promises for que
 records that may be deleted after processing. Embedded hashes never replace the
 writer's inspected whole-file hash.
 
+If an existing supported `generation.content_hash` is present and the body
+changes, refresh it as `sha256:<digest>` over the exact note content outside the
+metadata block. Do not add that field when absent or rewrite it for a no-op.
+The content-only temporary approval file omits the metadata block; the exact
+private draft used for saving retains it. Approval preserves the visible content
+and Markdown structure without another authoring pass.
+
 An existing plain note stays plain unless enrichment is explicitly requested.
 An unsupported metadata block remains byte-for-byte intact; malformed metadata is
 reported without silent removal or repair. Old provenance is descriptive user

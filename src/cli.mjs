@@ -13,6 +13,7 @@ import { createCodexNativeAdapter } from './client/codex-native.mjs';
 import { createControlBridge, serveControl } from './client/control-server.mjs';
 import { claimInvocation, runClaimedInvocation, readInvocation, launchInvocationChild, reportInvocationExit } from './control/invocations.mjs';
 import { executeControl } from './control/execute.mjs';
+import { createDirectNoteTools } from './control/direct-notes.mjs';
 import { readProjectStatus } from './control/status.mjs';
 import { setupProject } from './control/setup.mjs';
 import { createSyncRuntime } from './sync/runtime.mjs';
@@ -119,6 +120,7 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
       const adapter = args.client === 'codex' ? createCodexNativeAdapter({ version: skillVersion }) : null;
       try {
         const bridge = createControlBridge({ client: args.client, selection: contract.codex, codexAdapter: adapter,
+          directNotes: createDirectNoteTools({ store, client: args.client, skillVersion }),
           executeInvocation: invocation => invocation.action === 'status' ? execute(invocation) : submitCommand(store,
             { ...invocation, clientContract: clientContract(contract, args.client) }),
           readInvocation: handle => readInvocation(store, handle) });

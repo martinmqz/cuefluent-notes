@@ -172,8 +172,8 @@ export async function runClientSmoke() {
       const launch = { env, cwd: cwd.path };
       const actual = (await boundedCommand(executable, ['--version'], launch)).trim();
       requireSmoke(client === 'codex' ? actual === `codex-cli ${spec.clientVersion}` : actual === `${spec.clientVersion} (Claude Code)`, 'CLIENT_VERSION_MISMATCH');
-      const help = await boundedCommand(executable, client === 'codex' ? ['exec', '--help'] : ['--help'], launch);
-      for (const flag of client === 'codex' ? ['--ignore-user-config', '--ignore-rules', '--ephemeral', '--json', '--model'] : ['--restricted', '--strict-mcp-config', '--no-session-persistence', '--setting-sources', '--input-format', '--effort']) requireSmoke(help.includes(flag), 'CLIENT_FLAGS_UNSUPPORTED');
+      const help = await boundedCommand(executable, client === 'codex' ? ['app-server', '--help'] : ['--help'], launch);
+      for (const flag of client === 'codex' ? ['--strict-config'] : ['--restricted', '--strict-mcp-config', '--no-session-persistence', '--setting-sources', '--input-format', '--effort']) requireSmoke(help.includes(flag), 'CLIENT_FLAGS_UNSUPPORTED');
       const protocol = await clientAdmission(client, executable, { env, cwd, version });
       await cwd.check();
       console.log(JSON.stringify({ platform: process.platform, arch: process.arch, client, version: spec.clientVersion, nativeIntegrity: `sha512-${spec.integrity}`, cliHelp: true, protocol,

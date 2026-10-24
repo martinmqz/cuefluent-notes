@@ -11,8 +11,11 @@ export async function runDraftingSession(options, dependencies = {}) {
   requireClient(options && ['claude', 'codex'].includes(options.client), 'PROCESSING_ARGUMENT');
   requireClient(!options.signal?.aborted, 'PROCESSING_ABORTED');
   requireClient(typeof options.version === 'string' && PACKAGE_VERSION_PATTERN.test(options.version), 'PROCESSING_ARGUMENT');
-  const model = options.model ?? (options.client === 'codex' ? 'gpt-6.1-sol' : 'opus'), effort = options.effort ?? 'high';
-  requireClient(options.client === 'codex' ? ['gpt-6.1-sol', 'gpt-6-luna'].includes(model) && ['high', 'xhigh'].includes(effort) : ['opus', 'claude-opus-5-5'].includes(model) && ['high', 'xhigh'].includes(effort), 'PROCESSING_ARGUMENT');
+  // A native provider may use deployment-specific model names. Omission keeps
+  // Codex's configured model; an explicit trusted host selection remains valid.
+  const model = options.model ?? (options.client === 'codex' ? undefined : 'opus'), effort = options.effort ?? 'high';
+  requireClient(options.client === 'codex' ? model === undefined || boundedText(model, 256) && model.length > 0 && !/\s|\p{Cc}/u.test(model) : ['opus', 'claude-opus-5-5'].includes(model), 'PROCESSING_ARGUMENT');
+  requireClient(['high', 'xhigh'].includes(effort), 'PROCESSING_ARGUMENT');
   requireClient(boundedText(options.prompt, 64 * 1024) && options.prompt.trim() && boundedText(options.input, 4 * 1024 * 1024), 'PROCESSING_ARGUMENT');
   requireClient(options.onStarted === undefined || typeof options.onStarted === 'function', 'PROCESSING_ARGUMENT');
   const mcp = descriptor(options.mcp), cwd = await privateCwd(options.cwd), executable = await executablePath(options.executable ?? options.client);

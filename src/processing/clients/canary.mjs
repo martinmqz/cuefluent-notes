@@ -20,11 +20,43 @@ export function windowsCanaryCommand(systemRoot, operation, file) {
     env: { CUEFLUENT_CANARY_FILE: `"${file}"` } };
 }
 
-async function verifyWindowsSandbox(transport, cwd, outside, directory, port, connected) {
+export function macosCanaryCommand(operation, file) {
+  requireClient(typeof file === 'string' && path.posix.isAbsolute(file) && !/[\r\n\0]/.test(file));
+  requireClient(['read', 'write'].includes(operation));
+  return operation === 'read' ? { command: ['/bin/cat', file] } : {
+    command: ['/bin/sh', '-c', 'printf %s CUEFLUENT_CANARY_WRITE > "$CUEFLUENT_CANARY_FILE"'],
+    env: { CUEFLUENT_CANARY_FILE: file },
+  };
+}
+
+async function verifyMacosSandbox(transport, cwd, outside, directory, port, connected, permissionProfile) {
+  // System tools do not need Homebrew Node's shared libraries. Keep the same
+  // permission profile: a crashing probe is never evidence of denied access.
+  const suffix = randomUUID(), readable = path.join(cwd, `.cuefluent-readable ${suffix}.txt`);
+  const marker = 'CUEFLUENT_CANARY_READABLE'; await writeFile(readable, marker, { flag: 'wx' });
+  const request = command => transport.request('command/exec', { ...command, cwd, permissionProfile, disableTimeout: true, outputBytesCap: 2048 });
+  try {
+    const allowed = await request(macosCanaryCommand('read', readable));
+    requireClient(allowed?.exitCode === 0 && allowed.stdout === marker);
+    const denied = await request(macosCanaryCommand('read', outside));
+    requireClient(denied?.exitCode === 1 && denied.stdout === '');
+    for (const target of [path.join(cwd, '.cuefluent-denied'), path.join(directory, 'write.txt')]) {
+      const result = await request(macosCanaryCommand('write', target));
+      requireClient(result?.exitCode === 1 && result.stdout === '');
+      let absent = false; try { await lstat(target); } catch (error) { if (error.code !== 'ENOENT') throw error; absent = true; } requireClient(absent);
+    }
+    // -q suppresses user curl configuration; no proxy may substitute a failed
+    // remote connection for the exact local listener being tested.
+    const network = await request({ command: ['/usr/bin/curl', '-q', '--noproxy', '*', '--connect-timeout', '2', '--max-time', '3', '-sS', `http://127.0.0.1:${port}/cuefluent-synthetic-canary`] });
+    requireClient(network?.exitCode === 7 && network.stdout === '' && !connected());
+  } finally { await rm(readable, { force: true }); }
+}
+
+async function verifyWindowsSandbox(transport, cwd, outside, directory, port, connected, permissionProfile) {
   const systemRoot = await realpath(process.env.SystemRoot), suffix = randomUUID();
   const readable = path.join(cwd, `.cuefluent-readable & % ${suffix}.txt`), write = path.join(cwd, `.cuefluent-denied & % ${suffix}.txt`), outsideWrite = path.join(directory, 'denied & %.txt');
   const marker = 'CUEFLUENT_CANARY_READABLE'; await writeFile(readable, marker, { flag: 'wx' });
-  const request = command => transport.request('command/exec', { ...command, cwd, permissionProfile: 'cuefluent_processing', disableTimeout: true, outputBytesCap: 2048 });
+  const request = command => transport.request('command/exec', { ...command, cwd, permissionProfile, disableTimeout: true, outputBytesCap: 2048 });
   try {
     const allowed = await request(windowsCanaryCommand(systemRoot, 'read', readable));
     requireClient(allowed?.exitCode === 0 && allowed.stdout === marker);
@@ -42,15 +74,16 @@ async function verifyWindowsSandbox(transport, cwd, outside, directory, port, co
   } finally { await rm(readable, { force: true }); }
 }
 
-export async function verifySandbox(transport, cwd) {
+export async function verifySandbox(transport, cwd, permissionProfile = 'cuefluent_processing') {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'cuefluent-processing-check-')), directory = await realpath(temporary);
   const outside = path.join(directory, 'synthetic-readable.txt'); await writeFile(outside, 'SYNTHETIC CANARY', { mode: 0o600 });
   let connected = false;
   const server = net.createServer(socket => { connected = true; socket.destroy(); });
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-    if (process.platform === 'win32') return await verifyWindowsSandbox(transport, cwd, outside, directory, server.address().port, () => connected);
-    const result = await transport.request('command/exec', { command: [process.execPath, '--openssl-config=/dev/null', '-e', program, outside, path.join(cwd, '.cuefluent-canary'), path.join(directory, 'write.txt'), String(server.address().port)], cwd, permissionProfile: 'cuefluent_processing', disableTimeout: true, outputBytesCap: 2048 });
+    if (process.platform === 'win32') return await verifyWindowsSandbox(transport, cwd, outside, directory, server.address().port, () => connected, permissionProfile);
+    if (process.platform === 'darwin') return await verifyMacosSandbox(transport, cwd, outside, directory, server.address().port, () => connected, permissionProfile);
+    const result = await transport.request('command/exec', { command: [process.execPath, '--openssl-config=/dev/null', '-e', program, outside, path.join(cwd, '.cuefluent-canary'), path.join(directory, 'write.txt'), String(server.address().port)], cwd, permissionProfile, disableTimeout: true, outputBytesCap: 2048 });
     requireClient(result?.exitCode === 0);
     let value; try { value = JSON.parse(result.stdout); } catch { requireClient(false); }
     requireClient(!connected && value.read === true && value.write === true && value.outsideWrite === true && value.network === true);

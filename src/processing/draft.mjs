@@ -41,7 +41,7 @@ async function publishReady(store, owner) {
   });
 }
 
-async function recoverDrafts(store, owner) {
+export async function recoverDrafts(store, owner) {
   const current = await withCurrentAttempt(owner, async ({ run }) => run.artifacts ? inspectDraftArtifacts(store.pin, run.artifacts) : null);
   if (!current) {
     // Only an empty reservation can predate its pointer. Nonempty unknown files
@@ -65,6 +65,26 @@ async function recoverDrafts(store, owner) {
   return null;
 }
 
+export async function persistDraftManifest(store, owner, manifest) {
+  const run = await withCurrentAttempt(owner, ({ run }) => run);
+  if (manifest.runId !== run.id) fail('DRAFT_RUN_CHANGED', 'The draft workspace belongs to a different run.');
+  const metadata = { runId: run.id, outcome: manifest.outcome,
+    drafts: manifest.drafts.map(({ bytes, ...draft }) => ({ ...draft, byteLength: bytes.length })) };
+  await withCurrentAttempt(owner, async context => {
+    let current = context.run, hash = context.hash;
+    if (current.phase !== 'drafting' || current.artifacts) fail('DRAFT_RUN_CHANGED', 'The current draft reservation changed.');
+    await prepareDraftArtifacts(store.pin, `${context.directory}/drafts/${run.id}`, metadata, {
+      persistIntent: async pointer => {
+        current = validateRun({ ...current, artifacts: pointer });
+        hash = (await writeJSON(store.pin, `${context.directory}/run.json`, current, { expectedHash: hash })).hash;
+      },
+    });
+  });
+  for (const draft of manifest.drafts) await withCurrentAttempt(owner, ({ run }) => writeDraftArtifact(store.pin, run.artifacts, draft.id, draft.bytes));
+  await withCurrentAttempt(owner, ({ run }) => completeDraftArtifacts(store.pin, run.artifacts));
+  return publishReady(store, owner);
+}
+
 export async function prepareRunDrafts(store, owner, { client, skillVersion, model, effort = 'high',
   runClient = runDraftingSession, readActivityLog, signal } = {}) {
   const initial = await withCurrentAttempt(owner, ({ run }) => run);
@@ -84,21 +104,7 @@ export async function prepareRunDrafts(store, owner, { client, skillVersion, mod
     if (result?.status !== 'completed') fail('DRAFT_SESSION_INCOMPLETE', 'The native drafting session did not complete.');
     const manifest = await workspace.manifest();
     if (manifest.runId !== run.id) fail('DRAFT_RUN_CHANGED', 'The draft workspace belongs to a different run.');
-    const metadata = { runId: run.id, outcome: manifest.outcome,
-      drafts: manifest.drafts.map(({ bytes, ...draft }) => ({ ...draft, byteLength: bytes.length })) };
-    await withCurrentAttempt(owner, async context => {
-      let current = context.run, hash = context.hash;
-      if (current.phase !== 'drafting' || current.artifacts) fail('DRAFT_RUN_CHANGED', 'The current draft reservation changed.');
-      await prepareDraftArtifacts(store.pin, `${context.directory}/drafts/${run.id}`, metadata, {
-        persistIntent: async pointer => {
-          current = validateRun({ ...current, artifacts: pointer });
-          hash = (await writeJSON(store.pin, `${context.directory}/run.json`, current, { expectedHash: hash })).hash;
-        },
-      });
-    });
-    for (const draft of manifest.drafts) await withCurrentAttempt(owner, ({ run }) => writeDraftArtifact(store.pin, run.artifacts, draft.id, draft.bytes));
-    await withCurrentAttempt(owner, ({ run }) => completeDraftArtifacts(store.pin, run.artifacts));
-    ready = await publishReady(store, owner);
+    ready = await persistDraftManifest(store, owner, manifest);
   } catch (error) {
     failure = error;
   } finally {

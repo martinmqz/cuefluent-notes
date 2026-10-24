@@ -4,7 +4,7 @@ import { bindClaudeCommand, parseAction } from './commands.mjs';
 import { readFrames, writeFrame } from '../processing/draft-protocol.mjs';
 
 // Leave room for both MCP structuredContent and its escaped text projection.
-export const CONTROL_LIMITS = Object.freeze({ requestBytes: 64 * 1024, responseBytes: 256 * 1024, nodes: 10000, depth: 20 });
+export const CONTROL_LIMITS = Object.freeze({ requestBytes: 1024 * 1024, responseBytes: 256 * 1024, nodes: 10000, depth: 20 });
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 const ACTIONS = ['track', 'untrack', 'process', 'process project', 'save', 'skip', 'status'];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -76,13 +76,16 @@ export async function executeClaudeExpansion(envelope, selection, { executeInvoc
 /** No model-supplied path/session/prompt authority. executeInvocation must fence
  * and deduplicate the trusted current prompt durably before executeControl. The
  * bridge deliberately has no process-local receipt cache or command history. */
-export function createControlBridge({ client, selection, codexAdapter, executeInvocation, readInvocation } = {}) {
+export function createControlBridge({ client, selection, codexAdapter, executeInvocation, readInvocation, directNotes } = {}) {
   if (!['claude', 'codex'].includes(client) || (client === 'codex' && (typeof codexAdapter?.bindCommand !== 'function' || typeof executeInvocation !== 'function')) ||
       (client === 'claude' && typeof readInvocation !== 'function')) fail('CONTROL_ADAPTER_INVALID', 'A trusted native control adapter is required.');
   const definition = structuredClone(tool(client));
+  if (directNotes && (typeof directNotes.call !== 'function' || !Array.isArray(directNotes.tools))) fail('CONTROL_ADAPTER_INVALID', 'A trusted direct note handler is required.');
+  const noteTools = structuredClone(directNotes?.tools ?? []);
   const bridge = {
-    tools: Object.freeze([Object.freeze(definition)]),
+    tools: Object.freeze([Object.freeze(definition), ...noteTools.map(Object.freeze)]),
     async call(name, args, { meta } = {}) {
+      if (noteTools.some(item => item.name === name)) return metadata(await directNotes.call(name, args));
       if (name !== definition.name) fail('CONTROL_TOOL_UNKNOWN', 'The control tool is unavailable.');
       if (client === 'claude') { const input = fields(args, ['handle']); return metadata(await readInvocation(handle(input.handle))); }
       const input = fields(args, ['action']), action = parseAction(input.action);

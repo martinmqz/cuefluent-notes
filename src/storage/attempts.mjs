@@ -218,6 +218,47 @@ export async function ownAttempt(store, projectId, { runId, attemptId, workerGat
   }
 }
 
+/** Direct notes run deterministic draft/save work in the calling MCP process.
+ * That actual process owns the same OS worker gate for the entire operation;
+ * no model, background collection, or IPC activation is involved. */
+export async function ownDirectAttempt(store, projectId, runId, work) {
+  identity(runId);
+  if (typeof work !== 'function') fail('ATTEMPT_WORKER_INVALID', 'An owned operation needs work.');
+  const attemptId = randomUUID();
+  let gate, owner, failure, workFinished = false;
+  try {
+    await withProject(store, projectId, async context => {
+      const snapshot = await pending(store, context, runId);
+      if (snapshot.value.scope.kind !== 'direct') fail('DIRECT_NOTE_RUN_REQUIRED', 'This operation only accepts direct note drafts.');
+      const acquired = tryAcquireExistingGate(context.gates.workerGate, gateOptions);
+      if (acquired.busy) fail('ATTEMPT_ACTIVE', 'A worker already owns this project.');
+      gate = acquired.acquired;
+      await writeJSON(store.pin, `${context.directory}/run.json`, replaceAttempt(snapshot.value, attemptId), { expectedHash: snapshot.hash });
+    });
+    owner = Object.freeze({ runId, attemptId, projectId });
+    owners.set(owner, { store, projectId, runId, attemptId, active: true, accepting: true, publications: new Set(), failures: new Set() });
+    const result = await work(owner);
+    workFinished = true;
+    return result;
+  } catch (error) { failure = error; throw error; }
+  finally {
+    if (owner) {
+      const state = owners.get(owner);
+      state.accepting = false;
+      while (state.publications.size) await Promise.allSettled([...state.publications]);
+      state.active = false;
+    }
+    const unattended = workFinished && [...(owners.get(owner)?.failures ?? [])].find(item => !item.observed);
+    failure ??= unattended?.error;
+    try { gate?.release(); }
+    catch (error) {
+      if (failure) { try { Object.defineProperty(failure, 'releaseError', { value: error, configurable: true }); } catch {} }
+      else throw new GateError('GATE_RELEASE_FAILED', 'The direct operation finished but its worker gate release failed.', { cause: error });
+    }
+    if (unattended) throw unattended.error;
+  }
+}
+
 /** Only a live in-process owner capability can publish. Re-read exact run state
  * inside the short project gate; callers must finish every publication there.
  */

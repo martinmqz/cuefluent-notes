@@ -2,6 +2,21 @@
 
 ## Native clients
 
+Direct note creation and updates use ordinary MCP content submission to an
+explicitly selected configured project. They do not require native transcript or
+current-turn binding, enroll a chat, or claim session provenance. The current
+assistant authors the note; the plugin validates, previews or saves it. Each
+request supports one file and up to 64 KiB of submitted UTF-8 content. The complete
+draft, including retained metadata, is limited to 128 KiB. New targets must be absent;
+updates require an existing note's inspected whole-file hash. Direct note reads
+return bounded 8 KiB chunks, with the original hash required on later chunks.
+The agent-supplied content workflow and the writer's platform behavior need native
+desktop acceptance separately from deterministic protocol and filesystem tests.
+Existing published snapshots do not gain new source
+features until a release is installed.
+
+The following native binding requirements apply to tracking and queued processing.
+
 The current adapters target Claude Code 2.1.307 and Codex CLI 0.163.0 native
 contracts. Claude processing accepts stable 2.x releases from 2.1.307 while
 rechecking effective settings, tools and context before delivering source; older,
@@ -11,8 +26,13 @@ A native policy cap that prevents the requested effort returns
 checks do not establish acceptance of every later client release.
 Claude uses direct plugin command expansion plus an exact native
 attachment nonce for copied-history command boundaries. Codex uses native MCP turn
-metadata, the selected skill item, exact thread source metadata and current-turn
-checks. Different session/thread identity shapes remain unsupported until verified.
+metadata, the selected skill item or its exact linked-text history representation,
+exact thread source metadata and current-turn checks. The linked form must occupy
+the entire user message: the installed skill link, one action, and at most one
+terminal newline. Quoted examples, extra prose, annotations and other skill paths
+are rejected. An identical hand-entered whole-message link is also an explicit
+invocation; stored text cannot prove which UI gesture created it.
+Different session/thread identity shapes remain unsupported until verified.
 No newest-file, working-directory or model-supplied identity fallback exists.
 
 Known native bookkeeping is excluded from collection, as are unlisted Claude
@@ -44,14 +64,18 @@ with `node:ffi` enabled (and `--allow-ffi` when using Node's permission model).
 
 macOS native checks cover GPT-6.1 and Claude Opus draft-only sessions and a complete
 private-draft → review → save flow. Native processing verifies an effective floor
-before providing source input: no inherited instructions/hooks/plugins, no general
-shell or network access, and only the explicit draft workspace MCP capability.
+before providing source input: no project instructions, hooks or unrelated
+plugins, no general shell or network access, and only the explicit draft workspace
+MCP capability. Codex retains its configured provider and model, with authentication
+handled by the native client. Native global `AGENTS.md` guidance may remain; it
+cannot change the selected input, destination, draft tools or save authority.
 If that floor cannot be verified, processing fails without releasing source input.
 
 Windows native checks cover Claude Opus and explicitly selected Codex GPT-6 Luna
-processing through private draft, review, exact-byte save and cleanup. GPT-6.1
-remains the default Codex processing model; an explicit supported model selection
-can accommodate host availability. Codex on Windows requires its explicit MXC
+processing through private draft, review, exact-byte save and cleanup. Codex uses
+its configured model unless the trusted host explicitly selects another available
+model or deployment. The provider-preserving Codex transport has native macOS
+coverage; its Windows and Linux acceptance must be repeated. Codex on Windows requires its explicit MXC
 sandbox, a compatible Windows host, and access to the requested model; the native
 filesystem and network floor is checked before source delivery, with no fallback
 to a weaker sandbox. Linux processing and metadata-preservation branches require

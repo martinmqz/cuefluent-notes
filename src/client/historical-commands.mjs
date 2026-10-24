@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { parseAction } from './commands.mjs';
+import { parseAction, codexLinkedAction } from './commands.mjs';
 import { extractNativeFields } from '../transcript/native.mjs';
 import { metaValue as value, inspectNativeRow, rowTokenStream, transcriptLimits, transcriptError, verifyRow } from '../transcript/source.mjs';
 import { nativeId } from '../transcript/checkpoint.mjs';
@@ -32,17 +32,17 @@ function action(input) {
   catch (error) { if (error.code === 'COMMAND_INVALID') return null; throw error; }
 }
 
-async function codexStructure(source, row, textIndex, limits) {
+async function codexStructure(source, row, textIndex, limits, expectedCount = 2) {
   const base = ['payload', 'item', 'content'], elements = [...base, textIndex, 'text_elements'];
   let count = 0, annotated = false;
   for await (const token of rowTokenStream(source, row, limits)) {
     if (begins(token.path, base) && token.path.length === base.length + 1 &&
         ['startObject', 'startArray', 'startString', 'startNumber', 'trueValue', 'falseValue', 'nullValue'].includes(token.name)) {
-      if (token.name !== 'startObject' || ++count > 2) return false;
+      if (token.name !== 'startObject' || ++count > expectedCount) return false;
     }
     if (same(token.path, elements) && !['key', 'startArray', 'endArray'].includes(token.name)) annotated = true;
     if (begins(token.path, elements) && token.path.length > elements.length) annotated = true;
-    if (same(token.path, base) && token.name === 'endArray') return count === 2 && !annotated;
+    if (same(token.path, base) && token.name === 'endArray') return count === expectedCount && !annotated;
   }
   return false;
 }
@@ -70,6 +70,14 @@ export function createHistoricalCommandClassifier({ client, name, skillPath, lim
           value(row, 'payload', 'thread_id') !== sessionId || value(row, 'payload', 'item', 'type') !== 'UserMessage') return null;
       const base = ['payload', 'item', 'content'];
       const types = [0, 1].map(index => value(row, ...base, index, 'type'));
+      if (types[0] === 'text' && types[1] === undefined) {
+        const typed = await text(source, row, [...base, 0, 'text'], skillPath.length + name.length + 160, limits);
+        const selected = codexLinkedAction(typed, name, skillPath);
+        if (selected === null || !(await codexStructure(source, row, 0, limits, 1))) return null;
+        await verify(source, row, limits);
+        return Object.freeze({ promptId: nativeId(value(row, 'payload', 'turn_id')), rowId: nativeId(value(row, 'payload', 'item', 'id')),
+          action: selected, anchors: Object.freeze([Object.freeze({ start: row.start, end: row.end, hash: row.hash })]) });
+      }
       if (types.filter(type => type === 'skill').length !== 1 || types.filter(type => type === 'text').length !== 1) return null;
       const skillIndex = types.indexOf('skill'), textIndex = types.indexOf('text');
       if (value(row, ...base, skillIndex, 'name') !== name || !(await codexStructure(source, row, textIndex, limits))) return null;

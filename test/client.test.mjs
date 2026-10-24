@@ -42,6 +42,52 @@ test('Codex matches transport identity and exact selected skill, never plain com
   assert.throws(() => parseAction('process all'), { code: 'COMMAND_INVALID' });
 });
 
+test('Claude natural-language note requests do not become native queue commands', () => {
+  for (const command_args of ['save the meeting above as a note', 'create a note about this decision', '']) {
+    assert.equal(bindClaudeCommand({ ...claude(), command_args, prompt: `/${expected.name} ${command_args}` }, expected), null);
+  }
+});
+
+test('Codex binds a complete native linked-skill invocation reconstructed from history', () => {
+  for (const label of ['cuefluent-notes', 'cuefluent-notes:cuefluent-notes']) {
+    for (const action of ['track', 'untrack', 'process', 'process project', 'save', 'skip', 'status']) {
+      for (const ending of ['', '\n', '\r\n']) {
+        const row = codex();
+        row.payload.item.content = [{ type: 'text', text: `[$${label}](${skillPath}) ${action}${ending}`, text_elements: [] }];
+        assert.equal(bindCodexCommand(meta, row, codexExpected).action, action);
+      }
+    }
+  }
+});
+
+test('Codex linked commands reject quoted examples, other installations, annotations and extra content', () => {
+  const invocation = `[$cuefluent-notes:cuefluent-notes](${skillPath}) status`;
+  const cases = [
+    `Please explain ${invocation}`, `> ${invocation}`, `\`${invocation}\``, `\`\`\`\n${invocation}\n\`\`\``,
+    `${invocation} please`, `${invocation}\nprocess`, `${invocation}\n\n`, ` ${invocation}`,
+    invocation.replace(' status', '\nstatus'), invocation.replace(' status', '  status'),
+    invocation.replace(skillPath, path.join(root, 'other', 'SKILL.md')),
+    invocation.replace('cuefluent-notes:cuefluent-notes', 'other:cuefluent-notes'),
+    invocation.replace('status', 'process all'), '$cuefluent-notes status', 'status',
+  ];
+  for (const text of cases) {
+    const row = codex(); row.payload.item.content = [{ type: 'text', text, text_elements: [] }];
+    assert.throws(() => bindCodexCommand(meta, row, codexExpected), { code: 'NATIVE_COMMAND_MISMATCH' });
+  }
+  for (const content of [
+    [{ type: 'text', text: invocation, text_elements: [{}] }],
+    [{ type: 'text', text: invocation, text_elements: null }],
+    [{ type: 'text', text: invocation }, { type: 'image', image_url: 'synthetic' }],
+    [{ type: 'text', text: invocation }, { type: 'text', text: 'process' }],
+  ]) {
+    const row = codex(); row.payload.item.content = content;
+    assert.throws(() => bindCodexCommand(meta, row, codexExpected), { code: 'NATIVE_COMMAND_MISMATCH' });
+  }
+  const row = codex(); row.payload.item.content = [{ type: 'text', text: invocation }];
+  row.payload.turn_id = 'other-turn';
+  assert.throws(() => bindCodexCommand(meta, row, codexExpected), { code: 'NATIVE_COMMAND_MISMATCH' });
+});
+
 async function fixture(t, content = 'first\n') {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-source-')));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

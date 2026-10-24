@@ -115,6 +115,44 @@ test('ordinary oversized text is not assembled for historical command checks', a
   assert.equal((await classify([human('control', wrapper('track')), body])).action, 'track');
 });
 
+test('Codex linked command exchanges and their replies stay out of the collected queue', async () => {
+  const classifyCommand = createHistoricalCommandClassifier({ client: 'codex', name: 'cuefluent-notes', skillPath });
+  const user = (id, text) => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: sessionId, turn_id: id,
+    item: { type: 'UserMessage', id: `human:${id}`, content: [typed(text)] } } });
+  const reply = id => ({ type: 'response_item', payload: { type: 'message', id: `answer:${id}`, role: 'assistant', phase: 'final_answer',
+    content: [{ type: 'output_text', text: `Answer ${id}` }] } });
+  const link = `[$cuefluent-notes:cuefluent-notes](${skillPath})`;
+  const rows = [user('meeting', 'Synthetic meeting information'), reply('meeting'),
+    user('process', `${link} process\n`), reply('process'), user('status', `${link} status`), reply('status'),
+    user('quoted', `Please explain ${link} process`), reply('quoted')];
+  const events = [];
+  for await (const event of normalizeTranscript(source(rows), { client: 'codex', sessionId, classifyCommand })) events.push(event);
+  const parts = events.filter(event => event.type === 'part').map(event => event.part);
+  assert.deepEqual(parts.map(part => part.exchangeId), ['human:meeting', 'human:quoted']);
+  assert.equal(parts.flatMap(part => part.segments).some(segment => ['Answer process', 'Answer status'].includes(segment.text)), false);
+  assert.equal(events.at(-1).checkpoint.offset, source(rows).size);
+  const input = source([user('untrack', `${link} untrack`), reply('untrack'), user('later', 'Not yet authorized')]);
+  const stopped = [];
+  for await (const event of normalizeTranscript(input, { client: 'codex', sessionId, classifyCommand })) stopped.push(event);
+  assert.equal(stopped.at(-1).reason, 'TRANSCRIPT_UNTRACK_PENDING');
+  assert.equal(stopped.some(event => event.type === 'part'), false);
+});
+
+test('Codex linked historical exclusion requires exact content, path, identity and no annotations', async () => {
+  const classifyCommand = createHistoricalCommandClassifier({ client: 'codex', name: 'cuefluent-notes', skillPath });
+  const link = `[$cuefluent-notes:cuefluent-notes](${skillPath}) status`;
+  for (const content of [[typed(`> ${link}`)], [typed(link.replace(skillPath, path.resolve('other', 'SKILL.md')))],
+    [typed(link), typed('extra')], [typed(link), 'extra'], [{ ...typed(link), text_elements: [{}] }],
+    [{ ...typed(link), text_elements: null }], [typed(`${link}\nextra`)]] ) {
+    const input = source([codex(content)]), row = await inspectNativeRow(input, 0);
+    assert.equal(await classifyCommand(input, row, { sessionId }), null);
+  }
+  const input = source([codex([typed(link)])]), row = await inspectNativeRow(input, 0);
+  assert.equal(await classifyCommand(input, row, { sessionId: 'other' }), null);
+  input.verify = async () => { throw Object.assign(new Error('Synthetic changed source'), { code: 'SOURCE_CHANGED' }); };
+  await assert.rejects(classifyCommand(input, row, { sessionId }), { code: 'SOURCE_CHANGED' });
+});
+
 
 test('native command selection from an unretained path is pending without granting exclusion authority', async () => {
   const oldDirectory = path.resolve('old-synthetic-skill');

@@ -1,10 +1,33 @@
 # Note authoring and retrieval
 
-Use existing suitable notes before creating new ones. Read the note's current
-content before proposing an update, and retain its inspected whole-file hash.
+For a requested note, the assistant authors complete Markdown from user-authorized
+context, supplied material, or task results. Use `cuefluent_create_note` for a new
+target or `cuefluent_update_note` for an inspected existing note. Native transcript
+files, tracking and queued inputs are unnecessary. The draft workspace below
+describes the separate queued-processing workflow.
+
+Use existing suitable notes before creating new ones. For direct requests,
+`cuefluent_list_notes` browses the configured destination and `cuefluent_read_note`
+returns bounded content chunks with the whole-file hash. Read the complete current
+note before proposing its replacement, use the first hash on later chunks, and
+pass that exact `expectedHash` to `cuefluent_update_note`.
 Updates stay at the same path. Explicit file destinations authorize only that
 file. New directory-routed notes use `meetings/`, `tasks/`, `knowledge-base/`,
 `decisions/`, or the root according to their dominant purpose.
+
+## Direct-note content approval
+
+In review mode, the assistant opens and links a temporary `.md` containing the
+proposed content for approval. The file already uses the final compatible note
+structure, including the topic H1 and useful H2 sections. It omits the Cuefluent
+metadata block, search-alias comments and any added processing wrapper. The
+complete metadata and aliases remain in the retained private draft.
+
+Approval saves that exact draft with the content and structure the user reviewed;
+it does not trigger rewriting or reformatting. The temporary file lives outside
+the repository and notes destination and is only a presentation copy. Changes to
+it require a revised draft and fresh approval. See [commands](commands.md) for
+retry, conflict and temporary-file cleanup behavior.
 
 ## Structure
 
