@@ -53,8 +53,7 @@ test('only the explicit distribution and development guidance paths receive focu
     'plugins/0.17.0/cuefluent-notes/src/cli.mjs', 'claude/0.17.0/cuefluent-notes/src/cli.mjs',
     'packaging/releases/0.17.0/build.json', 'release.json', '.agents/plugins/marketplace.json',
     '.claude-plugin/marketplace.json', 'test/marketplace.test.mjs', 'test/support/marketplace.mjs',
-    '.agents/rules/distribution.md', '.agents/config.yaml', 'AGENTS.md', '.cursor/rules/distribution.mdc',
-    '.github/instructions/distribution.instructions.md', '.github/copilot-instructions.md',
+    '.agents/guide.md', '.agents/config.yaml', 'AGENTS.md', '.github/copilot-instructions.md',
   ];
   await f.commit(Object.fromEntries(files.map(file => [file, 'synthetic distribution bytes\n'])));
   assert.deepEqual(await classify(f), { mode: 'distribution', changedFiles: [...files].sort(), reason: 'DISTRIBUTION_ONLY' });
