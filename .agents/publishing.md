@@ -152,9 +152,14 @@ Required PR checks protect ordinary merges. The separate
 push to `main`, including direct pushes and administrator bypass merges. Its one
 read-only Ubuntu job verifies successful Checks evidence for the exact pushed
 tree using the retained source receipt and one digest-verified primary artifact.
-For distribution-only merges it verifies each merged PR's focused checks and
-first-parent diff, then walks at most ten such commits to the last full-check
-tree. It never substitutes an older green run for a newer failed or pending run.
+A complete valid full artifact set takes precedence over path classification,
+including after a multi-commit rebase merge. Its source receipt still must bind
+the tested and merged trees exactly. Partial, expired or malformed artifacts fail.
+Only artifact-free runs may use distribution ancestry: it verifies each merged
+PR's focused checks and first-parent diff, then walks at most ten such commits
+to the last full-check tree. Every intermediate commit needs its own evidence; a multi-commit rebase of
+an artifact-free PR can require an explicit full Checks dispatch for recovery.
+It never substitutes an older green run for a newer failed or pending run.
 It runs no tests, native clients, or builds. Missing or mismatched evidence fails
 visibly; explicitly run Checks for that commit, then rerun the failed Main evidence
 job. Release preparation independently verifies the tested source against the
@@ -206,13 +211,14 @@ hook-trust changes are part of artifact-producing jobs.
 
 ### Distribution-only changes
 
-A ready PR confined to published snapshots, catalogs, release receipts, the two
-marketplace test files, and development guidance runs `check:guidance` plus
-`test/marketplace.test.mjs` on Linux, macOS, and Windows. It runs no source suite,
+A ready PR targeting `main` and confined to published snapshots, catalogs, release
+receipts, the two marketplace test files, and development guidance runs
+`check:guidance` plus `test/marketplace.test.mjs` on Linux, macOS, and Windows. It runs no source suite,
 native client download, candidate build, or artifact upload. The exact allowlist
 is in `tools/ci-plan.mjs`. Shipped skill/reference files, README, package/lock
 versions, workflow/build tools, `.gitattributes`, and `.gitignore` require full
-checks. Manual dispatch and empty changes also select full checks.
+checks. Other target branches, manual dispatch and empty changes also select full
+checks: evidence reuse is defined only for main history.
 
 All existing required check names remain present. Unneeded secondary shards and
 smoke jobs report why no native work ran on lightweight Ubuntu runners. Their

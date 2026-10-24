@@ -94,12 +94,15 @@ async function eventPlan({ repoRoot = process.cwd(), env = process.env, git } = 
   const event = await readEvent(env.GITHUB_EVENT_PATH), pr = event?.pull_request;
   const number = event?.number;
   requirePlan(Number.isSafeInteger(number) && number > 0 && pr?.number === number &&
-    env.GITHUB_REF === 'refs/pull/' + number + '/merge' && SHA.test(pr?.base?.sha ?? '') && SHA.test(pr?.head?.sha ?? ''), 'PR_CONTEXT_INVALID');
+    env.GITHUB_REF === 'refs/pull/' + number + '/merge' && typeof pr?.base?.ref === 'string' && pr.base.ref.length > 0 &&
+    SHA.test(pr.base.sha ?? '') && SHA.test(pr?.head?.sha ?? ''), 'PR_CONTEXT_INVALID');
   const parents = (await gitText(git, ['show', '-s', '--format=%P', checkout])).trim().split(' ');
   // The event's base SHA can predate the base used for this tested merge. Its
   // first parent supplies that base; the exact checkout and PR head stay bound.
   requirePlan(parents.length === 2 && parents.every(parent => SHA.test(parent)) && parents[1] === pr.head.sha, 'PR_MERGE_MISMATCH');
-  return classifyCIChanges({ repoRoot, baselineRevision: parents[0], revision: checkout, git });
+  const result = await classifyCIChanges({ repoRoot, baselineRevision: parents[0], revision: checkout, git });
+  // Reduced checks reuse verified main history; other targets need full checks.
+  return pr.base.ref === 'main' ? result : { ...result, mode: 'full', reason: 'NON_MAIN_TARGET' };
 }
 
 export async function main(args, options = {}) {

@@ -80,8 +80,12 @@ async function fixture(t) {
       if (sameArgs(args, ['rev-parse', '--verify', `${entry.commit}^{tree}`])) return entry.tree;
       if (sameArgs(args, ['merge-base', '--is-ancestor', entry.commit, 'origin/main'])) return '';
     }
-    if (sameArgs(args, ['rev-parse', '--verify', `${target}^1`])) return base;
+    if (sameArgs(args, ['rev-parse', '--verify', `${target}^1`])) return state.commits[target].parents[0].sha;
     if (sameArgs(args, ['rev-parse', '--verify', `${target}^{tree}`])) return tree;
+    if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2]?.endsWith('^{tree}')) {
+      const commit = args[2].slice(0, -7);
+      if (state.commits[commit]) return state.commits[commit].tree.sha;
+    }
     if (sameArgs(args, ['merge-base', '--is-ancestor', target, 'origin/main'])) {
       if (!state.mainAncestor) throw new Error('Synthetic non-ancestor');
       return '';
@@ -141,6 +145,46 @@ test('main pushes verify one digest-bound primary artifact and reuse the success
   assert.equal(evidence.source.checkoutCommit, checkout);
   assert.match(await fs.readFile(f.options.env.GITHUB_STEP_SUMMARY, 'utf8'), /No platform checks were repeated/);
   assert.ok(f.requests.every(route => !route.includes('/dispatches')));
+});
+
+test('a full run survives a multi-commit rebase merge ending in a distribution-only change', async t => {
+  const f = await fixture(t), intermediate = sha('6');
+  f.state.newWorkflow = true;
+  f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
+  // The last rebased commit points at another commit from this PR, not its base.
+  f.state.commits[target].parents = [{ sha: intermediate }];
+  f.state.commits[intermediate] = { sha: intermediate, tree: { sha: sha('7') }, parents: [{ sha: base }] };
+  const classified = [];
+  f.options.classify = async args => {
+    classified.push(args);
+    assert.equal(args.baselineRevision, intermediate);
+    return { mode: 'distribution', changedFiles: ['.agents/publishing.md'] };
+  };
+  const selected = await selectMainEvidence(f.options);
+  assert.equal(selected.fullTarget.commit, target);
+  assert.deepEqual(selected.distribution, []);
+  await f.download();
+  assert.equal((await verifyMainEvidence(f.options)).source.checkoutTree, tree);
+  assert.deepEqual(classified, [], 'complete full artifacts require exact tree evidence, not a last-commit path inference');
+  f.state.commits[head].tree.sha = sha('8');
+  await assert.rejects(verifyMainEvidence(f.options), reason('EVIDENCE_MISMATCH'));
+});
+
+test('invalid full artifacts never fall back to a distribution hop', async t => {
+  const changes = [
+    state => { state.artifacts.pop(); },
+    state => { state.artifacts[0].expired = true; },
+    state => { state.artifacts[0].digest = 'invalid'; },
+    state => { state.artifacts[0].workflow_run.head_sha = base; },
+  ];
+  for (let index = 0; index < changes.length; index++) await t.test(`invalid artifacts ${index + 1}`, async t => {
+    const f = await fixture(t); f.state.newWorkflow = true;
+    f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
+    changes[index](f.state);
+    f.options.classify = async () => assert.fail('invalid artifacts must fail before distribution classification');
+    await assert.rejects(selectMainEvidence(f.options), error => error.releaseStage === 'artifacts');
+    await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
+  });
 });
 
 for (const branch of ['main', 'v0.16.0', 'v0.16.0-rc.1']) {
@@ -245,6 +289,21 @@ test('safe diagnostics retain the reason without exposing raw response or error 
   await assert.rejects(main(['dispatch']), reason('COMMAND_INVALID'));
 });
 
+test('a workflow read failure reports its cause category without raw Git diagnostics', async t => {
+  const f = await fixture(t), git = f.options.git;
+  f.options.git = args => {
+    if (args[0] === 'show' && args[1]?.endsWith(':.github/workflows/ci.yml')) throw new Error('synthetic private Git stderr');
+    return git(args);
+  };
+  await assert.rejects(selectMainEvidence(f.options), error => {
+    assert.equal(error.reason, 'WORKFLOW_READ_FAILED');
+    assert.match(mainEvidenceErrorMessage(error), /WORKFLOW_READ_FAILED/);
+    assert.doesNotMatch(mainEvidenceErrorMessage(error), /synthetic private Git stderr/);
+    return true;
+  });
+  await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
+});
+
 test('distribution-only main commits retain their focused checks and walk to exact full source evidence', async t => {
   const f = await fixture(t), entry = f.distribute(2);
   const selected = await selectMainEvidence(f.options);
@@ -263,6 +322,20 @@ test('the distribution ancestry walk accepts ten hops and refuses an eleventh', 
   assert.equal((await selectMainEvidence(accepted.options)).distribution.length, 10);
   const rejected = await fixture(t); rejected.distribute(11);
   await assert.rejects(selectMainEvidence(rejected.options), reason('DISTRIBUTION_ANCESTRY_LIMIT'));
+});
+
+test('artifact-free rebase hops cannot skip an intermediate commit with no successful evidence', async t => {
+  const f = await fixture(t), entry = f.distribute(1), intermediate = sha('6'), request = f.options.request;
+  entry.parent = intermediate;
+  f.state.commits[intermediate] = { sha: intermediate, tree: { sha: sha('7') }, parents: [{ sha: target }] };
+  f.options.request = route => {
+    if (route === `${api}/actions/workflows/ci.yml/runs?event=workflow_dispatch&head_sha=${intermediate}&per_page=100&page=1`)
+      return { total_count: 0, workflow_runs: [] };
+    if (route === `${api}/commits/${intermediate}/pulls?per_page=100&page=1`) return [];
+    return request(route);
+  };
+  await assert.rejects(selectMainEvidence(f.options), reason('CHECKS_EVIDENCE_MISSING'));
+  await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
 });
 
 test('distribution evidence cannot waive changed runtime input, missing jobs, unrelated PRs or a failed baseline', async t => {

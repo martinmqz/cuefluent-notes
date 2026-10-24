@@ -43,7 +43,7 @@ async function mergeFixture(t, changedFiles = { '.agents/publishing.md': 'Update
   f.git(['switch', 'main']); const base = await f.commit({ 'src/runtime.mjs': 'export const value = 2;\n' });
   f.git(['merge', '--no-ff', 'feature', '-m', 'Synthetic merge']);
   const merge = f.text(['rev-parse', 'HEAD']), event = {
-    number: 43, pull_request: { number: 43, base: { sha: base }, head: { sha: head } },
+    number: 43, pull_request: { number: 43, base: { ref: 'main', sha: base }, head: { sha: head } },
   };
   const eventFile = path.join(f.root, 'event.json'); await fs.writeFile(eventFile, JSON.stringify(event));
   const env = { GITHUB_SHA: merge, GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/43/merge', GITHUB_EVENT_PATH: eventFile,
@@ -164,7 +164,7 @@ test('plan binds the exact merge checkout, first parent base and second parent P
 
 test('plan and verify use the tested merge parent when the event base SHA is stale', async t => {
   const f = await mergeFixture(t);
-  const event = { ...f.event, pull_request: { ...f.event.pull_request, base: { sha: f.initial } } };
+  const event = { ...f.event, pull_request: { ...f.event.pull_request, base: { ...f.event.pull_request.base, sha: f.initial } } };
   await fs.writeFile(f.eventFile, JSON.stringify(event));
   // The merge includes a newer runtime change from main. Only this PR's
   // guidance change belongs in its diff, even with a stale event snapshot.
@@ -177,12 +177,25 @@ test('plan and verify use the tested merge parent when the event base SHA is sta
   }
 });
 
+test('PRs targeting another branch run full checks even for distribution-only changes', async t => {
+  const f = await mergeFixture(t);
+  f.event.pull_request.base.ref = 'release/next';
+  await fs.writeFile(f.eventFile, JSON.stringify(f.event));
+  for (const command of ['plan', 'verify']) {
+    assert.deepEqual(await main([command], { repoRoot: f.repoRoot, env: { ...f.env, CUEFLUENT_CI_MODE: 'full' } }), {
+      mode: 'full', changedFiles: ['.agents/publishing.md'], reason: 'NON_MAIN_TARGET',
+    });
+  }
+  await assert.rejects(main(['verify'], { repoRoot: f.repoRoot, env: { ...f.env, CUEFLUENT_CI_MODE: 'distribution' } }), planError('PLAN_MODE_MISMATCH'));
+});
+
 test('missing PR identity, mismatched parents and nonmerge checkouts cannot claim distribution', async t => {
   const f = await mergeFixture(t);
   for (const event of [
     { ...f.event, number: null },
     { ...f.event, pull_request: { ...f.event.pull_request, number: 44 } },
     { ...f.event, pull_request: { ...f.event.pull_request, base: { sha: 'invalid' } } },
+    { ...f.event, pull_request: { ...f.event.pull_request, base: { sha: f.base } } },
     { ...f.event, pull_request: { ...f.event.pull_request, head: { sha: f.base } } },
   ]) {
     await fs.writeFile(f.eventFile, JSON.stringify(event));

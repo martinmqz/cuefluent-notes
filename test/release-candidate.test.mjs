@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { selectReleaseCandidate, verifyReleaseCandidate, inspectChecksRun } from '../tools/release-candidate.mjs';
+import { selectReleaseCandidate, verifyReleaseCandidate, inspectChecksRun, releaseErrorMessage } from '../tools/release-candidate.mjs';
 
 const sha = digit => digit.repeat(40), hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const repository = 'example/cuefluent-notes', repositoryId = 12, runId = 42;
@@ -151,9 +151,26 @@ test('distribution runs are admitted only explicitly and cannot supply a release
   f.artifacts.splice(0);
   const c = { repository, repositoryId, runId, api: `/repos/${repository}`, request: f.options.request, now: Date.now };
   assert.deepEqual((await inspectChecksRun(c, { mode: 'distribution' })).artifacts, []);
+  assert.deepEqual((await inspectChecksRun(c, { mode: 'auto' })).artifacts, []);
   await assert.rejects(selectReleaseCandidate(f.options), error => error.releaseStage === 'artifacts');
   f.jobValues.at(-1).conclusion = 'skipped';
   await assert.rejects(inspectChecksRun(c, { mode: 'distribution' }), error => error.releaseStage === 'jobs');
+  await assert.rejects(inspectChecksRun(c, { mode: 'auto' }), error => error.releaseStage === 'jobs');
+});
+
+test('release selection distinguishes workflow read failures without exposing raw Git diagnostics', async t => {
+  const f = await fixture(t), git = f.options.git;
+  f.options.git = args => {
+    if (args[0] === 'show' && args[1]?.endsWith(':.github/workflows/ci.yml')) throw new Error('synthetic private Git stderr');
+    return git(args);
+  };
+  await assert.rejects(selectReleaseCandidate(f.options), error => {
+    assert.equal(error.reason, 'WORKFLOW_READ_FAILED');
+    assert.match(releaseErrorMessage(error), /WORKFLOW_READ_FAILED/);
+    assert.doesNotMatch(releaseErrorMessage(error), /synthetic private Git stderr/);
+    return true;
+  });
+  await assert.rejects(fs.stat(f.releaseRoot), { code: 'ENOENT' });
 });
 const sameArgs = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 

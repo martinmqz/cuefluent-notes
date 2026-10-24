@@ -110,26 +110,21 @@ async function traceEvidence(c, target, expectedSelection) {
       requireEvidence(expected && same(candidate, expected.candidate), 'EVIDENCE_CHANGED');
     }
     const requirePlan = checksRequirePlan(c, cursor.commit);
-    let parent, changes;
-    // Historical full runs and explicit dispatches retain their original exact
-    // tree checks. Only a merged PR using the planner can introduce a cheap hop.
-    if (requirePlan && candidate.event === 'pull_request') {
-      const parentCommit = Buffer.from(c.git(['rev-parse', '--verify', `${cursor.commit}^1`])).toString('utf8').trim();
-      requireEvidence(SHA.test(parentCommit), 'DISTRIBUTION_PARENT_INVALID');
-      changes = await c.classify({ repoRoot: c.repoRoot, baselineRevision: parentCommit, revision: cursor.commit, git: c.git });
-      requireEvidence(['full', 'distribution'].includes(changes?.mode), 'DISTRIBUTION_CLASSIFICATION_INVALID');
-      if (changes.mode === 'distribution') parent = await distributionParent(c, cursor, candidate);
-    }
-    const mode = parent ? 'distribution' : 'full';
-    const run = await inspectChecksRun(runContext, { mode, requirePlan });
+    const allowDistribution = requirePlan && candidate.event === 'pull_request';
+    const run = await inspectChecksRun(runContext, { mode: allowDistribution ? 'auto' : 'full', requirePlan });
     requireEvidence(run.event === candidate.event && run.headSha === candidate.headSha && run.headBranch === candidate.headBranch, 'RUN_SELECTION_CHANGED');
-    if (!parent) {
+    // Full artifacts remain exact-tree evidence even when the last commit of a
+    // rebase-merged PR looks distribution-only. Classify only artifact-free runs.
+    if (run.artifacts.length > 0) {
       const artifact = run.artifacts.find(value => value.name === ARTIFACT_NAMES[0]);
       requireEvidence(positive(artifact?.id), 'PRIMARY_ARTIFACT_MISSING');
       return { fullTarget: cursor, candidate, run, artifact, distribution };
     }
     requireEvidence(distribution.length < 10, 'DISTRIBUTION_ANCESTRY_LIMIT');
-    requireEvidence(Array.isArray(changes.changedFiles) && changes.changedFiles.length > 0, 'DISTRIBUTION_CLASSIFICATION_INVALID');
+    const parent = await distributionParent(c, cursor, candidate);
+    const changes = await c.classify({ repoRoot: c.repoRoot, baselineRevision: parent.commit, revision: cursor.commit, git: c.git });
+    requireEvidence(changes?.mode === 'distribution' && Array.isArray(changes.changedFiles) && changes.changedFiles.length > 0,
+      'DISTRIBUTION_CLASSIFICATION_INVALID');
     distribution.push({ target: cursor, parent, candidate, run, changedFiles: changes.changedFiles });
     cursor = parent;
   }
