@@ -1,12 +1,12 @@
 {
   "name": "cuefluent",
-  "description": "Track selected chats and explicitly process their queued conversation into Markdown notes.",
+  "description": "Create or update Markdown notes from supplied content, or explicitly process tracked Claude and Codex chats.",
   "owner": { "name": "Cuefluent" },
   "plugins": [
     {
       "name": "cuefluent-notes",
-      "description": "Track selected chats and explicitly process their queued conversation into Markdown notes.",
-      "source": "./claude/0.16.0/cuefluent-notes",
+      "description": "Create or update Markdown notes from supplied content, or explicitly process tracked Claude and Codex chats.",
+      "source": "./claude/0.17.0/cuefluent-notes",
       "category": "productivity",
       "license": "SUL-1.0"
     }

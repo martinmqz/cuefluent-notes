@@ -9,7 +9,10 @@ const repo = path.resolve(import.meta.dirname, '..');
 // Add a pin only after independently checking the authorized release asset.
 // Keep earlier pins: every retained snapshot is checked, including 0.15.1.
 const published = {
-  releases: { '0.16.0': 'a6a20b14680d2173cdf9aa79e77fe1309d76e2d528177d4561494744eb515da0' },
+  releases: {
+    '0.16.0': 'a6a20b14680d2173cdf9aa79e77fe1309d76e2d528177d4561494744eb515da0',
+    '0.17.0': '0790b8756f6e424e0cfb83e0dc0e67e68f1496528f88875e6099c51d5b2fddc1',
+  },
   historical: { version: '0.15.1', sha256: 'fb68d21426e23546ec272a6969e8084bd21e4189dcfb22dfdb10a85d7bbd13a4' },
 };
 const json = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
