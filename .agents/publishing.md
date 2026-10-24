@@ -6,7 +6,7 @@ and [setup](../references/setup.md).
 
 ## Source and published artifacts
 
-V2 source is `src/`, the root skill, and the seven installed workflow references.
+The source is `src/`, the root skill, and the seven installed workflow references.
 `packaging/v2/source-files.json` is the explicit runtime input list. Update it when
 adding a runtime module; build checks reject missing relative imports. Client
 descriptors live under `packaging/v2/{codex,claude}/`. Both packages contain one
@@ -21,12 +21,11 @@ reconstruct a historical release using today's source list. Missing historical
 assets may be recovered only when their original trusted checksums match.
 
 Keep real notes, conversation data, private configuration, secrets, credentials,
-and authentication caches outside the checkout. Commit synthetic fixtures only.
-Use ignored `.local/` for repository-owned audits and implementation notes; it
-does not authorize copying private conversations into the repository. Before
-changing repository visibility, inspect history and retained Actions artifacts as
-well as the current tree. Visibility and repository security changes require
-separate authorization.
+and authentication caches outside the checkout. Commit synthetic fixtures only,
+and never copy private conversations into the repository. Before changing
+repository visibility, inspect history and retained Actions artifacts as well
+as the current tree. Visibility and repository security changes are separate
+maintainer actions.
 
 ## Local verification and fresh builds
 
@@ -100,7 +99,7 @@ Its inventory hashes bind every catalog package file, including dependencies.
 The unversioned package folders and root `release.json` retain the 0.15.1 release.
 
 For a catalog update, verify the published archive and receipt digests against
-the authorized release, extract into a fresh temporary directory, and use the
+the published release, extract into a fresh temporary directory, and use the
 verified copy tool above to add new versioned folders. Copy the published receipt
 unchanged under `packaging/releases/VERSION/build.json`. Add its independently
 verified SHA-256 to `published.releases` in `test/marketplace.test.mjs`; preserve
@@ -130,8 +129,7 @@ if staged, extra package files fail the inventory check.
 These offline checks protect the reviewed release pins; they do not query GitHub
 or authenticate a newly added pin. Check each new pin against the published asset
 before committing it. The tests do not install a native plugin, change trust, or
-activate tracking. Keep the catalog update PR in draft until review is requested;
-native registration remains a separate user action.
+activate tracking. Native registration remains a separate user action.
 
 ## CI evidence limits
 
@@ -175,7 +173,7 @@ It never substitutes an older green run for a newer failed or pending run.
 It runs no tests, native clients, or builds. Missing or mismatched evidence fails
 visibly; explicitly run Checks for that commit, then rerun the failed Main evidence
 job. Release preparation independently verifies the tested source against the
-release tag. Manual Checks dispatch remains available when explicitly requested.
+release tag. Manual Checks dispatch remains available.
 Linux and macOS each run one source job; Windows runs four shards on
 independent runners. Per-platform duration weights place the longest Windows
 test files first into the least-loaded shard. Both `npm test` and CI use `tools/test.mjs`
@@ -252,9 +250,9 @@ retain their existing marketplace protections.
 Passing CI establishes the tested synthetic and packaging behavior. It does not
 prove native desktop command rendering, live hook activation, native processing
 isolation on an unaudited platform, reboot recovery, Cuefluent corpus admission,
-or search ranking. Report local checks, current-revision CI results, pending jobs,
-and separate native acceptance evidence distinctly. Product limits belong in
-[verification](../references/verification.md).
+or search ranking. Local checks, current-revision CI results, pending jobs, and
+native acceptance evidence are separate kinds of evidence. Product limits belong
+in [verification](../references/verification.md).
 
 ## Manual release preparation
 
@@ -268,10 +266,10 @@ prerelease versions such as `0.17.0-rc.1` remain supported.
 Once an implementation PR is merged and its Checks and Main evidence succeed:
 
 1. Select that green main commit and its retained full Checks run.
-2. With publication authorization, create the exact version tag on that commit.
+2. Create the exact version tag on that commit.
 3. Dispatch the release preparation workflow below to reuse its tested archives.
-4. Review the candidate and publish the authorized release from those same bytes.
-5. Open a draft marketplace PR using the verified published archives and receipts.
+4. Review the candidate and publish the release from those same bytes.
+5. Open a marketplace PR using the verified published archives and receipts.
    That PR runs the focused distribution checks, then Main evidence on merge.
 
 There is no release-purpose local suite, rebuild, or repeated detached-package
@@ -280,7 +278,7 @@ copying still checks published digests and runs its targeted test locally before
 pushing. A forgotten version bump requires a normal checked change before a new
 tag can be created; existing tags and published packages are never replaced.
 
-Pushing a branch or tag does not publish a v2 release or update a marketplace.
+Pushing a branch or tag does not publish a release or update a marketplace.
 The former release-published marketplace writer is removed. The
 [release preparation workflow](../.github/workflows/release.yml) has only a manual
 `workflow_dispatch` trigger, requires dispatch from `main` and an explicit
@@ -316,18 +314,17 @@ Keep the intended package version in the ordinary implementation PR so its full
 checks already cover the exact release bytes. Tag a commit with full candidate
 artifacts, not a later distribution-only merge.
 
-Verification tools come from the authorized main dispatch checkout. Downloaded
+Verification tools come from the `main` dispatch checkout. Downloaded
 candidate code is never executed. The output preserves the verified archives and
 `build.json`, with a `release-evidence.json` identifying the tag, source run, and
 artifact digests. Repository permissions remain read-only. The workflow creates
 no GitHub release, commit, branch, PR, or marketplace update.
 
-Review those artifacts and native acceptance evidence before requesting a
-separate publication action. Any future publication must be explicitly
-authorized, preserve immutable historical bytes, use reviewed checksums, and keep
-GitHub releases, native marketplace registration, public directory submissions,
-and repository visibility as distinct actions. Create package-update PRs as
-drafts; never merge, mark ready, or bypass repository rules without authorization.
+Publication is a separate maintainer action that follows review of those
+artifacts and native acceptance evidence. It preserves immutable historical
+bytes, uses reviewed checksums, and keeps GitHub releases, native marketplace
+registration, public directory submissions, and repository visibility as
+distinct actions. Merges follow the repository's branch protection.
 
 ## Revisions
 
