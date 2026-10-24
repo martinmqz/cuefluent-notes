@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, toN
 import { pathToFileURL } from 'node:url';
 import { isMainThread } from 'node:worker_threads';
 import { setTimeout as delay } from 'node:timers/promises';
-import { supportsNode } from '../diagnostics.mjs';
+import { supportsNode, NODE_REQUIREMENT } from '../core/runtime.mjs';
 import { assertMacosPrivateAccess } from './macos-acl.mjs';
 import { normalizeFilesystemId } from './stat.mjs';
 
@@ -30,7 +30,7 @@ function fail(code, message, cause) {
 
 function runtime() {
   if (!supportsNode(process.versions.node) || typeof sqlite.Database !== 'function') {
-    fail('GATE_UNSUPPORTED_RUNTIME', 'Gates require Node.js 26.12.1 or a later 26.x release with node:sqlite Database.');
+    fail('GATE_UNSUPPORTED_RUNTIME', `Gates require ${NODE_REQUIREMENT} with node:sqlite Database.`);
   }
   // Worker threads share a process's POSIX locks but not its JavaScript registry.
   if (!isMainThread) fail('GATE_UNSUPPORTED_CONTEXT', 'Gate ownership must run in a main process, not a worker thread.');

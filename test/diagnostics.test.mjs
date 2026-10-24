@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeFailure, supportsNode } from '../src/diagnostics.mjs';
+import { describeFailure, NOTE_TOOL_NAMES } from '../src/diagnostics.mjs';
+import { supportsNode } from '../src/core/runtime.mjs';
+import { ENTRY_COMMANDS } from '../src/core/entry-contract.mjs';
+import { DIRECT_NOTE_TOOLS } from '../src/control/direct-notes.mjs';
 import { selectStoreRoot, parseEntryArguments } from '../src/client/entry-options.mjs';
 import { assertValidNote, assertOrdinaryTarget } from '../src/notes/validate.mjs';
 
@@ -140,5 +143,29 @@ test('verified package refusals guide package repair while preserving user state
     const result = describeFailure({ code }, { stage: 'command', operation: 'mcp' });
     assert.match(result.recovery, /marketplace/); assert.match(result.recovery, /[Pp]reserve private storage and notes/);
     assert.doesNotMatch(result.recovery, /latest status|retrying setup/);
+  }
+});
+
+test('every advertised direct-note tool gets direct-note recovery and a safe tool identity', () => {
+  assert.deepEqual([...NOTE_TOOL_NAMES].sort(), DIRECT_NOTE_TOOLS.map(({ name }) => name).sort());
+  for (const { name } of DIRECT_NOTE_TOOLS) {
+    const result = describeFailure({ code: 'PROJECT_UNCONFIGURED' }, { stage: 'tool', toolName: name });
+    assert.equal(result.diagnostics.toolName, name);
+    assert.match(result.recovery, /Call cuefluent_projects/);
+  }
+  assert.equal(describeFailure({}, { toolName: 'cuefluent_unknown_note' }).diagnostics.toolName, undefined);
+});
+
+test('diagnostic operations follow the same command identities as the entry grammar', () => {
+  const root = '/synthetic/private', handle = Buffer.alloc(64, 1).toString('base64url');
+  const argumentsByCommand = {
+    hook: ['claude'], mcp: ['codex'], setup: ['--config', '/synthetic/setup.json'], settings: [],
+    status: ['--project', 'demo'], 'sync-steward': [root], 'sync-collect': [root, 'codex', 'native'],
+    'command-worker': [root, handle],
+  };
+  assert.deepEqual(Object.keys(argumentsByCommand).sort(), Object.values(ENTRY_COMMANDS).sort());
+  for (const command of Object.values(ENTRY_COMMANDS)) {
+    assert.equal(parseEntryArguments([command, ...argumentsByCommand[command]], { platform: 'linux' }).command, command);
+    assert.equal(describeFailure({}, { operation: command }).diagnostics.operation, command);
   }
 });

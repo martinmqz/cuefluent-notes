@@ -9,6 +9,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
 const entry = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+async function copyBootstrap(src) {
+  await fs.mkdir(path.join(src, 'core'), { recursive: true });
+  for (const file of ['cli.mjs', 'diagnostics.mjs', 'core/entry-contract.mjs', 'core/runtime.mjs']) {
+    await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  }
+}
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-cli-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -24,7 +30,7 @@ async function fixture(t) {
 test('unsupported runtimes report the detected version before importing a missing runtime module', async t => {
   const f = await fixture(t), copy = path.join(f.root, 'incomplete-package'), src = path.join(copy, 'src');
   await fs.mkdir(src, { recursive: true });
-  for (const file of ['cli.mjs', 'diagnostics.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  await copyBootstrap(src);
   const preload = path.join(f.root, 'synthetic runtime # %.mjs');
   for (const version of ['24.22.1', '26.2.0']) {
     await fs.writeFile(preload, `Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(version)} });`);
@@ -46,7 +52,8 @@ test('unsupported runtimes report the detected version before importing a missin
 test('a missing runtime module produces reinstall guidance without dumping its exception path or stack', async t => {
   const f = await fixture(t), src = path.join(f.root, 'synthetic-private-path', 'src');
   await fs.mkdir(path.join(src, 'core'), { recursive: true });
-  for (const file of ['cli.mjs', 'diagnostics.mjs', 'core/errors.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  await copyBootstrap(src);
+  await fs.copyFile(new URL('../src/core/errors.mjs', import.meta.url), path.join(src, 'core/errors.mjs'));
   const result = await f.run(['mcp', 'claude'], '', path.join(src, 'cli.mjs'));
   assert.equal(result.code, 1); assert.equal(result.stdout, '');
   assert.match(result.stderr, /ERR_MODULE_NOT_FOUND/); assert.match(result.stderr, /Reinstall/);
@@ -55,22 +62,27 @@ test('a missing runtime module produces reinstall guidance without dumping its e
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
 });
 
-test('missing diagnostics and error modules still produce private-safe CLI and hook failures', async t => {
+test('missing diagnostic, shared-contract, policy, and error modules retain private-safe failures', async t => {
   const f = await fixture(t), src = path.join(f.root, 'synthetic-private-package', 'src');
-  await fs.mkdir(src, { recursive: true });
-  await fs.copyFile(new URL('../src/cli.mjs', import.meta.url), path.join(src, 'cli.mjs'));
+  await copyBootstrap(src);
   await fs.writeFile(path.join(src, 'runtime-entry.mjs'), "import { fail } from './core/errors.mjs'; export function main() { fail('UNREACHABLE', 'Unreachable'); }\n");
-  for (const [missing, code] of [['diagnostics', 'CUEFLUENT_BOOTSTRAP_FAILED'], ['errors', 'ERR_MODULE_NOT_FOUND']]) {
-    if (missing === 'errors') await fs.copyFile(new URL('../src/diagnostics.mjs', import.meta.url), path.join(src, 'diagnostics.mjs'));
-    for (const command of ['mcp', 'hook']) {
+  for (const missing of ['diagnostics.mjs', 'core/entry-contract.mjs', 'core/runtime.mjs', 'core/errors.mjs']) {
+    const removed = missing === 'core/errors.mjs' ? null : await fs.readFile(path.join(src, missing));
+    if (removed) await fs.rm(path.join(src, missing));
+    for (const command of ['mcp', 'hook', 'settings', 'synthetic-private-argv']) {
       const result = await f.run([command, 'claude'], '{}', path.join(src, 'cli.mjs'));
       assert.equal(result.code, command === 'hook' ? 0 : 1);
       const message = command === 'hook' ? JSON.parse(result.stdout).systemMessage : result.stderr;
       assert.equal(command === 'hook' ? result.stderr : result.stdout, '');
-      assert.ok(message.includes(code)); assert.match(message, /Reinstall/);
-      assert.equal(JSON.parse(message.split('Diagnostics: ')[1]).stage, 'module-load');
-      assert.doesNotMatch(message, /synthetic-private-package|node:internal|Unreachable/);
+      assert.ok(message.includes(missing === 'core/errors.mjs' ? 'ERR_MODULE_NOT_FOUND' : 'CUEFLUENT_BOOTSTRAP_FAILED'));
+      assert.match(message, /Reinstall/);
+      const details = JSON.parse(message.split('Diagnostics: ')[1]);
+      assert.equal(details.stage, 'module-load');
+      if (missing === 'core/entry-contract.mjs' || command === 'synthetic-private-argv') assert.equal(details.operation, undefined);
+      else assert.equal(details.operation, command);
+      assert.doesNotMatch(message, /synthetic-private-package|synthetic-private-argv|node:internal|Unreachable/);
     }
+    if (removed) await fs.writeFile(path.join(src, missing), removed);
   }
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
 });
@@ -214,7 +226,7 @@ test('symlink-spelled CLI entry still executes read-only settings without creati
 test('the older-Node entry fallback recognizes preserved main symlinks and leaves imports inert', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t), src = path.join(f.root, 'package', 'src'), preload = path.join(f.root, 'older-entry.mjs');
   await fs.mkdir(src, { recursive: true });
-  for (const file of ['cli.mjs', 'diagnostics.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  await copyBootstrap(src);
   const alias = path.join(src, 'alias.mjs'), runner = path.join(f.root, 'import-only.mjs');
   await fs.symlink(path.join(src, 'cli.mjs'), alias);
   await fs.writeFile(preload, `import { registerHooks } from 'node:module';
@@ -233,6 +245,38 @@ test('the older-Node entry fallback recognizes preserved main symlinks and leave
   assert.deepEqual(await f.run(['settings'], '', runner, nodeArgs), { code: 0, stdout: 'function', stderr: '' });
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
 });
+test('older-Node entry comparison folds UNC host casing without conflating different paths', async t => {
+  const f = await fixture(t), src = path.join(f.root, 'unc-package', 'src'), preload = path.join(f.root, 'unc-entry.mjs');
+  await copyBootstrap(src);
+  const cli = path.join(src, 'cli.mjs'), cliUrl = pathToFileURL(cli).href;
+  // Simulate Node's UNC URL/realpath representations without requiring a live
+  // Windows network share. Native Windows filesystem access is not claimed.
+  for (const moduleUrl of ['file://server/share/cli.mjs', 'file://server/share/other.mjs']) {
+    await fs.writeFile(preload, `import fs from 'node:fs'; import url from 'node:url';
+      import { registerHooks, syncBuiltinESMExports } from 'node:module';
+      const realpath = fs.realpathSync, toPath = url.fileURLToPath, toUrl = url.pathToFileURL;
+      fs.realpathSync = value => typeof value === 'string' && value.startsWith('\\\\\\\\') ? value : realpath(value);
+      url.fileURLToPath = value => String(value).startsWith('file://server/') ? toPath(value, { windows: true }) : toPath(value);
+      url.pathToFileURL = value => value.startsWith('\\\\\\\\') ? toUrl(value, { windows: true }) : toUrl(value);
+      syncBuiltinESMExports();
+      Object.defineProperty(process.versions, 'node', { value: '24.22.1' });
+      registerHooks({ load(url, context, nextLoad) {
+        const result = nextLoad(url, context);
+        if (url !== ${JSON.stringify(cliUrl)}) return result;
+        return { ...result, source: String(result.source)
+          .replaceAll('import.meta.main', 'undefined')
+          .replaceAll('import.meta.url', ${JSON.stringify(JSON.stringify(moduleUrl))})
+          .replaceAll('process.argv[1]', ${JSON.stringify(JSON.stringify('\\\\SERVER\\share\\cli.mjs'))}) };
+      } });`);
+    const result = await f.run(['settings'], '', cli, ['--import', pathToFileURL(preload).href]);
+    if (moduleUrl.endsWith('/cli.mjs')) {
+      assert.equal(result.code, 1); assert.equal(result.stdout, '');
+      assert.match(result.stderr, /NODE_VERSION_UNSUPPORTED/);
+    } else assert.deepEqual(result, { code: 0, stdout: '', stderr: '' });
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
 test('CLI explicit setup creates fresh manual/review settings and requires the inspected hash for later changes', async t => {
   const f = await fixture(t), configPath = path.join(f.root, 'setup.json');
   const request = { expectedHash: null, project: { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes } } };

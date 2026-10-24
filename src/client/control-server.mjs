@@ -82,12 +82,19 @@ export function presentControlResult(value, context = {}, { bounded = true } = {
   const warnings = [];
   for (const [scope, item] of [['status', result], ['run', result.run], ['latest', result.latest], ['result', result.result]]) {
     if (!object(item) || !Array.isArray(item.warnings)) continue;
-    for (const code of new Set(item.warnings.filter(isCode))) warnings.push({ scope, code });
+    const historical = ['saved', 'nothing-useful', 'skipped', 'empty'].includes(item.status ?? item.state);
+    for (const code of new Set(item.warnings.filter(isCode))) warnings.push({ scope, code, historical });
   }
   if (!warnings.length) return result;
   const details = [];
-  for (const { scope, code } of warnings.slice(0, 16)) {
-    details.push({ scope, ...describeFailure({ code }, diagnosticContext) });
+  for (const { scope, code, historical } of warnings.slice(0, 16)) {
+    const detail = { scope, ...describeFailure({ code }, diagnosticContext) };
+    if (historical) {
+      detail.historical = true;
+      detail.message = `Warning recorded during this completed run: ${detail.message}`;
+      detail.recovery = 'This run has finished. Do not retry it because of this warning. Inspect the recorded outcome and any remaining queued work before starting a new operation.';
+    }
+    details.push(detail);
     try {
       result = projection({ ...result, warningDetails: [...details], warningDetailsTruncated: details.length < warnings.length });
     } catch (error) {

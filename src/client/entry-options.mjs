@@ -3,6 +3,7 @@ import os from 'node:os';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { fail } from '../core/errors.mjs';
+import { ENTRY_COMMANDS as COMMAND } from '../core/entry-contract.mjs';
 import { pinDirectory, assertDirectory, inspectParent, assertChain, fileIdentity, sameIdentity, lstatOrNull } from '../storage/paths.mjs';
 import { readHandleStat } from '../storage/stat.mjs';
 
@@ -32,15 +33,15 @@ function invocationHandle(value) {
 export function parseEntryArguments(argv, { platform = process.platform } = {}) {
   if (!Array.isArray(argv) || argv.length > 8 || argv.some(value => typeof value !== 'string' || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value))) invalid();
   const [command, ...args] = argv; let result;
-  if (['hook', 'mcp'].includes(command) && args.length === 1) result = { command, client: client(args[0]) };
-  else if (command === 'setup' && args.length === 2 && args[0] === '--config') result = { command, configPath: absolute(args[1], platform) };
-  else if (command === 'settings' && args.length === 0) result = { command };
-  else if (command === 'status' && args.length === 2 && args[0] === '--project') {
+  if ([COMMAND.hook, COMMAND.mcp].includes(command) && args.length === 1) result = { command, client: client(args[0]) };
+  else if (command === COMMAND.setup && args.length === 2 && args[0] === '--config') result = { command, configPath: absolute(args[1], platform) };
+  else if (command === COMMAND.settings && args.length === 0) result = { command };
+  else if (command === COMMAND.status && args.length === 2 && args[0] === '--project') {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(args[1])) invalid();
     result = { command, projectId: args[1] };
-  } else if (command === 'sync-steward' && args.length === 1) result = { command, storeRoot: absolute(args[0], platform) };
-  else if (command === 'sync-collect' && args.length === 3) result = { command, storeRoot: absolute(args[0], platform), client: client(args[1]), sessionId: token(args[2]) };
-  else if (command === 'command-worker' && args.length === 2) result = { command, storeRoot: absolute(args[0], platform), handle: invocationHandle(args[1]) };
+  } else if (command === COMMAND.syncSteward && args.length === 1) result = { command, storeRoot: absolute(args[0], platform) };
+  else if (command === COMMAND.syncCollect && args.length === 3) result = { command, storeRoot: absolute(args[0], platform), client: client(args[1]), sessionId: token(args[2]) };
+  else if (command === COMMAND.commandWorker && args.length === 2) result = { command, storeRoot: absolute(args[0], platform), handle: invocationHandle(args[1]) };
   else invalid();
   return Object.freeze(result);
 }

@@ -1,11 +1,14 @@
 // Public diagnostics use fixed explanations, never exception messages, stacks,
 // tool arguments, environment values, or paths taken from a caught exception.
+import { entryOperation } from './core/entry-contract.mjs';
+import { NODE_REQUIREMENT } from './core/runtime.mjs';
+
 const GUIDANCE = {
-  NODE_VERSION_UNSUPPORTED: ['This Node.js version cannot run Cuefluent Notes. Node 26.12.1 or a later 26.x release is required.',
+  NODE_VERSION_UNSUPPORTED: [`This Node.js version cannot run Cuefluent Notes. ${NODE_REQUIREMENT} is required.`,
     'Install a supported Node version and make the client use it for both the connector and hooks, then restart the client. A terminal may use a different Node executable.'],
   ERR_MODULE_NOT_FOUND: ['A required plugin module or dependency could not be loaded.', 'Reinstall the plugin through its marketplace. Check the installed package path and the Node runtime shown below.'],
   MODULE_NOT_FOUND: ['A required plugin module or dependency could not be loaded.', 'Reinstall the plugin through its marketplace. Check the installed package path and the Node runtime shown below.'],
-  ERR_UNKNOWN_BUILTIN_MODULE: ['This Node runtime is missing a built-in module required by the plugin.', 'Use a supported Node 26.12.1 or later 26.x installation and restart the client.'],
+  ERR_UNKNOWN_BUILTIN_MODULE: ['This Node runtime is missing a built-in module required by the plugin.', `Use ${NODE_REQUIREMENT} and restart the client.`],
   PACKAGE_INVALID: ['The installed plugin has an invalid package identity or version.', 'Reinstall the plugin through its marketplace; do not edit its version or published files manually.'],
   CLIENT_PACKAGE_INVALID: ['The installed plugin package is incomplete or could not be verified safely.', 'Reinstall the plugin through its marketplace and restart the client. Preserve private storage and notes; do not edit installed package files to bypass verification.'],
   CLIENT_PACKAGE_CHANGED: ['The installed plugin package changed while it was being verified.', 'Finish any plugin upgrade and restart the client. If verification still fails, reinstall through the marketplace; preserve private storage and notes.'],
@@ -13,7 +16,7 @@ const GUIDANCE = {
   EACCES: ['The operating system denied access to a required resource.', 'Check access to the configured paths under your account. Preserve existing permissions and share this diagnostic if the cause is unclear.'],
   EPERM: ['The operating system refused a required operation.', 'Check the client sandbox and access to the configured paths. Preserve security protections and share this diagnostic if the cause is unclear.'],
   PRIVATE_ACCESS_UNVERIFIED: ['Cuefluent could not verify that its private storage is accessible only to your account.', 'Use supported local storage and a supported Node runtime. On macOS, check that Node FFI is available and permitted; do not remove ACLs to bypass verification.'],
-  GATE_UNSUPPORTED_RUNTIME: ['The runtime lacks the locking support required for safe note operations.', 'Use a supported Node 26.12.1 or later 26.x installation and restart the client.'],
+  GATE_UNSUPPORTED_RUNTIME: ['The runtime lacks the locking support required for safe note operations.', `Use ${NODE_REQUIREMENT} and restart the client.`],
   SETTINGS_CONFLICT: ['Cuefluent settings changed after they were inspected.', 'Read the current settings and reconcile the intended operation before retrying. Preserve pending work and its recorded destination.'],
   PROJECT_UNCONFIGURED: ['The requested project ID is not in the current Cuefluent configuration.', 'Read the configured projects and use the exact existing project ID for the intended destination. Set up a project only if that destination is not configured.'],
   SETUP_ARGUMENT: ['The setup proposal has missing or invalid fields.', 'Check the setup reference and provide the complete agreed project settings plus the inspected settingsHash as expectedHash. Use null only for fresh settings; preserve existing settings and pending work.'],
@@ -62,8 +65,9 @@ const GUIDANCE = {
   CONTROL_REQUEST_LIMIT: ['The connector received too many pending requests and closed the connection.', 'Reconnect the client and send fewer concurrent requests. After reconnecting, inspect retained work and the latest outcome before retrying a mutation.'],
 };
 const DEFAULT = ['Cuefluent could not complete this operation.', 'Keep existing notes and pending work unchanged. Report the error code and diagnostic details to investigate the failure before retrying.'];
-const NOTE_TOOLS = new Set(['cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note',
+export const NOTE_TOOL_NAMES = Object.freeze(['cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note',
   'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note']);
+const NOTE_TOOLS = new Set(NOTE_TOOL_NAMES);
 const TOOL_NAMES = new Set(['cuefluent_control', 'cuefluent_invocation', ...NOTE_TOOLS]);
 const data = (value, key) => value !== null && (typeof value === 'object' || typeof value === 'function') ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
 const codeOf = value => { const code = data(value, 'code'); return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(code) ? code : null; };
@@ -89,17 +93,11 @@ function guidance(code, { stage, operation, toolName }) {
   return base;
 }
 
-export function supportsNode(version) {
-  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) return false;
-  const [major, minor, patch] = version.split('.').map(Number);
-  return major === 26 && (minor > 12 || minor === 12 && patch >= 1);
-}
-
 export function describeFailure(error, { fallback = 'CUEFLUENT_FAILED', stage, operation, toolName, client, version } = {}) {
   const code = codeOf(error) ?? codeOf({ code: fallback }) ?? 'CUEFLUENT_FAILED';
   const diagnostics = { nodeVersion: process.versions.node, platform: process.platform, arch: process.arch };
   if (['runtime-check', 'module-load', 'command', 'transport', 'tool', 'result'].includes(stage)) diagnostics.stage = stage;
-  if (['mcp', 'hook', 'setup', 'settings', 'status', 'sync-steward', 'sync-collect', 'command-worker'].includes(operation)) diagnostics.operation = operation;
+  if (entryOperation(operation)) diagnostics.operation = operation;
   if (TOOL_NAMES.has(toolName)) diagnostics.toolName = toolName;
   const [message, recovery] = guidance(code, diagnostics);
   if (['claude', 'codex'].includes(client)) diagnostics.client = client;

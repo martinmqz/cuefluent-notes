@@ -18,6 +18,8 @@ MCP error flag when read. Stored outcomes remain unchanged. Status and processin
 results may include `warningDetails`, with fixed explanations for code-only
 warnings and a scope of `status`, `run`, `latest` or `result`. These details identify
 where the warning belongs; they do not turn a successful status read into an error.
+Warnings belonging to completed outcomes are marked `historical` and do not advise
+retrying finished work. A newer pending run keeps its own recovery guidance.
 At most 16 details are returned, within the response size bound. Additional details
 can be omitted when space is exhausted; the original warnings remain intact.
 

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createControlBridge, presentControlResult, CONTROL_LIMITS } from '../src/client/control-server.mjs';
 import { createProject } from '../src/core/settings.mjs';
 import { createRun, replaceAttempt, publishDrafts, readyForReview } from '../src/core/run.mjs';
+import { validateResult } from '../src/core/result.mjs';
 
 async function protocol(bridge) {
   const call = bridge.protocol({ version: '0.17.1' });
@@ -36,7 +37,7 @@ test('both command transports explain retained failures and flag the failed comm
 });
 
 test('status explains scoped processing warnings without marking historical failures as new errors', async () => {
-  const retained = { state: 'idle', warnings: [], latest: { warnings: ['PROCESSING_CLIENT_FAILED'] }, run: null };
+  const retained = { state: 'idle', warnings: [], latest: { status: 'saved', warnings: ['PROCESSING_CLIENT_FAILED'] }, run: null };
   const call = await protocol(createControlBridge({ client: 'claude', readInvocation: async () => retained }));
   const response = await call(message('cuefluent_invocation', { handle: 'a'.repeat(86) }));
   assert.equal(response.result.isError, false);
@@ -44,10 +45,54 @@ test('status explains scoped processing warnings without marking historical fail
   assert.equal(value.state, 'idle'); assert.equal(value.error, undefined);
   assert.deepEqual(value.latest, retained.latest); assert.equal(retained.warningDetails, undefined);
   assert.equal(value.warningDetails[0].scope, 'latest'); assert.equal(value.warningDetails[0].error, 'PROCESSING_CLIENT_FAILED');
+  assert.equal(value.warningDetails[0].historical, true);
   assert.equal(value.warningDetailsTruncated, false);
   const current = presentControlResult({ state: 'interrupted', warnings: [], run: { warnings: ['PROCESSING_ISOLATION_UNSUPPORTED'] } });
   assert.equal(current.warningDetails[0].scope, 'run'); assert.match(current.warningDetails[0].recovery, /do not weaken isolation/);
   assert.equal(current.error, undefined);
+});
+
+test('completed outcomes carry historical advice while a newer pending run retains its own recovery', async () => {
+  for (const status of ['saved', 'nothing-useful', 'skipped', 'empty']) {
+    const warnings = ['PROCESSING_CLIENT_FAILED', 'PROCESSING_ISOLATION_UNSUPPORTED'];
+    const outcome = validateResult({ schemaVersion: 1, runId: randomUUID(), projectId: 'synthetic', status,
+      paths: status === 'saved' ? [path.join(os.tmpdir(), 'synthetic-note.md')] : [],
+      counts: { handled: 1, saved: status === 'saved' ? 1 : 0, remaining: 3 }, warnings });
+    const current = { warnings: ['PROCESSING_CLIENT_FAILED'], phase: 'drafting' };
+    const snapshots = [
+      [{ state: status, result: outcome }, 'result'],
+      [{ state: 'interrupted', run: current, latest: outcome }, 'latest'],
+      [{ ...outcome, state: status }, 'status'],
+    ];
+    for (const [retained, scope] of snapshots) {
+      const before = JSON.stringify(retained);
+      const bridges = [
+        [createControlBridge({ client: 'claude', readInvocation: async () => retained }), 'cuefluent_invocation', { handle: 'a'.repeat(86) }],
+        [createControlBridge({ client: 'codex', codexAdapter: { bindCommand: async () => ({ status: 'ready', binding: { client: 'codex', action: 'status' } }) },
+          executeInvocation: async () => retained }), 'cuefluent_control', { action: 'status' }],
+      ];
+      for (const [bridge, name, args] of bridges) {
+        const response = await (await protocol(bridge))(message(name, args));
+        assert.equal(response.result.isError, false);
+        const value = response.result.structuredContent;
+        const historical = value.warningDetails.filter(detail => detail.scope === scope);
+        assert.equal(historical.length, warnings.length);
+        for (const detail of historical) {
+          assert.equal(detail.historical, true);
+          assert.match(detail.message, /completed run/);
+          assert.match(detail.recovery, /Do not retry it/);
+          assert.doesNotMatch(detail.recovery, /retained run|pending drafts|sign-in/);
+        }
+        if (scope === 'latest') {
+          const pending = value.warningDetails.find(detail => detail.scope === 'run');
+          assert.equal(pending.historical, undefined);
+          assert.match(pending.recovery, /Inspect the retained run before retrying/);
+        }
+        assert.deepEqual(JSON.parse(response.result.content[0].text), value);
+        assert.equal(JSON.stringify(retained), before);
+      }
+    }
+  }
 });
 
 test('result guidance stays bounded and expands only code-only warnings in known metadata slots', () => {
