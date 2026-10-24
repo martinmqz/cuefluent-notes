@@ -286,6 +286,9 @@ test('safe diagnostics retain the reason without exposing raw response or error 
   assert.match(message, /HTTP_403/); assert.match(message, /Run Checks for this exact main commit/);
   assert.doesNotMatch(message, /private server body/);
   assert.doesNotMatch(mainEvidenceErrorMessage({ reason: 'injected\ntext', message: 'private' }), /injected|private/);
+  const baseMessage = mainEvidenceErrorMessage({ reason: 'CHECKS_EVIDENCE_MISSING' }, { base: true });
+  assert.match(baseMessage, /PR base evidence.*PR's base.*PR's failed Checks job/);
+  assert.doesNotMatch(baseMessage, /rerun Main evidence/);
   await assert.rejects(main(['dispatch']), reason('COMMAND_INVALID'));
 });
 
@@ -305,7 +308,9 @@ test('a workflow read failure reports its cause category without raw Git diagnos
 });
 
 test('distribution-only main commits retain their focused checks and walk to exact full source evidence', async t => {
-  const f = await fixture(t), entry = f.distribute(2);
+  const f = await fixture(t); f.state.newWorkflow = true;
+  f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
+  const entry = f.distribute(2);
   const selected = await selectMainEvidence(f.options);
   assert.equal(selected.target.commit, entry.commit);
   assert.equal(selected.fullTarget.commit, target);
@@ -315,6 +320,19 @@ test('distribution-only main commits retain their focused checks and walk to exa
   const evidence = await verifyMainEvidence(f.options);
   assert.equal(evidence.source.checkoutCommit, checkout);
   assert.match(await fs.readFile(f.options.env.GITHUB_STEP_SUMMARY, 'utf8'), /runtime unchanged since.*2 distribution-only commits/);
+  assert.equal(f.requests.filter(route => route === `${api}/actions/workflows/ci.yml`).length, 2, 'one workflow fetch per trace');
+  assert.equal(f.requests.filter(route => route === `${api}/actions/runs/${entry.run.id}`).length, 2, 'verification must refresh mutable runs');
+});
+
+test('large distribution changes keep the selection bounded and retain exact file counts', async t => {
+  const f = await fixture(t); f.distribute(9);
+  const classify = f.options.classify, changedFiles = Array.from({ length: 1409 }, (_, index) => `.agents/${index}-${'x'.repeat(80)}.md`);
+  f.options.classify = async args => ({ ...await classify(args), changedFiles });
+  const selected = await selectMainEvidence(f.options);
+  assert.ok(selected.distribution.every(hop => hop.changedFileCount === 1409 && !Object.hasOwn(hop, 'changedFiles')));
+  assert.ok((await fs.stat(path.join(f.root, 'selection.json'))).size < 64 * 1024);
+  await f.download(); await verifyMainEvidence(f.options);
+  assert.match(await fs.readFile(f.options.env.GITHUB_STEP_SUMMARY, 'utf8'), /12681 changed files/);
 });
 
 test('the distribution ancestry walk accepts ten hops and refuses an eleventh', async t => {
@@ -322,6 +340,21 @@ test('the distribution ancestry walk accepts ten hops and refuses an eleventh', 
   assert.equal((await selectMainEvidence(accepted.options)).distribution.length, 10);
   const rejected = await fixture(t); rejected.distribute(11);
   await assert.rejects(selectMainEvidence(rejected.options), reason('DISTRIBUTION_ANCESTRY_LIMIT'));
+});
+
+test('the PR gate reserves one distribution hop for its pending merge', async t => {
+  for (const count of [9, 10]) await t.test(`${count} existing hops`, async t => {
+    const f = await fixture(t), entry = f.distribute(count), merge = sha('8');
+    Object.assign(f.options.env, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/91/merge', GITHUB_SHA: merge });
+    Object.assign(f.state, { checkedOut: merge, mergeParents: [entry.commit, sha('7')] });
+    if (count === 10) {
+      await assert.rejects(main(['select-base'], f.options), reason('DISTRIBUTION_ANCESTRY_LIMIT'));
+      await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
+    } else {
+      assert.equal((await main(['select-base'], f.options)).distribution.length, 9);
+      await f.download(); await main(['verify-base'], f.options);
+    }
+  });
 });
 
 test('artifact-free rebase hops cannot skip an intermediate commit with no successful evidence', async t => {
@@ -361,6 +394,18 @@ test('an updated distribution run invalidates a previously selected chain', asyn
   const f = await fixture(t), entry = f.distribute(1); await selectMainEvidence(f.options); await f.download();
   entry.runs.push({ ...entry.run, id: 9000, created_at: '2026-10-23T01:00:00Z' });
   await assert.rejects(verifyMainEvidence(f.options), reason('EVIDENCE_CHANGED'));
+});
+
+test('verification refreshes distribution PR and head-tree facts after selection', async t => {
+  for (const kind of ['pr', 'head-tree']) await t.test(kind, async t => {
+    const f = await fixture(t), entry = f.distribute(1);
+    await selectMainEvidence(f.options); await f.download();
+    if (kind === 'pr') entry.pr.merged = false;
+    else f.state.commits[entry.head].tree.sha = sha('f');
+    await assert.rejects(verifyMainEvidence(f.options), reason(kind === 'pr' ? 'DISTRIBUTION_PR_INVALID' : 'DISTRIBUTION_TREE_MISMATCH'));
+    assert.equal(f.requests.filter(route => route === `${api}/pulls/${entry.pr.number}`).length, 2);
+    assert.equal(f.requests.filter(route => route === `${api}/git/commits/${entry.head}`).length, 2);
+  });
 });
 
 test('new full workflows cannot omit their plan job while legacy full runs remain eligible', async t => {

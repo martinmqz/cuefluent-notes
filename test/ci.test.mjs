@@ -9,6 +9,7 @@ import { runInNewContext } from 'node:vm';
 import { verifyBuildArchives, compareBuilds, ARTIFACT_NAMES } from '../tools/ci.mjs';
 import { EXPECTED_CHECK_JOBS } from '../tools/release-candidate.mjs';
 import { packageSource } from './fixtures/package-source.mjs';
+import { createGitRunner } from '../tools/git.mjs';
 import YAML from 'yaml';
 
 const exec = promisify(execFile);
@@ -16,6 +17,12 @@ const checks = async () => YAML.parse(await fs.readFile(path.resolve(import.meta
 
 test('native shards and client smoke run in parallel after classification and retain required names', async () => {
   const workflow = await checks(), { plan, guidance, test: source, 'client-smoke': smoke, reproducibility } = workflow.jobs;
+  const checkout = plan.steps.find(step => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, '${{ github.sha }}');
+  assert.equal(checkout.with['fetch-depth'], 2);
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(reproducibility.permissions, { contents: 'read', actions: 'read', 'pull-requests': 'read' });
+  for (const job of [plan, guidance, source, smoke]) assert.equal(job.permissions, undefined);
   for (const job of [plan, guidance]) assert.equal(job.needs, undefined);
   for (const job of [source, smoke]) assert.equal(job.needs, 'plan');
   for (const job of [source, smoke]) {
@@ -92,7 +99,7 @@ test('distribution mode tests marketplaces on all three OSes without suites, bui
   for (const row of source.strategy.matrix.include) {
     const active = source.steps.filter(step => enabled(step, 'distribution', row));
     assert.equal(active.filter(step => step.run === 'node --test test/marketplace.test.mjs').length, row.primary ? 1 : 0);
-    assert(!active.some(step => /tools\/(?:test|ci)\.mjs/.test(step.run ?? '')));
+    assert(!active.some(step => /tools\/(?:test|ci)\.mjs|npm ci/.test(step.run ?? '')));
     assert(!active.some(step => step.uses?.startsWith('actions/upload-artifact@')));
     const platform = runInNewContext(source['runs-on'].slice(3, -2), { needs: { plan: { outputs: { mode: 'distribution' } } }, matrix: row });
     assert.equal(platform, row.primary ? row.os : 'ubuntu-24.04');
@@ -107,11 +114,12 @@ test('distribution mode tests marketplaces on all three OSes without suites, bui
 
 test('distribution gate rederives its class and requires digest-verified evidence for the actual PR base', async () => {
   const workflow = await checks(), gate = workflow.jobs.reproducibility;
-  const steps = gate.steps, verifyClass = steps.findIndex(step => step.run === 'node tools/ci-plan.mjs verify');
+  const steps = gate.steps, verifyClass = steps.findIndex(step => step.env?.CUEFLUENT_CI_ACTION === 'verify');
   const select = steps.findIndex(step => step.run === 'node tools/main-evidence.mjs select-base');
   const verify = steps.findIndex(step => step.run === 'node tools/main-evidence.mjs verify-base');
   assert(verifyClass >= 0 && select > verifyClass && verify > select);
   assert.equal(steps[verifyClass].env.CUEFLUENT_CI_MODE, '${{ needs.plan.outputs.mode }}');
+  assert.equal(steps[verifyClass].run, workflow.jobs.plan.steps.find(step => step.env?.CUEFLUENT_CI_ACTION === 'plan').run);
   const download = steps.slice(select, verify).find(step => step.uses?.startsWith('actions/download-artifact@'));
   assert.equal(download.with['artifact-ids'], '${{ steps.base.outputs.artifact_id }}');
   assert.equal(download.with['run-id'], '${{ steps.base.outputs.run_id }}');
@@ -119,6 +127,38 @@ test('distribution gate rederives its class and requires digest-verified evidenc
   for (const step of [steps[select], download, steps[verify]]) assert.equal(step.if, "needs.plan.outputs.mode == 'distribution'");
   assert.equal(steps.find(step => step.run === 'node tools/ci.mjs compare').if, "needs.plan.outputs.mode == 'full'");
   assert.equal(steps.find(step => step.uses?.startsWith('actions/checkout@')).with['fetch-depth'], 0);
+});
+
+test('planning and the gate execute base policy even when the PR replaces its classifier', async t => {
+  const workflow = await checks(), step = workflow.jobs.plan.steps.find(step => step.env?.CUEFLUENT_CI_ACTION === 'plan');
+  const script = /<<'NODE'\n([\s\S]*?)\nNODE\s*$/.exec(step.run)?.[1]; assert.ok(script);
+  for (const baseHasPolicy of [true, false]) await t.test(baseHasPolicy ? 'base policy' : 'bootstrap full checks', async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-policy-test-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const repo = path.join(root, 'repo'); await fs.mkdir(path.join(repo, 'tools'), { recursive: true });
+    const readGit = createGitRunner(repo), git = args => readGit(args).toString().trim();
+    git(['init', '-b', 'main', '--template=']); git(['config', 'user.name', 'Synthetic Fixture']); git(['config', 'user.email', 'fixture@example.invalid']);
+    await fs.writeFile(path.join(repo, 'README.md'), 'Synthetic base\n');
+    if (baseHasPolicy) for (const file of ['ci-plan.mjs', 'git.mjs', 'packaging.mjs']) {
+      await fs.copyFile(new URL(`../tools/${file}`, import.meta.url), path.join(repo, 'tools', file));
+    }
+    git(['add', '.']); git(['commit', '-m', 'Synthetic base']); const base = git(['rev-parse', 'HEAD']);
+    git(['switch', '-c', 'feature']);
+    await fs.writeFile(path.join(repo, 'tools', 'ci-plan.mjs'), "import fs from 'node:fs'; fs.writeFileSync(process.env.CUEFLUENT_POLICY_MARKER, 'PR policy ran'); fs.appendFileSync(process.env.GITHUB_OUTPUT, 'mode=distribution\\n');\n");
+    git(['add', '.']); git(['commit', '-m', 'Synthetic classifier replacement']); const head = git(['rev-parse', 'HEAD']);
+    git(['switch', 'main']); git(['merge', '--no-ff', 'feature', '-m', 'Synthetic merge']);
+    const event = path.join(root, 'event.json');
+    await fs.writeFile(event, JSON.stringify({ number: 43, pull_request: { number: 43, base: { ref: 'main', sha: base }, head: { sha: head } } }));
+    const env = { ...process.env, GITHUB_SHA: git(['rev-parse', 'HEAD']), GITHUB_EVENT_NAME: 'pull_request', GITHUB_BASE_REF: 'main',
+      GITHUB_REF: 'refs/pull/43/merge', GITHUB_EVENT_PATH: event, RUNNER_TEMP: root,
+      GITHUB_OUTPUT: path.join(root, 'output'), GITHUB_STEP_SUMMARY: path.join(root, 'summary'), CUEFLUENT_POLICY_MARKER: path.join(root, 'marker') };
+    const run = patch => exec(process.execPath, ['--input-type=module', '-e', script], { cwd: repo, env: { ...env, ...patch } });
+    await run({ CUEFLUENT_CI_ACTION: 'plan' });
+    assert.equal(await fs.readFile(env.GITHUB_OUTPUT, 'utf8'), 'mode=full\n');
+    await run({ CUEFLUENT_CI_ACTION: 'verify', CUEFLUENT_CI_MODE: 'full' });
+    await assert.rejects(run({ CUEFLUENT_CI_ACTION: 'verify', CUEFLUENT_CI_MODE: 'distribution' }));
+    await assert.rejects(fs.stat(env.CUEFLUENT_POLICY_MARKER), { code: 'ENOENT' });
+  });
 });
 
 test('the Windows workflow weighted runner discovers each file once and propagates a shard failure', async t => {

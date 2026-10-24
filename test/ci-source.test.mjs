@@ -2,18 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { recordBuildSource } from '../tools/ci.mjs';
 import { packageSource } from './fixtures/package-source.mjs';
+import { createGitRunner } from '../tools/git.mjs';
 
 async function fixture(t) {
   const f = await packageSource(t);
-  const git = args => execFileSync('git', args, { cwd: f.source, encoding: 'utf8',
-    env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(f.root, 'absent-config'),
-      GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' },
-    stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  git(['init', '-b', 'main']); git(['add', '.']); git(['commit', '-m', 'Synthetic source']);
+  const readGit = createGitRunner(f.source), git = args => readGit(args).toString('utf8').trim();
+  git(['init', '-b', 'main', '--template=']);
+  git(['config', 'user.name', 'Synthetic Fixture']); git(['config', 'user.email', 'fixture@example.invalid']);
+  git(['add', '.']); git(['commit', '-m', 'Synthetic source']);
   const commit = git(['rev-parse', 'HEAD']);
   const env = { GITHUB_REPOSITORY: 'example/notes', GITHUB_REPOSITORY_ID: '12', GITHUB_RUN_ID: '34', GITHUB_RUN_ATTEMPT: '1',
     GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: commit, CUEFLUENT_HEAD_SHA: commit };

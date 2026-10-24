@@ -242,6 +242,7 @@ test('selection refuses failed, skipped, foreign, missing, duplicate, expired an
     f => { f.jobValues.shift(); },
     f => { f.jobValues.push({ ...f.jobValues[0], id: 900 }); },
     f => { f.jobValues[0].run_attempt = 3; },
+    f => { f.jobValues.push({ ...f.jobValues[0], id: 901, name: 'unexpected-job' }); },
     f => { f.artifacts.pop(); },
     f => { f.artifacts[1].name = f.artifacts[0].name; },
     f => { f.artifacts[1].id = f.artifacts[0].id; },

@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  pull-requests: read
 
 concurrency:
   group: checks-v2-${{ github.event_name }}-${{ github.ref }}
@@ -37,7 +35,37 @@ jobs:
           package-manager-cache: false
       - name: Classify the exact changes against the PR base
         id: classify
-        run: node tools/ci-plan.mjs plan
+        env:
+          CUEFLUENT_CI_ACTION: plan
+        run: &trusted-ci-policy |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { execFileSync } from 'node:child_process';
+          // Bootstrap from built-ins only; never import the PR's policy or helpers.
+          const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
+          Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0' });
+          const git = args => execFileSync('git', ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args], { env, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+          const action = env.CUEFLUENT_CI_ACTION;
+          if (!['plan', 'verify'].includes(action) || git(['rev-parse', 'HEAD']).toString().trim() !== env.GITHUB_SHA) throw new Error('Invalid CI checkout or action.');
+          let base;
+          if (env.GITHUB_EVENT_NAME === 'pull_request' && env.GITHUB_BASE_REF === 'main') {
+            base = git(['rev-parse', '--verify', 'HEAD^1']).toString().trim();
+            try { git(['cat-file', '-e', `${base}:tools/ci-plan.mjs`]); }
+            catch { base = undefined; }
+          }
+          if (!base) {
+            if (action === 'verify' && env.CUEFLUENT_CI_MODE !== 'full') throw new Error('Full CI is required.');
+            fs.appendFileSync(env.GITHUB_OUTPUT, 'mode=full\n');
+            fs.appendFileSync(env.GITHUB_STEP_SUMMARY, 'CI mode: **full** (manual run, non-main target, or base without a classifier).\n');
+          } else {
+            const root = fs.mkdtempSync(path.join(env.RUNNER_TEMP, 'cuefluent-ci-policy-'));
+            try {
+              execFileSync('tar', ['-xf', '-', '-C', root], { input: git(['archive', base, 'tools']), stdio: ['pipe', 'pipe', 'pipe'] });
+              execFileSync(process.execPath, [path.join(root, 'tools/ci-plan.mjs'), action], { env, stdio: 'inherit' });
+            } finally { fs.rmSync(root, { recursive: true, force: true }); }
+          }
+          NODE
 
   guidance:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
@@ -95,7 +123,7 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_ENV, `npm_config_cache=${cache}\nCUEFLUENT_TEST_NPM_CACHE=${cache}\nCUEFLUENT_BUILD_ROOT=${build}\n`);
           NODE
       - run: npm ci --ignore-scripts
-        if: needs.plan.outputs.mode == 'full' || matrix.primary
+        if: needs.plan.outputs.mode == 'full'
       - name: Run this shard of the complete native source suite
         if: needs.plan.outputs.mode == 'full'
         # Discover every test file, then place the longest measured files into
@@ -164,6 +192,10 @@ jobs:
 
   reproducibility:
     name: reproducibility
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     needs: [plan, guidance, test, client-smoke]
     runs-on: ubuntu-24.04
@@ -196,8 +228,9 @@ jobs:
           node-version: '26.12.1'
           package-manager-cache: false
       - name: Independently verify the selected change class
-        run: node tools/ci-plan.mjs verify
+        run: *trusted-ci-policy
         env:
+          CUEFLUENT_CI_ACTION: verify
           CUEFLUENT_CI_MODE: ${{ needs.plan.outputs.mode }}
       - name: Select successful runtime evidence from the distribution PR base
         if: needs.plan.outputs.mode == 'distribution'

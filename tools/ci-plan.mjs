@@ -1,5 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { createGitRunner } from './git.mjs';
+import { packagePath } from './packaging.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
 const LIMIT = 8 * 1024 * 1024;
@@ -20,17 +21,21 @@ const requirePlan = (condition, reason) => {
 
 function reader(repoRoot, git) {
   if (git) return git;
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
-  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0' });
+  const read = createGitRunner(repoRoot);
   return args => {
-    try { return execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: repoRoot, env, maxBuffer: LIMIT, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    try { return read(args); }
     catch { requirePlan(false, 'GIT_READ_FAILED'); }
   };
 }
 
-async function gitText(git, args) {
+async function gitBytes(git, args) {
   const bytes = Buffer.from(await git(args));
   requirePlan(bytes.length <= LIMIT, 'GIT_RESPONSE_TOO_LARGE');
+  return bytes;
+}
+
+async function gitText(git, args) {
+  const bytes = await gitBytes(git, args);
   try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
   catch { requirePlan(false, 'GIT_RESPONSE_INVALID'); }
 }
@@ -41,8 +46,10 @@ async function commitAt(git, revision) {
   requirePlan(SHA.test(commit), 'COMMIT_INVALID'); return commit;
 }
 
-const portablePath = value => value.length > 0 && !/[\\:\u0000-\u001f\u007f]/u.test(value) &&
-  value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
+const portablePath = value => {
+  try { packagePath(value); return true; }
+  catch (error) { if (error.code !== 'PACKAGE_PATH_INVALID') throw error; return false; }
+};
 const distributionPath = value => DISTRIBUTION_FILES.has(value) || DISTRIBUTION_ROOTS.some(root => value.startsWith(root));
 
 /** Classify immutable tracked changes. A distribution result only selects the
@@ -52,14 +59,23 @@ export async function classifyCIChanges({ repoRoot = process.cwd(), baselineRevi
   const baseline = await commitAt(git, baselineRevision), commit = await commitAt(git, revision);
   // Disable rename detection so both the old and new path must be allowed. Raw
   // NUL records retain mode changes and cannot split a filename on whitespace.
-  const raw = await gitText(git, ['diff', '--raw', '--no-abbrev', '--no-renames', '--no-ext-diff', '--no-textconv', '-z', baseline, commit, '--']);
-  if (!raw) return { mode: 'full', changedFiles: [], reason: 'EMPTY_DIFF' };
-  const fields = raw.split('\0'); requirePlan(fields.pop() === '' && fields.length % 2 === 0, 'GIT_DIFF_INVALID');
+  const raw = await gitBytes(git, ['diff', '--raw', '--no-abbrev', '--no-renames', '--no-ext-diff', '--no-textconv', '-z', baseline, commit, '--']);
+  if (!raw.length) return { mode: 'full', changedFiles: [], reason: 'EMPTY_DIFF' };
+  const fields = [];
+  for (let start = 0; start < raw.length;) {
+    const end = raw.indexOf(0, start); requirePlan(end >= 0, 'GIT_DIFF_INVALID');
+    fields.push(raw.subarray(start, end)); start = end + 1;
+  }
+  requirePlan(fields.length % 2 === 0, 'GIT_DIFF_INVALID');
   const files = [], seen = new Set(); let unsupported = false;
   for (let index = 0; index < fields.length; index += 2) {
-    const match = /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]{40}) ([a-f0-9]{40}) ([ADMT])$/.exec(fields[index]);
-    const file = fields[index + 1]; requirePlan(match && !seen.has(file), 'GIT_DIFF_INVALID');
-    seen.add(file); files.push(file);
+    const match = /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]{40}) ([a-f0-9]{40}) ([ADMT])$/.exec(fields[index].toString('utf8'));
+    const name = fields[index + 1], identity = name.toString('hex');
+    requirePlan(match && name.length > 0 && !seen.has(identity), 'GIT_DIFF_INVALID');
+    let file;
+    try { file = new TextDecoder('utf-8', { fatal: true }).decode(name); }
+    catch { file = name.toString('utf8'); unsupported = true; }
+    seen.add(identity); files.push(file);
     const [, before, after, beforeSha, afterSha, status] = match;
     const ordinary = mode => ['100644', '100755'].includes(mode);
     const absent = (mode, sha) => mode === '000000' && /^0+$/.test(sha);

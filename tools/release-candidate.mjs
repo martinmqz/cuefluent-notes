@@ -1,9 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { AssertionError } from 'node:assert';
-import { execFileSync } from 'node:child_process';
 import { compareBuilds, verifyBuildArchives, ARTIFACT_NAMES as ARTIFACTS, digest, decode as parse, bounded } from './ci.mjs';
 import { PACKAGE_VERSION } from './packaging.mjs';
+import { createGitRunner } from './git.mjs';
 
 export const EXPECTED_CHECK_JOBS = Object.freeze(['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)',
   'test (windows-2025, 2/4)', 'test (windows-2025, 3/4)', 'test (windows-2025, 4/4)',
@@ -64,7 +64,7 @@ export function createGitHubRequest({ token, fetchImpl = fetch } = {}) {
   });
 }
 
-function context({ env = process.env, git, request, fetchImpl, now = Date.now } = {}) {
+function context({ env = process.env, git, request, fetchImpl, now = Date.now, repoRoot = process.cwd() } = {}) {
   const { RELEASE_TAG: tag, CHECKS_RUN_ID: runText, GITHUB_REPOSITORY: repository,
     GITHUB_REPOSITORY_ID: repositoryText, CUEFLUENT_RELEASE_ROOT: root } = env;
   requireRelease(typeof tag === 'string' && tag.startsWith('v') && PACKAGE_VERSION.exec(tag.slice(1))?.[0] === tag.slice(1), 'TAG_INVALID');
@@ -73,7 +73,7 @@ function context({ env = process.env, git, request, fetchImpl, now = Date.now } 
   requireRelease(typeof repositoryText === 'string' && /^[1-9][0-9]*$/.test(repositoryText) && positive(Number(repositoryText)));
   requireRelease(typeof root === 'string' && path.isAbsolute(root));
   const runId = Number(runText), repositoryId = Number(repositoryText);
-  git ??= args => execFileSync('git', args, { maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+  git ??= createGitRunner(repoRoot);
   request ??= createGitHubRequest({ token: env.GITHUB_TOKEN, fetchImpl });
   return { env, tag, repository, repositoryId, root, runId, git, request, now, api: `/repos/${repository}` };
 }
@@ -132,9 +132,10 @@ export function checksRequirePlan(c, revision) {
 export async function inspectChecksRun(c, { mode = 'full', requirePlan = false } = {}) {
   return checked('run', async () => {
     requireRelease(['full', 'distribution', 'auto'].includes(mode), 'CHECKS_MODE_INVALID');
-    const workflow = await c.request(`${c.api}/actions/workflows/ci.yml`);
+    const [workflow, run] = await Promise.all([
+      c.request(`${c.api}/actions/workflows/ci.yml`), c.request(`${c.api}/actions/runs/${c.runId}`),
+    ]);
     requireRelease(positive(workflow.id) && workflow.path === '.github/workflows/ci.yml');
-    const run = await c.request(`${c.api}/actions/runs/${c.runId}`);
     // Run paths may include an @ref suffix; workflow metadata paths do not.
     const runPath = typeof run.path === 'string' ? run.path.split('@', 1)[0] : null;
     requireRelease(run.id === c.runId && run.workflow_id === workflow.id && runPath === workflow.path &&
@@ -143,7 +144,7 @@ export async function inspectChecksRun(c, { mode = 'full', requirePlan = false }
       run.status === 'completed' && run.conclusion === 'success' && positive(run.run_attempt) && SHA.test(run.head_sha) &&
       ['pull_request', 'workflow_dispatch'].includes(run.event), 'CHECKS_RUN_INVALID');
     if (run.event !== 'pull_request') requireRelease(run.head_branch === 'main' || (c.tag && run.head_branch === c.tag), 'CHECKS_REF_INVALID');
-    const jobs = await checked('jobs', async () => {
+    const [jobs, artifacts] = await Promise.all([checked('jobs', async () => {
       const history = await list(c, `${c.api}/actions/runs/${c.runId}/jobs?filter=all`, 'jobs');
       requireRelease(new Set(history.map(job => job.id)).size === history.length);
       for (const job of history) requireRelease(positive(job.id) && job.run_id === c.runId && (EXPECTED_CHECK_JOBS.includes(job.name) || job.name === 'plan') &&
@@ -155,8 +156,7 @@ export async function inspectChecksRun(c, { mode = 'full', requirePlan = false }
         const latest = matches[0]; requireRelease(latest.status === 'completed' && latest.conclusion === 'success');
         return { id: latest.id, name, runAttempt: latest.run_attempt };
       });
-    });
-    const artifacts = await checked('artifacts', async () => {
+    }), checked('artifacts', async () => {
       const values = await list(c, `${c.api}/actions/runs/${c.runId}/artifacts`, 'artifacts');
       if (mode === 'distribution') { requireRelease(values.length === 0, 'DISTRIBUTION_ARTIFACTS_UNEXPECTED'); return []; }
       // Main evidence may inspect either run type. Any artifacts must form a
@@ -174,7 +174,7 @@ export async function inspectChecksRun(c, { mode = 'full', requirePlan = false }
       });
       requireRelease(new Set(selected.map(item => item.id)).size === ARTIFACTS.length);
       return selected;
-    });
+    })]);
     return { repository: c.repository, repositoryId: c.repositoryId, workflowId: workflow.id, runId: c.runId,
       runAttempt: run.run_attempt, event: run.event, headSha: run.head_sha, headBranch: run.head_branch, jobs, artifacts };
   });

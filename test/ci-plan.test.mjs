@@ -1,20 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { classifyCIChanges, main } from '../tools/ci-plan.mjs';
+import { createGitRunner } from '../tools/git.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-ci-plan-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const repoRoot = path.join(root, 'repo'); await fs.mkdir(repoRoot);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
-  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' });
-  const git = (args, options = {}) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], {
-    cwd: repoRoot, env, input: options.input, stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  const git = createGitRunner(repoRoot);
   const text = args => git(args).toString('utf8').trim();
   git(['init', '--initial-branch=main', '--template=']);
   git(['config', 'user.name', 'Synthetic Fixture']); git(['config', 'user.email', 'fixture@example.invalid']);
@@ -135,6 +131,42 @@ test('NUL parsing supports spaces and Unicode and refuses nonportable path recor
   assert.equal((await classify(f, before, unusual)).reason, 'UNSUPPORTED_FILE_ENTRY');
 });
 
+test('non-UTF-8 path bytes select full checks without failing diff decoding', async t => {
+  const f = await fixture(t), blob = f.text(['rev-parse', 'HEAD:.agents/publishing.md']);
+  const bytes = Buffer.concat([Buffer.from(`100644 blob ${blob}\tcaf`), Buffer.from([0xe9]), Buffer.from('.md\0')]);
+  const nested = f.git(['mktree', '-z'], { input: bytes }).toString().trim();
+  const root = f.git(['mktree', '-z'], { input: Buffer.from(`040000 tree ${nested}\t.agents\0`) }).toString().trim();
+  const commit = f.text(['commit-tree', root, '-p', f.initial, '-m', 'Synthetic non-UTF-8 path']);
+  assert.equal((await classify(f, f.initial, commit)).reason, 'UNSUPPORTED_FILE_ENTRY');
+  assert.equal((await classify(f, commit, f.initial)).reason, 'UNSUPPORTED_FILE_ENTRY');
+});
+
+test('distribution path checks use the package portability rules', async t => {
+  const f = await fixture(t), blob = f.text(['rev-parse', 'HEAD:.agents/publishing.md']);
+  for (const name of ['nul.txt', 'CON.md', 'trailing.', 'trailing ', 'a*b', 'a?b', 'a"b', 'a<b', 'a>b', 'a|b', 'x'.repeat(1100), Array(30).fill('a').join('/')]) {
+    const parts = name.split('/'); let object = blob, mode = '100644', type = 'blob';
+    for (const part of [...parts].reverse()) {
+      object = f.git(['mktree', '-z'], { input: Buffer.from(`${mode} ${type} ${object}\t${part}\0`) }).toString().trim();
+      mode = '040000'; type = 'tree';
+    }
+    const root = f.git(['mktree', '-z'], { input: Buffer.from(`040000 tree ${object}\t.agents\0`) }).toString().trim();
+    const commit = f.text(['commit-tree', root, '-p', f.initial, '-m', 'Synthetic nonportable path']);
+    assert.equal((await classify(f, f.initial, commit)).reason, 'UNSUPPORTED_FILE_ENTRY', name);
+  }
+});
+
+test('the shared Git runner ignores inherited redirection, configuration and replace refs', async t => {
+  const f = await fixture(t), tree = f.text(['rev-parse', `${f.initial}^{tree}`]);
+  const replacement = await f.commit({ 'src/runtime.mjs': 'replacement tree\n' });
+  f.git(['replace', f.initial, replacement]);
+  f.git(['config', 'core.fsmonitor', '!exit 97']);
+  const git = createGitRunner(f.repoRoot, { env: { ...process.env, GIT_DIR: path.join(f.root, 'absent'),
+    git_work_tree: path.join(f.root, 'wrong'), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: '!exit 98' } });
+  assert.equal(git(['rev-parse', `${f.initial}^{tree}`]).toString().trim(), tree);
+  assert.equal(git(['rev-parse', 'HEAD']).toString().trim(), replacement);
+  assert.equal(git(['status', '--porcelain']).toString(), '');
+});
+
 test('Git callback can be asynchronous and malformed or oversized responses fail closed', async t => {
   const f = await fixture(t); await f.commit({ '.agents/publishing.md': 'updated\n' });
   assert.equal((await classifyCIChanges({ repoRoot: f.repoRoot, baselineRevision: f.initial, git: async args => f.git(args) })).mode, 'distribution');
@@ -213,6 +245,7 @@ test('verify rederives classification and refuses stale or tampered mode outputs
   }
   const full = await mergeFixture(t, { 'tools/changed.mjs': 'changed CI implementation\n' });
   assert.equal((await main(['plan'], { repoRoot: full.repoRoot, env: full.env })).mode, 'full');
+  assert.equal((await main(['verify'], { repoRoot: full.repoRoot, env: { ...full.env, CUEFLUENT_CI_MODE: 'full' } })).mode, 'full');
   await assert.rejects(main(['verify'], { repoRoot: full.repoRoot, env: { ...full.env, CUEFLUENT_CI_MODE: 'distribution' } }), planError('PLAN_MODE_MISMATCH'));
 });
 

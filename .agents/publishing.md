@@ -140,6 +140,13 @@ commits. For ready PRs, a short planning job classifies the exact merge change
 against the checked-out merge commit's first parent. The checkout must match
 the run's `GITHUB_SHA` and its second parent must match the event's PR head.
 The event's base SHA can be stale and is not used to select the diff base.
+Both planning and final verification execute the classifier and its tool imports
+from that first parent's tree in a temporary directory. A PR cannot grant itself
+an exemption by changing its classifier or allowlist. A base without the
+classifier selects full checks, as do manual runs and non-main targets. Workflow
+changes themselves still require review; this is not protection against arbitrary
+rewrites of the Actions workflow. The Git readers ignore inherited repository
+redirection, replacement refs, global/system configuration, hooks and fsmonitor.
 Source, dependency, runtime guidance, package version,
 build-tool, test and workflow changes run the complete synthetic suite on native
 Linux, macOS, and Windows. The two marketplace test files and development
@@ -157,7 +164,12 @@ including after a multi-commit rebase merge. Its source receipt still must bind
 the tested and merged trees exactly. Partial, expired or malformed artifacts fail.
 Only artifact-free runs may use distribution ancestry: it verifies each merged
 PR's focused checks and first-parent diff, then walks at most ten such commits
-to the last full-check tree. Every intermediate commit needs its own evidence; a multi-commit rebase of
+to the last full-check tree. The PR gate allows at most nine existing hops,
+reserving the tenth for its pending merge. Selection records retain changed-file
+counts instead of full path lists. Independent API reads run concurrently and
+workflow metadata is fetched once per walk; verification starts a fresh walk and
+rechecks current PR, run, job and artifact facts.
+Every intermediate commit needs its own evidence; a multi-commit rebase of
 an artifact-free PR can require an explicit full Checks dispatch for recovery.
 It never substitutes an older green run for a newer failed or pending run.
 It runs no tests, native clients, or builds. Missing or mismatched evidence fails
@@ -219,6 +231,10 @@ is in `tools/ci-plan.mjs`. Shipped skill/reference files, README, package/lock
 versions, workflow/build tools, `.gitattributes`, and `.gitignore` require full
 checks. Other target branches, manual dispatch and empty changes also select full
 checks: evidence reuse is defined only for main history.
+The three native marketplace rows use only Node built-ins and skip dependency
+installation. Unsupported or undecodable Git paths select full checks; portable
+paths use the same validation as package paths. Only the final gate receives
+Actions and pull-request read permissions; other jobs retain contents read only.
 
 All existing required check names remain present. Unneeded secondary shards and
 smoke jobs report why no native work ran on lightweight Ubuntu runners. Their
@@ -226,6 +242,9 @@ success is accepted only by a final gate that independently reclassifies the
 change, requires all three native marketplace checks and guidance to pass, and
 verifies successful full-check evidence for the actual PR base. Missing, expired,
 failed or mismatched evidence fails that gate; it never silently starts a matrix.
+For a base-evidence failure, refresh full Checks evidence for the base on main
+(updating the PR to that tested base if main has advanced), then rerun the failed
+PR Checks job. Rerunning Main evidence alone does not repair a failed PR gate.
 These runs have no candidate artifacts and cannot be selected for release
 preparation. Previously published bytes and independently verified receipt pins
 retain their existing marketplace protections.
@@ -309,3 +328,15 @@ authorized, preserve immutable historical bytes, use reviewed checksums, and kee
 GitHub releases, native marketplace registration, public directory submissions,
 and repository visibility as distinct actions. Create package-update PRs as
 drafts; never merge, mark ready, or bypass repository rules without authorization.
+
+## Revisions
+
+### 2026-10-23
+
+- Set the next final package version during ordinary development, reuse verified
+  artifacts at release time, and use focused checks for distribution-only PRs.
+- Evaluate exemptions with the base revision's policy, keep permissions scoped
+  to the jobs that need them, and omit dependency installs from marketplace rows.
+- Preserve complete full evidence after rebase merges; bound distribution walks
+  and reserve capacity for a pending merge. Keep evidence records compact and
+  revalidate current facts before accepting reuse.
