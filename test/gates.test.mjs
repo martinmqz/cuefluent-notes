@@ -93,6 +93,49 @@ async function externalProbe(identity) {
 
 const gateTest = (name, fn) => test(name, { timeout: windows ? 30_000 : 10_000 }, fn);
 
+test('gate operations enforce the supported Node range before inspecting paths', () => {
+  const original = Object.getOwnPropertyDescriptor(process.versions, 'node');
+  const operations = [
+    () => gates.initializeGate('relative.sqlite', 'runtime'),
+    () => gates.inspectExistingGate('relative.sqlite', 'runtime'),
+    () => gates.tryAcquireExistingGate({ path: 'relative.sqlite' }),
+    () => gates.probeGate({ path: 'relative.sqlite' }),
+  ];
+  try {
+    for (const [version, code] of [
+      ['26.12.1', 'GATE_INVALID_PATH'],
+      ['26.12.2', 'GATE_INVALID_PATH'],
+      ['26.13.0', 'GATE_INVALID_PATH'],
+      ['26.12.0', 'GATE_UNSUPPORTED_RUNTIME'],
+      ['27.0.0', 'GATE_UNSUPPORTED_RUNTIME'],
+    ]) {
+      Object.defineProperty(process.versions, 'node', { ...original, value: version });
+      for (const operation of operations) assert.throws(operation, { code }, version);
+    }
+  } finally { Object.defineProperty(process.versions, 'node', original); }
+});
+
+test('gate runtime rejects a supported Node version without the SQLite Database capability', () => {
+  const module = new URL('../src/storage/gates.mjs', import.meta.url).href;
+  const script = `
+    import assert from 'node:assert/strict';
+    import { registerHooks } from 'node:module';
+    registerHooks({ resolve(specifier, context, nextResolve) {
+      if (specifier === 'node:sqlite') return { url: 'data:text/javascript,export {};', shortCircuit: true };
+      return nextResolve(specifier, context);
+    } });
+    const gates = await import(${JSON.stringify(module)});
+    Object.defineProperty(process.versions, 'node', { value: '26.12.1' });
+    for (const operation of [
+      () => gates.initializeGate('relative.sqlite', 'runtime'),
+      () => gates.inspectExistingGate('relative.sqlite', 'runtime'),
+      () => gates.tryAcquireExistingGate({ path: 'relative.sqlite' }),
+      () => gates.probeGate({ path: 'relative.sqlite' }),
+    ]) assert.throws(operation, { code: 'GATE_UNSUPPORTED_RUNTIME' });
+  `;
+  execFileSync(process.execPath, ['--input-type=module', '-e', script], { timeout: 10_000, stdio: 'pipe' });
+});
+
 test('Linux gates retain high-bit inode identities through publication and ownership', { skip: process.platform !== 'linux' }, t => {
   const directory = setup(t), file = join(directory, 'high-bit.sqlite');
   let signed = true, replaced = false;

@@ -9,10 +9,12 @@ import { readHandleStat } from '../storage/stat.mjs';
 const CLIENTS = new Set(['claude', 'codex']);
 const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const invalid = () => fail('ENTRY_ARGUMENT_INVALID', 'Use a supported command and its exact documented arguments.');
-function absolute(value, platform = process.platform) {
+const invalidStoreRoot = () => fail('ENTRY_STORE_ROOT_INVALID', 'CUEFLUENT_V2_HOME must identify the intended normalized absolute private-store location.');
+const invalidLocation = () => fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+function absolute(value, platform = process.platform, reject = invalid) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
-  if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value) || !paths.isAbsolute(value) || paths.normalize(value) !== value || value.endsWith(paths.sep) || paths.parse(value).root === value) invalid();
-  if (platform === 'win32' && (!/^[A-Za-z]:\\/.test(value) || value.slice(3).split('\\').some(part => /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part)))) invalid();
+  if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value) || !paths.isAbsolute(value) || paths.normalize(value) !== value || value.endsWith(paths.sep) || paths.parse(value).root === value) reject();
+  if (platform === 'win32' && (!/^[A-Za-z]:\\/.test(value) || value.slice(3).split('\\').some(part => /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part)))) reject();
   return value;
 }
 function token(value, maximum = 256) {
@@ -43,10 +45,10 @@ export function parseEntryArguments(argv, { platform = process.platform } = {}) 
   return Object.freeze(result);
 }
 
-function environment(env, key) {
-  if (!env || typeof env !== 'object' || Array.isArray(env)) invalid();
+function environment(env, key, reject = invalidLocation) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) reject();
   const descriptor = Object.getOwnPropertyDescriptor(env, key);
-  if (descriptor && (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string')) invalid();
+  if (descriptor && (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string')) reject();
   return descriptor?.value;
 }
 
@@ -55,11 +57,11 @@ function environment(env, key) {
 function environmentLocation(value, platform) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 32768 || /[\u0000-\u001f\u007f]/.test(value) || !paths.isAbsolute(value))
-    fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+    invalidLocation();
   const normalized = paths.normalize(value), root = paths.parse(normalized).root;
   const result = normalized === root ? root : normalized.replace(platform === 'win32' ? /\\+$/ : /\/+$/, '');
   if (platform === 'win32' && (!/^[A-Za-z]:\\/.test(result) || result.slice(3).split('\\').filter(Boolean).some(part => /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part))))
-    fail('ENTRY_LOCATION_INVALID', 'The operating-system private-store location is invalid.');
+    invalidLocation();
   return result;
 }
 
@@ -68,8 +70,8 @@ function environmentLocation(value, platform) {
  * from any former product location and this function never creates directories. */
 export function selectStoreRoot({ env = process.env, platform = process.platform, homedir = os.homedir() } = {}) {
   if (!['darwin', 'linux', 'win32'].includes(platform)) fail('ENTRY_PLATFORM_UNSUPPORTED', 'This platform has no supported private-store location.');
-  const override = environment(env, 'CUEFLUENT_V2_HOME');
-  if (override !== undefined) return absolute(override, platform);
+  const override = environment(env, 'CUEFLUENT_V2_HOME', invalidStoreRoot);
+  if (override !== undefined) return absolute(override, platform, invalidStoreRoot);
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const home = environmentLocation(homedir, platform);
   if (platform === 'darwin') return paths.join(home, 'Library', 'Application Support', 'Cuefluent Notes', 'v2');

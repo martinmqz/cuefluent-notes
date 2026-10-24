@@ -8,6 +8,18 @@ A failed MCP tool call retains its stable `error` code and includes a plain-lang
 architecture, stage, and client/package version when known. Nested causes expose
 only bounded error codes. Unknown errors receive generic guidance rather than
 their raw exception messages, stacks, paths, arguments, or environment values.
+Recovery uses the actual operation: a note lookup failure calls for inspecting
+the selected destination and note, while a missing startup module calls for
+checking the installed package. Fatal framing or queue limits close the connector;
+reconnect and inspect retained work before retrying a mutation.
+
+A retained invocation with `state: failed` receives the same derived guidance and
+MCP error flag when read. Stored outcomes remain unchanged. Status and processing
+results may include `warningDetails`, with fixed explanations for code-only
+warnings and a scope of `status`, `run`, `latest` or `result`. These details identify
+where the warning belongs; they do not turn a successful status read into an error.
+At most 16 details are returned, within the response size bound. Additional details
+can be omitted when space is exhausted; the original warnings remain intact.
 
 Explain the failure and next step to the user; include the code for support.
 Runtime details are available when investigating a problem. An error is not proof

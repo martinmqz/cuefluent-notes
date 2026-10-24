@@ -13,14 +13,29 @@ it. Check the executable and version actually used by that client, then restart
 the client after correcting its launch configuration. A connector-only override
 does not change the Node executable used by hooks.
 
-The CLI checks the Node version before loading its storage and processing runtime.
-An unsupported runtime reports `NODE_VERSION_UNSUPPORTED`, the required range,
-the detected version and executable, and a recovery step. Missing runtime modules
-report reinstall guidance instead of an exception stack. CLI and MCP startup
+On Node 18 and later, the CLI entry script checks the Node version before loading
+its storage and processing runtime. An unsupported runtime reports
+`NODE_VERSION_UNSUPPORTED`, the required range, the detected version and executable,
+and a recovery step. Earlier Node versions may fail in the native parser or loader
+before this diagnostic can run. Missing runtime modules report reinstall guidance;
+if the diagnostic module itself cannot load, the self-contained bootstrap reports
+`CUEFLUENT_BOOTSTRAP_FAILED`. CLI and MCP startup
 diagnostics go to stderr; hook failures use the native `systemMessage` response
-and do not deliberately fail the user's prompt.
+and do not deliberately fail the user's prompt. An unavailable diagnostic pipe
+does not interrupt an operation's completion or resource cleanup.
 
-If the host cannot start an executable or enter the configured working directory,
+`ENTRY_STORE_ROOT_INVALID` identifies a malformed `CUEFLUENT_V2_HOME` override.
+Use the intended normalized absolute private-store path; preserve existing work
+and do not select a different store merely to bypass an error. Diagnostics name
+the variable without exposing its value. Loaded package versions are included
+in later failures, but a version is not guessed when package validation fails.
+
+The hook's Windows ACL budget includes child process startup, imports and
+preflight, with a reserved margin for wrapper overhead and the reply. It cannot
+guarantee a reply before a host deadline under arbitrary scheduling delays or
+wrapper startup time outside the child process.
+
+If the host cannot start an executable, load the entry script, or enter the configured working directory,
 Cuefluent has not started and cannot produce its own diagnostic. A host error such
 as `No such file or directory` does not identify the missing path by itself.
 Check the configured executable, installed plugin path, and working directory in

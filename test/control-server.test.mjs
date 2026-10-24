@@ -101,7 +101,7 @@ test('unknown MCP methods cannot forward requests and diagnostics omit private e
   assert.equal(JSON.parse(result.result.content[0].text).error, 'CONTROL_TOOL_FAILED');
   assert.deepEqual(JSON.parse(result.result.content[0].text), result.result.structuredContent);
   assert.match(result.result.structuredContent.message, /could not complete/);
-  assert.match(result.result.structuredContent.recovery, /latest status/);
+  assert.match(result.result.structuredContent.recovery, /pending work unchanged/);
 });
 
 test('MCP command mismatches explain the direct-note alternative and expose bounded debug context', async () => {

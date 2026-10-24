@@ -11,7 +11,7 @@ import { handleNativeHook } from './client/hooks.mjs';
 import { isClaudeCommandExpansion } from './client/commands.mjs';
 import { buildClaudeCommandContext } from './client/history.mjs';
 import { createCodexNativeAdapter } from './client/codex-native.mjs';
-import { createControlBridge, serveControl } from './client/control-server.mjs';
+import { createControlBridge, serveControl, presentControlResult } from './client/control-server.mjs';
 import { claimInvocation, runClaimedInvocation, readInvocation, launchInvocationChild, reportInvocationExit } from './control/invocations.mjs';
 import { executeControl } from './control/execute.mjs';
 import { createDirectNoteTools } from './control/direct-notes.mjs';
@@ -60,17 +60,18 @@ async function submitCommand(store, invocation) {
   return readInvocation(store, claimed.ticket);
 }
 
-export async function main(argv = process.argv.slice(2)) {
-  const started = performance.now();
+export async function main(argv = process.argv.slice(2), { onVersion = () => {} } = {}) {
   const args = parseEntryArguments(argv), skillVersion = await version();
+  onVersion(skillVersion);
   const storeRoot = args.storeRoot ?? selectStoreRoot();
   if (args.command === 'hook') {
     const envelope = await inputJSON(process.stdin, 64 * 1024 * 1024);
     const limit = args.client === 'codex' && ['SessionEnd', 'Interrupt'].includes(envelope?.hook_event_name) ? 3000 : 10000;
-    // Include store opening in the ACL budget and leave time for a coded reply
-    // before the native hook runner terminates the two-process wrapper.
+    // performance.now() starts at process startup, so imports and preflight use
+    // this same budget. Reserve time for the Codex wrapper and a coded reply;
+    // host scheduling and wrapper startup remain outside this child's clock.
     return withWindowsAclDeadline(() => runEntry(args, skillVersion, storeRoot, envelope),
-      { timeoutMs: Math.max(1, Math.floor(limit - (performance.now() - started) - 500)) });
+      { timeoutMs: Math.max(0, Math.floor(limit - performance.now() - 500)) });
   }
   return runEntry(args, skillVersion, storeRoot);
 }
@@ -86,7 +87,9 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
-  if (args.command === 'status') { output(await readProjectStatus(store, args.projectId)); return; }
+  if (args.command === 'status') {
+    output(presentControlResult(await readProjectStatus(store, args.projectId), { stage: 'result', operation: args.command, client: args.client, version: skillVersion }, { bounded: false })); return;
+  }
   let runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
   let execute = commandExecutor(store, runtime, skillVersion);
   try {
@@ -114,7 +117,8 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
         }
         return; // Ordinary lifecycle hooks inject no context.
       }
-      const result = mapped.command.action === 'status' ? await execute(mapped.command) : await submitCommand(store, mapped.command);
+      const result = presentControlResult(mapped.command.action === 'status' ? await execute(mapped.command) : await submitCommand(store, mapped.command),
+        { stage: 'result', operation: args.command, client: args.client, version: skillVersion }, { bounded: false });
       const context = result.handle ? buildClaudeCommandContext(result.handle) : `Cuefluent Notes result: ${JSON.stringify(result)}`;
       output({ hookSpecificOutput: { hookEventName: 'UserPromptExpansion', additionalContext: context } }); return;
     }

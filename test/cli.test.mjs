@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
 const entry = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
@@ -13,8 +13,8 @@ async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-cli-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const storeRoot = path.join(root, 'private'), cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd);
-  const run = (args, input = '', entryPath = entry, nodeArgs = []) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [...nodeArgs, entryPath, ...args], { cwd, env: { ...process.env, CUEFLUENT_V2_HOME: storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const run = (args, input = '', entryPath = entry, nodeArgs = [], env = {}) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [...nodeArgs, entryPath, ...args], { cwd, env: { ...process.env, CUEFLUENT_V2_HOME: storeRoot, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
     child.once('error', reject); child.once('close', code => resolve({ code, stdout, stderr: withoutFfiNotice(stderr, child.pid) })); child.stdin.end(input);
   });
@@ -23,12 +23,12 @@ async function fixture(t) {
 
 test('unsupported runtimes report the detected version before importing a missing runtime module', async t => {
   const f = await fixture(t), copy = path.join(f.root, 'incomplete-package'), src = path.join(copy, 'src');
-  await fs.mkdir(path.join(src, 'core'), { recursive: true });
-  for (const file of ['cli.mjs', 'diagnostics.mjs', 'core/errors.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
-  const preload = path.join(f.root, 'synthetic-runtime.mjs');
+  await fs.mkdir(src, { recursive: true });
+  for (const file of ['cli.mjs', 'diagnostics.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  const preload = path.join(f.root, 'synthetic runtime # %.mjs');
   for (const version of ['24.22.1', '26.2.0']) {
     await fs.writeFile(preload, `Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(version)} });`);
-    const result = await f.run(['mcp', 'codex'], '', path.join(src, 'cli.mjs'), ['--import', preload]);
+    const result = await f.run(['mcp', 'codex'], '', path.join(src, 'cli.mjs'), ['--import', pathToFileURL(preload).href]);
     assert.equal(result.code, 1); assert.equal(result.stdout, '');
     assert.match(result.stderr, /NODE_VERSION_UNSUPPORTED/); assert.match(result.stderr, /26\.12\.1/);
     assert.match(result.stderr, /Next step:/); assert.match(result.stderr, /restart/);
@@ -36,7 +36,7 @@ test('unsupported runtimes report the detected version before importing a missin
     assert.equal(details.nodeVersion, version); assert.equal(details.executable, process.execPath);
     assert.equal(details.stage, 'runtime-check'); assert.equal(details.client, 'codex');
     assert.doesNotMatch(result.stderr, /ERR_MODULE_NOT_FOUND/);
-    const hook = await f.run(['hook', 'claude'], '{}', path.join(src, 'cli.mjs'), ['--import', preload]);
+    const hook = await f.run(['hook', 'claude'], '{}', path.join(src, 'cli.mjs'), ['--import', pathToFileURL(preload).href]);
     assert.equal(hook.code, 0); assert.equal(hook.stderr, '');
     assert.match(JSON.parse(hook.stdout).systemMessage, /NODE_VERSION_UNSUPPORTED/);
   }
@@ -53,6 +53,110 @@ test('a missing runtime module produces reinstall guidance without dumping its e
   assert.equal(JSON.parse(result.stderr.split('Diagnostics: ')[1]).stage, 'module-load');
   assert.doesNotMatch(result.stderr, /synthetic-private-path|node:internal/);
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('missing diagnostics and error modules still produce private-safe CLI and hook failures', async t => {
+  const f = await fixture(t), src = path.join(f.root, 'synthetic-private-package', 'src');
+  await fs.mkdir(src, { recursive: true });
+  await fs.copyFile(new URL('../src/cli.mjs', import.meta.url), path.join(src, 'cli.mjs'));
+  await fs.writeFile(path.join(src, 'runtime-entry.mjs'), "import { fail } from './core/errors.mjs'; export function main() { fail('UNREACHABLE', 'Unreachable'); }\n");
+  for (const [missing, code] of [['diagnostics', 'CUEFLUENT_BOOTSTRAP_FAILED'], ['errors', 'ERR_MODULE_NOT_FOUND']]) {
+    if (missing === 'errors') await fs.copyFile(new URL('../src/diagnostics.mjs', import.meta.url), path.join(src, 'diagnostics.mjs'));
+    for (const command of ['mcp', 'hook']) {
+      const result = await f.run([command, 'claude'], '{}', path.join(src, 'cli.mjs'));
+      assert.equal(result.code, command === 'hook' ? 0 : 1);
+      const message = command === 'hook' ? JSON.parse(result.stdout).systemMessage : result.stderr;
+      assert.equal(command === 'hook' ? result.stderr : result.stdout, '');
+      assert.ok(message.includes(code)); assert.match(message, /Reinstall/);
+      assert.equal(JSON.parse(message.split('Diagnostics: ')[1]).stage, 'module-load');
+      assert.doesNotMatch(message, /synthetic-private-package|node:internal|Unreachable/);
+    }
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('the self-contained bootstrap report tolerates synchronous and asynchronous output failures', async t => {
+  const f = await fixture(t), src = path.join(f.root, 'incomplete-package', 'src'), preload = path.join(f.root, 'broken-output.mjs');
+  await fs.mkdir(src, { recursive: true });
+  await fs.copyFile(new URL('../src/cli.mjs', import.meta.url), path.join(src, 'cli.mjs'));
+  for (const command of ['mcp', 'hook']) for (const asynchronous of [false, true]) {
+    const stream = command === 'hook' ? 'stdout' : 'stderr';
+    await fs.writeFile(preload, `const stream = process.${stream}; stream.write = () => {
+      const error = Object.assign(new Error('synthetic-private-output'), { code: 'EPIPE' });
+      ${asynchronous ? "queueMicrotask(() => stream.emit('error', error)); return false;" : 'throw error;'}
+    };`);
+    const result = await f.run([command, 'claude'], '{}', path.join(src, 'cli.mjs'), ['--import', pathToFileURL(preload).href]);
+    assert.equal(result.code, command === 'hook' ? 0 : 1);
+    assert.equal(result.stdout, ''); assert.equal(result.stderr, '');
+  }
+});
+
+test('importing the CLI API runs no command and does not need the remaining package', async t => {
+  const f = await fixture(t), copy = path.join(f.root, 'api.mjs'), runner = path.join(f.root, 'import-only.mjs');
+  await fs.copyFile(entry, copy);
+  await fs.writeFile(runner, `const api = await import(${JSON.stringify(pathToFileURL(copy).href)}); process.stdout.write(typeof api.main);`);
+  const result = await f.run(['settings'], '', runner);
+  assert.deepEqual(result, { code: 0, stdout: 'function', stderr: '' });
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('hook ACL budgets include process startup and reserve time for the reply', async t => {
+  const f = await fixture(t), preload = path.join(f.root, 'hook-startup.mjs');
+  const acl = new URL('../src/storage/windows-acl.mjs', import.meta.url).href;
+  // A deterministic process clock represents time consumed before runtime.main.
+  // Intercept only the deadline boundary so no real store/helper is opened.
+  for (const [client, event, elapsed, expected] of [
+    ['codex', 'SessionEnd', 2300, 200], ['codex', 'Interrupt', 2800, 0],
+    ['codex', 'SessionStart', 2300, 7200], ['claude', 'SessionEnd', 2300, 7200],
+  ]) {
+    const replacement = `export function queryWindowsAcl() { throw new Error('Unexpected ACL query'); }
+      export function withWindowsAclDeadline(fn, { timeoutMs }) { process.stdout.write(JSON.stringify({ timeoutMs }) + '\\n'); }`;
+    await fs.writeFile(preload, `import { registerHooks } from 'node:module';
+      Object.defineProperty(performance, 'now', { value: () => ${elapsed} });
+      registerHooks({ load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(acl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(replacement)} };
+        return nextLoad(url, context);
+      } });`);
+    const result = await f.run(['hook', client], JSON.stringify({ hook_event_name: event }), entry, ['--import', pathToFileURL(preload).href]);
+    assert.equal(result.code, 0); assert.equal(result.stderr, '');
+    assert.equal(JSON.parse(result.stdout).timeoutMs, expected);
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('CLI and hook failures report a package version only after its identity is validated', async t => {
+  const f = await fixture(t), version = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+  const result = await f.run(['setup', '--config', path.join(f.root, 'missing-setup.json')]);
+  assert.equal(result.code, 1);
+  assert.equal(JSON.parse(result.stderr.split('Diagnostics: ')[1]).pluginVersion, version);
+  for (const client of ['claude', 'codex']) {
+    const hook = await f.run(['hook', client], '{"synthetic-private-input":');
+    assert.equal(hook.code, 0); assert.equal(hook.stderr, '');
+    const message = JSON.parse(hook.stdout).systemMessage;
+    assert.equal(JSON.parse(message.split('Diagnostics: ')[1]).pluginVersion, version);
+    assert.doesNotMatch(message, /synthetic-private-input/);
+  }
+  const invalid = await f.run(['not-a-command']);
+  assert.equal(invalid.code, 1);
+  assert.equal(Object.hasOwn(JSON.parse(invalid.stderr.split('Diagnostics: ')[1]), 'pluginVersion'), false);
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+test('valid CLI and hook commands explain an invalid store-root override without exposing its value', async t => {
+  const f = await fixture(t), override = 'relative-private-value';
+  for (const args of [['settings'], ['mcp', 'claude'], ['mcp', 'codex'], ['hook', 'claude'], ['hook', 'codex']]) {
+    const result = await f.run(args, '{}', entry, [], { CUEFLUENT_V2_HOME: override }), hook = args[0] === 'hook';
+    assert.equal(result.code, hook ? 0 : 1);
+    assert.equal(hook ? result.stderr : result.stdout, '');
+    const message = hook ? JSON.parse(result.stdout).systemMessage : result.stderr;
+    assert.match(message, /^Cuefluent Notes \[ENTRY_STORE_ROOT_INVALID\]:/);
+    assert.match(message, /Next step: Correct CUEFLUENT_V2_HOME/);
+    assert.doesNotMatch(message, /relative-private-value/);
+    const diagnostics = JSON.parse(message.split('Diagnostics: ')[1]);
+    assert.equal(diagnostics.stage, 'command'); assert.equal(diagnostics.operation, args[0]);
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(f.cwd, override)), { code: 'ENOENT' });
 });
 
 test('fatal MCP framing failures are reported on stderr without echoing input or corrupting protocol output', async t => {
@@ -105,6 +209,28 @@ test('symlink-spelled CLI entry still executes read-only settings without creati
   await fs.symlink(entry, alias);
   const result = await f.run(['settings'], '', alias);
   assert.equal(result.code, 0); assert.equal(JSON.parse(result.stdout).state, 'unconfigured'); assert.equal(result.stderr, '');
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+test('the older-Node entry fallback recognizes preserved main symlinks and leaves imports inert', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t), src = path.join(f.root, 'package', 'src'), preload = path.join(f.root, 'older-entry.mjs');
+  await fs.mkdir(src, { recursive: true });
+  for (const file of ['cli.mjs', 'diagnostics.mjs']) await fs.copyFile(new URL(`../src/${file}`, import.meta.url), path.join(src, file));
+  const alias = path.join(src, 'alias.mjs'), runner = path.join(f.root, 'import-only.mjs');
+  await fs.symlink(path.join(src, 'cli.mjs'), alias);
+  await fs.writeFile(preload, `import { registerHooks } from 'node:module';
+    Object.defineProperty(process.versions, 'node', { value: '24.22.1' });
+    registerHooks({ load(url, context, nextLoad) {
+      const result = nextLoad(url, context);
+      if ([${JSON.stringify(pathToFileURL(alias).href)}, ${JSON.stringify(pathToFileURL(path.join(src, 'cli.mjs')).href)}].includes(url)) {
+        return { ...result, source: String(result.source).replaceAll('import.meta.main', 'undefined') };
+      }
+      return result;
+    } });`);
+  const nodeArgs = ['--preserve-symlinks-main', '--import', pathToFileURL(preload).href];
+  const result = await f.run(['settings'], '', alias, nodeArgs);
+  assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /NODE_VERSION_UNSUPPORTED/);
+  await fs.writeFile(runner, `const api = await import(${JSON.stringify(pathToFileURL(alias).href)}); process.stdout.write(typeof api.main);`);
+  assert.deepEqual(await f.run(['settings'], '', runner, nodeArgs), { code: 0, stdout: 'function', stderr: '' });
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
 });
 test('CLI explicit setup creates fresh manual/review settings and requires the inspected hash for later changes', async t => {

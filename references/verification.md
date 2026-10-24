@@ -4,12 +4,17 @@
 
 CLI startup, fatal connector transport errors, and failed control/direct-note MCP
 calls provide fixed explanations and recovery guidance alongside stable codes.
-Checks cover early runtime refusal, missing runtime files, nonblocking hook error
-responses, malformed or incomplete protocol frames, and exclusion of private
-exception text. They do not establish how every desktop client renders diagnostics.
+Checks cover early runtime refusal, missing bootstrap/runtime files, symlinked
+entrypoints, child startup time in the hook ACL budget, closed diagnostic pipes
+during active work, malformed or incomplete protocol frames, and exclusion of
+private exception text. The diagnostic preflight targets Node 18 and later;
+older versions may fail in the native loader or parser. These checks do not
+establish how every desktop client renders diagnostics.
 Host failures before process creation remain host-reported errors, and executable
-discovery or automatic runtime installation is not provided. Existing retained
-run warnings and results are not rewritten into the new tool-error format.
+discovery or automatic runtime installation is not provided. Public presentation
+adds bounded explanations to retained failed invocations and code-only run
+warnings without rewriting stored results or changing their status semantics.
+Historical failures in a successful status read remain historical outcomes.
 
 ## Native clients
 
