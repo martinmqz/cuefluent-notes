@@ -7,20 +7,26 @@ import { readJSON } from '../storage/files.mjs';
 import { iterateProjectChats, readProjectChat, queueRelative } from '../storage/chats.mjs';
 import { inspectQueue } from '../storage/queue.mjs';
 
+/** Inspect only run bookkeeping under the caller's project gate. Direct notes
+ * share this view without enumerating tracked chats or conversation queues. */
+export async function readRunSnapshot(store, context) {
+  const pending = await readJSON(store.pin, `${context.directory}/run.json`, { missing: true });
+  const result = await readJSON(store.pin, `${context.directory}/result.json`, { missing: true });
+  const run = pending ? validateRun(pending.value) : null;
+  const latest = result ? validateResult(result.value) : null;
+  if (run && run.projectId !== context.project.id || latest && latest.projectId !== context.project.id) {
+    fail('STATUS_PROJECT_MISMATCH', 'Stored status belongs to another project.');
+  }
+  return Object.freeze({ run, latest, active: Boolean(probeGate(context.gates.workerGate, gateOptions).busy) });
+}
+
 /** Status is descriptive. It neither reconciles sources, retries a run nor
  * repairs log entries. Counts are bounded observations while hooks may append. */
 export async function readProjectStatus(store, projectId, { chat = null, inventoryLimit = 1000 } = {}) {
   if (!store) return Object.freeze({ state: 'unconfigured' });
   if (!Number.isSafeInteger(inventoryLimit) || inventoryLimit < 1 || inventoryLimit > 10000) fail('STATUS_LIMIT_INVALID', 'Invalid status inventory bound.');
-  const snapshot = await withProject(store, projectId, async context => {
-    const pending = await readJSON(store.pin, `${context.directory}/run.json`, { missing: true });
-    const result = await readJSON(store.pin, `${context.directory}/result.json`, { missing: true });
-    const run = pending ? validateRun(pending.value) : null;
-    const latest = result ? validateResult(result.value) : null;
-    if (run?.projectId !== undefined && run.projectId !== projectId || latest?.projectId !== undefined && latest.projectId !== projectId) fail('STATUS_PROJECT_MISMATCH', 'Stored status belongs to another project.');
-    const active = Boolean(probeGate(context.gates.workerGate, gateOptions).busy);
-    return { settings: context.project, run, active, latest };
-  });
+  const snapshot = await withProject(store, projectId, async context =>
+    ({ settings: context.project, ...await readRunSnapshot(store, context) }));
   const counts = { chats: 0, tracked: 0, optedOut: 0, queued: 0, pendingSources: 0, incomplete: false };
   const warnings = [];
   async function inspect(saved) {

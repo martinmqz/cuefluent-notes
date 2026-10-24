@@ -24,7 +24,9 @@ function strings(value, limit, length) {
  * removal, and contains neither conversation nor selected-record receipt history.
  */
 export function validateResult(input) {
-  object(input, fields);
+  const hasRequest = Object.hasOwn(input ?? {}, 'requestHash');
+  object(input, hasRequest ? [...fields, 'requestHash'] : fields);
+  if (hasRequest && (typeof input.requestHash !== 'string' || !/^[a-f0-9]{64}$/.test(input.requestHash) || input.runId === null)) fail('RESULT_INVALID', 'Direct results require their exact request hash.');
   if (input.schemaVersion !== 1 || !(input.runId === null || typeof input.runId === 'string' && UUID.test(input.runId)) ||
       typeof input.projectId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.projectId) ||
       !['saved', 'nothing-useful', 'skipped', 'empty'].includes(input.status)) fail('RESULT_INVALID', 'Unsupported result identity or state.');
@@ -35,7 +37,7 @@ export function validateResult(input) {
   const paths = strings(input.paths, 1024, 32768), warnings = strings(input.warnings, 128, 1024);
   if (paths.some(target => !path.isAbsolute(target) || path.normalize(target) !== target)) fail('RESULT_INVALID', 'Saved paths must be canonical absolute paths.');
   return Object.freeze({ schemaVersion: 1, runId: input.runId, projectId: input.projectId, status: input.status,
-    paths, counts: Object.freeze({ ...input.counts }), warnings });
+    paths, counts: Object.freeze({ ...input.counts }), warnings, ...(hasRequest ? { requestHash: input.requestHash } : {}) });
 }
 
 export function completedResult(run, { skipped = false, remaining = null } = {}) {
@@ -44,5 +46,5 @@ export function completedResult(run, { skipped = false, remaining = null } = {})
     status: skipped ? 'skipped' : changed.length ? 'saved' : 'nothing-useful',
     paths: changed.map(item => item.target), counts: {
       handled: skipped ? 0 : run.selection.length, saved: changed.length, remaining,
-    }, warnings: run.warnings });
+    }, warnings: run.warnings, ...(run.scope.kind === 'direct' ? { requestHash: run.scope.requestHash } : {}) });
 }

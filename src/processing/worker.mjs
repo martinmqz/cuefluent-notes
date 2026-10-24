@@ -6,7 +6,7 @@ import { openStore } from '../storage/store.mjs';
 import { ownAttempt, withCurrentAttempt, attachAttemptChild } from '../storage/attempts.mjs';
 import { writeJSON } from '../storage/files.mjs';
 import { readActivityLog } from '../logs/storage.mjs';
-import { prepareRunDrafts } from './draft.mjs';
+import { prepareRunDrafts, recoverDrafts } from './draft.mjs';
 import { saveRunNotes } from './save.mjs';
 import { pinProcessingLogging, flushRunLogs, discardRunLogPublication } from './logging.mjs';
 import { cleanupRun } from './cleanup.mjs';
@@ -18,6 +18,12 @@ export async function runProcessingWork(store, owner, { action, client, model, e
   try {
     if (action === 'skip') return await skipRun(store, owner, logging);
     let run = await withCurrentAttempt(owner, ({ run }) => run);
+    // A direct submission can die after its immutable draft is complete but
+    // before publication. Recovery needs no resubmission and never calls a model.
+    if (run.scope.kind === 'direct' && run.phase === 'drafting') {
+      run = await recoverDrafts(store, owner);
+      if (!run) fail('DIRECT_NOTE_CONTENT_REQUIRED', 'Retry the original direct note submission to finish its draft.');
+    }
     if (action === 'save') {
       if (run.settings.saving !== 'review' || !['review', 'saving', 'cleanup'].includes(run.phase)) fail('RUN_PHASE_INVALID', 'Save retries an existing review-mode draft set.');
       if (run.phase === 'review') run = await withCurrentAttempt(owner, async ({ run, hash, directory }) => {
@@ -25,7 +31,6 @@ export async function runProcessingWork(store, owner, { action, client, model, e
         await writeJSON(store.pin, `${directory}/run.json`, next, { expectedHash: hash }); return next;
       });
     } else if (run.phase === 'drafting') {
-      if (run.scope.kind === 'direct') fail('DIRECT_NOTE_CONTENT_REQUIRED', 'Retry the original direct note submission to finish its draft.');
       const binding = await pinProcessingLogging(store, owner);
       run = await prepareRunDrafts(store, owner, { client, model, effort, skillVersion, runClient, signal,
         readActivityLog: run.settings.destination.kind === 'directory' ? query => readActivityLog(run.settings.destination,

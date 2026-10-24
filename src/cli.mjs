@@ -8,6 +8,7 @@ import { pinDirectory } from './storage/paths.mjs';
 import { readJSON } from './storage/files.mjs';
 import { parseEntryArguments, selectStoreRoot, loadClientContract } from './client/entry-options.mjs';
 import { handleNativeHook } from './client/hooks.mjs';
+import { isClaudeCommandExpansion } from './client/commands.mjs';
 import { buildClaudeCommandContext } from './client/history.mjs';
 import { createCodexNativeAdapter } from './client/codex-native.mjs';
 import { createControlBridge, serveControl } from './client/control-server.mjs';
@@ -86,13 +87,13 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
         Object.keys(request.value).some(key => !['storeRoot', 'expectedHash', 'project'].includes(key)) || !Object.hasOwn(request.value, 'expectedHash')) fail('SETUP_ARGUMENT', 'Setup needs project settings and the inspected settings hash (null for a fresh store).');
     output(await setupProject({ ...request.value, storeRoot: request.value.storeRoot ?? storeRoot, skillVersion })); return;
   }
-  const store = await openStore(storeRoot);
+  let store = await openStore(storeRoot);
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
   if (args.command === 'status') { output(await readProjectStatus(store, args.projectId)); return; }
-  const runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
-  const execute = commandExecutor(store, runtime, skillVersion);
+  let runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
+  let execute = commandExecutor(store, runtime, skillVersion);
   try {
     if (args.command === 'sync-steward') { if (store) await runtime.steward(); return; }
     if (args.command === 'sync-collect') {
@@ -111,7 +112,13 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
     if (args.command === 'hook') {
       const mapped = await handleNativeHook(store, args.client, envelope, { claudeCommand: contract.claude,
         clientContract: clientContract(contract, args.client), schedule: () => runtime.schedule() });
-      if (!mapped.command) return; // Ordinary hooks inject no context.
+      if (!mapped.command) {
+        if (args.client === 'claude' && isClaudeCommandExpansion(envelope, contract.claude)) {
+          output({ hookSpecificOutput: { hookEventName: 'UserPromptExpansion', additionalContext:
+            'Cuefluent Notes did not execute a tracking or processing command. No tracking or processing state was changed. Natural-language note requests may use the direct note tools. If the user intended a tracking or processing action, explain that it did not run and ask for one exact action: track, untrack, process, process project, save, skip, or status.' } });
+        }
+        return; // Ordinary lifecycle hooks inject no context.
+      }
       const result = mapped.command.action === 'status' ? await execute(mapped.command) : await submitCommand(store, mapped.command);
       const context = result.handle ? buildClaudeCommandContext(result.handle) : `Cuefluent Notes result: ${JSON.stringify(result)}`;
       output({ hookSpecificOutput: { hookEventName: 'UserPromptExpansion', additionalContext: context } }); return;
@@ -119,11 +126,27 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
     if (args.command === 'mcp') {
       const adapter = args.client === 'codex' ? createCodexNativeAdapter({ version: skillVersion }) : null;
       try {
+        let directNotes = createDirectNoteTools({ store, client: args.client, skillVersion }), opening = null;
+        // A server may start before explicit setup creates the private store.
+        // Recheck only that absent state; once opened, keep its pinned identity.
+        const refreshStore = async () => {
+          if (store) return;
+          opening ??= (async () => {
+            const opened = await openStore(storeRoot);
+            if (!opened) return;
+            await runtime.close();
+            store = opened;
+            runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
+            execute = commandExecutor(store, runtime, skillVersion);
+            directNotes = createDirectNoteTools({ store, client: args.client, skillVersion });
+          })().finally(() => { opening = null; });
+          await opening;
+        };
         const bridge = createControlBridge({ client: args.client, selection: contract.codex, codexAdapter: adapter,
-          directNotes: createDirectNoteTools({ store, client: args.client, skillVersion }),
-          executeInvocation: invocation => invocation.action === 'status' ? execute(invocation) : submitCommand(store,
-            { ...invocation, clientContract: clientContract(contract, args.client) }),
-          readInvocation: handle => readInvocation(store, handle) });
+          directNotes: { tools: directNotes.tools, async call(...input) { await refreshStore(); return directNotes.call(...input); } },
+          executeInvocation: async invocation => { await refreshStore(); return invocation.action === 'status' ? execute(invocation) : submitCommand(store,
+            { ...invocation, clientContract: clientContract(contract, args.client) }); },
+          readInvocation: async handle => { await refreshStore(); return readInvocation(store, handle); } });
         let finish;
         const ended = new Promise(resolve => { finish = resolve; });
         const transport = serveControl(bridge, { version: skillVersion, onFailure: () => { process.exitCode = 1; process.stdin.destroy(); finish(); } });

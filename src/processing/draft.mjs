@@ -66,14 +66,13 @@ export async function recoverDrafts(store, owner) {
 }
 
 export async function persistDraftManifest(store, owner, manifest) {
-  const run = await withCurrentAttempt(owner, ({ run }) => run);
-  if (manifest.runId !== run.id) fail('DRAFT_RUN_CHANGED', 'The draft workspace belongs to a different run.');
-  const metadata = { runId: run.id, outcome: manifest.outcome,
+  const metadata = { runId: manifest.runId, outcome: manifest.outcome,
     drafts: manifest.drafts.map(({ bytes, ...draft }) => ({ ...draft, byteLength: bytes.length })) };
   await withCurrentAttempt(owner, async context => {
     let current = context.run, hash = context.hash;
+    if (manifest.runId !== current.id) fail('DRAFT_RUN_CHANGED', 'The draft workspace belongs to a different run.');
     if (current.phase !== 'drafting' || current.artifacts) fail('DRAFT_RUN_CHANGED', 'The current draft reservation changed.');
-    await prepareDraftArtifacts(store.pin, `${context.directory}/drafts/${run.id}`, metadata, {
+    await prepareDraftArtifacts(store.pin, `${context.directory}/drafts/${current.id}`, metadata, {
       persistIntent: async pointer => {
         current = validateRun({ ...current, artifacts: pointer });
         hash = (await writeJSON(store.pin, `${context.directory}/run.json`, current, { expectedHash: hash })).hash;
@@ -103,7 +102,6 @@ export async function prepareRunDrafts(store, owner, { client, skillVersion, mod
       input: draftingInput(input, run.settings), mcp: bridge.descriptor, signal });
     if (result?.status !== 'completed') fail('DRAFT_SESSION_INCOMPLETE', 'The native drafting session did not complete.');
     const manifest = await workspace.manifest();
-    if (manifest.runId !== run.id) fail('DRAFT_RUN_CHANGED', 'The draft workspace belongs to a different run.');
     ready = await persistDraftManifest(store, owner, manifest);
   } catch (error) {
     failure = error;

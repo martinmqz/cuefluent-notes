@@ -22,11 +22,15 @@ if (client === 'codex') {
     'secret_auth_storage', 'api_key_model_discovery', 'enable_request_compression', 'unbounded_connection_retries',
     'respect_system_proxy', 'system_proxy_fallback', 'unified_exec', 'synthetic_future_tool'];
   const baseline = featureNames.map(name => ({ name, enabled: name !== 'skip_host_skill_discovery' && name !== 'system_proxy_fallback', stage: 'stable' }));
-  let started, ownServer, policyReads = 0;
+  let started, ownServer, policyReads = 0, inventoryDrift = false;
   const setting = name => {
     const option = args.find(value => value.startsWith(`${name}=`));
     return option === undefined ? null : JSON.parse(option.slice(name.length + 1));
   };
+  config.otel = { log_user_prompt: setting('otel.log_user_prompt') ?? true,
+    ...Object.fromEntries(['exporter', 'trace_exporter', 'metrics_exporter'].map(key => [key,
+      mode === `telemetry-${key}` ? { 'otlp-http': { endpoint: 'http://127.0.0.1/synthetic-collector' } } : setting(`otel.${key}`)])) };
+  if (mode === 'telemetry-prompts') config.otel.log_user_prompt = true;
   const settings = () => ({ cwd: started.cwd, approvalPolicy: started.approvalPolicy, approvalsReviewer: started.approvalsReviewer,
     model: started.model ?? configuredModel, modelProvider: mode === 'wrong-provider' ? 'openai' : provider,
     reasoningEffort: setting('model_reasoning_effort'), sandbox: { type: 'readOnly', networkAccess: false },
@@ -51,21 +55,22 @@ if (client === 'codex') {
         for (const feature of data) {
           const override = started.config[`features.${feature.name}`];
           if (override !== undefined) feature.enabled = override;
-          if (feature.name === 'unified_exec') feature.enabled = true;
           if (mode === 'hooks' && feature.name === 'hooks' || mode === 'future-tool' && feature.name === 'synthetic_future_tool' ||
-              mode === 'postflight-feature' && policyReads > 1 && feature.name === 'shell_tool') feature.enabled = true;
+              (['postflight-feature', 'midturn-policy'].includes(mode) && policyReads > 1 || inventoryDrift) && feature.name === 'shell_tool') feature.enabled = true;
         }
       }
       result = { data, nextCursor: null };
     }
     if (method === 'command/exec') {
-      if (!['darwin', 'win32'].includes(process.platform)) result = { exitCode: 0, stdout: JSON.stringify({ read: mode !== 'canary', write: true, outsideWrite: true, network: true }), stderr: '' };
-      else if (/curl(?:\.exe)?$/.test(params.command[0])) result = { exitCode: 7, stdout: '', stderr: 'Synthetic network denied.' };
-      else if (params.env?.CUEFLUENT_CANARY_FILE?.includes('.cuefluent-readable') || (params.command[0] === '/bin/cat' && params.command[1].includes('.cuefluent-readable'))) result = { exitCode: 0, stdout: 'CUEFLUENT_CANARY_READABLE', stderr: '' };
+      if (params.command.includes('process.stdout.write("CUEFLUENT_SMOKE_CONTROL")')) result = { exitCode: 0, stdout: 'CUEFLUENT_SMOKE_CONTROL', stderr: '' };
+      else if (/curl(?:\.exe)?$/.test(params.command[0]) || params.command[3]?.includes('net.createConnection')) result = { exitCode: 7, stdout: '', stderr: 'Synthetic network denied.' };
+      else if (params.env?.CUEFLUENT_CANARY_FILE?.includes('.cuefluent-readable') || params.command.at(-1).includes('.cuefluent-readable')) result = { exitCode: 0, stdout: 'CUEFLUENT_CANARY_READABLE', stderr: '' };
       else result = mode === 'canary' ? { exitCode: 0, stdout: 'SYNTHETIC CANARY ESCAPED', stderr: '' } : { exitCode: 1, stdout: '', stderr: 'Synthetic access denied.' };
     }
     if (method === 'thread/start') {
       started = params; ownServer = Object.keys(params.config.mcp_servers).find(name => !Object.hasOwn(config.mcp_servers, name));
+      notify('warning', { message: 'Synthetic startup warning.' });
+      for (const status of ['starting', 'ready']) notify('mcpServer/startupStatus/updated', { threadId: 'synthetic-codex', name: ownServer, status });
       result = { ...settings(), thread: { id: 'synthetic-codex', sessionId: mode === 'wrong-session' ? 'unrelated-session' : 'synthetic-codex',
         ephemeral: mode !== 'persistent', path: mode === 'persistent' ? path.join(home, 'sessions', 'synthetic.jsonl') : null,
         forkedFromId: null, parentThreadId: null, status: { type: 'idle' } },
@@ -73,6 +78,11 @@ if (client === 'codex') {
           mode === 'project-guidance' ? [path.join(params.cwd, 'AGENTS.md')] : [] };
     }
     if (method === 'mcpServerStatus/list') {
+      for (const status of ['starting', 'ready']) notify('mcpServer/startupStatus/updated', { threadId: 'synthetic-codex', name: ownServer, status });
+      if (mode === 'during-policy-feature' && !inventoryDrift) {
+        inventoryDrift = true;
+        notify('warning', { message: 'Synthetic feature change after its inventory snapshot.' });
+      }
       const data = Object.keys(config.mcp_servers).map(name => ({ name,
         runtimeStatus: started.config.mcp_servers[name]?.enabled === false && mode !== 'inherited-active' ? 'disabled' : 'connected',
         tools: {}, resources: [], resourceTemplates: [] }));
@@ -89,6 +99,10 @@ if (client === 'codex') {
     record({ sourceReceived: JSON.stringify(params.input).includes('SOURCE_SENTINEL') });
     const identity = { threadId: mode === 'wrong-thread-event' ? 'unrelated-thread' : 'synthetic-codex', turnId: mode === 'wrong-turn-event' ? 'unrelated-turn' : 'synthetic-turn' };
     notify('turn/started', { ...identity, turn: { id: identity.turnId, status: 'inProgress' } });
+    if (mode === 'midturn-policy' || mode === 'midturn-burst') {
+      notify('warning', { message: 'Synthetic new policy warning.' });
+      for (const status of ['starting', 'ready']) notify('mcpServer/startupStatus/updated', { threadId: identity.threadId, name: ownServer, status });
+    }
     if (mode === 'slow') return;
     if (mode === 'retry' || mode === 'terminal-error') notify('error', { ...identity, willRetry: mode === 'retry', error: { message: 'Synthetic transport failure.' } });
     if (mode === 'interactive-request') send({ id: 'synthetic-approval', method: 'item/commandExecution/requestApproval', params: identity });

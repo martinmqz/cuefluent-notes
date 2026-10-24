@@ -162,6 +162,29 @@ function awaitActivation(channel, attemptId, startupTimeoutMs) {
   });
 }
 
+function registerOwner(store, projectId, runId, attemptId) {
+  const owner = Object.freeze({ runId, attemptId, projectId });
+  owners.set(owner, { store, projectId, runId, attemptId, active: true, accepting: true, publications: new Set(), failures: new Set() });
+  return owner;
+}
+
+async function settleOwner(owner, gate, failure, workFinished) {
+  if (owner) {
+    const state = owners.get(owner);
+    state.accepting = false;
+    while (state.publications.size) await Promise.allSettled([...state.publications]);
+    state.active = false;
+  }
+  const unattended = workFinished && [...(owners.get(owner)?.failures ?? [])].find(item => !item.observed);
+  failure ??= unattended?.error;
+  try { gate?.release(); }
+  catch (error) {
+    if (failure) { try { Object.defineProperty(failure, 'releaseError', { value: error, configurable: true }); } catch {} }
+    else throw new GateError('GATE_RELEASE_FAILED', 'The attempt finished but its worker gate release failed.', { cause: error });
+  }
+  if (unattended) throw unattended.error;
+}
+
 /** Worker-side ownership. Startup must have a parent IPC channel; activated work
  * deliberately survives that parent's exit. All asynchronous work is outside
  * project/settings gates. The worker gate is held until work and its writes end.
@@ -181,8 +204,7 @@ export async function ownAttempt(store, projectId, { runId, attemptId, workerGat
       gate = acquired.acquired;
     });
     await awaitActivation(channel, attemptId, startupTimeoutMs);
-    owner = Object.freeze({ runId, attemptId, projectId });
-    owners.set(owner, { store, projectId, runId, attemptId, active: true, accepting: true, publications: new Set(), failures: new Set() });
+    owner = registerOwner(store, projectId, runId, attemptId);
     await withCurrentAttempt(owner, () => {});
     // IPC is only the startup handshake. Closing it lets both processes proceed
     // independently and prevents later parent loss from cancelling active work.
@@ -201,20 +223,7 @@ export async function ownAttempt(store, projectId, { runId, attemptId, workerGat
     }
     throw error;
   } finally {
-    if (owner) {
-      const state = owners.get(owner);
-      state.accepting = false;
-      while (state.publications.size) await Promise.allSettled([...state.publications]);
-      state.active = false;
-    }
-    const unattended = workFinished && [...(owners.get(owner)?.failures ?? [])].find(item => !item.observed);
-    failure ??= unattended?.error;
-    try { gate?.release(); }
-    catch (error) {
-      if (failure) { try { Object.defineProperty(failure, 'releaseError', { value: error, configurable: true }); } catch {} }
-      else throw new GateError('GATE_RELEASE_FAILED', 'The attempt finished but its worker gate release failed.', { cause: error });
-    }
-    if (unattended) throw unattended.error;
+    await settleOwner(owner, gate, failure, workFinished);
   }
 }
 
@@ -225,7 +234,7 @@ export async function ownDirectAttempt(store, projectId, runId, work) {
   identity(runId);
   if (typeof work !== 'function') fail('ATTEMPT_WORKER_INVALID', 'An owned operation needs work.');
   const attemptId = randomUUID();
-  let gate, owner, failure, workFinished = false;
+  let gate, owner, run, failure, workFinished = false;
   try {
     await withProject(store, projectId, async context => {
       const snapshot = await pending(store, context, runId);
@@ -233,29 +242,16 @@ export async function ownDirectAttempt(store, projectId, runId, work) {
       const acquired = tryAcquireExistingGate(context.gates.workerGate, gateOptions);
       if (acquired.busy) fail('ATTEMPT_ACTIVE', 'A worker already owns this project.');
       gate = acquired.acquired;
-      await writeJSON(store.pin, `${context.directory}/run.json`, replaceAttempt(snapshot.value, attemptId), { expectedHash: snapshot.hash });
+      run = replaceAttempt(snapshot.value, attemptId);
+      await writeJSON(store.pin, `${context.directory}/run.json`, run, { expectedHash: snapshot.hash });
     });
-    owner = Object.freeze({ runId, attemptId, projectId });
-    owners.set(owner, { store, projectId, runId, attemptId, active: true, accepting: true, publications: new Set(), failures: new Set() });
-    const result = await work(owner);
+    owner = registerOwner(store, projectId, runId, attemptId);
+    const result = await work(owner, run);
     workFinished = true;
     return result;
   } catch (error) { failure = error; throw error; }
   finally {
-    if (owner) {
-      const state = owners.get(owner);
-      state.accepting = false;
-      while (state.publications.size) await Promise.allSettled([...state.publications]);
-      state.active = false;
-    }
-    const unattended = workFinished && [...(owners.get(owner)?.failures ?? [])].find(item => !item.observed);
-    failure ??= unattended?.error;
-    try { gate?.release(); }
-    catch (error) {
-      if (failure) { try { Object.defineProperty(failure, 'releaseError', { value: error, configurable: true }); } catch {} }
-      else throw new GateError('GATE_RELEASE_FAILED', 'The direct operation finished but its worker gate release failed.', { cause: error });
-    }
-    if (unattended) throw unattended.error;
+    await settleOwner(owner, gate, failure, workFinished);
   }
 }
 

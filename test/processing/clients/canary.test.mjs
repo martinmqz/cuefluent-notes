@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { windowsCanaryCommand, macosCanaryCommand, verifySandbox } from '../../../src/processing/clients/canary.mjs';
+import { windowsCanaryCommand, macosCanaryCommand, networkCanaryCommand, verifySandbox } from '../../../src/processing/clients/canary.mjs';
 
 test('Windows native canary binds hostile-looking paths as literal environment values with delayed expansion off', () => {
   const file = String.raw`C:\Users\Synthetic & User!\Temp\note %PATH% $value 'quote' ` + "`tick`.txt";
@@ -26,11 +26,21 @@ test('macOS probe commands treat shell-looking file names literally', { skip: pr
   const file = path.join(root, '$(touch ESCAPED) `touch ESCAPED` $HOME "quote".txt');
   for (const operation of ['write', 'read']) {
     const probe = macosCanaryCommand(operation, file);
+    assert.notEqual(probe.command[0], '/bin/sh');
     const result = spawnSync(probe.command[0], probe.command.slice(1), { cwd: root, env: { ...process.env, ...probe.env }, encoding: 'utf8' });
     assert.equal(result.status, 0);
-    if (operation === 'read') assert.equal(result.stdout, 'CUEFLUENT_CANARY_WRITE');
+    if (operation === 'write') await writeFile(file, 'SYNTHETIC LITERAL PATH');
+    else assert.equal(result.stdout, 'SYNTHETIC LITERAL PATH');
   }
   assert.deepEqual(await readdir(root), [path.basename(file)]);
+});
+
+test('Windows and macOS network probes disable curl config and proxies before selecting the loopback listener', () => {
+  for (const platform of ['darwin', 'win32']) {
+    const probe = networkCanaryCommand(platform, 32123, 'C:\\Windows');
+    assert.deepEqual(probe.command.slice(1, 4), ['-q', '--noproxy', '*']);
+    assert.equal(probe.command.at(-1), 'http://127.0.0.1:32123/cuefluent-synthetic-canary');
+  }
 });
 
 test('macOS isolation requires a running probe and every actual denial before source delivery', { skip: process.platform !== 'darwin' }, async t => {
@@ -38,7 +48,7 @@ test('macOS isolation requires a running probe and every actual denial before so
     await t.test(failure ?? 'all protections verified', async t => {
       const cwd = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cuefluent-canary-test-')));
       t.after(() => rm(cwd, { recursive: true, force: true }));
-      const calls = []; let writes = 0;
+      const calls = [];
       const transport = { async request(method, params) {
         assert.equal(method, 'command/exec');
         assert.equal(params.permissionProfile, 'cuefluent_processing');
@@ -49,9 +59,9 @@ test('macOS isolation requires a running probe and every actual denial before so
           }
           return failure === 'read' ? { exitCode: 0, stdout: 'SYNTHETIC CANARY' } : { exitCode: 1, stdout: '' };
         }
-        if (params.command[0] === '/bin/sh') {
-          const operation = ++writes === 1 ? 'write' : 'outsideWrite';
-          if (failure === 'hiddenWrite') await writeFile(params.env.CUEFLUENT_CANARY_FILE, 'SYNTHETIC');
+        if (params.command[0] === '/usr/bin/touch') {
+          const operation = path.dirname(params.command[1]) === cwd ? 'write' : 'outsideWrite';
+          if (failure === 'hiddenWrite') await writeFile(params.command[1], 'SYNTHETIC');
           return { exitCode: failure === operation ? 0 : 1, stdout: '' };
         }
         assert.equal(params.command[0], '/usr/bin/curl');
@@ -69,9 +79,28 @@ test('macOS isolation requires a running probe and every actual denial before so
       if (failure) await assert.rejects(verifySandbox(transport, cwd), { code: 'PROCESSING_ISOLATION_UNSUPPORTED' });
       else {
         await verifySandbox(transport, cwd);
-        assert.deepEqual(calls, ['/bin/cat', '/bin/cat', '/bin/sh', '/bin/sh', '/usr/bin/curl']);
+        const rootCount = new Set([await realpath(os.tmpdir()), await realpath('/tmp')]).size;
+        assert.deepEqual(calls, [...Array(1 + rootCount).fill('/bin/cat'), ...Array(1 + rootCount).fill('/usr/bin/touch'), '/usr/bin/curl']);
       }
       assert.equal((await readdir(cwd)).some(name => name.startsWith('.cuefluent-readable')), false);
     });
+  }
+});
+
+test('macOS canary probes shared /tmp even with a distinct process TMPDIR and coalesces identical roots', { skip: process.platform !== 'darwin' }, async t => {
+  const cwd = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cuefluent-canary-test-')));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  for (const sharedOnly of [false, true]) {
+    const probes = [];
+    if (sharedOnly) t.mock.method(os, 'tmpdir', () => '/tmp');
+    const transport = { async request(_method, params) {
+      probes.push(params.command);
+      if (params.command[0] === '/bin/cat' && params.command[1].includes('.cuefluent-readable')) return { exitCode: 0, stdout: await readFile(params.command[1], 'utf8') };
+      return { exitCode: params.command[0] === '/usr/bin/curl' ? 7 : 1, stdout: '' };
+    } };
+    await verifySandbox(transport, cwd);
+    const reads = probes.filter(argv => argv[0] === '/bin/cat' && !argv[1].includes('.cuefluent-readable'));
+    assert.ok(reads.some(argv => argv[1].startsWith('/private/tmp/')));
+    if (sharedOnly) assert.equal(reads.length, 1);
   }
 });

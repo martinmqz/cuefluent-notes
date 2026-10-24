@@ -143,9 +143,13 @@ function parseYaml(payload) {
 }
 
 /** Mask actual block code and paired inline code; raw HTML comments remain raw. */
-function activeMarkers(source, tokens) {
+export function lineStarts(source) {
   const starts = [0];
   for (const match of source.matchAll(/\r\n|\r|\n/g)) starts.push(match.index + match[0].length);
+  return starts;
+}
+function activeMarkers(source, tokens) {
+  const starts = lineStarts(source);
   const ranges = [];
   for (const token of tokens) if (['fence', 'code_block'].includes(token.type) && token.map) ranges.push([starts[token.map[0]], starts[token.map[1]] ?? source.length]);
   let masked = source.split('');
@@ -212,6 +216,12 @@ export function inspectMetadata(input) {
 
 function withoutMetadata(source, inspection) {
   return inspection.raw === null ? source : source.slice(inspection.end);
+}
+/** Visible authored content, retaining any prefix and exact newline style. */
+export function noteContent(input) {
+  const source = decodeNote(input), inspection = inspectMetadata(source);
+  if (inspection.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be hidden in a review.');
+  return (inspection.raw === null ? '' : source.slice(0, inspection.start)) + withoutMetadata(source, inspection);
 }
 function quoted(value) { const scalar = new Scalar(value); scalar.type = Scalar.QUOTE_DOUBLE; return scalar; }
 

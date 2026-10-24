@@ -1,4 +1,4 @@
-import { descriptor, boundedText, executablePath, privateCwd, requireClient } from './protocol.mjs';
+import { descriptor, boundedText, token, executablePath, privateCwd, requireClient } from './protocol.mjs';
 import { runClaude } from './claude.mjs';
 import { runCodex } from './codex.mjs';
 import { PACKAGE_VERSION_PATTERN } from '../../core/version.mjs';
@@ -14,7 +14,7 @@ export async function runDraftingSession(options, dependencies = {}) {
   // A native provider may use deployment-specific model names. Omission keeps
   // Codex's configured model; an explicit trusted host selection remains valid.
   const model = options.model ?? (options.client === 'codex' ? undefined : 'opus'), effort = options.effort ?? 'high';
-  requireClient(options.client === 'codex' ? model === undefined || boundedText(model, 256) && model.length > 0 && !/\s|\p{Cc}/u.test(model) : ['opus', 'claude-opus-5-5'].includes(model), 'PROCESSING_ARGUMENT');
+  requireClient(options.client === 'codex' ? model === undefined || token(model) : ['opus', 'claude-opus-5-5'].includes(model), 'PROCESSING_ARGUMENT');
   requireClient(['high', 'xhigh'].includes(effort), 'PROCESSING_ARGUMENT');
   requireClient(boundedText(options.prompt, 64 * 1024) && options.prompt.trim() && boundedText(options.input, 4 * 1024 * 1024), 'PROCESSING_ARGUMENT');
   requireClient(options.onStarted === undefined || typeof options.onStarted === 'function', 'PROCESSING_ARGUMENT');

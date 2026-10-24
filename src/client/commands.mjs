@@ -19,13 +19,29 @@ function absolute(value, label, nullable = false) {
   return value;
 }
 
-export function parseAction(value) {
+function actionText(value) {
   if (typeof value !== 'string' || value.length > 128 || CONTROL.test(value)) {
     fail('COMMAND_INVALID', 'Use track, untrack, process, process project, save, skip, or status.');
   }
-  const action = value.trim().replace(/ +/g, ' ');
+  return value.trim().replace(/ +/g, ' ');
+}
+
+export function matchAction(value) {
+  let action;
+  try { action = actionText(value); }
+  catch (error) { if (error.code === 'COMMAND_INVALID') return null; throw error; }
+  return ACTIONS.has(action) ? action : null;
+}
+
+export function parseAction(value) {
+  const action = matchAction(value);
   if (!ACTIONS.has(action)) fail('COMMAND_INVALID', 'Use track, untrack, process, process project, save, skip, or status.');
   return action;
+}
+
+export function isClaudeCommandExpansion(envelope, { name, source } = {}) {
+  return envelope?.hook_event_name === 'UserPromptExpansion' && envelope.expansion_type === 'slash_command' &&
+    envelope.command_name === name && envelope.command_source === source;
 }
 
 /** Only the installed native hook calls this with its stdin envelope. Never
@@ -34,16 +50,12 @@ export function parseAction(value) {
  */
 export function bindClaudeCommand(envelope, { name, source } = {}) {
   token(name, 'command name'); token(source, 'command source');
-  if (envelope?.hook_event_name !== 'UserPromptExpansion' || envelope.expansion_type !== 'slash_command' ||
-      envelope.command_name !== name || envelope.command_source !== source) return null;
-  let action;
-  try { action = parseAction(envelope.command_args); }
-  catch (error) {
-    // Natural-language note requests are handled by the skill's content tools.
-    // They grant no native tracking or queue-processing command authority.
-    if (error.code === 'COMMAND_INVALID') return null;
-    throw error;
-  }
+  if (!isClaudeCommandExpansion(envelope, { name, source })) return null;
+  // A well-formed natural-language request has no native command authority;
+  // malformed arguments still report their refusal through the hook.
+  actionText(envelope.command_args);
+  const action = matchAction(envelope.command_args);
+  if (action === null) return null;
   if (typeof envelope.prompt !== 'string' || envelope.prompt.length > name.length + 130 ||
       CONTROL.test(envelope.prompt) || envelope.prompt.trim() !== `/${name} ${envelope.command_args.trim()}`) {
     fail('NATIVE_COMMAND_MISMATCH', 'The native command expansion does not match its direct invocation.');
@@ -55,15 +67,26 @@ export function bindClaudeCommand(envelope, { name, source } = {}) {
 
 /** Exact native linked history representation, shared by current command binding
  * and historical exclusion. The caller independently establishes native identity. */
-export function codexLinkedAction(text, name, skillPath) {
-  if (typeof text !== 'string') return null;
+export function codexLinkedCommand(text, name, { platform = process.platform } = {}) {
+  if (typeof text !== 'string' || text.length > 32768 + name.length * 2 + 160) return null;
+  const paths = platform === 'win32' ? path.win32 : path.posix;
   for (const label of [name, `cuefluent-notes:${name}`]) {
-    const prefix = `[$${label}](${skillPath}) `;
-    if (text.length > prefix.length + 130 || !text.startsWith(prefix)) continue;
-    const action = text.slice(prefix.length).replace(/\r?\n$/, '');
-    if (ACTIONS.has(action)) return action;
+    const prefix = `[$${label}](`;
+    if (!text.startsWith(prefix)) continue;
+    const separator = text.lastIndexOf(') ');
+    if (separator < prefix.length || text[separator + 2] === ' ') continue;
+    const skillPath = text.slice(prefix.length, separator);
+    if (skillPath.length > 32768 || CONTROL.test(skillPath) || !paths.isAbsolute(skillPath) ||
+        paths.normalize(skillPath) !== skillPath || paths.basename(skillPath) !== 'SKILL.md') continue;
+    const action = matchAction(text.slice(separator + 2).replace(/\r?\n$/, ''));
+    if (action !== null) return Object.freeze({ action, skillPath });
   }
   return null;
+}
+
+export function codexLinkedAction(text, name, skillPath) {
+  const command = codexLinkedCommand(text, name);
+  return command?.skillPath === skillPath ? command.action : null;
 }
 
 function codexAction(parts, name, skillPath) {

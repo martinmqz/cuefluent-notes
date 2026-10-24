@@ -1,5 +1,6 @@
 // Synthetic protocol peer for deterministic smoke-harness tests only.
 import fs from 'node:fs';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
 const [mode] = process.argv.slice(2), trace = process.env.CUEFLUENT_SMOKE_TRACE;
 const record = value => fs.appendFileSync(trace, `${JSON.stringify(value)}\n`);
@@ -8,6 +9,27 @@ if (mode === 'fail') process.exit(7);
 else if (mode === 'output') process.stdout.write('x'.repeat(65536));
 else if (mode === 'wait') setInterval(() => {}, 1000);
 else if (mode === 'command') console.log('Synthetic CLI output.');
+else if (mode === 'codex') {
+  const args = process.argv.slice(3);
+  if (args.includes('generate-json-schema')) {
+    const root = args[args.indexOf('--out') + 1];
+    const schema = { oneOf: ['turn/start', 'command/exec'].map(method => ({ properties: { method: { enum: [method] }, params: { $ref: `#/definitions/${method === 'turn/start' ? 'TurnStartParams' : 'CommandExecParams'}` } } })),
+      definitions: {
+        TurnStartParams: { type: 'object', required: ['threadId', 'input'], properties: { threadId: { type: 'string' }, input: { type: 'array', items: { $ref: '#/definitions/UserInput' } } } },
+        UserInput: { oneOf: [{ type: 'object', required: ['type', 'text'], properties: { type: { enum: ['text'] }, text: { type: 'string' }, text_elements: { type: 'array' } } }] },
+        CommandExecParams: { type: 'object', required: ['command'], properties: { command: { type: 'array', items: { type: 'string' } }, cwd: { type: ['string', 'null'] }, env: { type: ['object', 'null'] }, permissionProfile: { type: ['string', 'null'] }, disableTimeout: { type: 'boolean' }, outputBytesCap: { type: ['integer', 'null'] } } },
+      } };
+    if (process.env.CUEFLUENT_SMOKE_POLICY === 'schema') delete schema.definitions.TurnStartParams.properties.threadId;
+    if (process.env.CUEFLUENT_SMOKE_POLICY === 'command-schema') delete schema.definitions.CommandExecParams.properties.permissionProfile;
+    if (process.env.CUEFLUENT_SMOKE_POLICY === 'required-schema') schema.definitions.TurnStartParams.required.push('unrecognized_required_field');
+    fs.writeFileSync(path.join(root, 'ClientRequest.json'), JSON.stringify(schema));
+  } else {
+    process.argv.splice(2, 1);
+    process.env.FIXTURE_CLIENT = 'codex'; process.env.FIXTURE_TRACE = trace;
+    process.env.FIXTURE_MODE = process.env.CUEFLUENT_SMOKE_POLICY === 'bad' ? 'managed' : '';
+    await import('../processing/clients/native.fixture.mjs');
+  }
+}
 else {
   const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
   const input = createInterface({ input: process.stdin });

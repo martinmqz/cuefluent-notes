@@ -52,19 +52,28 @@ test('native command checks fail on nonzero exit, excess output and timeout', as
 for (const client of ['codex', 'claude']) test(`source-free ${client} admission verifies the native protocol without delivering user/model input`, async t => {
   const { root, env, trace } = await fixture(t);
   const methods = await clientAdmission(client, process.execPath, { env, version: '1.2.3-dev.4', cwd: { path: root, check: async () => {} }, spawn: fixtureSpawn(client) });
-  assert.deepEqual(methods, client === 'codex' ? ['initialize', 'configRequirements/read'] : ['initialize', 'get_settings', 'mcp_status', 'get_context_usage']);
+  assert.deepEqual(methods, client === 'codex' ? ['initialize', 'configRequirements/read', 'config/read', 'experimentalFeature/list', 'thread/start', 'mcpServerStatus/list', 'command/exec', 'turn/start:schema'] : ['initialize', 'get_settings', 'mcp_status', 'get_context_usage']);
   const calls = (await fs.readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(calls.some(value => value.user), false);
   if (process.platform === 'win32') assert.deepEqual(calls[0].windowsProfile, { homePairMatchesDisposableProfile: true, blankIdentity: true });
-  assert.equal(calls.some(value => ['turn/start', 'thread/start', 'account/read', 'config/write'].includes(value.method)), false);
+  assert.equal(calls.some(value => ['turn/start', 'account/read', 'config/write'].includes(value.method)), false);
+  if (client === 'codex') {
+    assert.equal(calls.filter(value => value.method === 'thread/start').length, 1);
+    const control = calls.find(value => value.method === 'command/exec');
+    assert.deepEqual(control.params.sandboxPolicy, { type: 'dangerFullAccess' });
+    assert.equal(control.params.command.at(-1), 'process.stdout.write("CUEFLUENT_SMOKE_CONTROL")');
+  }
   // CoreFoundation may add this process-local encoding hint on macOS.
   assert.deepEqual(calls[0].environment.filter(name => !Object.hasOwn(env, name) && !(process.platform === 'darwin' && name === '__CF_USER_TEXT_ENCODING')), []);
 });
 
 test('native admission refuses policy overrides and has an explicit startup deadline', async t => {
   const { root, env } = await fixture(t), cwd = { path: root, check: async () => {} };
-  await assert.rejects(clientAdmission('codex', process.execPath, { env: { ...env, CUEFLUENT_SMOKE_POLICY: 'bad' }, version: '1.2.3-dev.4', cwd, spawn: fixtureSpawn('codex') }), { code: 'CLIENT_POLICY_ADMISSION' });
-  await assert.rejects(clientAdmission('codex', process.execPath, { env, version: '1.2.3-dev.4', cwd, spawn: fixtureSpawn('wait'), timeoutMs: 100 }), { code: 'PROCESSING_ABORTED' });
+  await assert.rejects(clientAdmission('codex', process.execPath, { env: { ...env, CUEFLUENT_SMOKE_POLICY: 'bad' }, version: '1.2.3-dev.4', cwd, spawn: fixtureSpawn('codex') }), { code: 'PROCESSING_ISOLATION_UNSUPPORTED' });
+  for (const [policy, code] of [['schema', 'CLIENT_TURN_SCHEMA_UNSUPPORTED'], ['command-schema', 'CLIENT_COMMAND_SCHEMA_UNSUPPORTED'], ['required-schema', 'CLIENT_TURN_SCHEMA_UNSUPPORTED']]) {
+    await assert.rejects(clientAdmission('codex', process.execPath, { env: { ...env, CUEFLUENT_SMOKE_POLICY: policy }, version: '1.2.3-dev.4', cwd, spawn: fixtureSpawn('codex') }), { code });
+  }
+  await assert.rejects(clientAdmission('codex', process.execPath, { env, version: '1.2.3-dev.4', cwd, spawn: fixtureSpawn('wait'), timeoutMs: 100 }), { code: 'CLIENT_COMMAND_TIMEOUT' });
 });
 
 test('admission requires a valid explicit package identity before any native launch', async () => {

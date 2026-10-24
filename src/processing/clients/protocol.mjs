@@ -11,7 +11,13 @@ export { executablePath } from '../../client/executable.mjs';
 
 export const requireClient = (condition, code = 'PROCESSING_ISOLATION_UNSUPPORTED') => { if (!condition) fail(code, 'The native processing session could not be safely established.'); };
 export const boundedText = (value, bytes) => typeof value === 'string' && Buffer.byteLength(value) <= bytes && !/\u0000|\p{Cs}/u.test(value);
-export const sameNames = (actual, expected) => Array.isArray(actual) && actual.length === expected.length && [...actual].sort().every((name, index) => name === [...expected].sort()[index]);
+export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+export const token = value => boundedText(value, 256) && value.length > 0 && !/\s|\p{Cc}/u.test(value);
+export function sameNames(actual, expected) {
+  if (!Array.isArray(actual) || !Array.isArray(expected) || actual.length !== expected.length) return false;
+  const sorted = [...expected].sort();
+  return [...actual].sort().every((name, index) => name === sorted[index]);
+}
 
 export async function privateCwd(directory) {
   requireClient(typeof directory === 'string' && path.isAbsolute(directory), 'PROCESSING_ARGUMENT');

@@ -11,6 +11,8 @@ Use existing suitable notes before creating new ones. For direct requests,
 returns bounded content chunks with the whole-file hash. Read the complete current
 note before proposing its replacement, use the first hash on later chunks, and
 pass that exact `expectedHash` to `cuefluent_update_note`.
+The direct tool refuses an incomplete read or an original larger than its 64 KiB
+replacement limit. Report the limit without changing or shortening the note.
 Updates stay at the same path. Explicit file destinations authorize only that
 file. New directory-routed notes use `meetings/`, `tasks/`, `knowledge-base/`,
 `decisions/`, or the root according to their dominant purpose.
@@ -23,7 +25,8 @@ structure, including the topic H1 and useful H2 sections. It omits the Cuefluent
 metadata block, search-alias comments and any added processing wrapper. The
 complete metadata and aliases remain in the retained private draft.
 
-Approval saves that exact draft with the content and structure the user reviewed;
+The save tool requests user confirmation through the client. Approval saves that
+exact draft with the content and structure the user reviewed;
 it does not trigger rewriting or reformatting. The temporary file lives outside
 the repository and notes destination and is only a presentation copy. Changes to
 it require a revised draft and fresh approval. See [commands](commands.md) for

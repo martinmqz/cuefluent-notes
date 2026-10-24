@@ -70,6 +70,8 @@ test('Codex retains the native provider and deployment while verifying ephemeral
   assert.equal(Object.hasOwn(start.config, 'features.secret_auth_storage'), false);
   assert.equal(Object.hasOwn(start.config, 'features.respect_system_proxy'), false);
   assert.equal(start.config['features.skip_host_skill_discovery'], true);
+  assert.equal(start.config['features.unified_exec'], true);
+  for (const value of ['otel.log_user_prompt=false', 'otel.exporter="none"', 'otel.trace_exporter="none"', 'otel.metrics_exporter="none"']) assert.ok(launch.arguments.includes(value));
   const servers = start.config.mcp_servers, serverName = Object.keys(servers).find(name => name.startsWith('cuefluent_'));
   assert.deepEqual(servers.existing_toolbox, { enabled: false }); assert.deepEqual(servers.cuefluent, { enabled: false });
   assert.match(serverName, /^cuefluent_[a-f0-9]{20}$/); assert.match(start.permissions, /^cuefluent_processing_[a-f0-9]{20}$/);
@@ -77,6 +79,8 @@ test('Codex retains the native provider and deployment while verifying ephemeral
   assert.deepEqual(servers[serverName].env_vars, ['CUEFLUENT_DRAFT_BRIDGE_TOKEN']);
   assert.equal(Object.hasOwn(servers[serverName], 'env'), false);
   assert.ok(launch.arguments.includes(`permissions.${start.permissions}.network.enabled=false`));
+  const filesystem = launch.arguments.find(value => value.startsWith(`permissions.${start.permissions}.filesystem=`));
+  assert.ok(filesystem.includes('":slash_tmp"="deny"')); assert.ok(filesystem.includes('":tmpdir"="deny"'));
   const probes = trace.filter(value => value.method === 'command/exec');
   assert.ok(probes.length > 0); assert.ok(probes.every(value => value.params.permissionProfile === start.permissions));
   const sourceIndex = trace.findIndex(value => value.sourceReceived);
@@ -87,6 +91,8 @@ test('Codex retains the native provider and deployment while verifying ephemeral
   const wire = JSON.stringify(trace);
   for (const secret of ['SYNTHETIC_SECRET', 'SYNTHETIC_PROVIDER_CREDENTIAL', 'synthetic-native-auth-helper', 'synthetic-provider.invalid']) assert.equal(wire.includes(secret), false);
   assert.equal(launch.tokenPresent, true);
+  assert.equal(trace.filter(value => value.method === 'experimentalFeature/list' && value.params.threadId).length, 2);
+  assert.equal(trace.filter(value => value.method === 'mcpServerStatus/list').length, 2);
 });
 
 test('Codex accepts an explicit deployment name without overriding its native provider', async t => {
@@ -114,10 +120,19 @@ test('Codex accepts explicitly selected xhigh without changing the high default'
   assert.ok((await fixture.trace()).find(value => value.arguments).arguments.includes('model_reasoning_effort="xhigh"'));
 });
 
-for (const mode of ['managed', 'canary', 'config-warning', 'hooks', 'future-tool', 'inherited-active', 'extra-tool', 'extra-mcp', 'mcp-resource', 'project-guidance', 'persistent', 'wrong-session', 'wrong-provider', 'wrong-profile']) test(`Codex refuses ${mode} before delivering source`, async t => {
+for (const mode of ['managed', 'canary', 'config-warning', 'hooks', 'future-tool', 'inherited-active', 'extra-tool', 'extra-mcp', 'mcp-resource', 'project-guidance', 'persistent', 'wrong-session', 'wrong-provider', 'wrong-profile',
+  'telemetry-prompts', 'telemetry-exporter', 'telemetry-trace_exporter', 'telemetry-metrics_exporter', 'during-policy-feature']) test(`Codex refuses ${mode} before delivering source`, async t => {
   const fixture = await setup(t, 'codex', mode);
   await assert.rejects(runDraftingSession(fixture.options, fixture.dependencies), { code: 'PROCESSING_ISOLATION_UNSUPPORTED' });
   assert.equal((await fixture.trace()).some(value => value.sourceReceived || value.method === 'turn/start'), false);
+});
+
+test('Codex coalesces new policy notifications while still checking after completion', async t => {
+  const fixture = await setup(t, 'codex', 'midturn-burst');
+  assert.equal((await runDraftingSession(fixture.options, fixture.dependencies)).status, 'completed');
+  const trace = await fixture.trace();
+  assert.equal(trace.filter(value => value.method === 'experimentalFeature/list' && value.params.threadId).length, 3);
+  assert.equal(trace.filter(value => value.method === 'mcpServerStatus/list').length, 3);
 });
 
 test('Codex permits native global guidance while keeping project guidance excluded', async t => {
@@ -144,7 +159,7 @@ test('Codex completes drafting after native context compaction and a display pla
 });
 
 for (const [mode, code] of [['terminal-error', 'PROCESSING_CLIENT_FAILED'], ['failed-turn', 'PROCESSING_CLIENT_FAILED'], ['oversized-plan', 'PROCESSING_PROTOCOL_LIMIT'],
-  ...['wrong-thread-event', 'wrong-turn-event', 'shell-event', 'unknown-item', 'foreign-tool', 'interactive-request', 'settings-drift', 'postflight-feature'].map(mode => [mode, 'PROCESSING_ISOLATION_UNSUPPORTED'])]) test(`Codex refuses ${mode} without reporting completion`, async t => {
+  ...['wrong-thread-event', 'wrong-turn-event', 'shell-event', 'unknown-item', 'foreign-tool', 'interactive-request', 'settings-drift', 'postflight-feature', 'midturn-policy'].map(mode => [mode, 'PROCESSING_ISOLATION_UNSUPPORTED'])]) test(`Codex refuses ${mode} without reporting completion`, async t => {
   const fixture = await setup(t, 'codex', mode);
   await assert.rejects(runDraftingSession(fixture.options, fixture.dependencies), { code });
   assert.equal((await fixture.trace()).filter(value => value.method === 'turn/start').length, 1);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { createHistoricalCommandClassifier } from '../src/client/historical-commands.mjs';
+import { createHistoricalCommandClassifier, createHistoricalCommandClassifiers } from '../src/client/historical-commands.mjs';
 import { inspectNativeRow, normalizeTranscript } from '../src/transcript/index.mjs';
 
 const sessionId = 'native-synthetic', skillPath = path.resolve('synthetic-skill', 'SKILL.md'), name = 'cuefluent-notes:notes';
@@ -141,7 +141,7 @@ test('Codex linked command exchanges and their replies stay out of the collected
 test('Codex linked historical exclusion requires exact content, path, identity and no annotations', async () => {
   const classifyCommand = createHistoricalCommandClassifier({ client: 'codex', name: 'cuefluent-notes', skillPath });
   const link = `[$cuefluent-notes:cuefluent-notes](${skillPath}) status`;
-  for (const content of [[typed(`> ${link}`)], [typed(link.replace(skillPath, path.resolve('other', 'SKILL.md')))],
+  for (const content of [[typed(`> ${link}`)],
     [typed(link), typed('extra')], [typed(link), 'extra'], [{ ...typed(link), text_elements: [{}] }],
     [{ ...typed(link), text_elements: null }], [typed(`${link}\nextra`)]] ) {
     const input = source([codex(content)]), row = await inspectNativeRow(input, 0);
@@ -151,6 +151,44 @@ test('Codex linked historical exclusion requires exact content, path, identity a
   assert.equal(await classifyCommand(input, row, { sessionId: 'other' }), null);
   input.verify = async () => { throw Object.assign(new Error('Synthetic changed source'), { code: 'SOURCE_CHANGED' }); };
   await assert.rejects(classifyCommand(input, row, { sessionId }), { code: 'SOURCE_CHANGED' });
+});
+
+test('Codex linked historical actions normalize spaces while preserving unknown installation boundaries', async () => {
+  const commandName = 'cuefluent-notes', otherPath = path.resolve('another-installation-with-a-longer-path', 'SKILL.md');
+  const classifyCommand = createHistoricalCommandClassifier({ client: 'codex', name: commandName, skillPath });
+  for (const [text, action] of [['status ', 'status'], ['process  project ', 'process project'], ['untrack   ', 'untrack']]) {
+    const input = source([codex([typed(`[$${commandName}](${skillPath}) ${text}`)])]), row = await inspectNativeRow(input, 0);
+    assert.equal((await classifyCommand(input, row, { sessionId })).action, action);
+  }
+  const input = source([codex([typed(`[$${commandName}](${otherPath}) untrack `)])]), row = await inspectNativeRow(input, 0);
+  assert.deepEqual(await classifyCommand(input, row, { sessionId }), { pending: 'CLIENT_COMMAND_IDENTITY_UNKNOWN' });
+  const retained = createHistoricalCommandClassifiers({ client: 'codex', clientContracts: [
+    { name: commandName, skillPath }, { name: commandName, skillPath: otherPath } ] });
+  assert.equal((await retained(input, row, { sessionId })).action, 'untrack');
+  input.verify = async () => { throw Object.assign(new Error('Synthetic changed source'), { code: 'SOURCE_CHANGED' }); };
+  await assert.rejects(classifyCommand(input, row, { sessionId }), { code: 'SOURCE_CHANGED' });
+});
+
+test('a linked command from an unretained installation never checkpoints its conversation or later exchanges', async () => {
+  const commandName = 'cuefluent-notes', otherPath = path.resolve('unretained-installation', 'SKILL.md');
+  const classifyCommand = createHistoricalCommandClassifier({ client: 'codex', name: commandName, skillPath });
+  const user = (id, text) => ({ type: 'event_msg', payload: { type: 'item_completed', thread_id: sessionId, turn_id: id,
+    item: { type: 'UserMessage', id: `human:${id}`, content: [typed(text)] } } });
+  const reply = id => ({ type: 'response_item', payload: { type: 'message', id: `answer:${id}`, role: 'assistant', phase: 'final_answer',
+    content: [{ type: 'output_text', text: `Answer ${id}` }] } });
+  const before = [user('before', 'Earlier information'), reply('before')];
+  const rows = [...before, user('untrack', `[$${commandName}](${otherPath}) untrack`), reply('untrack'), user('after', 'Later information'), reply('after')];
+  const input = source(rows), events = [];
+  for await (const event of normalizeTranscript(input, { client: 'codex', sessionId, classifyCommand })) events.push(event);
+  assert.deepEqual(events.filter(event => event.type === 'part').map(event => event.part.exchangeId), ['human:before']);
+  assert.equal(events.at(-1).reason, 'CLIENT_COMMAND_IDENTITY_UNKNOWN');
+  assert.equal(events.at(-1).checkpoint.offset, source(before).size);
+  const retained = createHistoricalCommandClassifiers({ client: 'codex', clientContracts: [
+    { name: commandName, skillPath }, { name: commandName, skillPath: otherPath } ] });
+  const resumed = [];
+  for await (const event of normalizeTranscript(input, { client: 'codex', sessionId, classifyCommand: retained, checkpoint: events.at(-1).checkpoint })) resumed.push(event);
+  assert.equal(resumed.some(event => event.type === 'part'), false);
+  assert.equal(resumed.at(-1).reason, 'TRANSCRIPT_UNTRACK_PENDING');
 });
 
 

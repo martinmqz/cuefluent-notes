@@ -95,7 +95,12 @@ test('default directory setup establishes logging and records one entry for a sa
   assert.equal((await readActivityLog(result.project.destination, { year: initialYear })).entries.length, 0);
   const reference = { projectId: result.project.id, runId: draft.runId };
   const earliestYear = logYear(new Date().toISOString(), result.project.activityLog.timezone);
-  const saved = await tools.call('cuefluent_save_note', reference);
+  let confirmations = 0;
+  const saved = await tools.call('cuefluent_save_note', reference, { approve: async confirmation => {
+    assert.equal(confirmation.action, 'save'); assert.equal(confirmation.runId, draft.runId);
+    confirmations++; return true;
+  } });
+  assert.equal(confirmations, 1);
   assert.equal(saved.state, 'saved');
   const latestYear = logYear(new Date().toISOString(), result.project.activityLog.timezone);
   const entries = [];

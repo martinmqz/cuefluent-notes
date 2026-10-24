@@ -48,6 +48,12 @@ test('Claude natural-language note requests do not become native queue commands'
   }
 });
 
+test('Claude malformed installed command arguments remain visible errors', () => {
+  for (const command_args of [null, 12, {}, 'status\t', 'status\n', 'x'.repeat(129)]) {
+    assert.throws(() => bindClaudeCommand({ ...claude(), command_args }, expected), { code: 'COMMAND_INVALID' });
+  }
+});
+
 test('Codex binds a complete native linked-skill invocation reconstructed from history', () => {
   for (const label of ['cuefluent-notes', 'cuefluent-notes:cuefluent-notes']) {
     for (const action of ['track', 'untrack', 'process', 'process project', 'save', 'skip', 'status']) {
@@ -56,6 +62,17 @@ test('Codex binds a complete native linked-skill invocation reconstructed from h
         row.payload.item.content = [{ type: 'text', text: `[$${label}](${skillPath}) ${action}${ending}`, text_elements: [] }];
         assert.equal(bindCodexCommand(meta, row, codexExpected).action, action);
       }
+    }
+  }
+});
+
+test('Codex linked and selected-skill action text share space normalization', () => {
+  for (const [text, action] of [['status ', 'status'], ['process  project', 'process project'], ['process  project   ', 'process project']]) {
+    const selected = codex(); selected.payload.item.content[1].text = text;
+    assert.equal(bindCodexCommand(meta, selected, codexExpected).action, action);
+    for (const ending of ['', '\n', '\r\n']) {
+      const linked = codex(); linked.payload.item.content = [{ type: 'text', text: `[$cuefluent-notes](${skillPath}) ${text}${ending}` }];
+      assert.equal(bindCodexCommand(meta, linked, codexExpected).action, action);
     }
   }
 });

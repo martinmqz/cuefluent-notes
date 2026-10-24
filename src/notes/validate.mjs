@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fail } from '../core/errors.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
-import { inspectMetadata } from './metadata.mjs';
+import { inspectMetadata, lineStarts, noteContent } from './metadata.mjs';
 import { decodeEntities, headingSlug, inlineText, normalizedText, parseMarkdown } from './markdown.mjs';
 
 const safeTags = new Set('p br strong em del s code pre blockquote ul ol li hr table thead tbody tfoot tr th td a img h1 h2 h3 h4 h5 h6 div span sup sub kbd mark'.split(' '));
@@ -11,6 +11,16 @@ const identifier = '[A-Za-z0-9][A-Za-z0-9_-]{0,127}';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 const logMarker = new RegExp(`^<!-- note-log-entry event=${uuid} project=${identifier} -->$`);
 export const isLogEntryMarker = value => typeof value === 'string' && logMarker.test(value.trim());
+const aliasComment = /^ {0,3}<!--[ \t]*aliases:[ \t]*([^\r\n]*?)-->[ \t]*(?:\r?\n)?$/;
+
+/** Content-only approval view: literal examples of metadata remain visible. */
+export function reviewNoteContent(input) {
+  const body = noteContent(input), starts = lineStarts(body), { tokens } = parseMarkdown(body);
+  const aliases = tokens.filter(token => token.type === 'html_block' && token.level === 0 && token.map && aliasComment.test(token.content));
+  let content = body;
+  for (const token of aliases.reverse()) content = content.slice(0, starts[token.map[0]]) + content.slice(starts[token.map[1]] ?? body.length);
+  return content;
+}
 
 export function assertOrdinaryTarget(project, target, { platform = process.platform } = {}) {
   const paths = platform === 'win32' ? path.win32 : path.posix;
@@ -242,7 +252,7 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
       i += 2; continue;
     }
     if (token.type === 'html_block' && /<!--\s*aliases\b/i.test(token.content)) {
-      const match = /^ {0,3}<!--[ \t]*aliases:[ \t]*([^\r\n]*?)-->[ \t]*(?:\r?\n)?$/.exec(token.content);
+      const match = aliasComment.exec(token.content);
       if (!section || token.level !== 0) { issue('alias-outside-section', line); continue; }
       if (!match) { issue('malformed-alias', line); continue; }
       if (section.aliasSeen) issue('repeated-alias', line);

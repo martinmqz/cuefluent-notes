@@ -28,7 +28,11 @@ whole-file hash. Follow the returned next offset; `expectedHash` is required for
 every read starting after byte zero. Reuse the first hash, so a changed file cannot
 be mistaken for one consistent read. Read the complete original before
 submitting its replacement; preserve useful content, metadata, aliases and manual
-edits. Do not shorten a note merely to fit the submission limit.
+edits. The direct tool requires complete read coverage in the same Codex chat or
+Claude connection for the exact original hash. Codex must supply the chat context
+through its MCP transport; missing context refuses an update without changing the
+original. Originals exceeding 64 KiB are refused
+before reserving a draft. Do not shorten a note to fit the submission limit.
 
 `cuefluent_create_note` takes `projectId`, a fresh UUID `requestId`, `target`,
 `content` and `summary`; the target must be absent. `cuefluent_update_note` takes
@@ -45,8 +49,10 @@ useful H2 sections and body already use the final note structure. Approval keeps
 that content and structure; saving includes the retained metadata without
 another rewrite or reformatting pass. The returned
 `hash` identifies the complete retained private draft, including its metadata;
-it is not the preview file's hash. `cuefluent_save_note` publishes that exact run
-after approval. The preview is never used as the publication stage. Edits to the
+it is not the preview file's hash. `cuefluent_save_note` requests confirmation from
+the client and publishes only the identified, unchanged draft after the user
+accepts. A decline, cancellation or unsupported confirmation capability leaves
+the draft pending. The preview is never used as the publication stage. Edits to the
 preview require a revised draft and fresh approval. Remove an unchanged temporary
 preview after save or discard; preserve user edits. Automatic saving returns the
 saved path from the create/update call. Both return actual
@@ -55,18 +61,24 @@ outcomes rather than starting a second model and asking for status commands.
 Keep the returned projectId/runId for review, save or skip. Reuse the original
 requestId and exact payload to retry an interrupted submission. A changed draft
 needs an explicit discard of the old draft and a fresh requestId. Reuse of an ID cannot
-replace its pending content. Only the latest completed result is retained; if a
+replace its pending content or silently return a previous outcome for different
+content. Only the latest completed result is retained; if a
 later result replaces it, the original target expectation still prevents an
 uninspected overwrite.
 
-`cuefluent_review_note` is read-only. Save retries keep the retained draft bytes
+`cuefluent_review_note` does not change stored state. Access from another
+Codex chat or Claude connection requires user confirmation before the preview is disclosed.
+Save retries keep the retained draft bytes
 and original target expectation: absent for creation, or the inspected hash for
 an update. A conflicting file is preserved. Re-read and reconcile the current note
 before proposing a new change; never substitute a fresh hash into the old draft
 to force a save. A revised draft needs fresh review under the saving preference.
-`cuefluent_skip_note` releases only the identified direct run, preserving notes
+`cuefluent_skip_note` asks for client confirmation and releases only the identified direct run, preserving notes
 and all queues. Direct notes share the project's single pending-run slot with
-queued processing. A busy result never authorizes replacing that pending work.
+queued processing. A busy result does not disclose another run's identity and
+never authorizes replacing that pending work. A complete durable direct draft
+can be recovered after interruption without resubmitting content or calling a
+model; incomplete drafting still needs the original request.
 
 ## Native tracking and processing commands
 

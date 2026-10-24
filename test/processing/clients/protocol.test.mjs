@@ -2,7 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { JsonProcess } from '../../../src/processing/clients/protocol.mjs';
+import { JsonProcess, sameNames, token, object } from '../../../src/processing/clients/protocol.mjs';
+
+test('shared protocol predicates preserve token bounds and exact name multiplicity without mutating inventories', () => {
+  const actual = Object.freeze(['b', 'a', 'a']), expected = Object.freeze(['a', 'b', 'a']);
+  assert.equal(sameNames(actual, expected), true);
+  assert.equal(sameNames(actual, ['a', 'b', 'b']), false);
+  assert.equal(sameNames(null, expected), false);
+  assert.equal(sameNames(actual, null), false);
+  for (const value of ['', 'x'.repeat(257), 'a b', 'a\nb', '\0', '\ud800']) assert.equal(token(value), false);
+  assert.equal(token('provider/deployment:1.2-rc'), true);
+  for (const value of [null, [], 'text']) assert.equal(object(value), false);
+  assert.equal(object({}), true);
+});
 
 function fixture(t) {
   const child = new EventEmitter();

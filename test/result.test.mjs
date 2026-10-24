@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { completedResult } from '../src/core/result.mjs';
+import { completedResult, validateResult } from '../src/core/result.mjs';
 
 test('completed outcomes report only notes that actually changed', () => {
   const original = path.join(os.tmpdir(), 'unchanged.md'), updated = path.join(os.tmpdir(), 'changed.md');
-  const run = { id: '12345678-1234-4123-8123-123456789abc', projectId: 'synthetic', selection: [{}], warnings: [], saved: [{ target: original, changed: false }] };
+  const run = { id: '12345678-1234-4123-8123-123456789abc', projectId: 'synthetic', scope: { kind: 'project' }, selection: [{}], warnings: [], saved: [{ target: original, changed: false }] };
   const nothing = completedResult(run, { remaining: 0 });
   assert.equal(nothing.status, 'nothing-useful'); assert.deepEqual(nothing.paths, []);
   assert.deepEqual(nothing.counts, { handled: 1, saved: 0, remaining: 0 });
@@ -15,4 +15,14 @@ test('completed outcomes report only notes that actually changed', () => {
   assert.equal(mixed.status, 'saved'); assert.deepEqual(mixed.paths, [updated]); assert.equal(mixed.counts.saved, 1);
   const skipped = completedResult(run, { skipped: true });
   assert.equal(skipped.status, 'skipped'); assert.deepEqual(skipped.paths, [updated]); assert.equal(skipped.counts.handled, 0);
+});
+
+test('direct outcomes retain one exact request identity while queued outcomes contain none', () => {
+  const run = { id: '12345678-1234-4123-8123-123456789abc', projectId: 'synthetic', scope: { kind: 'direct', requestHash: 'a'.repeat(64) }, selection: [], warnings: [], saved: [] };
+  const result = completedResult(run);
+  assert.equal(result.requestHash, run.scope.requestHash);
+  assert.deepEqual(validateResult(result), result);
+  for (const requestHash of [null, '', 'A'.repeat(64), 'a'.repeat(63)]) assert.throws(() => validateResult({ ...result, requestHash }), { code: 'RESULT_INVALID' });
+  assert.throws(() => validateResult({ ...result, runId: null }), { code: 'RESULT_INVALID' });
+  assert.equal(Object.hasOwn(completedResult({ ...run, scope: { kind: 'project' } }), 'requestHash'), false);
 });

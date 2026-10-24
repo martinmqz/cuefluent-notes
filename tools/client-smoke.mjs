@@ -9,9 +9,8 @@ import { createInterface } from 'node:readline';
 import { packageIdentity, packageVersion } from '../src/core/version.mjs';
 import { executablePath } from '../src/client/executable.mjs';
 import { createPrivateDirectory, assertDirectory } from '../src/storage/paths.mjs';
-import { codexConfiguration } from '../src/processing/clients/codex.mjs';
+import { openCodexSession } from '../src/processing/clients/codex.mjs';
 import { runClaude } from '../src/processing/clients/claude.mjs';
-import { JsonProcess } from '../src/processing/clients/protocol.mjs';
 
 export const CLIENT_VERSIONS = Object.freeze({ claude: '2.1.309', codex: '0.163.0' });
 // Exact official npm native archives. No npm lifecycle runs.
@@ -124,6 +123,38 @@ export async function downloadNative(spec, directory, { fetch = globalThis.fetch
   return executablePath(target);
 }
 
+/** Admission must not submit a turn to an unauthenticated model. Check the
+ * generated native contract for the exact text payload used after admission. */
+export function verifyCodexTurnSchema(schema) {
+  const call = schema?.oneOf?.find(item => item.properties?.method?.enum?.includes('turn/start'));
+  const turn = schema?.definitions?.TurnStartParams;
+  const text = schema?.definitions?.UserInput?.oneOf?.find(item => item.properties?.type?.enum?.includes('text'));
+  requireSmoke(call?.properties?.params?.$ref === '#/definitions/TurnStartParams' &&
+    turn?.type === 'object' && Array.isArray(turn.required) && turn.required.every(key => ['threadId', 'input'].includes(key)) &&
+    turn.properties?.threadId?.type === 'string' && turn.properties?.input?.type === 'array' &&
+    turn.properties.input.items?.$ref === '#/definitions/UserInput' && text?.type === 'object' &&
+    Array.isArray(text.required) && text.required.every(key => ['type', 'text', 'text_elements'].includes(key)) &&
+    text.properties?.text?.type === 'string' && text.properties?.text_elements?.type === 'array', 'CLIENT_TURN_SCHEMA_UNSUPPORTED');
+  const execution = schema?.oneOf?.find(item => item.properties?.method?.enum?.includes('command/exec'));
+  const command = schema?.definitions?.CommandExecParams, fields = command?.properties;
+  requireSmoke(execution?.properties?.params?.$ref === '#/definitions/CommandExecParams' && command?.type === 'object' &&
+    Array.isArray(command.required) && command.required.every(key => key === 'command') && fields?.command?.type === 'array' &&
+    fields.command.items?.type === 'string' && fields?.cwd?.type?.includes('string') && fields?.env?.type?.includes('object') &&
+    fields?.permissionProfile?.type?.includes('string') && fields?.disableTimeout?.type === 'boolean' &&
+    fields?.outputBytesCap?.type?.includes('integer'), 'CLIENT_COMMAND_SCHEMA_UNSUPPORTED');
+}
+
+async function codexSchemaAdmission(executable, options) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-client-schema-'));
+  try {
+    await boundedCommand(executable, ['app-server', 'generate-json-schema', '--experimental', '--out', root], options);
+    const file = path.join(root, 'ClientRequest.json'), stat = await fs.lstat(file);
+    requireSmoke(stat.isFile() && !stat.isSymbolicLink() && stat.size <= 4 * 1024 * 1024, 'CLIENT_TURN_SCHEMA_UNSUPPORTED');
+    let schema; try { schema = JSON.parse(await fs.readFile(file, 'utf8')); } catch { throw error('CLIENT_TURN_SCHEMA_UNSUPPORTED'); }
+    verifyCodexTurnSchema(schema);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+
 export async function clientAdmission(client, executable, { env, cwd, version, timeoutMs = 60_000, spawn = nativeSpawn } = {}) {
   version = packageVersion(version);
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -137,24 +168,31 @@ export async function clientAdmission(client, executable, { env, cwd, version, t
     return child;
   };
   try {
+    requireSmoke(['claude', 'codex'].includes(client), 'CLIENT_UNKNOWN');
     if (client === 'codex') {
-      const config = await codexConfiguration(executable, cwd.path);
-      const transport = new JsonProcess(executable, ['app-server', ...config], { cwd: cwd.path, env, signal: controller.signal, spawn: isolatedSpawn });
+      await codexSchemaAdmission(executable, { env, cwd: cwd.path, timeoutMs, spawn: isolatedSpawn });
+      const session = await openCodexSession({ executable, cwd, version, effort: 'high',
+        prompt: 'Source-free CI admission; no user message will be supplied.', signal: controller.signal,
+        mcp: { name: 'cuefluent_smoke', command: process.execPath, args: [path.resolve(import.meta.dirname, 'client-smoke.mjs'), '--mcp'], env: {}, tools: ['notes_read', 'draft_write'] } }, { spawn: isolatedSpawn });
       try {
-        const initialized = await transport.request('initialize', { clientInfo: { name: 'cuefluent_client_smoke', version }, capabilities: { experimentalApi: true } });
-        requireSmoke(typeof initialized?.userAgent === 'string', 'CLIENT_PROTOCOL_ADMISSION');
-        transport.send({ method: 'initialized', params: {} });
-        requireSmoke((await transport.request('configRequirements/read', {}))?.requirements === null, 'CLIENT_POLICY_ADMISSION');
-        return ['initialize', 'configRequirements/read'];
-      } finally { const kill = setTimeout(() => transport.child.kill('SIGKILL'), 1000); try { await transport.dispose(); } finally { clearTimeout(kill); } }
+        // Exercise the native method with a fixed source-free stdout program.
+        // This smoke-only control needs no MXC/seatbelt privileges; it proves
+        // API admission, never the production denial canary or model isolation.
+        const control = await session.transport.request('command/exec', { command: [process.execPath, '-e', 'process.stdout.write("CUEFLUENT_SMOKE_CONTROL")'],
+          cwd: cwd.path, sandboxPolicy: { type: 'dangerFullAccess' }, disableTimeout: true, outputBytesCap: 2048 });
+        requireSmoke(control?.exitCode === 0 && control.stdout === 'CUEFLUENT_SMOKE_CONTROL', 'CLIENT_COMMAND_ADMISSION');
+        return ['initialize', 'configRequirements/read', 'config/read', 'experimentalFeature/list', 'thread/start', 'mcpServerStatus/list', 'command/exec', 'turn/start:schema'];
+      } finally { const kill = setTimeout(() => session.transport.child.kill('SIGKILL'), 1000); try { await session.transport.dispose(); } finally { clearTimeout(kill); } }
     }
-    requireSmoke(client === 'claude', 'CLIENT_UNKNOWN');
     const admitted = error('CLIENT_ADMITTED');
     try {
       await runClaude({ executable, cwd, version, model: 'opus', effort: 'high', prompt: 'Source-free CI admission; no user message will be supplied.', input: '', signal: controller.signal,
         mcp: { name: 'cuefluent_smoke', command: process.execPath, args: [path.resolve(import.meta.dirname, 'client-smoke.mjs'), '--mcp'], env: {}, tools: ['notes_read', 'draft_write'] },
         onStarted: () => { controller.abort(); throw admitted; } }, { spawn: isolatedSpawn });
-    } catch (failure) { if (failure !== admitted) throw failure; return ['initialize', 'get_settings', 'mcp_status', 'get_context_usage']; }
+    } catch (failure) {
+      if (failure !== admitted) throw failure;
+      return ['initialize', 'get_settings', 'mcp_status', 'get_context_usage'];
+    }
     throw error('CLIENT_SOURCE_BOUNDARY');
   } finally { clearTimeout(timer); }
 }
@@ -173,7 +211,7 @@ export async function runClientSmoke() {
       const actual = (await boundedCommand(executable, ['--version'], launch)).trim();
       requireSmoke(client === 'codex' ? actual === `codex-cli ${spec.clientVersion}` : actual === `${spec.clientVersion} (Claude Code)`, 'CLIENT_VERSION_MISMATCH');
       const help = await boundedCommand(executable, client === 'codex' ? ['app-server', '--help'] : ['--help'], launch);
-      for (const flag of client === 'codex' ? ['--strict-config'] : ['--restricted', '--strict-mcp-config', '--no-session-persistence', '--setting-sources', '--input-format', '--effort']) requireSmoke(help.includes(flag), 'CLIENT_FLAGS_UNSUPPORTED');
+      for (const flag of client === 'codex' ? ['--strict-config', '--disable', '--config'] : ['--restricted', '--strict-mcp-config', '--no-session-persistence', '--setting-sources', '--input-format', '--effort']) requireSmoke(help.includes(flag), 'CLIENT_FLAGS_UNSUPPORTED');
       const protocol = await clientAdmission(client, executable, { env, cwd, version });
       await cwd.check();
       console.log(JSON.stringify({ platform: process.platform, arch: process.arch, client, version: spec.clientVersion, nativeIntegrity: `sha512-${spec.integrity}`, cliHelp: true, protocol,

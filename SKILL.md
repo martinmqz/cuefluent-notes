@@ -29,6 +29,11 @@ untracked chats; no exact native command is needed.
    `cuefluent_read_note`, following its returned byte offsets until the complete
    content is read. Keep the first returned whole-file hash and pass it as
    `expectedHash` on subsequent chunks. Listing alone does not inspect note content.
+   Read all chunks in the same Codex chat or Claude connection before updating.
+   If Codex does not supply the current chat context, report the limitation and
+   preserve the note. Originals larger than
+   64 KiB cannot be replaced through the direct tool; report the size limit and
+   preserve the file instead of shortening it.
 3. Compose the complete Markdown from the requested information. For an update,
    reconcile it with the inspected original; preserve useful content, manual edits,
    aliases and metadata. For a new note, use a topic H1 and useful H2 sections at a
@@ -50,9 +55,10 @@ untracked chats; no exact native command is needed.
    and structure while including the retained metadata; do not rewrite or
    reformat the note after approval. Open the temporary file with the
    client's file-preview tool when available and provide a clickable local file
-   link, naming the intended note destination separately. Ask the user to approve
-   the content in that file. After approval, call `cuefluent_save_note` with the
-   returned `projectId` and `runId`. If it is `saved`, link the returned saved path.
+   link, naming the intended note destination separately. Call `cuefluent_save_note`
+   with the returned `projectId` and `runId` to request the client's confirmation
+   of that exact retained draft. The user approves the content through that
+   confirmation. If it is `saved`, link the returned saved path.
    Automatic saving finishes in the create/update call; do not ask for an additional
    save command.
    An unchanged result means no note bytes or timestamps changed.
@@ -73,8 +79,13 @@ draft pending for review.
 latest result;
 `cuefluent_skip_note` discards that identified draft when requested. A busy result
 means another run is pending; explain it without saving or skipping unrelated work.
+Saving a review draft and discarding pending work require the client's user
+confirmation. If the client cannot provide it, report the returned limitation and
+leave the draft pending. Do not substitute a shell write or an agent-authored
+approval. Resuming a draft from another connection may also request confirmation
+before revealing its content.
 Create requires an absent target; update requires the existing note's inspected
-hash. On a conflict, re-read the note and reconcile the requested change with its
+hash and a complete bounded read. On a conflict, re-read the note and reconcile the requested change with its
 current content. In review mode, a changed proposal needs fresh review; never
 refresh a hash merely to force the old draft over manual edits.
 If the user wants to revise a review draft, discard it only with their authorization
