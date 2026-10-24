@@ -13,7 +13,9 @@ const options = (fixture, item, name) => ({ sourceRoot: path.join(fixture.output
 
 test('symlink-spelled companion entry points run verification, copying and invalid-command checks', { skip: process.platform === 'win32' ? 'POSIX symlink primitive; entry guards use native import.meta.main on every platform.' : false }, async t => {
   const f = await packageSource(t), item = f.built.packages[0], alias = path.join(f.root, 'alias');
-  await fs.copyFile(path.resolve(import.meta.dirname, '../tools/ci.mjs'), path.join(f.source, 'tools/ci.mjs'));
+  for (const name of ['ci.mjs', 'git.mjs']) {
+    await fs.copyFile(path.resolve(import.meta.dirname, '../tools', name), path.join(f.source, 'tools', name));
+  }
   await fs.symlink(f.source, alias, 'dir');
   const packageRoot = path.join(f.output, item.path), verifier = path.join(alias, 'tools/packaging.mjs');
   await assert.rejects(execute(process.execPath, [verifier, 'verify', packageRoot, '--expected-inventory-sha256', '0'.repeat(64)]), error => error.code === 1 && /PACKAGE_TRUSTED_DIGEST_MISMATCH/.test(error.stderr));
