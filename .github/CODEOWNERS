@@ -1,0 +1,16 @@
+# Changes to release integrity, CI, packaging, and agent guidance request
+# review from the maintainer.
+/.github/ @martinmqz
+/.agents/ @martinmqz
+/.claude-plugin/ @martinmqz
+/AGENTS.md @martinmqz
+/SECURITY.md @martinmqz
+/claude/ @martinmqz
+/plugins/ @martinmqz
+/packaging/ @martinmqz
+/tools/ @martinmqz
+/release.json @martinmqz
+/package.json @martinmqz
+/package-lock.json @martinmqz
+/.gitattributes @martinmqz
+/.gitignore @martinmqz
