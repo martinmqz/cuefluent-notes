@@ -28,10 +28,11 @@ There is no linter, formatter, or type checker.
 ## Definition of done
 
 - Changes confined to guidance (`.agents/` and its generated outputs),
-  marketplace catalogs, release receipts, or published snapshots (the
-  allowlist in `tools/ci-plan.mjs`):
-  `npm run check:guidance` and `node --test test/marketplace.test.mjs` pass.
-  For such pull requests to `main`, CI runs only these checks.
+  marketplace catalogs and their tests, release receipts, or published
+  snapshots (the allowlist in `tools/ci-plan.mjs`): `npm run check:guidance`
+  and `node --test test/marketplace.test.mjs` pass. For such pull requests to
+  `main`, CI runs only these checks after confirming full-check evidence for
+  the base.
 - Any other change: the complete `npm test` and `npm run check:examples` pass.
   CI runs both on Linux, macOS, and Windows. A change to `packaging/`,
   `tools/packaging.mjs`, `tools/install.mjs`, or dependencies also needs a
@@ -52,32 +53,28 @@ There is no linter, formatter, or type checker.
 - `.agents/plugins/marketplace.json` (Codex) and
   `.claude-plugin/marketplace.json` (Claude) each select a published snapshot;
   both select the same version.
-- `packaging/v2/` holds client descriptors and the shipped-file list.
-  `packaging/releases/<version>/build.json` holds published checksums.
-- `tools/` holds build, CI, and release tooling; none of it ships in a plugin.
+- `packaging/v2/` holds client descriptors and `source-files.json`, the list of
+  shipped `src/` modules. `packaging/releases/<version>/build.json` holds
+  published checksums.
+- `tools/` holds build, CI, and release tooling. None of it ships in a
+  plugin, but `tools/install.mjs` and `tools/packaging.mjs` also ship as the
+  standalone tools archive and import only Node built-ins.
 - [Publishing](/.agents/publishing.md) is the maintainer procedure for builds,
   snapshots, CI evidence, and release preparation.
 - `AGENTS.md` and `.github/copilot-instructions.md` are generated from
   `.agents/guide.md`. Several Copilot features read only the Copilot copy.
 
-## Authorization model
-
-Installing the plugin, trusting its hooks, developing it, discussing a command,
-and reading notes authorize no saving, tracking, or processing. Explicit user
-authorization is required to install, register, or trust a plugin or hook; to
-change client authentication, profiles, or installed settings; and to use an
-existing login for a client check. It is also required to merge, tag,
-publish, replace a published package, checksum, or release asset, or change
-repository visibility or settings. Git history and published bytes are
-preserved even when source versions differ.
-
 ## Product invariants
 
+- Installing the plugin, trusting its hooks, developing it, discussing a
+  command, or reading notes authorizes no saving, tracking, or processing.
 - A new project defaults to tracking `manual` and saving `review`. Activity
   logging defaults to on for a directory destination and stays off for a
   single-file destination. The three settings are independent. Preserve
   explicit opt-outs and loaded settings. Tracking `auto` enrolls eligible new
-  native chats only, and processing is always explicit.
+  native chats only, and processing is always explicit. An explicit untrack
+  survives cleanup and `auto` tracking; read-only requests and opt-outs take
+  priority.
 - Bind tracking and processing commands from native current-chat and
   invocation context. Cwd, the newest transcript, an agent-supplied identity,
   and ordinary command mentions are not identity evidence. Synchronous hooks
@@ -110,13 +107,14 @@ preserved even when source versions differ.
   preserves useful content, metadata, aliases, and manual edits; reconcile
   conflicts instead of forcing an old draft over changed content. Saving
   writes the exact approved draft bytes. Stage under names ending in `.tmp`,
-  never `.md`. An unchanged note keeps its bytes and timestamps. Cleanup
-  removes handled private input and completed drafts, never notes or native
-  transcripts.
+  never `.md`. A save with no useful change leaves the note's bytes and
+  timestamps unchanged. Cleanup removes successfully handled private input and
+  completed drafts, never notes or native transcripts.
 
 ## Runtime and storage
 
-- `src/core/` is pure: settings, ownership, run transitions, and validation.
+- `src/core/` holds settings, ownership, run transitions, and validation, and
+  performs no I/O.
   It validates complete loaded state and freezes independent snapshots.
 - `src/storage/` owns private paths, bounded reads, atomic publication, gates,
   queues, and attempts, independent of client transcript shapes and models.
@@ -140,7 +138,8 @@ preserved even when source versions differ.
   and macOS and Windows ACLs; refuse unverifiable locations. Read and status
   operations never create a store, gate, transcript registration, or model
   session.
-- SQLite gate files are persistent rendezvous paths, not data. Reach them only
+- Gates use Node's built-in `node:sqlite`; add no SQLite dependency. Gate
+  files are persistent rendezvous paths, not data. Reach them only
   through `src/storage/gates.mjs` and its process-wide registry; never unlink,
   replace, hash, or open them with generic file helpers. Closing another
   descriptor for the same inode in that process can release its POSIX locks.
@@ -152,9 +151,10 @@ preserved even when source versions differ.
   rechecks the current run and attempt under the same short gates. Parent death
   before activation releases the unstarted worker; a detached active worker
   may finish and publish a truthful result.
-- The latest result holds status, paths, counts, and warnings only. It never
-  authorizes writes and contains no conversation or input receipts. Runtime
-  failures preserve queue data, pending state, and manual note edits.
+- The latest result holds run and project identifiers, status, paths, counts,
+  and warnings, plus the request hash for a direct note. It never authorizes
+  writes and contains no conversation or input receipts. Runtime failures
+  preserve queue data, pending state, and manual note edits.
 - Give every new failure a stable `code` through the module's existing error
   helper, usually `fail()` from `src/core/errors.mjs`. Error messages never
   include conversation content.
@@ -182,34 +182,39 @@ preserved even when source versions differ.
   compatibility profile before saving. Never truncate content, raise app safety
   limits, or invent provenance to pass validation; preserve an over-limit draft
   and its input.
-- `SKILL.md` and `references/` ship in the plugin, so repository build and
-  release instructions stay out of them.
+- `SKILL.md`, `README.md`, `LICENSE.md`, and the references named in
+  `REFERENCES` in `tools/packaging.mjs` ship in each plugin, so repository build
+  and release instructions stay out of them. A new reference ships only after
+  it is added to `REFERENCES`.
 
 ## Distribution and releases
 
-- Packages are built from current source and the explicit shipped-file list,
-  without tests, tooling, or repository guidance. Each client package includes
-  its runtime dependency closure and license notices.
+- Packages are built from current source and those explicit lists, without
+  tests, tooling, or repository guidance. Each client package includes its
+  runtime dependency closure and license notices.
 - The source version in `package.json` is separate from published releases.
-  Root `release.json` records only the historical 0.15.1 release.
+  Root `release.json` records only the historical 0.15.1 release. Published
+  snapshots, checksums, tags, and release assets are immutable; changes ship
+  as a new version. Guidance-only changes need no release.
 - Builds write only to a new output directory outside the checkout and refuse
   to overwrite. An inventory proves internal consistency, not provenance;
-  release authenticity depends on trusted checksums and an authorized
+  release authenticity depends on trusted checksums and an official
   publication.
 - Verify a new receipt pin against the published release before adding it.
 
 ## Security and privacy
 
-- Never commit credentials, real notes, conversation data, or private
-  configuration. Tests, fixtures, and examples use synthetic data in disposable
-  locations.
-- Dependency lifecycle scripts never run, and the builder verifies each
-  tarball against its lockfile integrity.
+- Credentials, real notes, conversation data, and private configuration never
+  enter this checkout, including ignored paths. Tests, fixtures, and examples
+  use synthetic data in disposable locations.
+- Install with `npm ci --ignore-scripts`. The builder runs no package scripts
+  and verifies each tarball against its lockfile integrity.
 - GitHub Actions are pinned to full commit SHAs with minimal job permissions.
   Third-party client downloads stay out of artifact-producing jobs.
-- Client checks use disposable profiles. Never copy credentials into fixtures
-  or change authentication, installed plugins, capture settings, or trust as a
-  side effect. Fixtures never inherit user hooks or Git configuration.
+- Client checks use disposable profiles. Never read or copy credentials into
+  fixtures, or change authentication, installed plugins, capture settings, or
+  trust as a side effect. Fixtures never inherit user hooks or Git
+  configuration.
 
 ## Tests and verification
 
@@ -224,9 +229,7 @@ preserved even when source versions differ.
   desktop command rendering, live hook activation, native processing isolation,
   or Cuefluent search ranking. Native CLI envelopes do not prove production
   adapters, and per-file validation does not prove admission into a full app
-  corpus.
-- Verification claims name the platform they ran on and what remains
-  unverified, and CI status refers to the run for the exact commit.
+  corpus. A run covers only its own platform and commit;
   `references/verification.md` states supported behavior and limits.
 
 ## Conventions
@@ -234,8 +237,9 @@ preserved even when source versions differ.
 - Conventional Commits, with branches named `<type>/<short-kebab-description>`.
   Keep unrelated changes separate.
 - Edit sources, never published snapshots or build output.
-- Edit guidance only in `.agents/guide.md`, then run `npm run guidance:sync`
-  and commit the source with both outputs. `npm run check:guidance` fails
+- Edit `AGENTS.md` content only in `.agents/guide.md`, then run
+  `npm run guidance:sync` and commit the source with both outputs. `npm run check:guidance` fails
   when an output drifts from its source; it does not check links or facts.
   Use root-relative links (`/path`) so both outputs resolve, and keep
-  `AGENTS.md` under 32 KiB, the default Codex instruction limit.
+  `AGENTS.md` under 32 KiB, the default Codex instruction limit. Do not add a
+  `CLAUDE.md`: Claude Code reads `AGENTS.md` only when no `CLAUDE.md` exists.
