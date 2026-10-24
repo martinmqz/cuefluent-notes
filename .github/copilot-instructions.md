@@ -44,8 +44,9 @@ There is no linter, formatter, or type checker.
 - A new runtime module is listed in `packaging/v2/source-files.json`; the build
   rejects unlisted relative imports.
 - A dependency change pins an exact version after checking the current release
-  and updates `package-lock.json`. The build refuses unpinned dependencies and
-  packages without license files.
+  and updates `package-lock.json`. The build enforces this only for runtime
+  dependencies: it refuses an unpinned runtime dependency and a runtime package
+  without license files.
 
 ## Repository layout
 
@@ -210,7 +211,7 @@ There is no linter, formatter, or type checker.
   enter this checkout, including ignored paths. Tests, fixtures, and examples
   use synthetic data in disposable locations.
 - Install with `npm ci --ignore-scripts`. The builder runs no package scripts
-  and verifies each tarball against its lockfile integrity.
+  and verifies each runtime dependency tarball against its lockfile integrity.
 - GitHub Actions are pinned to full commit SHAs with minimal job permissions.
   Third-party client downloads stay out of artifact-producing jobs.
 - Client checks use disposable profiles. Never read or copy credentials into
@@ -240,8 +241,12 @@ There is no linter, formatter, or type checker.
   Keep unrelated changes separate.
 - Edit sources, never published snapshots or build output.
 - Edit `AGENTS.md` content only in `.agents/guide.md`, then run
-  `npm run guidance:sync` and commit the source with both outputs. `npm run check:guidance` fails
-  when an output drifts from its source; it does not check links or facts.
-  Use root-relative links (`/path`) so both outputs resolve, and keep
-  `AGENTS.md` under 32 KiB, the default Codex instruction limit. Do not add a
-  `CLAUDE.md`: Claude Code reads `AGENTS.md` only when no `CLAUDE.md` exists.
+  `npm run guidance:sync` and commit the source with both outputs.
+  `npm run check:guidance` fails when an output drifts from its source; it does
+  not check links or facts. Use root-relative links (`/path`) so both outputs
+  resolve, and keep `AGENTS.md` under 32 KiB, the default Codex instruction
+  limit.
+- Do not add a `CLAUDE.md`. By default, Claude Code skips `AGENTS.md` when a
+  `CLAUDE.md`, `.claude/CLAUDE.md`, or `CLAUDE.local.md` exists in the working
+  directory or any parent. To keep a personal `CLAUDE.local.md`, set Claude
+  Code's Project instructions setting to `claude-md-and-agents-md`.
