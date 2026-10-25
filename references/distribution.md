@@ -35,6 +35,9 @@ follow the [fresh-setup transition](setup.md#private-location) while preserving
 the earlier store. `STORE_ROOT_OCCUPIED` means setup found foreign entries, and
 `STORE_INCOMPLETE` means incomplete or changed initialization state needs inspection.
 Neither authorizes deleting retained work or recreating settings around it.
+`STORE_SETUP_BUSY` reports interference while opening the setup directory; wait
+briefly and retry the same setup at the same location. Unrelated sibling activity
+after directory acquisition does not invalidate setup.
 
 The hook's Windows ACL budget includes child process startup, imports and
 preflight, with a reserved margin for wrapper overhead and the reply. It cannot

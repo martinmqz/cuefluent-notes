@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
+import nativeFs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
+import { normalizeStat } from './stat.mjs';
 import { emptySettings, validateSettings, assertSettingsChange } from '../core/settings.mjs';
 import { assertLocalFilesystem, assertPrivateAccess, establishWindowsPrivacy } from './platform.mjs';
 import {
@@ -123,12 +125,31 @@ const scaffoldEntries = new Map([
   ['store/locks', new Map([['settings.sqlite', 'file'], ['writer.sqlite', 'file'], ['sync.sqlite', 'file']])],
 ]);
 
+const sameDirectoryObservation = (current, expected) => current.isDirectory() && !current.isSymbolicLink() &&
+  ['dev', 'ino', 'mtimeNs', 'ctimeNs'].every(key => current[key] === expected[key]);
+
+function openInitializationRoot(pin, expected) {
+  const parent = path.dirname(pin.root);
+  const stat = file => normalizeStat(nativeFs.lstatSync(file, { bigint: true }));
+  // Dir exposes no handle identity. Fence only its acquisition, without awaits
+  // or ACL work; later sibling activity cannot invalidate the acquired stream.
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const before = stat(parent);
+    if (!sameDirectoryObservation(stat(pin.root), expected)) incompleteStore();
+    const stream = nativeFs.opendirSync(pin.root); let admitted = false;
+    try {
+      if (!sameDirectoryObservation(stat(pin.root), expected)) incompleteStore();
+      if (sameDirectoryObservation(stat(parent), before)) { admitted = true; return stream; }
+    } finally { if (!admitted) stream.closeSync(); }
+  }
+  fail('STORE_SETUP_BUSY', 'Concurrent filesystem activity prevented a stable setup inspection; retry the same setup.');
+}
+
 /** Only an empty first-setup scaffold may finish publishing its initial metadata. */
 async function assertInitializationEmpty(pin, layout, previous) {
   await assertDirectory(pin);
   if (layout && Object.keys(layout.projects).length) incompleteStore();
   const observations = previous?.observations ?? [], parents = [];
-  const boundary = previous?.boundary ?? { pin: await pinDirectory(path.dirname(pin.root)), stat: await lstatOrNull(path.dirname(pin.root)) };
   if (previous) {
     for (const parent of previous.parents) {
       await assertDirectory(parent.pin);
@@ -152,7 +173,7 @@ async function assertInitializationEmpty(pin, layout, previous) {
   }
   const verify = async () => {
     await assertDirectory(pin);
-    for (const parent of [boundary, ...parents]) {
+    for (const parent of parents) {
       const current = await lstatOrNull(parent.pin.root);
       // Parent mtime detects renamed child entries without relying on Windows
       // ctime semantics. No parent entries are changed during this read phase.
@@ -175,7 +196,8 @@ async function assertInitializationEmpty(pin, layout, previous) {
   }
   for (const parent of parents) {
     await verify();
-    const stream = await fs.opendir(parent.pin.root), seen = new Set();
+    const stream = parent.pin.root === pin.root ? openInitializationRoot(pin, parent.stat) : await fs.opendir(parent.pin.root);
+    const seen = new Set();
     try {
       await verify();
       for (;;) {
@@ -196,7 +218,7 @@ async function assertInitializationEmpty(pin, layout, previous) {
     } finally { await stream.close(); }
   }
   await verify();
-  return { verify, observations, parents, boundary };
+  return { verify, observations, parents };
 }
 
 /** Explicit fresh setup only. No notes, hooks, plugins, or model are touched. */
