@@ -302,21 +302,36 @@ export function initializeGate(path, id, options = {}) {
   throw problem;
 }
 
-/** Reconcile only the initialized gate's own exact two-link staging inode. */
-function reconcilePublication(identity, stage, options) {
+/** Inspect the marker's exact publication pair without changing either name. */
+function inspectPublication(identity, stage, options, candidate) {
+  const temporary = stagePath(identity.path, stage);
+  if (candidate !== undefined && candidate !== temporary) fail('GATE_UNSAFE_PATH', 'Gate staging path does not match its initialized marker.');
   verify(identity, options, 2n);
   let final = lstatSync(identity.path, { bigint: true });
-  if (final.nlink === 1n) return;
-  const temporary = stagePath(identity.path, stage);
+  if (final.nlink === 1n) {
+    if (candidate !== undefined) fail('GATE_UNSAFE_PATH', 'A publication candidate requires an exact two-link gate.');
+    return null;
+  }
   const staged = inspect(temporary, { ...options, missing: true }, 2n);
   if (!staged) {
     final = lstatSync(identity.path, { bigint: true });
-    if (final.nlink === 1n) { verify(identity, options); return; }
+    if (candidate === undefined && final.nlink === 1n) { verify(identity, options); return null; }
     fail('GATE_UNSAFE_PATH', 'The published gate has an unknown additional hard link.');
   }
   if (staged.device !== identity.device || staged.inode !== identity.inode) fail('GATE_UNSAFE_PATH', 'Gate staging link refers to a different file.');
   rejectSidecars(temporary);
   verify(identity, options, 2n);
+  if (candidate !== undefined) {
+    verify(staged, options, 2n);
+    if (lstatSync(identity.path, { bigint: true }).nlink !== 2n) fail('GATE_UNSAFE_PATH', 'The inspected gate publication pair changed.');
+  }
+  return temporary;
+}
+
+/** Reconcile only the initialized gate's own exact two-link staging inode. */
+function reconcilePublication(identity, stage, options) {
+  const temporary = inspectPublication(identity, stage, options);
+  if (!temporary) return;
   try { unlinkSync(temporary); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
@@ -333,8 +348,17 @@ export function inspectExistingGate(path, id, options = {}) {
   gateId(id);
   const recoverPublication = options.recoverPublication ?? true;
   if (typeof recoverPublication !== 'boolean') fail('GATE_INVALID_GUARD', 'Gate publication recovery must be explicitly enabled or disabled.');
-  const links = recoverPublication ? 2n : 1n;
+  const publicationStage = options.publicationStage;
+  if (publicationStage !== undefined) {
+    if (recoverPublication) fail('GATE_INVALID_GUARD', 'A publication candidate is only valid for non-mutating inspection.');
+    gatePath(publicationStage);
+  }
+  const expectedIdentity = options.expectedIdentity === undefined ? null : Object.freeze({ ...descriptor(options.expectedIdentity) });
+  const links = recoverPublication || publicationStage !== undefined ? 2n : 1n;
   const identity = Object.freeze({ ...inspect(path, options, links), id });
+  if (expectedIdentity && ['path', 'id', 'device', 'inode'].some(key => identity[key] !== expectedIdentity[key])) {
+    fail('GATE_REPLACED', 'The gate differs from its previously inspected identity.');
+  }
   rejectSidecars(path);
   if (!reserve(identity)) fail('GATE_BUSY', 'Gate is already open in this process.');
   let db;
@@ -354,6 +378,9 @@ export function inspectExistingGate(path, id, options = {}) {
   if (recoverPublication) {
     try { reconcilePublication(identity, stage, options); syncParent(path); }
     catch (error) { throw storageError(error, 'publication recovery'); }
+  } else if (publicationStage !== undefined) {
+    try { inspectPublication(identity, stage, options, publicationStage); }
+    catch (error) { throw storageError(error, 'publication inspection'); }
   }
   return identity;
 }

@@ -57,7 +57,8 @@ not consumed by that run. Cleanup never deletes Markdown notes.
 ## Recovery and logs
 
 If first initialization is interrupted, retry setup at the same location. Setup
-resumes only its verified temporary metadata and preserves the original gates.
+resumes only its verified metadata stages and unfinished gate publications,
+preserving the original gates.
 Unrecognized, changed, or privacy-unverifiable files stay untouched and cause a
 refusal; a temporary filename alone does not authorize recovery.
 

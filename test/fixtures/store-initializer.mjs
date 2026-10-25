@@ -1,10 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { constants } from 'node:fs';
+import nativeFs, { constants } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { initializeStore } from '../../src/storage/store.mjs';
 
 const [root, relative, boundary] = process.argv.slice(2);
-if (!['store/layout.json', 'config/settings.json'].includes(relative) || !['open', 'partial', 'complete'].includes(boundary)) {
+const metadataBoundary = ['store/layout.json', 'config/settings.json'].includes(relative) && ['open', 'partial', 'complete'].includes(boundary);
+const gateBoundary = ['settings', 'writer', 'sync'].some(id => relative === `store/locks/${id}.sqlite`) && boundary === 'linked';
+if (!metadataBoundary && !gateBoundary) {
   throw new Error('Invalid synthetic initialization boundary.');
 }
 const target = path.join(root, ...relative.split('/'));
@@ -41,6 +44,17 @@ fs.rename = async (from, to) => {
   if (boundary === 'complete' && to === target && isStage(from)) await pause(from);
   return rename(from, to);
 };
+const linkSync = nativeFs.linkSync;
+nativeFs.linkSync = (from, to, ...args) => {
+  const result = linkSync(from, to, ...args);
+  if (gateBoundary && to === target && isStage(from)) {
+    // Die inside the synchronous publisher before it can unlink the stage.
+    // The parent inspects the surviving pair after exit; no IPC delivery is needed.
+    process.kill(process.pid, 'SIGKILL');
+  }
+  return result;
+};
+syncBuiltinESMExports();
 
 try {
   await initializeStore(root);

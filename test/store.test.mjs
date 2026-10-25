@@ -30,6 +30,23 @@ async function snapshots(root, files) {
   }));
 }
 
+// A filesystem clock need not advance for every namespace mutation. Control
+// observations at acquisition so retry coverage does not depend on its precision.
+function acquisitionEpoch(parent) {
+  const observed = nativeFs.lstatSync(parent, { bigint: true });
+  let epoch = 0n;
+  return {
+    advance() { epoch++; },
+    observe(file, stat) {
+      if (file === parent) {
+        stat.ctimeNs = observed.ctimeNs + epoch;
+        stat.mtimeNs = observed.mtimeNs + epoch;
+      }
+      return stat;
+    },
+  };
+}
+
 test('unconfigured status and invalid first setup make zero writes', async t => {
   const f = await fixture(t);
   assert.equal(await openStore(f.privateRoot), null);
@@ -86,7 +103,9 @@ test('setup tolerates sibling entry churn during fresh and interrupted initializ
 });
 
 test('setup retries transient sibling activity during root directory acquisition', async t => {
-  const f = await fixture(t), opendir = nativeFs.opendirSync;
+  const f = await fixture(t), opendir = nativeFs.opendirSync, lstat = nativeFs.lstatSync;
+  const epoch = acquisitionEpoch(f.root);
+  const observation = t.mock.method(nativeFs, 'lstatSync', (...args) => epoch.observe(args[0], lstat(...args)));
   let injected = false, rejectedClosed = false;
   const injection = t.mock.method(nativeFs, 'opendirSync', (...args) => {
     const stream = opendir(...args);
@@ -94,28 +113,32 @@ test('setup retries transient sibling activity during root directory acquisition
     injected = true;
     const sibling = path.join(f.root, 'transient-sibling');
     nativeFs.writeFileSync(sibling, 'Synthetic neighbor.'); nativeFs.unlinkSync(sibling);
+    epoch.advance();
     return { closeSync() { rejectedClosed = true; stream.closeSync(); } };
   });
   let store;
   try { store = await initializeStore(f.privateRoot, f.settings); }
-  finally { injection.mock.restore(); }
+  finally { injection.mock.restore(); observation.mock.restore(); }
   assert.equal(injected, true); assert.equal(rejectedClosed, true);
   assert.deepEqual((await readSettings(store)).value, f.settings);
 });
 
 test('sustained acquisition interference can retry after layout publication with the same gates', async t => {
   const f = await fixture(t), layoutFile = path.join(f.privateRoot, 'store/layout.json');
-  const opendir = nativeFs.opendirSync; let churn = 0;
+  const opendir = nativeFs.opendirSync, lstat = nativeFs.lstatSync; let churn = 0;
+  const epoch = acquisitionEpoch(f.root);
+  const observation = t.mock.method(nativeFs, 'lstatSync', (...args) => epoch.observe(args[0], lstat(...args)));
   const injection = t.mock.method(nativeFs, 'opendirSync', (...args) => {
     const stream = opendir(...args);
     if (args[0] === f.privateRoot && nativeFs.existsSync(layoutFile)) {
       const sibling = path.join(f.root, `interference-${churn++}`);
       nativeFs.writeFileSync(sibling, 'Synthetic neighbor.'); nativeFs.unlinkSync(sibling);
+      epoch.advance();
     }
     return stream;
   });
   try { await assert.rejects(initializeStore(f.privateRoot), { code: 'STORE_SETUP_BUSY' }); }
-  finally { injection.mock.restore(); }
+  finally { injection.mock.restore(); observation.mock.restore(); }
   assert.ok(churn > 1 && churn <= 64);
   const before = await fs.readFile(layoutFile);
   await assert.rejects(fs.stat(path.join(f.privateRoot, 'config/settings.json')), { code: 'ENOENT' });
@@ -144,33 +167,40 @@ test('setup refuses a root entry arriving during inspection before creating its 
 });
 
 test('root replacement and restoration cannot hide retained work during acquisition', async t => {
-  for (const mode of ['once', 'repeated', 'replaced']) await t.test(mode, async t => {
+  for (const mode of ['once', 'repeated', 'replaced']) await t.test(mode === 'repeated' ? 'repeated distinct observations' : mode, async t => {
     const f = await fixture(t); await createPrivateDirectory(f.privateRoot);
     await fs.writeFile(path.join(f.privateRoot, 'retained'), 'Synthetic retained input.\n', { mode: 0o600 });
     const moved = path.join(f.root, 'original-private'), replacement = path.join(f.root, 'replacement');
     await createPrivateDirectory(replacement);
     const opendir = nativeFs.opendirSync, lstat = fs.lstat, lstatSync = nativeFs.lstatSync;
-    const observed = await lstat(f.privateRoot, { bigint: true }); let opens = 0, closed = 0;
+    const observed = await lstat(f.privateRoot, { bigint: true }), epoch = acquisitionEpoch(f.root);
+    let opens = 0, closed = 0;
     const stableTimes = (file, stat) => {
       if (file === f.privateRoot) { stat.ctimeNs = observed.ctimeNs; stat.mtimeNs = observed.mtimeNs; }
-      return stat;
+      return epoch.observe(file, stat);
     };
     const statInjection = t.mock.method(fs, 'lstat', async (...args) => stableTimes(args[0], await lstat(...args)));
     const syncStatInjection = t.mock.method(nativeFs, 'lstatSync', (...args) => stableTimes(args[0], lstatSync(...args)));
     const injection = t.mock.method(nativeFs, 'opendirSync', (...args) => {
       if (args[0] !== f.privateRoot || (opens && mode === 'once')) return opendir(...args);
       opens++;
-      nativeFs.renameSync(f.privateRoot, moved); nativeFs.renameSync(replacement, f.privateRoot);
-      const stream = opendir(...args), empty = stream.readSync(); stream.closeSync();
-      if (mode !== 'replaced') {
+      // Exercise actual substitution once. Repeated acquisition interference
+      // supplies the other directory's stream without repeated OS rename stress.
+      if (mode !== 'repeated') {
+        nativeFs.renameSync(f.privateRoot, moved); nativeFs.renameSync(replacement, f.privateRoot);
+      }
+      const stream = opendir(mode === 'repeated' ? replacement : args[0], ...args.slice(1));
+      const empty = stream.readSync(); stream.closeSync();
+      if (mode === 'once') {
         nativeFs.renameSync(f.privateRoot, replacement); nativeFs.renameSync(moved, f.privateRoot);
       }
+      epoch.advance();
       return { read: async () => empty, close: async () => {}, closeSync() { closed++; } };
     });
     const expected = { once: 'STORE_ROOT_OCCUPIED', repeated: 'STORE_SETUP_BUSY', replaced: 'STORE_INCOMPLETE' }[mode];
     try {
       await assert.rejects(initializeStore(f.privateRoot), error => {
-        assert.equal(error.code, expected);
+        assert.equal(error.code, expected, error.stack);
         if (mode === 'repeated') assert.match(describeFailure(error).recovery, /retry the same setup/i);
         return true;
       });

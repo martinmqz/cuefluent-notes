@@ -14,6 +14,7 @@ import { establishWindowsPrivacy } from '../src/storage/platform.mjs';
 
 const worker = fileURLToPath(new URL('./fixtures/store-initializer.mjs', import.meta.url));
 const waitMs = process.platform === 'win32' ? 60_000 : 15_000;
+const gateIds = ['settings', 'writer', 'sync'];
 
 async function fixture(t) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-store-initialization-')));
@@ -29,21 +30,26 @@ async function fixture(t) {
   return { root, storeRoot: path.join(root, 'private'), children };
 }
 
-async function stopAt(f, relative, boundary) {
+function launch(f, relative, boundary) {
   const child = fork(worker, [f.storeRoot, relative, boundary], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'], execArgv: [] });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-8192); });
   const closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
   f.children.push({ child, closed });
+  return { child, closed, stderr: () => stderr };
+}
+
+async function stopAt(f, relative, boundary) {
+  const { child, closed, stderr } = launch(f, relative, boundary);
   let timer;
   const ready = new Promise((resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`Initialization child missed ${relative} ${boundary}: ${stderr}`)), waitMs);
+    timer = setTimeout(() => reject(new Error(`Initialization child missed ${relative} ${boundary}: ${stderr()}`)), waitMs);
     child.once('error', reject);
     child.once('message', message => {
       if (message?.type === 'stage') resolve(message);
-      else reject(new Error(`Initialization child did not pause: ${JSON.stringify(message)} ${stderr}`));
+      else reject(new Error(`Initialization child did not pause: ${JSON.stringify(message)} ${stderr()}`));
     });
-    child.once('close', (code, signal) => reject(new Error(`Initialization child exited before pause (${code}, ${signal}): ${stderr}`)));
+    child.once('close', (code, signal) => reject(new Error(`Initialization child exited before pause (${code}, ${signal}): ${stderr()}`)));
   });
   try { return { child, closed, message: await ready }; }
   finally { clearTimeout(timer); }
@@ -56,11 +62,47 @@ async function stageSnapshot(file) {
 
 // Never read, hash or open gates outside the gate module: lstat is sufficient
 // to prove that retry retains the original persistent rendezvous files.
-async function gateSnapshots(root) {
-  return Promise.all(['settings', 'writer', 'sync'].map(async id => {
+async function gateSnapshots(root, ids = gateIds) {
+  return Promise.all(ids.map(async id => {
     const stat = await fs.lstat(path.join(root, `store/locks/${id}.sqlite`), { bigint: true });
-    return { id, device: stat.dev, inode: stat.ino, size: stat.size, modified: stat.mtimeNs };
+    return { id, device: stat.dev, inode: stat.ino, size: stat.size, modified: stat.mtimeNs, links: stat.nlink };
   }));
+}
+
+async function killedGate(t, id) {
+  const f = await fixture(t), running = launch(f, `store/locks/${id}.sqlite`, 'linked');
+  let timer, exit;
+  try {
+    exit = await Promise.race([running.closed, new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`Initialization child missed ${id} gate publication: ${running.stderr()}`)), waitMs);
+      running.child.once('error', reject);
+    })]);
+  } finally { clearTimeout(timer); }
+  assert.notEqual(exit.code, 0, running.stderr());
+  if (process.platform !== 'win32') assert.equal(exit.signal, 'SIGKILL', running.stderr());
+  const locks = path.join(f.storeRoot, 'store/locks'), entries = await fs.readdir(locks);
+  const stages = entries.filter(name => name.startsWith(`.${id}.sqlite.`) && name.endsWith('.tmp'));
+  assert.equal(stages.length, 1);
+  const stage = path.join(locks, stages[0]), gate = path.join(locks, `${id}.sqlite`);
+  const [staged, published] = await Promise.all([fs.lstat(stage, { bigint: true }), fs.lstat(gate, { bigint: true })]);
+  assert.equal(staged.isFile(), true); assert.equal(published.isFile(), true);
+  assert.equal(staged.nlink, 2n); assert.equal(published.nlink, 2n);
+  assert.equal(staged.dev, published.dev); assert.equal(staged.ino, published.ino);
+  const gates = await gateSnapshots(f.storeRoot, gateIds.filter(name => entries.includes(`${name}.sqlite`)));
+  return { f, stage, gates, locks };
+}
+
+for (const id of gateIds) {
+  test(`SIGKILL after initial ${id} gate publication retains its pair and permits setup retry`, { timeout: waitMs * 2 }, async t => {
+    const { f, gates, locks } = await killedGate(t, id);
+    await assert.rejects(fs.access(path.join(f.storeRoot, 'store/layout.json')), { code: 'ENOENT' });
+    const recovered = await initializeStore(f.storeRoot);
+    assert.deepEqual((await readSettings(recovered)).value, emptySettings());
+    assert.deepEqual((await readSettings(await openStore(f.storeRoot))).value, emptySettings());
+    assert.deepEqual(await gateSnapshots(f.storeRoot, gates.map(gate => gate.id)), gates.map(gate => ({ ...gate, links: 1n })));
+    assert.deepEqual((await fs.readdir(locks)).sort(), gateIds.map(name => `${name}.sqlite`).sort());
+    assert.deepEqual((await fs.readdir(f.storeRoot, { recursive: true })).filter(name => name.endsWith('.tmp')), []);
+  });
 }
 
 for (const relative of ['store/layout.json', 'config/settings.json']) {
@@ -113,8 +155,9 @@ async function retainedTree(root) {
   const files = ['', ...(await fs.readdir(root, { recursive: true })).sort()];
   return Promise.all(files.map(async relative => {
     const file = path.join(root, relative), stat = await fs.lstat(file, { bigint: true });
+    const gate = relative.endsWith('.sqlite') || /\.sqlite\.[^/\\]+\.tmp$/.test(relative);
     return { relative, device: stat.dev, inode: stat.ino, size: stat.size, links: stat.nlink, mode: stat.mode, modified: stat.mtimeNs,
-      ...(stat.isSymbolicLink() ? { link: await fs.readlink(file) } : stat.isFile() && !relative.endsWith('.sqlite') ? { bytes: await fs.readFile(file) } : {}) };
+      ...(stat.isSymbolicLink() ? { link: await fs.readlink(file) } : stat.isFile() && !gate ? { bytes: await fs.readFile(file) } : {}) };
   }));
 }
 
@@ -127,6 +170,49 @@ async function refusesUnchanged(f, codes = ['STORE_ROOT_OCCUPIED']) {
   assert.deepEqual(await retainedTree(f.root), before);
   await assert.rejects(fs.access(path.join(f.storeRoot, 'config/settings.json')), { code: 'ENOENT' });
 }
+
+test('an unrelated root entry prevents recovery without consuming a published gate pair', { timeout: waitMs * 2 }, async t => {
+  const { f } = await killedGate(t, 'sync');
+  await fs.writeFile(path.join(f.storeRoot, 'unrelated.json'), 'Synthetic unrelated state.\n', { mode: 0o600 });
+  await refusesUnchanged(f);
+});
+
+test('a later unrelated lock entry prevents recovery after a genuine gate pair is admitted', { timeout: waitMs * 2 }, async t => {
+  const { f, stage, locks } = await killedGate(t, 'sync'), open = fs.opendir;
+  const stageName = path.basename(stage), unrelatedName = 'unrelated.json';
+  await fs.writeFile(path.join(locks, unrelatedName), 'Synthetic unrelated lock-directory state.\n', { mode: 0o600 });
+  let admitted = 0;
+  const injection = t.mock.method(fs, 'opendir', async (directory, ...args) => {
+    const stream = await open(directory, ...args);
+    if (directory !== locks) return stream;
+    const entries = [];
+    for (let entry; (entry = await stream.read());) entries.push(entry);
+    entries.sort((left, right) => Number(right.name === stageName) - Number(left.name === stageName));
+    let index = 0, candidateSeen = false;
+    stream.read = async () => {
+      const entry = entries[index++] ?? null;
+      if (entry?.name === stageName) candidateSeen = true;
+      if (entry?.name === unrelatedName) {
+        assert.equal(candidateSeen, true);
+        // Reaching the next entry proves the candidate passed admission; its
+        // initialized inode must still have both names until the scan succeeds.
+        assert.equal((await fs.lstat(stage, { bigint: true })).nlink, 2n);
+        admitted++;
+      }
+      return entry;
+    };
+    return stream;
+  });
+  try { await refusesUnchanged(f); }
+  finally { injection.mock.restore(); }
+  assert.equal(admitted, 1);
+});
+
+test('an invalid gate stage name cannot authorize recovery of a published pair', { timeout: waitMs * 2 }, async t => {
+  const { f, stage, locks } = await killedGate(t, 'sync');
+  await fs.rename(stage, path.join(locks, '.sync.sqlite.not-a-uuid.tmp'));
+  await refusesUnchanged(f);
+});
 
 test('a killed stage with another initializer context in its name is preserved and refused', { timeout: waitMs * 2 }, async t => {
   const first = await killedStage(t), second = await killedStage(t);

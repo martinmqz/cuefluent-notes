@@ -145,6 +145,7 @@ function openInitializationRoot(pin, expected) {
   fail('STORE_SETUP_BUSY', 'Concurrent filesystem activity prevented a stable setup inspection; retry the same setup.');
 }
 
+const GATE_PUBLICATION = /^\.(settings|writer|sync)\.sqlite\.([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\.tmp$/;
 // Initial stages carry enough context to reconstruct even an empty/torn write.
 // Their UUID remains the layout ID; a generic temporary name proves no ownership.
 const INITIAL_STAGE = /^\.(layout|settings)\.json\.initialize\.([a-f0-9]{64})\.([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.tmp$/;
@@ -173,7 +174,7 @@ function existingInitializationStore(pin) {
 async function assertInitializationEmpty(pin, layout, previous, store) {
   await assertDirectory(pin);
   if (layout && Object.keys(layout.projects).length) incompleteStore();
-  const observations = previous?.observations ?? [], parents = [], stages = [];
+  const observations = previous?.observations ?? [], parents = [], stages = [], gatePublications = [];
   let stageStore = store;
   if (previous) {
     for (const parent of previous.parents) {
@@ -198,6 +199,10 @@ async function assertInitializationEmpty(pin, layout, previous, store) {
   }
   const verify = async () => {
     await assertDirectory(pin);
+    for (const publication of gatePublications) {
+      inspectExistingGate(publication.gate.path, publication.gate.id, { ...gateOptions, recoverPublication: false,
+        publicationStage: publication.file, expectedIdentity: publication.gate });
+    }
     for (const stage of stages) {
       const current = await readSnapshot(pin, stage.relative, { maxBytes: stage.bytes.length });
       if (current.hash !== stage.snapshot.hash || current.identity.device !== stage.snapshot.identity.device ||
@@ -236,6 +241,16 @@ async function assertInitializationEmpty(pin, layout, previous, store) {
         if (!entry) break;
         const kind = parent.entries.get(entry.name);
         if (!kind) {
+          const gateStage = parent.pin.root === path.join(pin.root, 'store/locks') && GATE_PUBLICATION.exec(entry.name);
+          if (gateStage) {
+            if (!entry.isFile() || layout || previous || store || gatePublications.some(item => item.gate.id === gateStage[1])) occupiedRoot();
+            const file = path.join(parent.pin.root, entry.name);
+            const gate = inspectExistingGate(path.join(parent.pin.root, `${gateStage[1]}.sqlite`), gateStage[1], {
+              ...gateOptions, recoverPublication: false, publicationStage: file,
+            });
+            gatePublications.push({ gate, file });
+            continue;
+          }
           const match = INITIAL_STAGE.exec(entry.name);
           const target = match?.[1] === 'layout' ? LAYOUT : SETTINGS;
           if (!match || !entry.isFile() || stages.length || parent.pin.root !== path.join(pin.root, path.dirname(target)) ||
@@ -266,7 +281,7 @@ async function assertInitializationEmpty(pin, layout, previous, store) {
   if (stages.length && (parents.length !== scaffoldEntries.size || observations.some(item =>
       ['store/projects', 'store/chats'].some(relative => item.directory === path.join(pin.root, relative)) && !item.stat))) incompleteStore();
   await verify();
-  return { verify, observations, parents, stages, stageStore };
+  return { verify, observations, parents, stages, stageStore, gatePublications };
 }
 
 /** Explicit fresh setup only. No notes, hooks, plugins, or model are touched. */
@@ -288,7 +303,17 @@ export async function initializeStore(root, initial = emptySettings()) {
     const layout = validateLayout(root, (await readJSON(pin, LAYOUT)).value);
     store = Object.freeze({ root, pin, settingsGate: Object.freeze(layout.settingsGate), writerGate: Object.freeze(layout.writerGate), syncGate: Object.freeze(layout.syncGate) });
   } else {
-    const inspected = await assertInitializationEmpty(pin);
+    let inspected = await assertInitializationEmpty(pin);
+    if (inspected.gatePublications.length) {
+      // Prove the entire scaffold first. Only the gate module may finish these
+      // exact publications, pinned to the identities admitted by that scan.
+      await inspected.verify();
+      for (const publication of inspected.gatePublications) {
+        await assertDirectory(pin);
+        inspectExistingGate(publication.gate.path, publication.gate.id, { ...gateOptions, expectedIdentity: publication.gate });
+      }
+      inspected = await assertInitializationEmpty(pin);
+    }
     if (inspected.stages.length) {
       store = inspected.stageStore; retainedInitialization = inspected;
     } else {
