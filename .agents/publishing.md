@@ -360,3 +360,5 @@ distinct actions. Merges follow the repository's branch protection.
 - Use neutral CI artifact and concurrency names, with one exact candidate set
   shared by producers and evidence readers. Existing artifacts under other names
   remain retained but cannot supply current automated evidence.
+- Advance both catalogs to the verified 0.18.0 release snapshots and add its
+  independently verified receipt pin, preserving all earlier snapshots and pins.
