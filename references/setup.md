@@ -123,8 +123,9 @@ the default is used. Changing the location does not move settings, queued input
 or pending runs. The default's
 `runtime` directory keeps setup separate from an existing application-data parent.
 Fresh setup refuses a directory with foreign entries. Setup may resume
-only an empty interrupted first initialization; it never adopts retained work as
-fresh settings. Unsupported private-state schemas are refused before store use.
+only an empty interrupted first initialization, including its verified temporary
+metadata; it never adopts retained work as fresh settings. Unsupported private-state
+schemas are refused before store use.
 Preserve the selected directory when a privacy, layout or schema conflict is
 reported. Read-only commands never initialize or repair it.
 

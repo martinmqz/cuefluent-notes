@@ -331,24 +331,30 @@ export function inspectExistingGate(path, id, options = {}) {
   runtime();
   gatePath(path);
   gateId(id);
-  const identity = Object.freeze({ ...inspect(path, options, 2n), id });
+  const recoverPublication = options.recoverPublication ?? true;
+  if (typeof recoverPublication !== 'boolean') fail('GATE_INVALID_GUARD', 'Gate publication recovery must be explicitly enabled or disabled.');
+  const links = recoverPublication ? 2n : 1n;
+  const identity = Object.freeze({ ...inspect(path, options, links), id });
   rejectSidecars(path);
   if (!reserve(identity)) fail('GATE_BUSY', 'Gate is already open in this process.');
   let db;
   let stage;
   try {
     db = connect(path);
-    verify(identity, options, 2n);
+    verify(identity, options, links);
     stage = validateDatabase(db, id);
-    verify(identity, options, 2n);
+    verify(identity, options, links);
     rejectSidecars(path);
   } catch (error) { throw storageError(error, 'inspection'); }
   finally {
     if (db) closeConnection(db, identity, db.isTransaction);
     else owners.delete(keyOf(identity));
   }
-  try { reconcilePublication(identity, stage, options); syncParent(path); }
-  catch (error) { throw storageError(error, 'publication recovery'); }
+  // Admission checks need a non-mutating observation before accepting a store.
+  if (recoverPublication) {
+    try { reconcilePublication(identity, stage, options); syncParent(path); }
+    catch (error) { throw storageError(error, 'publication recovery'); }
+  }
   return identity;
 }
 

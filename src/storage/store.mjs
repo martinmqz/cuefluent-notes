@@ -8,9 +8,9 @@ import { emptySettings, validateSettings, assertSettingsChange } from '../core/s
 import { assertLocalFilesystem, assertPrivateAccess, establishWindowsPrivacy } from './platform.mjs';
 import {
   assertAbsolute, assertChain, assertDirectory, assertPrivatePlacement, assertRegularFile,
-  createPrivateDirectory, inspectAncestors, lstatOrNull, pinDirectory,
+  createPrivateDirectory, inspectAncestors, inspectParent, lstatOrNull, pinDirectory,
 } from './paths.mjs';
-import { readJSON, readSnapshot, writeJSON, reclaimAtomicStages } from './files.mjs';
+import { readJSON, readSnapshot, writeJSON, jsonBytes, reclaimAtomicStages } from './files.mjs';
 import { assertGatePlacement, initializeGate, inspectExistingGate, probeGate, withShortGate } from './gates.mjs';
 
 const LAYOUT = 'store/layout.json';
@@ -145,11 +145,36 @@ function openInitializationRoot(pin, expected) {
   fail('STORE_SETUP_BUSY', 'Concurrent filesystem activity prevented a stable setup inspection; retry the same setup.');
 }
 
+// Initial stages carry enough context to reconstruct even an empty/torn write.
+// Their UUID remains the layout ID; a generic temporary name proves no ownership.
+const INITIAL_STAGE = /^\.(layout|settings)\.json\.initialize\.([a-f0-9]{64})\.([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.tmp$/;
+const initialGate = ({ path, id, device, inode }) => ({ path, id, device, inode });
+const initialLayout = (store, id) => ({ schemaVersion: STORE_SCHEMA, id, settingsGate: initialGate(store.settingsGate),
+  writerGate: initialGate(store.writerGate), syncGate: initialGate(store.syncGate), projects: {} });
+
+async function bindInitialStage(store, target, id) {
+  const parent = await inspectParent(store.pin, target);
+  const gates = [store.settingsGate, store.writerGate, store.syncGate].map(gate => [gate.path, gate.id, gate.device, gate.inode]);
+  const binding = createHash('sha256').update(JSON.stringify([
+    'store-initialization', STORE_SCHEMA, store.pin.chain.at(-1), parent.chain.at(-1), target, gates, id,
+  ])).digest('hex');
+  return { binding, id };
+}
+
+function existingInitializationStore(pin) {
+  const gates = {};
+  for (const name of ['settings', 'writer', 'sync']) {
+    gates[`${name}Gate`] = inspectExistingGate(path.join(pin.root, `store/locks/${name}.sqlite`), name, { ...gateOptions, recoverPublication: false });
+  }
+  return Object.freeze({ root: pin.root, pin, ...gates });
+}
+
 /** Only an empty first-setup scaffold may finish publishing its initial metadata. */
-async function assertInitializationEmpty(pin, layout, previous) {
+async function assertInitializationEmpty(pin, layout, previous, store) {
   await assertDirectory(pin);
   if (layout && Object.keys(layout.projects).length) incompleteStore();
-  const observations = previous?.observations ?? [], parents = [];
+  const observations = previous?.observations ?? [], parents = [], stages = [];
+  let stageStore = store;
   if (previous) {
     for (const parent of previous.parents) {
       await assertDirectory(parent.pin);
@@ -173,6 +198,11 @@ async function assertInitializationEmpty(pin, layout, previous) {
   }
   const verify = async () => {
     await assertDirectory(pin);
+    for (const stage of stages) {
+      const current = await readSnapshot(pin, stage.relative, { maxBytes: stage.bytes.length });
+      if (current.hash !== stage.snapshot.hash || current.identity.device !== stage.snapshot.identity.device ||
+          current.identity.inode !== stage.snapshot.identity.inode) incompleteStore();
+    }
     for (const parent of parents) {
       const current = await lstatOrNull(parent.pin.root);
       // Parent mtime detects renamed child entries without relying on Windows
@@ -205,7 +235,23 @@ async function assertInitializationEmpty(pin, layout, previous) {
         await verify();
         if (!entry) break;
         const kind = parent.entries.get(entry.name);
-        if (!kind || seen.has(entry.name) || (kind === 'directory' ? !entry.isDirectory() : !entry.isFile())) occupiedRoot();
+        if (!kind) {
+          const match = INITIAL_STAGE.exec(entry.name);
+          const target = match?.[1] === 'layout' ? LAYOUT : SETTINGS;
+          if (!match || !entry.isFile() || stages.length || parent.pin.root !== path.join(pin.root, path.dirname(target)) ||
+              (target === LAYOUT ? layout || previous : !layout || match[3] !== layout.id)) occupiedRoot();
+          stageStore ??= existingInitializationStore(pin);
+          const bound = await bindInitialStage(stageStore, target, match[3]);
+          if (bound.binding !== match[2]) occupiedRoot();
+          const value = target === LAYOUT ? initialLayout(stageStore, match[3]) : emptySettings(), bytes = jsonBytes(value);
+          const relative = `${path.posix.dirname(target)}/${entry.name}`;
+          const snapshot = await readSnapshot(pin, relative, { maxBytes: bytes.length });
+          if (!bytes.subarray(0, snapshot.bytes.length).equals(snapshot.bytes)) occupiedRoot();
+          stages.push({ relative, target, value, bytes, snapshot, ...bound });
+          await verify();
+          continue;
+        }
+        if (seen.has(entry.name) || (kind === 'directory' ? !entry.isDirectory() : !entry.isFile())) occupiedRoot();
         if (parent.pin.root === path.join(pin.root, 'store') && entry.name === 'layout.json' && !layout && !previous) {
           // The absent-layout decision cannot adopt a later owner's layout or
           // create gates for it. Only the caller's own publication may advance
@@ -217,8 +263,10 @@ async function assertInitializationEmpty(pin, layout, previous) {
       }
     } finally { await stream.close(); }
   }
+  if (stages.length && (parents.length !== scaffoldEntries.size || observations.some(item =>
+      ['store/projects', 'store/chats'].some(relative => item.directory === path.join(pin.root, relative)) && !item.stat))) incompleteStore();
   await verify();
-  return { verify, observations, parents };
+  return { verify, observations, parents, stages, stageStore };
 }
 
 /** Explicit fresh setup only. No notes, hooks, plugins, or model are touched. */
@@ -235,26 +283,31 @@ export async function initializeStore(root, initial = emptySettings()) {
   await assertChain(pin.chain);
   const existingLayout = await lstatOrNull(path.join(root, LAYOUT));
   if (!existingLayout && await lstatOrNull(path.join(root, SETTINGS))) incompleteStore();
-  let store;
+  let store, retainedInitialization;
   if (existingLayout) {
     const layout = validateLayout(root, (await readJSON(pin, LAYOUT)).value);
     store = Object.freeze({ root, pin, settingsGate: Object.freeze(layout.settingsGate), writerGate: Object.freeze(layout.writerGate), syncGate: Object.freeze(layout.syncGate) });
   } else {
-    await assertInitializationEmpty(pin);
-    for (const relative of ['config', 'store', 'store/locks', 'store/projects', 'store/chats']) {
+    const inspected = await assertInitializationEmpty(pin);
+    if (inspected.stages.length) {
+      store = inspected.stageStore; retainedInitialization = inspected;
+    } else {
+      for (const relative of ['config', 'store', 'store/locks', 'store/projects', 'store/chats']) {
+        await assertInitializationEmpty(pin);
+        await createPrivateDirectory(path.join(root, relative));
+      }
       await assertInitializationEmpty(pin);
-      await createPrivateDirectory(path.join(root, relative));
+      const settingsGate = prepareGate(path.join(root, 'store/locks/settings.sqlite'), 'settings');
+      const writerGate = prepareGate(path.join(root, 'store/locks/writer.sqlite'), 'writer');
+      const syncGate = prepareGate(path.join(root, 'store/locks/sync.sqlite'), 'sync');
+      store = Object.freeze({ root, pin, settingsGate, writerGate, syncGate });
     }
-    await assertInitializationEmpty(pin);
-    const settingsGate = prepareGate(path.join(root, 'store/locks/settings.sqlite'), 'settings');
-    const writerGate = prepareGate(path.join(root, 'store/locks/writer.sqlite'), 'writer');
-    const syncGate = prepareGate(path.join(root, 'store/locks/sync.sqlite'), 'sync');
-    store = Object.freeze({ root, pin, settingsGate, writerGate, syncGate });
   }
   await withShortGate(store.settingsGate, gateOptions, async () => {
+    await retainedInitialization?.verify();
     const existing = await readJSON(pin, LAYOUT, { missing: true });
     const current = await readJSON(pin, SETTINGS, { missing: true });
-    let initialization;
+    let initialization, layout = existing?.value;
     if (existing) {
       validateLayout(root, existing.value);
       if (!sameGate(existing.value.settingsGate, store.settingsGate) || !sameGate(existing.value.writerGate, store.writerGate) || !sameGate(existing.value.syncGate, store.syncGate)) {
@@ -265,14 +318,18 @@ export async function initializeStore(root, initial = emptySettings()) {
       probeGate(store.writerGate, gateOptions); probeGate(store.syncGate, gateOptions);
     } else {
       if (existingLayout || current) incompleteStore();
-      initialization = await assertInitializationEmpty(pin);
+      probeGate(store.writerGate, gateOptions); probeGate(store.syncGate, gateOptions);
+      initialization = await assertInitializationEmpty(pin, undefined, undefined, store);
       await initialization.verify();
-      await writeJSON(pin, LAYOUT, { schemaVersion: STORE_SCHEMA, id: randomUUID(), settingsGate: store.settingsGate, writerGate: store.writerGate, syncGate: store.syncGate, projects: {} }, { expectedHash: null });
+      const stage = initialization.stages[0], value = stage?.value ?? initialLayout(store, randomUUID());
+      await writeJSON(pin, LAYOUT, value, { expectedHash: null, initialStage: stage ?? await bindInitialStage(store, LAYOUT, value.id) });
+      layout = value;
     }
     if (!current) {
-      initialization = await assertInitializationEmpty(pin, existing?.value, initialization);
+      initialization = await assertInitializationEmpty(pin, existing?.value, initialization, store);
       await initialization.verify();
-      await writeJSON(pin, SETTINGS, emptySettings(), { expectedHash: null });
+      const stage = initialization.stages[0];
+      await writeJSON(pin, SETTINGS, emptySettings(), { expectedHash: null, initialStage: stage ?? await bindInitialStage(store, SETTINGS, layout.id) });
     }
     else validateSettings(current.value);
   });

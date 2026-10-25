@@ -283,6 +283,34 @@ gateTest('explicit setup reconciles only the exact initialized two-link publicat
   assert.deepEqual(probeGate(expected), { available: true });
 });
 
+gateTest('inspection without publication recovery preserves stages and never flushes parents', async t => {
+  const directory = setup(t), filename = join(directory, 'gate.sqlite');
+  await crashInitialization(t, filename, 'published');
+  const before = lstatSync(filename, { bigint: true }), entries = readdirSync(directory).sort();
+  assert.equal(before.nlink, 2n);
+  const unlinks = t.mock.method(nativeFs, 'unlinkSync'), flushes = t.mock.method(nativeFs, 'fsyncSync');
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => inspectExistingGate(filename, 'crash-test', { recoverPublication: false }), { code: 'GATE_UNSAFE_PATH' });
+    assert.equal(unlinks.mock.callCount(), 0); assert.equal(flushes.mock.callCount(), 0);
+    assert.deepEqual(readdirSync(directory).sort(), entries);
+    const retained = lstatSync(filename, { bigint: true });
+    for (const field of ['dev', 'ino', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(retained[field], before[field]);
+
+    // Ordinary explicit setup still repairs the exact publication pair.
+    const identity = inspectExistingGate(filename, 'crash-test');
+    assert.equal(lstatSync(filename).nlink, 1);
+    assert.deepEqual(readdirSync(directory), ['gate.sqlite']);
+    assert.equal(unlinks.mock.callCount(), 1);
+    const unlinkCount = unlinks.mock.callCount(), flushCount = flushes.mock.callCount();
+    assert.deepEqual(inspectExistingGate(filename, 'crash-test', { recoverPublication: false }), identity);
+    assert.throws(() => inspectExistingGate(filename, 'wrong-id', { recoverPublication: false }), { code: 'GATE_INVALID_DATABASE' });
+    assert.equal(unlinks.mock.callCount(), unlinkCount); assert.equal(flushes.mock.callCount(), flushCount);
+  } finally {
+    unlinks.mock.restore(); flushes.mock.restore(); syncBuiltinESMExports();
+  }
+});
+
 gateTest('explicit setup never unlinks an arbitrary second hard link', t => {
   const directory = setup(t);
   const identity = initializeGate(join(directory, 'gate.sqlite'), 'owned');

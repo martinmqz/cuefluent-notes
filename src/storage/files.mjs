@@ -197,8 +197,13 @@ async function compare(pin, relative, expectedHash, maxBytes) {
 }
 
 /** Caller holds the appropriate mutation gate. Staging files never end in .md. */
-export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes = 2 * 1024 * 1024 } = {}) {
+export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes = 2 * 1024 * 1024, initialStage } = {}) {
   expected(expectedHash);
+  if (initialStage && (pin?.private !== true || expectedHash !== null ||
+      !/^[a-f0-9]{64}$/.test(initialStage.binding) ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(initialStage.id))) {
+    fail('STAGE_INITIALIZATION_INVALID', 'Initial publication requires a bound private stage and an absent target.');
+  }
   if (!Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) fail('BYTES_REQUIRED', 'Atomic publication requires exact bytes.');
   bytes = Buffer.from(bytes);
   if (bytes.length > maxBytes) fail('WRITE_LIMIT_EXCEEDED', 'The proposed file exceeds its size limit.');
@@ -207,18 +212,31 @@ export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes
   if (pin.private) await restoreRemoval(pin, relative, expectedHash, maxBytes);
   const hash = hashBytes(bytes);
   if (original?.hash === hash) return { changed: false, hash };
-  const stage = path.join(path.dirname(parent.file), `.${path.basename(parent.file)}.${randomUUID()}.tmp`);
+  const suffix = initialStage ? `initialize.${initialStage.binding}.${initialStage.id}` : randomUUID();
+  const stage = path.join(path.dirname(parent.file), `.${path.basename(parent.file)}.${suffix}.tmp`);
+  const stageRelative = path.posix.join(path.posix.dirname(relative), path.basename(stage));
+  const resumed = initialStage?.snapshot;
+  if (resumed && (!Buffer.isBuffer(resumed.bytes) || !bytes.subarray(0, resumed.bytes.length).equals(resumed.bytes))) {
+    fail('FILE_CHANGED', 'The initialization stage is not a prefix of its original proposal.');
+  }
   let staged = false;
   let published = false;
   let failure, stageIdentity;
   try {
-    const handle = await fs.open(stage, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, pin.private ? 0o600 : 0o666);
+    const handle = await fs.open(stage, constants.O_WRONLY | (resumed ? 0 : constants.O_CREAT | constants.O_EXCL) | NO_FOLLOW, pin.private ? 0o600 : 0o666);
     staged = true;
     try {
-      if (pin.private) establishWindowsPrivacy(stage);
+      if (pin.private && !resumed) establishWindowsPrivacy(stage);
       const created = await readHandleStat(handle);
       assertRegularFile(stage, created, pin);
       stageIdentity = fileIdentity(created);
+      if (resumed) {
+        const current = await readSnapshot(pin, stageRelative, { maxBytes });
+        if (!sameIdentity(created, resumed.identity) || !sameIdentity(created, current.identity) ||
+            current.hash !== resumed.hash || !current.bytes.equals(resumed.bytes)) {
+          fail('FILE_CHANGED', 'The inspected initialization stage changed before resuming.');
+        }
+      }
       await assertChain(parent.chain);
       await handle.writeFile(bytes);
       // Public note replacements retain POSIX permission bits. Node rename does
@@ -230,6 +248,12 @@ export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes
     await assertChain(parent.chain);
     await assertDirectory(pin);
     await compare(pin, relative, expectedHash, maxBytes);
+    if (initialStage) {
+      const current = await readSnapshot(pin, stageRelative, { maxBytes });
+      if (current.hash !== hash || current.identity.device !== stageIdentity.device || current.identity.inode !== stageIdentity.inode) {
+        fail('FILE_CHANGED', 'The initialization stage changed before publication.');
+      }
+    }
     if (expectedHash === null && !pin.private) {
       // An absent target is published without overwrite, even if another actor
       // creates the name after the last absence check.
@@ -256,7 +280,8 @@ export async function writeAtomic(pin, relative, bytes, { expectedHash, maxBytes
   } catch (error) { failure = error; throw error; } finally {
     // Never remove a published destination. A failed unlink after link leaves a
     // detectable two-link file; recovery must reconcile that exact staged inode.
-    if (staged && !published) {
+    // Bound initial stages survive failures for identity-checked same-setup retry.
+    if (staged && !published && !initialStage) {
       try {
         await assertChain(parent.chain);
         const current = await lstatOrNull(stage);
