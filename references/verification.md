@@ -35,6 +35,33 @@ desktop acceptance separately from deterministic protocol and filesystem tests.
 Existing published snapshots do not gain new source
 features until a release is installed.
 
+Native macOS checks with Cuefluent Notes 0.18.0 verified accepted direct-note saves
+and confirmed discards in Codex Desktop and Claude Code 2.1.307 in Terminal.
+Rejected confirmations preserved the exact drafts; accepted saves published the
+reviewed bytes. These results apply to the observed client surfaces, not every
+application that embeds Claude Code. The Terminal checks used the verified
+published package through explicit MCP configuration. A later fixture-scoped
+marketplace installation also connected successfully in Claude Desktop with
+Node 26.12.1 and exposed all nine tools.
+
+On 2026-10-24, Claude Desktop 3.6556.2's Code tab rendered the content-only Markdown
+preview correctly but returned `DIRECT_NOTE_APPROVAL_DECLINED` without displaying
+the save-confirmation form. Three requests received host declines within 1–2 ms;
+on the third, the user clicked the ordinary **Allow once** tool-permission card
+and confirmed that no separate approval form appeared. This matches the
+[reported Desktop confirmation failure](https://github.com/anthropics/claude-code/issues/89858).
+The installed-plugin recheck reproduced the same failure twice after the user
+clicked **Allow once**; the Desktop host logged an elicitation request in print
+mode and returned decline after 2 ms. The target remained absent and the exact
+draft and preview were preserved.
+Accepted saves and discards remain unverified in that Desktop surface. This is
+a compatibility defect against the shared native approval workflow, not a separate
+Desktop workflow. A later connection must still obtain confirmation before
+accessing or acting on a retained draft. The ordinary tool-permission card does
+not approve the note itself. Keep the draft pending when the required form is
+unavailable; do not substitute an operating-system dialog. Ordinary Claude chat
+and Cowork were not exercised by these checks.
+
 The following native binding requirements apply to tracking and queued processing.
 
 The current adapters target Claude Code 2.1.307 and Codex CLI 0.163.0 native

@@ -44,6 +44,13 @@ unverified. Earlier Windows checks used the previous transport. Windows packaged
 Desktop/TUI command acceptance also remains incomplete; see
 [verification](references/verification.md).
 
+For direct-note review on macOS, Claude Code in Terminal has verified native save
+and discard confirmation. Claude Desktop 3.6556.2's Code tab can render a preview
+but decline the save without showing its confirmation form, leaving the draft
+pending. The same native review and explicit save/discard confirmation flow is
+required across supported clients; this Desktop behavior remains a compatibility
+defect. See the [observed client limits](references/verification.md#native-clients).
+
 Install or register the chosen client package through the client's explicit plugin
 flow and trust its hooks only if desired. Plugin installation and hook trust do
 not configure a project or start tracking. Never change client authentication to

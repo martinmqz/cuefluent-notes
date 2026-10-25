@@ -84,6 +84,18 @@ confirmation. If the client cannot provide it, report the returned limitation an
 leave the draft pending. Do not substitute a shell write or an agent-authored
 approval. Resuming a draft from another connection may also request confirmation
 before revealing its content.
+
+A declined tool result alone does not establish that the user answered a form.
+If the user reports that no confirmation appeared, explain the host limitation
+and preserve the draft and preview. Do not attribute that refusal to the user or
+retry without their instruction. See the
+[known Claude Desktop limitation](references/verification.md#native-clients).
+
+The review, approval, save and discard workflow must remain consistent across
+Claude Desktop, Codex Desktop and their CLI clients, using each client's native
+confirmation UI. Do not introduce a separate operating-system dialog or switch
+approval mechanisms to work around a client failure.
+
 Create requires an absent target; update requires the existing note's inspected
 hash and a complete bounded read. On a conflict, re-read the note and reconcile the requested change with its
 current content. In review mode, a changed proposal needs fresh review; never
