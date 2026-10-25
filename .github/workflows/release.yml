@@ -23,7 +23,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: prepare-v2-${{ inputs.tag }}
+  group: prepare-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:

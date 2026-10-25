@@ -8,7 +8,7 @@ import { installPackage } from './install.mjs';
 import { createGitRunner } from './git.mjs';
 
 const requireCI = condition => { if (!condition) { const error = new Error('Candidate build verification failed.'); error.code = 'CI_CANDIDATE_INVALID'; throw error; } };
-export const ARTIFACT_NAMES = Object.freeze(['v2-candidate-ubuntu-24.04', 'v2-candidate-macos-14', 'v2-candidate-windows-2025']);
+export const ARTIFACT_NAMES = Object.freeze(['candidate-ubuntu-24.04', 'candidate-macos-14', 'candidate-windows-2025']);
 export const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 export const decode = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 export async function bounded(file, limit) {
@@ -41,7 +41,7 @@ export async function verifyDetachedBuild(root, { copy = true } = {}) {
     await verifyPackage(packageRoot, { expectedInventorySha256: item.inventorySha256 });
     const profile = path.join(os.tmpdir(), `cuefluent-detached-${randomUUID()}`);
     const output = execFileSync(process.execPath, [path.join(packageRoot, 'src/cli.mjs'), 'settings'], { cwd: os.tmpdir(), encoding: 'utf8', maxBuffer: 64 * 1024,
-      env: { ...process.env, CUEFLUENT_V2_HOME: profile, NODE_PATH: '' } });
+      env: { ...process.env, CUEFLUENT_HOME: profile, NODE_PATH: '' } });
     const settings = JSON.parse(output); requireCI(settings.state === 'unconfigured' && settings.settingsHash === null && settings.settings.projects.length === 0);
     let absent = false; try { await fs.lstat(profile); } catch (error) { if (error.code !== 'ENOENT') throw error; absent = true; } requireCI(absent);
     if (copy) await installPackage({ sourceRoot: packageRoot, destination: path.join(root, `copied-${item.client}`), expectedInventorySha256: item.inventorySha256, client: item.client });

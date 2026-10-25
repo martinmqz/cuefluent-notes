@@ -106,7 +106,7 @@ test('Codex linked commands reject quoted examples, other installations, annotat
 });
 
 async function fixture(t, content = 'first\n') {
-  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-source-')));
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-source-')));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const sourceFile = path.join(directory, 'native.jsonl');
   await fs.writeFile(sourceFile, content, { mode: 0o600 });

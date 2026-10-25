@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 const LIMIT = 64 * 1024;
 const DEADLINE = 15_000;
-const REGISTRY = Symbol.for('cuefluent.notes.v2.windows-acl');
+const REGISTRY = Symbol.for('cuefluent.notes.windows-acl');
 const deadlines = new AsyncLocalStorage();
 
 /** One hook's whole storage budget, including every synchronous ACL round trip. */
@@ -72,7 +72,7 @@ export function queryWindowsAcl(file, create) {
   if (Buffer.byteLength(request) > LIMIT) throw new Error('Windows ACL request exceeds its bound.');
   let worker = globalThis[REGISTRY];
   if (!worker) {
-    worker = new Worker(new URL('./windows-acl.mjs', import.meta.url), { execArgv: [], workerData: 'cuefluent-acl-v1' });
+    worker = new Worker(new URL('./windows-acl.mjs', import.meta.url), { execArgv: [], workerData: 'cuefluent-acl' });
     globalThis[REGISTRY] = worker;
     const clear = () => { if (globalThis[REGISTRY] === worker) delete globalThis[REGISTRY]; };
     worker.on('error', clear); worker.on('exit', clear); worker.unref();
@@ -93,7 +93,7 @@ export function queryWindowsAcl(file, create) {
   }
 }
 
-if (!isMainThread && workerData === 'cuefluent-acl-v1') {
+if (!isMainThread && workerData === 'cuefluent-acl') {
   // EOF on the worker-owned stdin closes the native helper after parent death or
   // worker termination. No named pipe, helper server or persisted state exists.
   const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(SCRIPT, 'utf16le').toString('base64')],

@@ -4,7 +4,12 @@ Project settings, chat metadata, queues, complete draft bytes and current-run
 recovery records live in a private store outside repositories and note
 destinations. Use a supported local filesystem with verifiable ownership and
 permissions. Symbolic links, hard links, replaced parents and unsupported storage
-are refused. See [setup](setup.md) for locations.
+are refused. See [setup](setup.md#private-location) for locations and the 0.18.0
+fresh-setup requirement. Unsupported private-state schemas are refused before
+settings, queues or runs are used. Fresh setup preserves and refuses foreign entries;
+only an empty interrupted first initialization can resume. Store files are not
+portable: gate identities bind exact paths, and separate stores cannot coordinate
+writes to the same notes.
 
 ## What is retained
 
@@ -51,10 +56,22 @@ not consumed by that run. Cleanup never deletes Markdown notes.
 
 ## Recovery and logs
 
+If first initialization is interrupted, retry setup at the same location. Setup
+resumes only its verified metadata stages and unfinished gate publications,
+preserving the original gates.
+Unrecognized, changed, or privacy-unverifiable files stay untouched and cause a
+refusal; a temporary filename alone does not authorize recovery.
+
 Process-owned gates release when their worker dies. Retries retain exact inspected
 hashes, draft content and durable cleanup progress. Do not infer owner death from
 PID reuse or elapsed time, delete gate files, refresh conflict hashes or relocate
 locks. Unexpected files and user edits are preserved.
+
+Cleanup acknowledgments and pending queue-removal journals must match the current
+run's cleanup context. A mismatch is refused with `RUN_INVALID` or
+`QUEUE_CURSOR_MISMATCH`; retained state is not rewritten to force cleanup. Finish
+pending work before changing packages, and preserve any mismatched state for
+inspection.
 
 A note save and activity entry are separate writes. Logging failure does not block
 successful note cleanup. The current run can retry an interrupted entry with its

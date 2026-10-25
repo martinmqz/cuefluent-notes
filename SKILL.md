@@ -143,11 +143,14 @@ are missing, diagnose startup using [package requirements](references/distributi
 before asking the user to repeat note or tracking commands.
 
 Fresh project defaults are **manual tracking**, **review saving**, and **activity
-logging on for directory destinations**. Respect explicit logging opt-outs; existing
-settings are not changed by installing an update. Single-file destinations keep
-logging off. Queued processing always requires an explicit command. Automatic
-tracking applies to new chats going forward; it does not import old chats. Explicit untrack survives
-cleanup and automatic mode. Read-only requests and opt-outs take priority.
+logging on for directory destinations**. Respect explicit logging opt-outs and
+loaded settings. Installation does not modify existing settings. Version 0.18.0
+requires fresh setup; earlier private state stays untouched and is not imported.
+Follow the [storage transition](references/setup.md#private-location) before
+upgrading. Single-file destinations keep logging off. Queued processing always
+requires an explicit command. Automatic tracking applies to new chats going
+forward; it does not import old chats. Explicit untrack survives cleanup and
+automatic mode. Read-only requests and opt-outs take priority.
 
 An unconfigured command writes no tracking or conversation data. Explain setup
 using [setup](references/setup.md); get the user's project, destination and mode

@@ -10,7 +10,7 @@ import { Database } from 'node:sqlite';
 import test from 'node:test';
 import * as gates from '../src/storage/gates.mjs';
 import nativeFs from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
 import { assertPrivateAccess, establishWindowsPrivacy } from '../src/storage/platform.mjs';
 
 const { assertGatePlacement } = gates;
@@ -283,6 +283,126 @@ gateTest('explicit setup reconciles only the exact initialized two-link publicat
   assert.deepEqual(probeGate(expected), { available: true });
 });
 
+gateTest('inspection without publication recovery preserves stages and never flushes parents', async t => {
+  const directory = setup(t), filename = join(directory, 'gate.sqlite');
+  await crashInitialization(t, filename, 'published');
+  const before = lstatSync(filename, { bigint: true }), entries = readdirSync(directory).sort();
+  assert.equal(before.nlink, 2n);
+  const publicationStage = join(directory, entries.find(name => name !== 'gate.sqlite'));
+  const unlinks = t.mock.method(nativeFs, 'unlinkSync'), flushes = t.mock.method(nativeFs, 'fsyncSync');
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => inspectExistingGate(filename, 'crash-test', { recoverPublication: false }), { code: 'GATE_UNSAFE_PATH' });
+    assert.throws(() => inspectExistingGate(filename, 'crash-test', { publicationStage }), { code: 'GATE_INVALID_GUARD' });
+    const proof = inspectExistingGate(filename, 'crash-test', { recoverPublication: false, publicationStage });
+    assert.equal(proof.path, filename); assert.equal(proof.id, 'crash-test');
+    assert.equal(unlinks.mock.callCount(), 0); assert.equal(flushes.mock.callCount(), 0);
+    assert.deepEqual(readdirSync(directory).sort(), entries);
+    const retained = lstatSync(filename, { bigint: true });
+    for (const field of ['dev', 'ino', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(retained[field], before[field]);
+
+    // Ordinary explicit setup still repairs the exact publication pair.
+    const identity = inspectExistingGate(filename, 'crash-test', { expectedIdentity: proof });
+    assert.deepEqual(identity, proof);
+    assert.equal(lstatSync(filename).nlink, 1);
+    assert.deepEqual(readdirSync(directory), ['gate.sqlite']);
+    assert.equal(unlinks.mock.callCount(), 1);
+    const unlinkCount = unlinks.mock.callCount(), flushCount = flushes.mock.callCount();
+    assert.deepEqual(inspectExistingGate(filename, 'crash-test', { recoverPublication: false }), identity);
+    assert.throws(() => inspectExistingGate(filename, 'crash-test', { recoverPublication: false, publicationStage }), { code: 'GATE_UNSAFE_PATH' });
+    assert.throws(() => inspectExistingGate(filename, 'wrong-id', { recoverPublication: false }), { code: 'GATE_INVALID_DATABASE' });
+    assert.equal(unlinks.mock.callCount(), unlinkCount); assert.equal(flushes.mock.callCount(), flushCount);
+  } finally {
+    unlinks.mock.restore(); flushes.mock.restore(); syncBuiltinESMExports();
+  }
+});
+
+gateTest('a gate replaced after publication proof is refused before opening or reconciling it', async t => {
+  const directory = setup(t), filename = join(directory, 'gate.sqlite');
+  await crashInitialization(t, filename, 'published');
+  const originalStage = readdirSync(directory).find(name => name !== 'gate.sqlite');
+  const proof = inspectExistingGate(filename, 'crash-test', { recoverPublication: false, publicationStage: join(directory, originalStage) });
+  renameSync(filename, join(directory, 'retained-gate.sqlite'));
+  await crashInitialization(t, filename, 'published');
+  const publicationStage = join(directory, readdirSync(directory).find(name => name.startsWith('.gate.sqlite.') && name !== originalStage));
+
+  const moduleUrl = new URL('../src/storage/gates.mjs?expected-identity', import.meta.url).href;
+  const sqliteUrl = `data:text/javascript,${encodeURIComponent(`
+    // Count construction specifically for the expected-identity regression.
+    import { Database as NativeDatabase } from 'node:sqlite';
+    export let opens = 0;
+    export class Database extends NativeDatabase {
+      constructor(...args) { opens++; super(...args); }
+    }
+  `)}`;
+  const sqlite = await import(sqliteUrl);
+  const hook = registerHooks({ resolve(specifier, context, nextResolve) {
+    if (specifier === 'node:sqlite' && context.parentURL === moduleUrl) return { url: sqliteUrl, shortCircuit: true };
+    return nextResolve(specifier, context);
+  } });
+  let observed;
+  try { observed = await import(moduleUrl); }
+  finally { hook.deregister(); }
+  const snapshot = () => readdirSync(directory).sort().map(name => {
+    const stat = lstatSync(join(directory, name), { bigint: true });
+    return [name, ...['dev', 'ino', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].map(field => stat[field])];
+  });
+  const before = snapshot();
+  const unlinks = t.mock.method(nativeFs, 'unlinkSync'), flushes = t.mock.method(nativeFs, 'fsyncSync');
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => observed.inspectExistingGate(filename, 'crash-test', profile({ expectedIdentity: proof })), { code: 'GATE_REPLACED' });
+    assert.equal(sqlite.opens, 0);
+    assert.equal(unlinks.mock.callCount(), 0); assert.equal(flushes.mock.callCount(), 0);
+    assert.deepEqual(snapshot(), before);
+    // The replacement is a valid publication pair; its own read-only proof opens SQLite.
+    const replacement = observed.inspectExistingGate(filename, 'crash-test', profile({ recoverPublication: false, publicationStage }));
+    assert.notEqual(replacement.inode, proof.inode);
+    assert.equal(sqlite.opens, 1);
+    assert.equal(unlinks.mock.callCount(), 0); assert.equal(flushes.mock.callCount(), 0);
+    assert.deepEqual(snapshot(), before);
+  } finally {
+    unlinks.mock.restore(); flushes.mock.restore(); syncBuiltinESMExports();
+  }
+});
+
+for (const fault of ['unrelated-path', 'wrong-marker', 'different-inode', 'third-link', 'wrong-id']) {
+  gateTest(`publication inspection refuses ${fault} without consuming gate artifacts`, async t => {
+    const directory = setup(t), filename = join(directory, 'gate.sqlite');
+    await crashInitialization(t, filename, 'published');
+    const stage = join(directory, readdirSync(directory).find(name => name !== 'gate.sqlite'));
+    let publicationStage = stage, id = 'crash-test';
+    if (fault === 'unrelated-path') publicationStage = join(directory, 'unrelated.tmp');
+    if (fault === 'wrong-marker') {
+      publicationStage = join(directory, '.gate.sqlite.00000000-0000-4000-8000-000000000000.tmp');
+      renameSync(stage, publicationStage);
+    }
+    if (fault === 'different-inode') {
+      renameSync(stage, join(directory, 'retained-stage.tmp'));
+      initializeGate(stage, 'other');
+      assert.notEqual(lstatSync(stage, { bigint: true }).ino, lstatSync(filename, { bigint: true }).ino);
+    }
+    if (fault === 'third-link') linkSync(filename, join(directory, 'third-link.tmp'));
+    if (fault === 'wrong-id') id = 'other';
+    const snapshot = () => readdirSync(directory).sort().map(name => {
+      const stat = lstatSync(join(directory, name), { bigint: true });
+      return [name, ...['dev', 'ino', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].map(field => stat[field])];
+    });
+    const before = snapshot();
+    const unlinks = t.mock.method(nativeFs, 'unlinkSync'), flushes = t.mock.method(nativeFs, 'fsyncSync');
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => inspectExistingGate(filename, id, { recoverPublication: false, publicationStage }), {
+        code: fault === 'wrong-id' ? 'GATE_INVALID_DATABASE' : 'GATE_UNSAFE_PATH',
+      });
+      assert.equal(unlinks.mock.callCount(), 0); assert.equal(flushes.mock.callCount(), 0);
+      assert.deepEqual(snapshot(), before);
+    } finally {
+      unlinks.mock.restore(); flushes.mock.restore(); syncBuiltinESMExports();
+    }
+  });
+}
+
 gateTest('explicit setup never unlinks an arbitrary second hard link', t => {
   const directory = setup(t);
   const identity = initializeGate(join(directory, 'gate.sqlite'), 'owned');
@@ -371,18 +491,52 @@ gateTest('two processes exclude each other while an independent gate remains ava
   assert.deepEqual(probeGate(workerGate), { available: true });
 });
 
-gateTest('same-process duplicates never release the original owner lock', async (t) => {
+gateTest('same-process duplicates refuse before opening another gate handle', async (t) => {
+  const duplicateUrl = new URL('../src/storage/gates.mjs?duplicate-owner', import.meta.url).href;
+  const sqliteUrl = `data:text/javascript,${encodeURIComponent(`
+    import { Database as NativeDatabase } from 'node:sqlite';
+    export let opens = 0;
+    export class Database extends NativeDatabase {
+      constructor(...args) { opens++; super(...args); }
+    }
+  `)}`;
+  const observedSqlite = await import(sqliteUrl);
+  const hook = registerHooks({ resolve(specifier, context, nextResolve) {
+    if (specifier === 'node:sqlite' && context.parentURL === duplicateUrl) return { url: sqliteUrl, shortCircuit: true };
+    return nextResolve(specifier, context);
+  } });
+  let duplicate;
+  try { duplicate = await import(duplicateUrl); }
+  finally { hook.deregister(); }
   const directory = setup(t);
-  const identity = initializeGate(join(directory, 'gate.sqlite'), 'local');
-  const owner = tryAcquireExistingGate(identity).acquired;
-  onCleanup(t, () => owner.release());
-  assert.deepEqual(tryAcquireExistingGate({ ...identity }), { busy: true });
-  assert.deepEqual(probeGate(identity), { busy: true });
-  assert.throws(() => probeGate({ ...identity, id: 'wrong-local-id' }), { code: 'GATE_INVALID_DATABASE' });
+  const descriptorOpens = t.mock.method(nativeFs, 'openSync');
+  syncBuiltinESMExports();
+  let identity, owner;
+  try {
+    identity = initializeGate(join(directory, 'gate.sqlite'), 'local');
+    owner = tryAcquireExistingGate(identity).acquired;
+    onCleanup(t, () => owner.release());
+    const descriptors = descriptorOpens.mock.callCount();
+    // Initialization proves the descriptor spy observes actual gate opens.
+    assert.ok(descriptors > 0);
+    assert.deepEqual(tryAcquireExistingGate({ ...identity }), { busy: true });
+    assert.deepEqual(probeGate(identity), { busy: true });
+    assert.deepEqual(duplicate.tryAcquireExistingGate(identity, profile()), { busy: true });
+    assert.deepEqual(duplicate.probeGate(identity, profile()), { busy: true });
+    assert.throws(() => duplicate.inspectExistingGate(identity.path, identity.id, profile()), { code: 'GATE_BUSY' });
+    assert.throws(() => probeGate({ ...identity, id: 'wrong-local-id' }), { code: 'GATE_INVALID_DATABASE' });
+    assert.equal(observedSqlite.opens, 0, 'an owned gate must not open another SQLite connection');
+    assert.equal(descriptorOpens.mock.callCount(), descriptors, 'an owned gate must not open another raw descriptor');
+  } finally {
+    descriptorOpens.mock.restore(); syncBuiltinESMExports();
+  }
   assert.deepEqual(await externalProbe(identity), { busy: true });
   owner.release();
   owner.release();
   assert.deepEqual(await externalProbe(identity), { available: true });
+  assert.deepEqual(duplicate.probeGate(identity, profile()), { available: true });
+  // After release, the duplicate import must open a real connection through the spy.
+  assert.equal(observedSqlite.opens, 1);
 });
 
 gateTest('holder death releases ownership without deleting or repairing the gate', async (t) => {

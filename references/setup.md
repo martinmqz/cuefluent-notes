@@ -97,15 +97,37 @@ links remain useful to agents and other Markdown readers.
 
 ## Private location
 
-Defaults are `~/Library/Application Support/Cuefluent Notes/v2` on macOS,
-`$XDG_STATE_HOME/cuefluent-notes/v2` (or `~/.local/state/cuefluent-notes/v2`) on
-Linux, and `%LOCALAPPDATA%/Cuefluent Notes/v2` on Windows. `CUEFLUENT_V2_HOME`
-selects an explicit fresh location consistently for the client and its workers.
+Defaults are `~/Library/Application Support/Cuefluent Notes/runtime` on macOS,
+`$XDG_STATE_HOME/cuefluent-notes/runtime` (or `~/.local/state/cuefluent-notes/runtime`)
+on Linux, and `%LOCALAPPDATA%/Cuefluent Notes/runtime` on Windows. `CUEFLUENT_HOME`
+selects an explicit location consistently for the client and its workers.
 A setup request may also name `storeRoot`; subsequent client invocations must
-select that same location with `CUEFLUENT_V2_HOME` in each native client's launch
+select that same location with `CUEFLUENT_HOME` in each native client's launch
 environment, so its hooks and MCP worker use the configured store. Never place
 it in a repository or notes destination.
 Private storage requires a supported local filesystem and verifiable permissions.
+
+Version 0.18.0 requires fresh settings and private storage. Earlier settings,
+tracking and opt-out state, queued input and pending drafts are not imported.
+Before upgrading, finish pending work with the package that created it, stop its
+connector, hooks and workers, and preserve its store in place. Explicitly set up
+the current package at a fresh location after agreeing on all project and mode
+choices again. Existing Markdown notes can remain the chosen destination.
+Do not copy or move earlier store files into the current location: stored gate
+identities bind exact paths. Do not run separate stores against the same notes
+concurrently; their writer gates cannot coordinate with each other.
+
+Location selection reads or creates no files and does not search other locations.
+`CUEFLUENT_HOME` is the only environment override; without an explicit location,
+the default is used. Changing the location does not move settings, queued input
+or pending runs. The default's
+`runtime` directory keeps setup separate from an existing application-data parent.
+Fresh setup refuses a directory with foreign entries. Setup may resume
+only an empty interrupted first initialization, including its verified temporary
+metadata; it never adopts retained work as fresh settings. Unsupported private-state
+schemas are refused before store use.
+Preserve the selected directory when a privacy, layout or schema conflict is
+reported. Read-only commands never initialize or repair it.
 
 Setup changes only Cuefluent Notes project state and the explicitly authorized
 notes/log destination. Native plugin registration, hook trust, authentication,

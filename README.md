@@ -63,8 +63,10 @@ Original native transcripts are never deleted. Successful saves consume only the
 selected queue records; later arrivals remain. Hash checks preserve manual edits.
 Activity-log failures are reported without blocking successful note cleanup.
 
-Starting with 0.16.0, Cuefluent Notes uses fresh settings and storage. It does not
-migrate or interpret runtime state from 0.15.1 or earlier. Existing Markdown notes
+Version 0.18.0 requires fresh settings and private storage. Earlier settings,
+tracking state, queued input and pending drafts are not imported. Finish pending
+work with the package that created it and preserve its store in place before
+following [setup](references/setup.md#private-location). Existing Markdown notes
 remain user content and can be updated under the current writer's conflict rules.
 
 ## Source development

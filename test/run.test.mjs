@@ -138,6 +138,8 @@ test('bounded cleanup progress pins the exact record and acknowledgment until it
   assert.equal(next.cleanup.next, 1); assert.deepEqual(next.cleanup.ack, cursor);
   error(() => advanceCleanup(next, ids[1], { ...cursor, index: 1 }, options), 'RUN_CLEANUP_INVALID');
   error(() => advanceCleanup(done, ids[1], { ...cursor, hash: h('f') }, options));
+  error(() => advanceCleanup(done, ids[1], { ...cursor, context: h('e') }, options));
+  error(() => validateRun({ ...next, cleanup: { ...next.cleanup, ack: { ...cursor, context: h('e') } } }, options));
   error(() => clearCleanupAcknowledgment(next, ids[1], { ...cursor, transactionId: ids[2] }, options), 'RUN_CLEANUP_INVALID');
   const acknowledged = clearCleanupAcknowledgment(next, ids[1], cursor, options);
   assert.equal(acknowledged.cleanup.next, 1); assert.equal(acknowledged.cleanup.ack, null);

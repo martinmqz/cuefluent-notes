@@ -32,6 +32,13 @@ async function all(pin, relative) {
   for await (const item of iterateQueue(pin, relative)) result.push(item);
   return result;
 }
+async function queueBytes(pin, relative) {
+  const root = path.join(pin.root, relative), files = ['intent.json', 'state.json'];
+  for (const directory of ['parts', 'links']) {
+    for (const file of await fs.readdir(path.join(root, directory))) files.push(path.join(directory, file));
+  }
+  return Promise.all(files.sort().map(async file => [file, await fs.readFile(path.join(root, file))]));
+}
 const request = (selected, index = 0, cursor) => ({ selected, context, index, ...(cursor ? { cursor } : {}) });
 async function remove(pin, relative, selected, index = 0) {
   const result = await cleanupQueueStep(pin, relative, request(selected, index));
@@ -271,6 +278,11 @@ for (const phase of ['neighbor', 'manifest', 'completed']) {
     await killAt(t, pin, relative, phase, 'cleanup', items[1]);
     const before = await inspectQueue(pin, relative);
     assert.equal(before.pending.op, 'remove');
+    const retained = await queueBytes(pin, relative);
+    await assert.rejects(cleanupQueueStep(pin, relative, { ...request(items[1]), context: hashBytes(Buffer.from('different cleanup context')) }),
+      { code: 'QUEUE_CURSOR_MISMATCH' });
+    assert.deepEqual(await queueBytes(pin, relative), retained);
+    assert.deepEqual(await inspectQueue(pin, relative), before);
     const recovered = await cleanupQueueStep(pin, relative, request(items[1]));
     assert.deepEqual(recovered.cursor, before.pending.cursor);
     await acknowledgeQueueCleanup(pin, relative, recovered.cursor);

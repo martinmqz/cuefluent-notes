@@ -5,7 +5,7 @@ import { compareBuilds, verifyBuildArchives, ARTIFACT_NAMES as ARTIFACTS, digest
 import { PACKAGE_VERSION } from './packaging.mjs';
 import { createGitRunner } from './git.mjs';
 
-export const EXPECTED_CHECK_JOBS = Object.freeze(['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)',
+export const EXPECTED_CHECK_JOBS = Object.freeze(['plan', 'guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)',
   'test (windows-2025, 2/4)', 'test (windows-2025, 3/4)', 'test (windows-2025, 4/4)',
   'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']);
 const SHA = /^[a-f0-9]{40}$/;
@@ -117,19 +117,7 @@ async function list(c, route, key) {
   requireRelease(false);
 }
 
-export function checksRequirePlan(c, revision) {
-  requireRelease(SHA.test(revision ?? ''), 'WORKFLOW_REVISION_INVALID');
-  let workflow;
-  try { workflow = Buffer.from(c.git(['show', `${revision}:.github/workflows/ci.yml`])).toString('utf8'); }
-  catch (cause) {
-    if (cause instanceof AssertionError) throw cause;
-    const error = new Error('The Checks workflow could not be read at the evidence revision.', { cause });
-    error.code = 'RELEASE_EVIDENCE_INVALID'; error.reason = 'WORKFLOW_READ_FAILED'; throw error;
-  }
-  return /^  plan:\s*(?:#.*)?$/m.test(workflow) || workflow.includes('tools/ci-plan.mjs');
-}
-
-export async function inspectChecksRun(c, { mode = 'full', requirePlan = false } = {}) {
+export async function inspectChecksRun(c, { mode = 'full' } = {}) {
   return checked('run', async () => {
     requireRelease(['full', 'distribution', 'auto'].includes(mode), 'CHECKS_MODE_INVALID');
     const [workflow, run] = await Promise.all([
@@ -147,10 +135,9 @@ export async function inspectChecksRun(c, { mode = 'full', requirePlan = false }
     const [jobs, artifacts] = await Promise.all([checked('jobs', async () => {
       const history = await list(c, `${c.api}/actions/runs/${c.runId}/jobs?filter=all`, 'jobs');
       requireRelease(new Set(history.map(job => job.id)).size === history.length);
-      for (const job of history) requireRelease(positive(job.id) && job.run_id === c.runId && (EXPECTED_CHECK_JOBS.includes(job.name) || job.name === 'plan') &&
+      for (const job of history) requireRelease(positive(job.id) && job.run_id === c.runId && EXPECTED_CHECK_JOBS.includes(job.name) &&
         positive(job.run_attempt) && job.run_attempt <= run.run_attempt);
-      const expected = requirePlan || mode !== 'full' || history.some(job => job.name === 'plan') ? ['plan', ...EXPECTED_CHECK_JOBS] : EXPECTED_CHECK_JOBS;
-      return expected.map(name => {
+      return EXPECTED_CHECK_JOBS.map(name => {
         const matches = history.filter(job => job.name === name).sort((a, b) => b.run_attempt - a.run_attempt);
         requireRelease(matches.length > 0 && new Set(matches.map(job => job.run_attempt)).size === matches.length);
         const latest = matches[0]; requireRelease(latest.status === 'completed' && latest.conclusion === 'success');
@@ -182,7 +169,7 @@ export async function inspectChecksRun(c, { mode = 'full', requirePlan = false }
 
 export async function selectReleaseCandidate(options = {}) {
   return checked('selection', async () => {
-    const c = context(options), tag = await readTag(c), run = await inspectChecksRun(c, { requirePlan: checksRequirePlan(c, tag.commit) });
+    const c = context(options), tag = await readTag(c), run = await inspectChecksRun(c);
     if (run.event !== 'pull_request') requireRelease(run.headSha === tag.commit, 'CHECKS_COMMIT_MISMATCH');
     await fs.mkdir(c.root);
     const snapshot = { schema: 1, tag, run };
@@ -255,7 +242,7 @@ export async function verifyReleaseCandidate(options = {}) {
     }
     // Revalidate immediately before making a candidate available: reruns, tag moves,
     // artifact replacement or expiration require a new explicit selection.
-    requireRelease(same(tag, await readTag(c)) && same(run, await inspectChecksRun(c, { requirePlan: checksRequirePlan(c, tag.commit) })), 'EVIDENCE_CHANGED');
+    requireRelease(same(tag, await readTag(c)) && same(run, await inspectChecksRun(c)), 'EVIDENCE_CHANGED');
     const primary = path.join(artifactsRoot, ARTIFACTS[0]), { build, bytes } = verified[ARTIFACTS[0]];
     const output = path.join(c.root, 'candidate'); await fs.mkdir(output);
     for (const file of ['build.json', ...build.packages.flatMap(item => item.archives.map(archive => archive.path)), ...build.tools.map(archive => archive.path)]) {

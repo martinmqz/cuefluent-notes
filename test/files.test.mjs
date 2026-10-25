@@ -11,7 +11,7 @@ import { establishWindowsPrivacy } from '../src/storage/platform.mjs';
 import { interruptRemoval } from './fixtures/exact-removal-worker.mjs';
 
 async function fixture(t) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-files-')));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-files-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const pin = await createPrivateDirectory(path.join(root, 'private'));
   return { root, pin };

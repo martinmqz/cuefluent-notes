@@ -607,7 +607,7 @@ async function windowsSecurityProfile(target, profile) {
 $p=ConvertFrom-Json $env:CUEFLUENT_NOTE_FIXTURE
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
 $parent=[IO.Path]::GetDirectoryName($p.path)
-if($p.profile -eq 'legacy-parent') {
+if($p.profile -eq 'non-auto-inherited-parent') {
  $acl=Get-Acl -LiteralPath $parent -Audit
  [CuefluentNoteNative]::Security($parent,$acl.GetSecurityDescriptorBinaryForm(),4)
  [IO.File]::WriteAllText($p.path,"original\n")
@@ -634,16 +634,16 @@ if($p.profile -eq 'legacy-parent') {
     { env: { ...process.env, CUEFLUENT_NOTE_FIXTURE: JSON.stringify({ path: target, profile }) } });
 }
 
-for (const profile of ['legacy-parent', 'creator-owner', 'inherited-audit', 'explicit-audit', 'protected-audit']) {
+for (const profile of ['non-auto-inherited-parent', 'creator-owner', 'inherited-audit', 'explicit-audit', 'protected-audit']) {
   test(`Windows native ${profile} security descriptors retain exact controls through publication`, { skip: process.platform !== 'win32' }, async t => {
     const { notes, pin } = await fixture(t), target = path.join(notes, 'note.md');
     await windowsSecurityProfile(target, profile);
     await fs.writeFile(`${target}:synthetic-metadata`, 'preserved stream');
     const metadata = await windowsMetadata(target, 128);
-    if (profile === 'legacy-parent') {
-      assert.equal(metadata.control & 1024, 0, 'The fixture has a legacy, non-auto-inherited DACL.');
+    if (profile === 'non-auto-inherited-parent') {
+      assert.equal(metadata.control & 1024, 0, 'The fixture has a non-auto-inherited DACL.');
       assert.equal(metadata.accessProtected, false);
-    } else assert.notEqual(metadata.control & 1024, 0, 'The fixture retains its modern automatic-inheritance representation.');
+    } else assert.notEqual(metadata.control & 1024, 0, 'The fixture retains its automatic-inheritance representation.');
     if (profile.endsWith('audit')) assert.match(metadata.acl, /S:/);
     const intent = await prepare(pin, 'note.md', body, hashBytes(await fs.readFile(target)));
     const result = await publish(pin, intent);

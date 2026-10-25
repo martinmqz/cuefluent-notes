@@ -22,7 +22,7 @@ const assistant = (id, text = id) => ({ type: 'assistant', sessionId, uuid: id,
 const bytes = rows => rows.map(row => JSON.stringify(row) + '\n').join('');
 
 async function fixture(t, rows = []) {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-v2-collect-')));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-collect-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'project'); await fs.mkdir(cwd);
   const sourcePath = path.join(root, 'synthetic.jsonl'); await fs.writeFile(sourcePath, bytes(rows));

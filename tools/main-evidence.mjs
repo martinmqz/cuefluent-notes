@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ARTIFACT_NAMES, bounded, decode } from './ci.mjs';
 import { PACKAGE_VERSION } from './packaging.mjs';
-import { createGitHubRequest, inspectChecksRun, verifyBuildSource, checksRequirePlan } from './release-candidate.mjs';
+import { createGitHubRequest, inspectChecksRun, verifyBuildSource } from './release-candidate.mjs';
 import { classifyCIChanges } from './ci-plan.mjs';
 import { createGitRunner } from './git.mjs';
 
@@ -118,9 +118,7 @@ async function traceEvidence(c, target, expectedSelection) {
         (expectedSelection.fullTarget.commit === cursor.commit ? expectedSelection : null);
       requireEvidence(expected && same(candidate, expected.candidate), 'EVIDENCE_CHANGED');
     }
-    const requirePlan = checksRequirePlan(c, cursor.commit);
-    const allowDistribution = requirePlan && candidate.event === 'pull_request';
-    const run = await inspectChecksRun(runContext, { mode: allowDistribution ? 'auto' : 'full', requirePlan });
+    const run = await inspectChecksRun(runContext, { mode: candidate.event === 'pull_request' ? 'auto' : 'full' });
     requireEvidence(run.event === candidate.event && run.headSha === candidate.headSha && run.headBranch === candidate.headBranch, 'RUN_SELECTION_CHANGED');
     // Full artifacts remain exact-tree evidence even when the last commit of a
     // rebase-merged PR looks distribution-only. Classify only artifact-free runs.
