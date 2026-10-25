@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createProject, emptySettings } from '../src/core/settings.mjs';
 import { initializeStore, openStore, readSettings, updateSettings, withProject, gateOptions } from '../src/storage/store.mjs';
+import { createPrivateDirectory } from '../src/storage/paths.mjs';
 import { tryAcquireExistingGate } from '../src/storage/gates.mjs';
 import { interruptRemoval } from './fixtures/exact-removal-worker.mjs';
 import { readSnapshot, writeJSON } from '../src/storage/files.mjs';
@@ -33,6 +34,109 @@ test('unconfigured status and invalid first setup make zero writes', async t => 
   assert.deepEqual(await readSettings(null), { value: emptySettings(), hash: null });
   await assert.rejects(initializeStore(f.privateRoot, { schemaVersion: 99, projects: [] }), { code: 'SETTINGS_SCHEMA_UNSUPPORTED' });
   assert.deepEqual(await fs.readdir(f.root), ['project']);
+});
+
+test('fresh setup refuses unrelated root and scaffold entries without adding metadata', async t => {
+  for (const relative of ['retained-store/pending.json', 'collections/note.md', 'config/unrelated.json', 'store/unrelated.json', 'store/locks/unrelated.sqlite']) {
+    const f = await fixture(t), file = path.join(f.privateRoot, relative);
+    await createPrivateDirectory(path.dirname(file));
+    await fs.writeFile(file, 'Synthetic retained input.\n', { mode: 0o600 });
+    const before = await snapshots(f.privateRoot, [relative]);
+    const entries = await fs.readdir(f.privateRoot, { recursive: true });
+    await assert.rejects(initializeStore(f.privateRoot), { code: 'STORE_ROOT_OCCUPIED' });
+    assert.deepEqual(await snapshots(f.privateRoot, [relative]), before);
+    assert.deepEqual(await fs.readdir(f.privateRoot, { recursive: true }), entries);
+  }
+});
+
+test('setup refuses a root entry arriving during inspection before creating its scaffold', async t => {
+  const f = await fixture(t); await createPrivateDirectory(f.privateRoot);
+  const opendir = fs.opendir; let injected = false;
+  const injection = t.mock.method(fs, 'opendir', async (...args) => {
+    const stream = await opendir(...args);
+    if (args[0] === f.privateRoot && !injected) {
+      injected = true;
+      await fs.writeFile(path.join(f.privateRoot, 'retained'), 'Synthetic retained input.\n', { mode: 0o600 });
+    }
+    return stream;
+  });
+  try { await assert.rejects(initializeStore(f.privateRoot), { code: 'STORE_INCOMPLETE' }); }
+  finally { injection.mock.restore(); }
+  assert.equal(injected, true);
+  assert.deepEqual(await fs.readdir(f.privateRoot), ['retained']);
+  assert.equal(await fs.readFile(path.join(f.privateRoot, 'retained'), 'utf8'), 'Synthetic retained input.\n');
+});
+
+test('setup refuses a swapped-and-restored root even when its own timestamps do not change', async t => {
+  const f = await fixture(t); await createPrivateDirectory(f.privateRoot);
+  await fs.writeFile(path.join(f.privateRoot, 'retained'), 'Synthetic retained input.\n', { mode: 0o600 });
+  const moved = path.join(f.root, 'original-private'), opendir = fs.opendir, lstat = fs.lstat;
+  const observed = await lstat(f.privateRoot, { bigint: true }); let injected = false;
+  const statInjection = t.mock.method(fs, 'lstat', async (...args) => {
+    const stat = await lstat(...args);
+    if (injected && args[0] === f.privateRoot) { stat.ctimeNs = observed.ctimeNs; stat.mtimeNs = observed.mtimeNs; }
+    return stat;
+  });
+  const injection = t.mock.method(fs, 'opendir', async (...args) => {
+    if (args[0] !== f.privateRoot || injected) return opendir(...args);
+    injected = true;
+    await fs.rename(f.privateRoot, moved); await createPrivateDirectory(f.privateRoot);
+    const stream = await opendir(...args), empty = await stream.read();
+    await stream.close(); await fs.rmdir(f.privateRoot); await fs.rename(moved, f.privateRoot);
+    return { read: async () => empty, close: async () => {} };
+  });
+  try { await assert.rejects(initializeStore(f.privateRoot), { code: 'STORE_INCOMPLETE' }); }
+  finally { injection.mock.restore(); statInjection.mock.restore(); }
+  assert.equal(injected, true); assert.deepEqual(await fs.readdir(f.privateRoot), ['retained']);
+  assert.equal(await fs.readFile(path.join(f.privateRoot, 'retained'), 'utf8'), 'Synthetic retained input.\n');
+});
+
+test('a layout arriving after an absent observation cannot authorize gate creation', async t => {
+  for (const schemaVersion of [1, 2, 3]) {
+    const f = await fixture(t); await createPrivateDirectory(path.join(f.privateRoot, 'store'));
+    const file = path.join(f.privateRoot, 'store/layout.json'), lstat = fs.lstat;
+    const gate = id => ({ path: path.join(f.privateRoot, `store/locks/${id}.sqlite`), id, device: '1', inode: '2' });
+    const layout = { schemaVersion, id: '11111111-1111-1111-1111-111111111111', settingsGate: gate('settings'), writerGate: gate('writer'), syncGate: gate('sync'), projects: {} };
+    let injected = false;
+    const injection = t.mock.method(fs, 'lstat', async (...args) => {
+      try { return await lstat(...args); }
+      catch (error) {
+        if (args[0] === file && error.code === 'ENOENT' && !injected) {
+          injected = true;
+          await fs.writeFile(file, JSON.stringify(layout) + '\n', { mode: 0o600 });
+        }
+        throw error;
+      }
+    });
+    try { await assert.rejects(initializeStore(f.privateRoot), { code: schemaVersion === 2 ? 'STORE_INCOMPLETE' : 'STORE_SCHEMA_UNSUPPORTED' }); }
+    finally { injection.mock.restore(); }
+    assert.equal(injected, true);
+    assert.deepEqual(await fs.readdir(f.privateRoot), ['store']);
+    assert.deepEqual(await fs.readdir(path.join(f.privateRoot, 'store')), ['layout.json']);
+    assert.equal(await fs.readFile(file, 'utf8'), JSON.stringify(layout) + '\n');
+  }
+});
+
+test('unsupported store schemas refuse before inspecting retained run or queue data', async t => {
+  for (const schemaVersion of [1, 3]) {
+    const f = await fixture(t), store = await initializeStore(f.privateRoot, f.settings);
+    const retained = await withProject(store, 'demo', async ({ directory }) => {
+      const files = [`${directory}/run.json`, 'store/chats/retained.queue'];
+      // Deliberately unreadable as current state: store admission must reject
+      // the schema before either a pending cleanup receipt or queue is parsed.
+      for (const relative of files) await fs.writeFile(path.join(store.root, relative), 'Synthetic incompatible cleanup receipt.\n', { mode: 0o600 });
+      return files;
+    });
+    const layoutFile = path.join(store.root, 'store/layout.json');
+    const layout = JSON.parse(await fs.readFile(layoutFile, 'utf8'));
+    assert.equal(layout.schemaVersion, 2);
+    await fs.writeFile(layoutFile, JSON.stringify({ ...layout, schemaVersion }) + '\n');
+    const files = [...retained, 'store/layout.json', 'config/settings.json', 'store/locks/settings.sqlite', 'store/locks/writer.sqlite', 'store/locks/sync.sqlite'];
+    const before = await snapshots(store.root, files);
+    await assert.rejects(openStore(store.root), { code: 'STORE_SCHEMA_UNSUPPORTED' });
+    await assert.rejects(initializeStore(store.root), { code: 'STORE_SCHEMA_UNSUPPORTED' });
+    assert.deepEqual(await snapshots(store.root, files), before);
+  }
 });
 
 test('unsafe ancestor modes are refused before setup creates any private directories', { skip: process.platform === 'win32' }, async t => {

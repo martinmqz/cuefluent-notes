@@ -10,7 +10,7 @@ import { Database } from 'node:sqlite';
 import test from 'node:test';
 import * as gates from '../src/storage/gates.mjs';
 import nativeFs from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
 import { assertPrivateAccess, establishWindowsPrivacy } from '../src/storage/platform.mjs';
 
 const { assertGatePlacement } = gates;
@@ -371,23 +371,52 @@ gateTest('two processes exclude each other while an independent gate remains ava
   assert.deepEqual(probeGate(workerGate), { available: true });
 });
 
-gateTest('same-process duplicates never release the original owner lock', async (t) => {
-  const duplicate = await import('../src/storage/gates.mjs?duplicate-owner');
+gateTest('same-process duplicates refuse before opening another gate handle', async (t) => {
+  const duplicateUrl = new URL('../src/storage/gates.mjs?duplicate-owner', import.meta.url).href;
+  const sqliteUrl = `data:text/javascript,${encodeURIComponent(`
+    import { Database as NativeDatabase } from 'node:sqlite';
+    export let opens = 0;
+    export class Database extends NativeDatabase {
+      constructor(...args) { opens++; super(...args); }
+    }
+  `)}`;
+  const observedSqlite = await import(sqliteUrl);
+  const hook = registerHooks({ resolve(specifier, context, nextResolve) {
+    if (specifier === 'node:sqlite' && context.parentURL === duplicateUrl) return { url: sqliteUrl, shortCircuit: true };
+    return nextResolve(specifier, context);
+  } });
+  let duplicate;
+  try { duplicate = await import(duplicateUrl); }
+  finally { hook.deregister(); }
   const directory = setup(t);
-  const identity = initializeGate(join(directory, 'gate.sqlite'), 'local');
-  const owner = tryAcquireExistingGate(identity).acquired;
-  onCleanup(t, () => owner.release());
-  assert.deepEqual(tryAcquireExistingGate({ ...identity }), { busy: true });
-  assert.deepEqual(probeGate(identity), { busy: true });
-  assert.deepEqual(duplicate.tryAcquireExistingGate(identity), { busy: true });
-  assert.deepEqual(duplicate.probeGate(identity), { busy: true });
-  assert.throws(() => duplicate.inspectExistingGate(identity.path, identity.id), { code: 'GATE_BUSY' });
-  assert.throws(() => probeGate({ ...identity, id: 'wrong-local-id' }), { code: 'GATE_INVALID_DATABASE' });
+  const descriptorOpens = t.mock.method(nativeFs, 'openSync');
+  syncBuiltinESMExports();
+  let identity, owner;
+  try {
+    identity = initializeGate(join(directory, 'gate.sqlite'), 'local');
+    owner = tryAcquireExistingGate(identity).acquired;
+    onCleanup(t, () => owner.release());
+    const descriptors = descriptorOpens.mock.callCount();
+    // Initialization proves the descriptor spy observes actual gate opens.
+    assert.ok(descriptors > 0);
+    assert.deepEqual(tryAcquireExistingGate({ ...identity }), { busy: true });
+    assert.deepEqual(probeGate(identity), { busy: true });
+    assert.deepEqual(duplicate.tryAcquireExistingGate(identity, profile()), { busy: true });
+    assert.deepEqual(duplicate.probeGate(identity, profile()), { busy: true });
+    assert.throws(() => duplicate.inspectExistingGate(identity.path, identity.id, profile()), { code: 'GATE_BUSY' });
+    assert.throws(() => probeGate({ ...identity, id: 'wrong-local-id' }), { code: 'GATE_INVALID_DATABASE' });
+    assert.equal(observedSqlite.opens, 0, 'an owned gate must not open another SQLite connection');
+    assert.equal(descriptorOpens.mock.callCount(), descriptors, 'an owned gate must not open another raw descriptor');
+  } finally {
+    descriptorOpens.mock.restore(); syncBuiltinESMExports();
+  }
   assert.deepEqual(await externalProbe(identity), { busy: true });
   owner.release();
   owner.release();
   assert.deepEqual(await externalProbe(identity), { available: true });
-  assert.deepEqual(duplicate.probeGate(identity), { available: true });
+  assert.deepEqual(duplicate.probeGate(identity, profile()), { available: true });
+  // After release, the duplicate import must open a real connection through the spy.
+  assert.equal(observedSqlite.opens, 1);
 });
 
 gateTest('holder death releases ownership without deleting or repairing the gate', async (t) => {

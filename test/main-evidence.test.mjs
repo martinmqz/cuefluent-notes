@@ -33,7 +33,7 @@ async function fixture(t) {
       id: run.id, repository_id: repository.id, head_repository_id: repository.id, head_sha: head, head_branch: run.head_branch } }));
   const state = { run, pr, receipt, source, jobs, artifacts, pulls: [pr], manualRuns: [], prRuns: [run],
     checkedOut: target, checkoutTree: tree, mainAncestor: true, listCount: undefined,
-    distributions: new Map(), newWorkflow: false, mergeParents: null,
+    distributions: new Map(), mergeParents: null,
     commits: { [checkout]: { sha: checkout, tree: { sha: tree }, parents: [{ sha: base }, { sha: head }] },
       [head]: { sha: head, tree: { sha: tree }, parents: [{ sha: base }] },
       [target]: { sha: target, tree: { sha: tree }, parents: [{ sha: base }] } } };
@@ -74,7 +74,6 @@ async function fixture(t) {
     if (args.join(' ') === 'rev-parse --verify HEAD') return state.checkedOut;
     if (args.join(' ') === 'rev-parse --verify HEAD^{tree}') return state.checkoutTree;
     if (sameArgs(args, ['show', '-s', '--format=%P', 'HEAD']) && state.mergeParents) return state.mergeParents.join(' ');
-    if (args[0] === 'show' && args[1]?.endsWith(':.github/workflows/ci.yml')) return state.newWorkflow || state.distributions.has(args[1].split(':')[0]) ? 'jobs:\n  plan:\n    run: node tools/ci-plan.mjs plan\n' : 'jobs:\n  test: {}\n';
     for (const entry of state.distributions.values()) {
       if (sameArgs(args, ['rev-parse', '--verify', `${entry.commit}^1`])) return entry.parent;
       if (sameArgs(args, ['rev-parse', '--verify', `${entry.commit}^{tree}`])) return entry.tree;
@@ -122,7 +121,7 @@ async function fixture(t) {
       const pr = { number: 100 + index, merged: true, state: 'closed', merge_commit_sha: commit,
         base: { ref: 'main', repo: repository }, head: { sha: head, repo: repository } };
       const entry = { commit, head, tree, parent, pr, run: distributedRun, runs: [distributedRun], artifacts: [], mode: 'distribution',
-        jobs: ['plan', ...EXPECTED_CHECK_JOBS].map((name, i) => ({ id: 10000 + index * 20 + i, name, run_id: distributedRun.id,
+        jobs: EXPECTED_CHECK_JOBS.map((name, i) => ({ id: 10000 + index * 20 + i, name, run_id: distributedRun.id,
           run_attempt: 1, status: 'completed', conclusion: 'success' })) };
       state.distributions.set(commit, entry); state.commits[head] = { sha: head, tree: { sha: tree } };
       parent = commit;
@@ -149,8 +148,6 @@ test('main pushes verify one digest-bound primary artifact and reuse the success
 
 test('a full run survives a multi-commit rebase merge ending in a distribution-only change', async t => {
   const f = await fixture(t), intermediate = sha('6');
-  f.state.newWorkflow = true;
-  f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
   // The last rebased commit points at another commit from this PR, not its base.
   f.state.commits[target].parents = [{ sha: intermediate }];
   f.state.commits[intermediate] = { sha: intermediate, tree: { sha: sha('7') }, parents: [{ sha: base }] };
@@ -173,18 +170,16 @@ test('a full run survives a multi-commit rebase merge ending in a distribution-o
 test('invalid full artifacts never fall back to a distribution hop', async t => {
   const changes = [
     state => { state.artifacts.pop(); },
-    state => { for (const artifact of state.artifacts) artifact.name = `unexpected-${artifact.name}`; },
-    state => { state.artifacts[0].name = `unexpected-${state.artifacts[0].name}`; },
+    state => { state.artifacts.at(-1).name = `unexpected-${state.artifacts.at(-1).name}`; },
     state => { state.artifacts[0].expired = true; },
     state => { state.artifacts[0].digest = 'invalid'; },
     state => { state.artifacts[0].workflow_run.head_sha = base; },
   ];
   for (let index = 0; index < changes.length; index++) await t.test(`invalid artifacts ${index + 1}`, async t => {
-    const f = await fixture(t); f.state.newWorkflow = true;
-    f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
+    const f = await fixture(t);
     changes[index](f.state);
     f.options.classify = async () => assert.fail('invalid artifacts must fail before distribution classification');
-    await assert.rejects(selectMainEvidence(f.options), error => error.releaseStage === 'artifacts');
+    await assert.rejects(selectMainEvidence(f.options), { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'artifacts', reason: 'EVIDENCE_MISMATCH' });
     await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
   });
 });
@@ -196,6 +191,13 @@ for (const branch of ['main', 'v0.16.0', 'v0.16.0-rc.1']) {
     assert.equal((await verifyMainEvidence(f.options)).source.checkoutCommit, target);
   });
 }
+
+test('a manual Checks run without full artifacts cannot become a distribution hop', async t => {
+  const f = await fixture(t); f.manual(); f.state.artifacts = [];
+  f.options.classify = async () => assert.fail('manual Checks must supply full artifacts');
+  await assert.rejects(selectMainEvidence(f.options), { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'artifacts', reason: 'EVIDENCE_MISMATCH' });
+  await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
+});
 
 test('a direct push with no source evidence fails visibly instead of launching a matrix', async t => {
   const f = await fixture(t); f.state.pulls = []; f.state.prRuns = [];
@@ -294,24 +296,8 @@ test('safe diagnostics retain the reason without exposing raw response or error 
   await assert.rejects(main(['dispatch']), reason('COMMAND_INVALID'));
 });
 
-test('a workflow read failure reports its cause category without raw Git diagnostics', async t => {
-  const f = await fixture(t), git = f.options.git;
-  f.options.git = args => {
-    if (args[0] === 'show' && args[1]?.endsWith(':.github/workflows/ci.yml')) throw new Error('synthetic private Git stderr');
-    return git(args);
-  };
-  await assert.rejects(selectMainEvidence(f.options), error => {
-    assert.equal(error.reason, 'WORKFLOW_READ_FAILED');
-    assert.match(mainEvidenceErrorMessage(error), /WORKFLOW_READ_FAILED/);
-    assert.doesNotMatch(mainEvidenceErrorMessage(error), /synthetic private Git stderr/);
-    return true;
-  });
-  await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
-});
-
 test('distribution-only main commits retain their focused checks and walk to exact full source evidence', async t => {
-  const f = await fixture(t); f.state.newWorkflow = true;
-  f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
+  const f = await fixture(t);
   const entry = f.distribute(2);
   const selected = await selectMainEvidence(f.options);
   assert.equal(selected.target.commit, entry.commit);
@@ -374,20 +360,22 @@ test('artifact-free rebase hops cannot skip an intermediate commit with no succe
 });
 
 test('distribution evidence cannot waive changed runtime input, missing jobs, unrelated PRs or a failed baseline', async t => {
+  const jobs = { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'jobs', reason: 'EVIDENCE_MISMATCH' };
+  const run = { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'run', reason: 'CHECKS_RUN_INVALID' };
   const cases = [
-    f => { f.entry.mode = 'full'; },
-    f => { f.entry.jobs = f.entry.jobs.filter(job => job.name !== 'plan'); },
-    f => { f.entry.jobs[1].conclusion = 'skipped'; },
-    f => { f.entry.run.conclusion = 'failure'; },
-    f => { f.entry.artifacts.push({ id: 999 }); },
-    f => { f.entry.pr.merged = false; },
-    f => { f.entry.pr.head.repo = { ...repository, id: 18 }; },
-    f => { f.state.commits[f.entry.head].tree.sha = sha('f'); },
-    f => { f.state.run.conclusion = 'failure'; },
+    ['runtime change', f => { f.entry.mode = 'full'; }, { code: 'MAIN_EVIDENCE_INVALID', reason: 'DISTRIBUTION_CLASSIFICATION_INVALID' }],
+    ['missing plan', f => { f.entry.jobs = f.entry.jobs.filter(job => job.name !== 'plan'); }, jobs],
+    ['skipped guidance', f => { f.entry.jobs.find(job => job.name === 'guidance').conclusion = 'skipped'; }, jobs],
+    ['failed run', f => { f.entry.run.conclusion = 'failure'; }, run],
+    ['partial artifacts', f => { f.entry.artifacts.push({ id: 999 }); }, { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'artifacts', reason: 'EVIDENCE_MISMATCH' }],
+    ['unmerged PR', f => { f.entry.pr.merged = false; }, { code: 'MAIN_EVIDENCE_INVALID', reason: 'DISTRIBUTION_PR_INVALID' }],
+    ['foreign repository', f => { f.entry.pr.head.repo = { ...repository, id: 18 }; }, { code: 'MAIN_EVIDENCE_INVALID', reason: 'CHECKS_EVIDENCE_MISSING' }],
+    ['different tree', f => { f.state.commits[f.entry.head].tree.sha = sha('f'); }, { code: 'MAIN_EVIDENCE_INVALID', reason: 'DISTRIBUTION_TREE_MISMATCH' }],
+    ['failed baseline', f => { f.state.run.conclusion = 'failure'; }, run],
   ];
-  for (let index = 0; index < cases.length; index++) await t.test(`invalid distribution ${index + 1}`, async t => {
-    const f = await fixture(t); f.entry = f.distribute(1); cases[index](f);
-    await assert.rejects(selectMainEvidence(f.options));
+  for (const [name, change, expected] of cases) await t.test(name, async t => {
+    const f = await fixture(t); f.entry = f.distribute(1); change(f);
+    await assert.rejects(selectMainEvidence(f.options), expected);
     await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
   });
 });
@@ -410,12 +398,20 @@ test('verification refreshes distribution PR and head-tree facts after selection
   });
 });
 
-test('full workflow evidence requires its declared plan job', async t => {
-  const f = await fixture(t); f.state.newWorkflow = true;
-  await assert.rejects(selectMainEvidence(f.options), error => error.releaseStage === 'jobs');
-  f.state.jobs.push({ id: 500, name: 'plan', run_id: 42, run_attempt: 1, status: 'completed', conclusion: 'success' });
-  await selectMainEvidence(f.options); await f.download();
-  assert.equal((await verifyMainEvidence(f.options)).distribution.length, 0);
+test('full main evidence requires a successful plan during selection and verification', async t => {
+  for (const event of ['pull_request', 'workflow_dispatch']) await t.test(event, async t => {
+    const f = await fixture(t), failure = { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'jobs', reason: 'EVIDENCE_MISMATCH' };
+    if (event === 'workflow_dispatch') f.manual();
+    const plan = f.state.jobs.find(job => job.name === 'plan');
+    f.state.jobs = f.state.jobs.filter(job => job !== plan);
+    await assert.rejects(selectMainEvidence(f.options), failure);
+    f.state.jobs.push(plan);
+    await selectMainEvidence(f.options); await f.download();
+    plan.conclusion = 'skipped';
+    await assert.rejects(verifyMainEvidence(f.options), failure);
+    plan.conclusion = 'success';
+    assert.equal((await verifyMainEvidence(f.options)).distribution.length, 0);
+  });
 });
 
 test('a distribution gate proves its actual PR first parent without impersonating a main push', async t => {
@@ -432,15 +428,23 @@ test('a distribution gate proves its actual PR first parent without impersonatin
 });
 
 test('PR base evidence rejects ordinary heads and failed, absent or renamed full baseline evidence', async t => {
-  for (const mode of ['head-ref', 'one-parent', 'failed-baseline', 'missing-baseline', 'renamed-baseline']) {
+  const cases = [
+    ['head-ref', { code: 'MAIN_EVIDENCE_INVALID', reason: 'PR_EVENT_REQUIRED' }],
+    ['one-parent', { code: 'MAIN_EVIDENCE_INVALID', reason: 'PR_MERGE_CHECKOUT_REQUIRED' }],
+    ['failed-baseline', { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'run', reason: 'CHECKS_RUN_INVALID' }],
+    ['missing-baseline', { code: 'MAIN_EVIDENCE_INVALID', reason: 'CHECKS_EVIDENCE_MISSING' }],
+    ['renamed-baseline', { code: 'RELEASE_EVIDENCE_INVALID', releaseStage: 'artifacts', reason: 'EVIDENCE_MISMATCH' }],
+  ];
+  for (const [mode, expected] of cases) await t.test(mode, async t => {
     const f = await fixture(t), merge = sha('8');
     Object.assign(f.options.env, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: mode === 'head-ref' ? 'refs/pull/91/head' : 'refs/pull/91/merge', GITHUB_SHA: merge });
     Object.assign(f.state, { checkedOut: merge, mergeParents: mode === 'one-parent' ? [target] : [target, sha('7')] });
     if (mode === 'failed-baseline') f.state.run.conclusion = 'failure';
     if (mode === 'missing-baseline') { f.state.pulls = []; f.state.prRuns = []; }
     if (mode === 'renamed-baseline') for (const artifact of f.state.artifacts) artifact.name = `unexpected-${artifact.name}`;
-    await assert.rejects(main(['select-base'], f.options));
-  }
+    await assert.rejects(main(['select-base'], f.options), expected);
+    await assert.rejects(fs.stat(f.root), { code: 'ENOENT' });
+  });
 });
 
 test('Main evidence is one read-only main-push job with no draft trigger or matrix', async () => {

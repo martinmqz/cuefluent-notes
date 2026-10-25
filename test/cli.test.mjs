@@ -195,6 +195,58 @@ test('CLI no-create reads and unconfigured native hooks leave no private store',
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
 });
 
+test('default entry points stay unconfigured beside an existing product parent without writing', async t => {
+  const f = await fixture(t), { selectStoreRoot } = await import('../src/client/entry-options.mjs');
+  const env = { CUEFLUENT_HOME: undefined, HOME: f.root, USERPROFILE: f.root,
+    LOCALAPPDATA: path.join(f.root, 'local-data'), XDG_STATE_HOME: path.join(f.root, 'state') };
+  const selectionEnv = { ...env }; delete selectionEnv.CUEFLUENT_HOME;
+  const selected = selectStoreRoot({ env: selectionEnv, homedir: f.root }), parent = path.dirname(selected);
+  await fs.mkdir(parent, { recursive: true, mode: 0o755 });
+  const retained = path.join(parent, 'retained.txt'); await fs.writeFile(retained, 'Synthetic retained store parent.\n');
+  const original = await fs.readFile(retained);
+  const settings = await f.run(['settings'], '', entry, [], env);
+  assert.equal(settings.code, 0); assert.equal(settings.stderr, '');
+  assert.equal(JSON.parse(settings.stdout).state, 'unconfigured'); assert.equal(JSON.parse(settings.stdout).storeRoot, selected);
+  for (const client of ['claude', 'codex']) {
+    const hook = await f.run(['hook', client], JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup',
+      session_id: 'synthetic', cwd: f.cwd, transcript_path: null }), entry, [], env);
+    assert.deepEqual(hook, { code: 0, stdout: '', stderr: '' });
+    assert.deepEqual(await f.run(['mcp', client], '', entry, [], env), { code: 0, stdout: '', stderr: '' });
+  }
+  assert.deepEqual(await fs.readdir(parent), ['retained.txt']);
+  assert.deepEqual(await fs.readFile(retained), original);
+  await assert.rejects(fs.access(selected), { code: 'ENOENT' });
+});
+
+test('entry points reject unsupported store schemas before reading or changing retained cleanup state', async t => {
+  const f = await fixture(t), configPath = path.join(f.root, 'setup.json');
+  await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
+    destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } } }));
+  const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+  const layoutPath = path.join(f.storeRoot, 'store/layout.json'), layout = JSON.parse(await fs.readFile(layoutPath, 'utf8'));
+  const [project] = await fs.readdir(path.join(f.storeRoot, 'store/projects'));
+  for (const relative of [`store/projects/${project}/run.json`, 'store/chats/retained.queue']) {
+    await fs.writeFile(path.join(f.storeRoot, relative), 'synthetic-private-cleanup-receipt\n', { mode: 0o600 });
+  }
+  await fs.writeFile(layoutPath, JSON.stringify({ ...layout, schemaVersion: 1 }) + '\n');
+  const snapshot = async () => Promise.all((await fs.readdir(f.storeRoot, { recursive: true })).sort().map(async relative => {
+    const file = path.join(f.storeRoot, relative), stat = await fs.lstat(file, { bigint: true });
+    return { relative, device: stat.dev, inode: stat.ino, size: stat.size, modified: stat.mtimeNs,
+      ...(stat.isFile() && !relative.endsWith('.sqlite') ? { bytes: await fs.readFile(file) } : {}) };
+  }));
+  const before = await snapshot();
+  for (const args of [['settings'], ['status', '--project', 'demo'], ['setup', '--config', configPath],
+    ['hook', 'claude'], ['hook', 'codex'], ['mcp', 'claude'], ['mcp', 'codex']]) {
+    const result = await f.run(args, args[0] === 'hook' ? '{}' : '');
+    assert.equal(result.code, args[0] === 'hook' ? 0 : 1);
+    const message = args[0] === 'hook' ? JSON.parse(result.stdout).systemMessage : result.stderr;
+    assert.equal(args[0] === 'hook' ? result.stderr : result.stdout, '');
+    assert.match(message, /STORE_SCHEMA_UNSUPPORTED/); assert.match(message, /Preserve the store in place/);
+    assert.doesNotMatch(message, /synthetic-private-cleanup-receipt|RUN_INVALID|QUEUE_CURSOR_MISMATCH/);
+    assert.deepEqual(await snapshot(), before);
+  }
+});
+
 test('Claude installed expansions report unexecuted commands and malformed arguments without creating state', async t => {
   const f = await fixture(t), name = 'cuefluent-notes:cuefluent-notes';
   const expansion = command_args => ({ hook_event_name: 'UserPromptExpansion', expansion_type: 'slash_command',

@@ -30,6 +30,12 @@ and do not select a different store merely to bypass an error. Diagnostics name
 the variable without exposing its value. Loaded package versions are included
 in later failures, but a version is not guessed when package validation fails.
 
+`STORE_SCHEMA_UNSUPPORTED` refuses an unsupported private-state contract before use;
+follow the [fresh-setup transition](setup.md#private-location) while preserving
+the earlier store. `STORE_ROOT_OCCUPIED` means setup found foreign entries, and
+`STORE_INCOMPLETE` means incomplete or changed initialization state needs inspection.
+Neither authorizes deleting retained work or recreating settings around it.
+
 The hook's Windows ACL budget includes child process startup, imports and
 preflight, with a reserved margin for wrapper overhead and the reply. It cannot
 guarantee a reply before a host deadline under arbitrary scheduling delays or
@@ -59,11 +65,13 @@ existing native login and authentication settings unchanged. Then explicitly set
 up the project and notes destination using [setup](setup.md). New installations
 track nothing; fresh settings default to manual tracking and review saving.
 
-Cuefluent Notes maintains one current runtime and private-state contract. Runtime
-state is not automatically discovered or imported from another location. Finish
-pending work before changing packages, and restart the client so its connector,
-hooks and workers use the same package and store. Existing Markdown notes remain
-user content and are preserved independently of private runtime state. Published
+Version 0.18.0 uses one current runtime and private-state contract and requires
+fresh setup. Settings, tracking state, queues and drafts from earlier packages are
+not discovered or imported. Follow the [storage transition](setup.md#private-location):
+finish pending work with its original package, stop its processes, preserve its
+store in place, and explicitly configure the current package. Restart the client
+so its connector, hooks and workers use the same package and store. Existing
+Markdown notes remain user content and are preserved independently of private runtime state. Published
 releases and their checksums remain immutable; a development package does not
 replace historical releases.
 

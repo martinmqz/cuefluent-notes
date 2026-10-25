@@ -5,7 +5,7 @@ import os from 'node:os';
 import { mkdtemp, realpath, rm, writeFile, readFile, mkdir, readdir, link, symlink } from 'node:fs/promises';
 import { parseEntryArguments, selectStoreRoot, loadClientContract } from '../src/client/entry-options.mjs';
 import { createPrivateDirectory } from '../src/storage/paths.mjs';
-import { openStore } from '../src/storage/store.mjs';
+import { initializeStore, openStore } from '../src/storage/store.mjs';
 
 const handle = Buffer.alloc(64, 17).toString('base64url');
 const root = process.platform === 'win32' ? 'C:\\synthetic\\private' : '/synthetic/private';
@@ -44,11 +44,11 @@ test('CLI refuses unknown, repeated, missing or authority-smuggling options', ()
 
 test('private defaults are platform appropriate', () => {
   const env = {};
-  assert.equal(selectStoreRoot({ platform: 'darwin', homedir: '/Users/synthetic', env }), '/Users/synthetic/Library/Application Support/Cuefluent Notes');
-  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/home/synthetic', env }), '/home/synthetic/.local/state/cuefluent-notes');
-  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/home/synthetic', env: { XDG_STATE_HOME: '/private/state' } }), '/private/state/cuefluent-notes');
-  assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:\\Users\\Synthetic', env: { LOCALAPPDATA: 'D:\\Local Data' } }), 'D:\\Local Data\\Cuefluent Notes');
-  assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:\\Users\\Synthetic', env: {} }), 'C:\\Users\\Synthetic\\AppData\\Local\\Cuefluent Notes');
+  assert.equal(selectStoreRoot({ platform: 'darwin', homedir: '/Users/synthetic', env }), '/Users/synthetic/Library/Application Support/Cuefluent Notes/runtime');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/home/synthetic', env }), '/home/synthetic/.local/state/cuefluent-notes/runtime');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/home/synthetic', env: { XDG_STATE_HOME: '/private/state' } }), '/private/state/cuefluent-notes/runtime');
+  assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:\\Users\\Synthetic', env: { LOCALAPPDATA: 'D:\\Local Data' } }), 'D:\\Local Data\\Cuefluent Notes\\runtime');
+  assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:\\Users\\Synthetic', env: {} }), 'C:\\Users\\Synthetic\\AppData\\Local\\Cuefluent Notes\\runtime');
 });
 
 test('selecting a default store preserves its absent parent and sibling files', async t => {
@@ -59,14 +59,16 @@ test('selecting a default store preserves its absent parent and sibling files', 
   assert.deepEqual(await readdir(directory), ['retained.md']);
 });
 
-test('opening a nonempty default parent without current layout preserves retained files', async t => {
-  const directory = await temporary(t), selected = selectStoreRoot({ env: {}, homedir: directory });
-  await createPrivateDirectory(selected);
-  const retained = path.join(selected, 'retained-store'), file = path.join(retained, 'retained.md');
+test('the default owns an absent runtime leaf beside retained parent contents', async t => {
+  const directory = await temporary(t), selected = selectStoreRoot({ env: {}, homedir: directory }), parent = path.dirname(selected);
+  await createPrivateDirectory(parent);
+  const retained = path.join(parent, 'retained-store'), file = path.join(retained, 'retained.md');
   await mkdir(retained); await writeFile(file, '# Retained synthetic note\n');
   const bytes = await readFile(file);
-  await assert.rejects(openStore(selected), { code: 'PATH_MISSING' });
-  assert.deepEqual(await readdir(selected), ['retained-store']);
+  assert.equal(await openStore(selected), null);
+  assert.deepEqual(await readdir(parent), ['retained-store']);
+  await initializeStore(selected);
+  assert.deepEqual((await readdir(parent)).sort(), ['retained-store', 'runtime']);
   assert.deepEqual(await readdir(retained), ['retained.md']);
   assert.deepEqual(await readFile(file), bytes);
 });
@@ -120,11 +122,11 @@ test('package loader refuses symlink skill and symlink ancestors', { skip: proce
 
 
 test('OS locations normalize separators without relaxing explicit arguments', () => {
-  for (const home of ['/home/synthetic/', '/home//synthetic']) assert.equal(selectStoreRoot({ platform: 'linux', homedir: home, env: {} }), '/home/synthetic/.local/state/cuefluent-notes');
-  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/', env: {} }), '/.local/state/cuefluent-notes');
-  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/home/synthetic/', env: { XDG_STATE_HOME: 'relative' } }), '/home/synthetic/.local/state/cuefluent-notes');
-  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/', env: { XDG_STATE_HOME: '/state//' } }), '/state/cuefluent-notes');
-  assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic/', env: { LOCALAPPDATA: 'D:/Local Data/' } }), 'D:\\Local Data\\Cuefluent Notes');
+  for (const home of ['/home/synthetic/', '/home//synthetic']) assert.equal(selectStoreRoot({ platform: 'linux', homedir: home, env: {} }), '/home/synthetic/.local/state/cuefluent-notes/runtime');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/', env: {} }), '/.local/state/cuefluent-notes/runtime');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/home/synthetic/', env: { XDG_STATE_HOME: 'relative' } }), '/home/synthetic/.local/state/cuefluent-notes/runtime');
+  assert.equal(selectStoreRoot({ platform: 'linux', homedir: '/', env: { XDG_STATE_HOME: '/state//' } }), '/state/cuefluent-notes/runtime');
+  assert.equal(selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic/', env: { LOCALAPPDATA: 'D:/Local Data/' } }), 'D:\\Local Data\\Cuefluent Notes\\runtime');
   assert.throws(() => selectStoreRoot({ platform: 'linux', homedir: 'relative', env: {} }), { code: 'ENTRY_LOCATION_INVALID' });
   assert.throws(() => selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic', env: { LOCALAPPDATA: 'relative' } }), { code: 'ENTRY_LOCATION_INVALID' });
   assert.throws(() => selectStoreRoot({ platform: 'win32', homedir: 'C:/Users/Synthetic', env: { LOCALAPPDATA: 17 } }), { code: 'ENTRY_LOCATION_INVALID' });

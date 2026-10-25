@@ -12,6 +12,7 @@ import { readJSON, readSnapshot, writeJSON, reclaimAtomicStages } from './files.
 import { assertGatePlacement, initializeGate, inspectExistingGate, probeGate, withShortGate } from './gates.mjs';
 
 const LAYOUT = 'store/layout.json';
+const STORE_SCHEMA = 2;
 const SETTINGS = 'config/settings.json';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const projectKey = id => createHash('sha256').update(id).digest('hex');
@@ -32,8 +33,11 @@ function checkGate(value, expectedPath, id) {
 }
 
 function validateLayout(root, value) {
+  if (Number.isSafeInteger(value?.schemaVersion) && value.schemaVersion > 0 && value.schemaVersion !== STORE_SCHEMA) {
+    fail('STORE_SCHEMA_UNSUPPORTED', 'The private store uses an unsupported schema; preserve it without changing its metadata.');
+  }
   if (!object(value, ['schemaVersion', 'id', 'settingsGate', 'writerGate', 'syncGate', 'projects']) ||
-      value.schemaVersion !== 1 || !UUID.test(value.id) || !value.projects ||
+      value.schemaVersion !== STORE_SCHEMA || !UUID.test(value.id) || !value.projects ||
       typeof value.projects !== 'object' || Array.isArray(value.projects)) {
     fail('STORE_LAYOUT_INVALID', 'The private layout is invalid or uses an unsupported schema.');
   }
@@ -111,12 +115,20 @@ async function readLayout(store) {
 }
 
 const incompleteStore = () => fail('STORE_INCOMPLETE', 'The existing private store is incomplete; preserve its metadata and retained work.');
+const occupiedRoot = () => fail('STORE_ROOT_OCCUPIED', 'The private-store location contains unrelated entries; preserve them and use the intended store.');
+const scaffoldEntries = new Map([
+  ['', new Map([['config', 'directory'], ['store', 'directory']])],
+  ['config', new Map()],
+  ['store', new Map([['locks', 'directory'], ['projects', 'directory'], ['chats', 'directory'], ['layout.json', 'file']])],
+  ['store/locks', new Map([['settings.sqlite', 'file'], ['writer.sqlite', 'file'], ['sync.sqlite', 'file']])],
+]);
 
 /** Only an empty first-setup scaffold may finish publishing its initial metadata. */
 async function assertInitializationEmpty(pin, layout, previous) {
   await assertDirectory(pin);
   if (layout && Object.keys(layout.projects).length) incompleteStore();
   const observations = previous?.observations ?? [], parents = [];
+  const boundary = previous?.boundary ?? { pin: await pinDirectory(path.dirname(pin.root)), stat: await lstatOrNull(path.dirname(pin.root)) };
   if (previous) {
     for (const parent of previous.parents) {
       await assertDirectory(parent.pin);
@@ -124,9 +136,9 @@ async function assertInitializationEmpty(pin, layout, previous) {
       // all child observations and parent identities; enumerate them again.
       parents.push(parent.pin.root === path.join(pin.root, 'store') ? { ...parent, stat: await lstatOrNull(parent.pin.root) } : parent);
     }
-  } else for (const relative of ['config', 'store']) {
+  } else for (const [relative, entries] of scaffoldEntries) {
     const directory = path.join(pin.root, relative), stat = await lstatOrNull(directory);
-    if (stat) parents.push({ pin: await pinDirectory(directory, { private: true }), stat });
+    if (stat) parents.push({ pin: relative ? await pinDirectory(directory, { private: true }) : pin, stat, entries });
   }
   if (!previous) for (const relative of ['store/projects', 'store/chats']) {
     const directory = path.join(pin.root, relative), stat = await lstatOrNull(directory);
@@ -140,7 +152,7 @@ async function assertInitializationEmpty(pin, layout, previous) {
   }
   const verify = async () => {
     await assertDirectory(pin);
-    for (const parent of parents) {
+    for (const parent of [boundary, ...parents]) {
       const current = await lstatOrNull(parent.pin.root);
       // Parent mtime detects renamed child entries without relying on Windows
       // ctime semantics. No parent entries are changed during this read phase.
@@ -161,8 +173,30 @@ async function assertInitializationEmpty(pin, layout, previous) {
     try { await verify(); if (await stream.read()) incompleteStore(); await verify(); }
     finally { await stream.close(); }
   }
+  for (const parent of parents) {
+    await verify();
+    const stream = await fs.opendir(parent.pin.root), seen = new Set();
+    try {
+      await verify();
+      for (;;) {
+        const entry = await stream.read();
+        await verify();
+        if (!entry) break;
+        const kind = parent.entries.get(entry.name);
+        if (!kind || seen.has(entry.name) || (kind === 'directory' ? !entry.isDirectory() : !entry.isFile())) occupiedRoot();
+        if (parent.pin.root === path.join(pin.root, 'store') && entry.name === 'layout.json' && !layout && !previous) {
+          // The absent-layout decision cannot adopt a later owner's layout or
+          // create gates for it. Only the caller's own publication may advance
+          // this empty-scaffold observation to a published layout.
+          validateLayout(pin.root, (await readJSON(pin, LAYOUT)).value);
+          incompleteStore();
+        }
+        seen.add(entry.name);
+      }
+    } finally { await stream.close(); }
+  }
   await verify();
-  return { verify, observations, parents };
+  return { verify, observations, parents, boundary };
 }
 
 /** Explicit fresh setup only. No notes, hooks, plugins, or model are touched. */
@@ -185,7 +219,11 @@ export async function initializeStore(root, initial = emptySettings()) {
     store = Object.freeze({ root, pin, settingsGate: Object.freeze(layout.settingsGate), writerGate: Object.freeze(layout.writerGate), syncGate: Object.freeze(layout.syncGate) });
   } else {
     await assertInitializationEmpty(pin);
-    for (const relative of ['config', 'store', 'store/locks', 'store/projects', 'store/chats']) await createPrivateDirectory(path.join(root, relative));
+    for (const relative of ['config', 'store', 'store/locks', 'store/projects', 'store/chats']) {
+      await assertInitializationEmpty(pin);
+      await createPrivateDirectory(path.join(root, relative));
+    }
+    await assertInitializationEmpty(pin);
     const settingsGate = prepareGate(path.join(root, 'store/locks/settings.sqlite'), 'settings');
     const writerGate = prepareGate(path.join(root, 'store/locks/writer.sqlite'), 'writer');
     const syncGate = prepareGate(path.join(root, 'store/locks/sync.sqlite'), 'sync');
@@ -207,7 +245,7 @@ export async function initializeStore(root, initial = emptySettings()) {
       if (existingLayout || current) incompleteStore();
       initialization = await assertInitializationEmpty(pin);
       await initialization.verify();
-      await writeJSON(pin, LAYOUT, { schemaVersion: 1, id: randomUUID(), settingsGate: store.settingsGate, writerGate: store.writerGate, syncGate: store.syncGate, projects: {} }, { expectedHash: null });
+      await writeJSON(pin, LAYOUT, { schemaVersion: STORE_SCHEMA, id: randomUUID(), settingsGate: store.settingsGate, writerGate: store.writerGate, syncGate: store.syncGate, projects: {} }, { expectedHash: null });
     }
     if (!current) {
       initialization = await assertInitializationEmpty(pin, existing?.value, initialization);

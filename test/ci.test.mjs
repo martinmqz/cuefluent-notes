@@ -29,7 +29,7 @@ test('native shards and client smoke run in parallel after classification and re
     assert.equal(job.strategy['fail-fast'], false);
     assert.equal(job.strategy['max-parallel'], undefined);
   }
-  const rows = source.strategy.matrix.include, names = new Set(['guidance', reproducibility.name]);
+  const rows = source.strategy.matrix.include, names = new Set([plan.name ?? 'plan', guidance.name ?? 'guidance', reproducibility.name]);
   for (const [platform, count] of [['ubuntu-24.04', 1], ['macos-14', 1], ['windows-2025', 4]]) {
     const selected = rows.filter(row => row.os === platform);
     assert.deepEqual(selected.map(row => row.shard).sort(), Array.from({ length: count }, (_, index) => `${index + 1}/${count}`));
@@ -40,7 +40,7 @@ test('native shards and client smoke run in parallel after classification and re
   assert.equal(rows.length, 6);
   for (const platform of smoke.strategy.matrix.os) names.add(smoke.name.replace('${{ matrix.os }}', platform));
   assert.deepEqual([...names].sort(), [...EXPECTED_CHECK_JOBS].sort(), 'Release evidence must require every workflow job.');
-  for (const required of ['guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
+  for (const required of ['plan', 'guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
   assert.deepEqual(reproducibility.needs, ['plan', 'guidance', 'test', 'client-smoke']);
   for (const step of source.steps.filter(step => step.run === 'npm run check:examples' || step.run === 'node tools/ci.mjs build' || step.uses?.startsWith('actions/upload-artifact@'))) assert.equal(step.if, "needs.plan.outputs.mode == 'full' && matrix.primary");
   const upload = source.steps.find(step => step.uses?.startsWith('actions/upload-artifact@'));
@@ -224,8 +224,8 @@ test('manual release candidate authorization requires confirmation on the main d
 test('candidate comparison verifies every archive and requires identical three-platform receipts', async t => {
   const f = await packageSource(t), artifacts = path.join(f.root, 'artifacts'); await fs.mkdir(artifacts);
   const files = ['build.json', ...f.built.packages.flatMap(item => item.archives.map(archive => archive.path)), ...f.built.tools.map(archive => archive.path)];
-  for (const platform of ['ubuntu-24.04', 'macos-14', 'windows-2025']) {
-    const root = path.join(artifacts, `candidate-${platform}`); await fs.mkdir(root);
+  for (const name of ARTIFACT_NAMES) {
+    const root = path.join(artifacts, name); await fs.mkdir(root);
     for (const file of files) await fs.copyFile(path.join(f.output, file), path.join(root, file));
   }
   assert.deepEqual(await compareBuilds(artifacts), { platforms: 3, identical: true });
@@ -235,20 +235,18 @@ test('candidate comparison verifies every archive and requires identical three-p
     assert.deepEqual(result.build, f.built);
     assert.deepEqual(result.bytes, await fs.readFile(path.join(f.output, 'build.json')));
   }
-  const windows = path.join(artifacts, 'candidate-windows-2025'), receipt = path.join(windows, 'build.json'), original = await fs.readFile(receipt);
+  const altered = path.join(artifacts, ARTIFACT_NAMES.at(-1)), receipt = path.join(altered, 'build.json'), original = await fs.readFile(receipt);
   await fs.appendFile(receipt, '\n');
   await assert.rejects(compareBuilds(artifacts), { code: 'CI_CANDIDATE_INVALID' });
   await fs.writeFile(receipt, original);
-  await fs.appendFile(path.join(windows, f.built.tools[0].path), 'corruption');
+  await fs.appendFile(path.join(altered, f.built.tools[0].path), 'corruption');
   await assert.rejects(compareBuilds(artifacts), { code: 'CI_CANDIDATE_INVALID' });
 });
 
 test('candidate comparison rejects non-current artifact directories before reading their contents', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cuefluent-candidate-names-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  for (const name of ARTIFACT_NAMES) await fs.mkdir(path.join(root, `unexpected-${name}`));
-  await assert.rejects(compareBuilds(root), { code: 'CI_CANDIDATE_INVALID' });
-  for (const name of ARTIFACT_NAMES.slice(1)) await fs.rename(path.join(root, `unexpected-${name}`), path.join(root, name));
+  for (const name of ARTIFACT_NAMES) await fs.mkdir(path.join(root, name === ARTIFACT_NAMES.at(-1) ? `unexpected-${name}` : name));
   await assert.rejects(compareBuilds(root), { code: 'CI_CANDIDATE_INVALID' });
 });
 

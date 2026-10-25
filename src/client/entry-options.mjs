@@ -75,13 +75,13 @@ export function selectStoreRoot({ env = process.env, platform = process.platform
   if (override !== undefined) return absolute(override, platform, invalidStoreRoot);
   const paths = platform === 'win32' ? path.win32 : path.posix;
   const home = environmentLocation(homedir, platform);
-  if (platform === 'darwin') return paths.join(home, 'Library', 'Application Support', 'Cuefluent Notes');
+  if (platform === 'darwin') return paths.join(home, 'Library', 'Application Support', 'Cuefluent Notes', 'runtime');
   if (platform === 'win32') {
     const local = environment(env, 'LOCALAPPDATA');
-    return paths.join(local ? environmentLocation(local, platform) : paths.join(home, 'AppData', 'Local'), 'Cuefluent Notes');
+    return paths.join(local ? environmentLocation(local, platform) : paths.join(home, 'AppData', 'Local'), 'Cuefluent Notes', 'runtime');
   }
   const state = environment(env, 'XDG_STATE_HOME');
-  return paths.join(state && paths.isAbsolute(state) ? environmentLocation(state, platform) : paths.join(home, '.local', 'state'), 'cuefluent-notes');
+  return paths.join(state && paths.isAbsolute(state) ? environmentLocation(state, platform) : paths.join(home, '.local', 'state'), 'cuefluent-notes', 'runtime');
 }
 
 async function packageFile(pin, relative, { read = false, missing = false, maxBytes = 64 * 1024 } = {}) {
