@@ -91,13 +91,13 @@ a package enables neither tracking nor note processing.
 
 ## Marketplace snapshots
 
-The Codex and Claude catalogs select the released 0.17.0 packages at
-`plugins/0.17.0/cuefluent-notes/` and `claude/0.17.0/cuefluent-notes/`.
-`packaging/releases/0.17.0/build.json` is the unchanged build receipt from the
-[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.17.0).
+The Codex and Claude catalogs select the released 0.18.0 packages at
+`plugins/0.18.0/cuefluent-notes/` and `claude/0.18.0/cuefluent-notes/`.
+`packaging/releases/0.18.0/build.json` is the unchanged build receipt from the
+[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.18.0).
 Its inventory hashes bind every catalog package file, including dependencies.
-The versioned 0.16.0 snapshots and receipt remain intact. The unversioned package
-folders and root `release.json` retain the 0.15.1 release.
+The versioned 0.16.0 and 0.17.0 snapshots and receipts remain intact. The
+unversioned package folders and root `release.json` retain the 0.15.1 release.
 
 For a catalog update, verify the published archive and receipt digests against
 the published release, extract into a fresh temporary directory, and use the
@@ -111,11 +111,11 @@ The directory-wide `.gitattributes` rules preserve every release's bytes, while
 `.gitignore` excludes `plugins/` and `claude/` from ordinary source searches.
 New versions need no additional attribute or ignore rules. Plain `git add` can
 omit ignored bundled dependencies, so force-stage only the exact new package
-folders. For example, when adding the 0.17.0 release:
+folders. For example, when adding the 0.18.0 release:
 
 ```sh
-git add -f -- plugins/0.17.0/cuefluent-notes claude/0.17.0/cuefluent-notes
-git add -- .agents/plugins/marketplace.json .claude-plugin/marketplace.json packaging/releases/0.17.0/build.json test/marketplace.test.mjs
+git add -f -- plugins/0.18.0/cuefluent-notes claude/0.18.0/cuefluent-notes
+git add -- .agents/plugins/marketplace.json .claude-plugin/marketplace.json packaging/releases/0.18.0/build.json test/marketplace.test.mjs
 node --test test/marketplace.test.mjs
 ```
 
