@@ -10,6 +10,7 @@ import { readProjectStatus } from '../../src/control/status.mjs';
 import { createControlBridge } from '../../src/client/control-server.mjs';
 import { describeFailure } from '../../src/diagnostics.mjs';
 import { initializeStore, openStore, readSettings } from '../../src/storage/store.mjs';
+import { readPendingSetup, setupProject } from '../../src/control/setup.mjs';
 import { interruptRemoval } from '../fixtures/exact-removal-worker.mjs';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -343,4 +344,29 @@ test('an unpublished interrupted setup is never replayed for a different proposa
   assert.deepEqual((await f.settings()).value.projects.map(item => item.id).sort(), ['base', 'held']);
   assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
   assert.deepEqual(await fs.readFile(path.join(f.root, 'notes', 'logs', '2026.md')), annual);
+});
+
+test('completing a published interrupted setup is bound to the settings observed with its journal; a concurrent change is a conflict, never a replay', async t => {
+  const f = await fixture(t), project = await f.folder('demo');
+  const oldNotes = f.destination('old-notes'), newNotes = f.destination('new-notes');
+  await f.setup({ root: await f.folder('base'), destination: f.destination('base-notes'), activityLog: { enabled: false } });
+  // A setup of demo at old-notes publishes its settings and stops while removing its journal.
+  await interruptRemoval({ root: f.storeRoot, relative: 'config/setup.json', operation: 'setup', options: { storeRoot: f.storeRoot, expectedHash: (await f.settings()).hash, skillVersion,
+    project: { id: 'demo', root: project, destination: oldNotes, activityLog: { enabled: false } } } });
+  const store = await openStore(f.storeRoot);
+  // Connection A observes the completed journal under the settings gate ...
+  const observed = await readPendingSetup(store);
+  assert.equal(observed.published, true); assert.equal(observed.request.id, 'demo'); assert.equal(observed.settingsHash, (await f.settings()).hash);
+  // ... and before A continues, connection B completes that journal and moves demo to new-notes.
+  const moved = await f.setup({ id: 'demo', destination: newNotes });
+  assert.equal(moved.project.destination.path, newNotes.path);
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+  // A's completion cites the hash it observed, so the journal's old request cannot
+  // replay as an update over B's change.
+  await assert.rejects(setupProject({ storeRoot: f.storeRoot, project: observed.request, expectedHash: observed.settingsHash, skillVersion }), { code: 'SETTINGS_CONFLICT' });
+  const after = await f.settings();
+  assert.equal(after.value.projects.find(item => item.id === 'demo').destination.path, newNotes.path);
+  // A's own choices, re-read against the current settings, apply on top of B's.
+  const applied = await f.setup({ id: 'demo', tracking: 'auto' });
+  assert.equal(applied.project.tracking, 'auto'); assert.equal(applied.project.destination.path, newNotes.path);
 });

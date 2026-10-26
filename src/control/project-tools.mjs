@@ -132,7 +132,9 @@ export function createProjectTools({ storeRoot, store, skillVersion }) {
       // different proposal.
       const pending = error?.code === 'SETUP_PENDING' && store ? await readPendingSetup(store) : null;
       if (!pending?.published || pending.request.id !== proposed.id || !sameRoot(pending.request.root, proposed.root)) throw error;
-      await setupProject({ storeRoot, project: pending.request, expectedHash: (await currentSettings(store)).hash, skillVersion });
+      // The hash observed with the journal authorizes its completion and nothing
+      // else: settings changed by another connection in between are a conflict.
+      await setupProject({ storeRoot, project: pending.request, expectedHash: pending.settingsHash, skillVersion });
       // Then the caller's own choices apply to the completed configuration.
       const current = await currentSettings(store), selected = selectProject(current.value.projects, input);
       result = await setupProject({ storeRoot, project: proposal(current.value.projects, selected, input), expectedHash: current.hash, skillVersion });
