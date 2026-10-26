@@ -24,11 +24,11 @@ require an exact selected command, enroll a chat, or claim session provenance. T
 assistant authors the note; the plugin validates, previews or saves it. Each
 request supports one file and up to 64 KiB of submitted UTF-8 content. The complete
 draft, including retained metadata, is limited to 128 KiB. New targets must be absent;
-updates require an existing note's inspected whole-file hash and complete read
-coverage in the same Codex chat or Claude connection. A Codex update needs
-host-supplied chat context; missing context is refused. Originals larger than 64 KiB are refused
-by the direct replacement tool. Reads return bounded 8 KiB chunks, with the
-original hash required on later chunks. Review decisions for direct and queued
+updates require the existing note's inspected whole-file hash, which is the only
+guard against replacing a changed original. Originals larger than 64 KiB are
+refused by the direct replacement tool. A read returns a note within 64 KiB whole
+when its serialized projection fits one 128 KiB result, and otherwise bounded
+8 KiB ranges with the original hash required on later ranges. Review decisions for direct and queued
 drafts are asked in chat: the assistant shows the draft and relays the user's
 answer to `cuefluent_save_note` or `cuefluent_skip_note` together with the
 immutable `revision` of the reviewed set. The backend checks content identity,

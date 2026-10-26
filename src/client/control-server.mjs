@@ -20,18 +20,6 @@ export function freezeData(value) {
   if (value && typeof value === 'object') { Object.values(value).forEach(freezeData); Object.freeze(value); }
   return value;
 }
-function transportSession(client, meta, sessions) {
-  // These fields come from the MCP transport, never from tool arguments. They
-  // scope temporary capabilities only, and claim no transcript provenance.
-  if (client !== 'codex' || !object(meta)) return null;
-  const native = Object.getOwnPropertyDescriptor(meta, 'x-codex-turn-metadata')?.value;
-  if (!object(native)) return null;
-  const values = ['session_id', 'thread_id', 'turn_id'].map(key => Object.getOwnPropertyDescriptor(native, key)?.value);
-  if (!values.every(value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) || values[0] !== values[1]) return null;
-  const key = values[0];
-  if (!sessions.has(key)) { if (sessions.size >= 128) sessions.delete(sessions.keys().next().value); sessions.set(key, Object.freeze({})); }
-  return sessions.get(key);
-}
 function handle(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(value)) argumentError();
   return value;
@@ -146,8 +134,10 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
   if (names.some(name => typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name)) || new Set(names).size !== names.length) fail('CONTROL_ADAPTER_INVALID', 'Control tool names must be unique and disjoint.');
   const bridge = {
     tools: freezeData([definition, ...noteTools]),
-    async call(name, args, { meta, session = null, canInspect = false } = {}) {
-      if (noteTools.some(item => item.name === name)) return metadata(await directNotes.call(name, args, { session, canInspect }));
+    async call(name, args, { meta } = {}) {
+      // Transport metadata reaches only the native command binding; note tools
+      // take their arguments alone.
+      if (noteTools.some(item => item.name === name)) return metadata(await directNotes.call(name, args));
       if (name !== definition.name) fail('CONTROL_TOOL_UNKNOWN', 'The control tool is unavailable.');
       if (client === 'claude') { const input = fields(args, ['handle']); return metadata(await readInvocation(handle(input.handle))); }
       const input = fields(args, ['action']), action = parseAction(input.action);
@@ -161,7 +151,7 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
       const { version } = fields(options, [], ['version'], () => fail('CONTROL_ADAPTER_INVALID', 'The control protocol accepts only its package version.'));
       const serverVersion = packageVersion(version);
       let initialized = false, ready = false, closed = false;
-      const sessions = new Map(), calls = new Map(), connection = Object.freeze({});
+      const calls = new Map();
       const begin = message => {
         if (message?.method !== 'tools/call' || !Object.hasOwn(message, 'id') ||
             !(typeof message.id === 'string' && message.id.length <= 128) && !Number.isSafeInteger(message.id)) return null;
@@ -216,9 +206,7 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
           // cancelled the request gets a coded failure; nothing starts for it.
           if (closed) fail('CONTROL_CONNECTION_CLOSED', 'The control connection closed before this request ran.');
           if (state?.cancelled) fail('CONTROL_REQUEST_CANCELLED', 'The host cancelled this request before it ran.');
-          const native = transportSession(client, input._meta, sessions);
-          const value = await bridge.call(input.name, input.arguments ?? {}, { meta: input._meta,
-            session: native ?? connection, canInspect: client === 'claude' || native !== null });
+          const value = await bridge.call(input.name, input.arguments ?? {}, { meta: input._meta });
           const presented = presentControlResult(value, { client, version: serverVersion, toolName: input.name });
           return result(id, { content: [{ type: 'text', text: JSON.stringify(presented) }], structuredContent: presented, isError: value.state === 'failed' });
         } catch (caught) {
@@ -229,7 +217,7 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
       protocol.begin = begin;
       protocol.finish = finish;
       protocol.receive = receive;
-      protocol.close = () => { closed = true; sessions.clear(); };
+      protocol.close = () => { closed = true; };
       return protocol;
     },
   };
