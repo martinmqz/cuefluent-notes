@@ -143,7 +143,7 @@ function decisionBridge(onSaved = () => {}) {
   return createControlBridge({ client: 'claude', readInvocation: async () => ({ state: 'idle' }), directNotes: {
     tools: [{ name: 'decide_note', inputSchema: { type: 'object', properties: {}, additionalProperties: false } }],
     async call(_name, _args, request) {
-      assert.deepEqual(Object.keys(request).sort(), ['canInspect', 'session']);
+      assert.equal(request, undefined);
       await new Promise(resolve => setImmediate(resolve));
       onSaved(); return { state: 'saved' };
     },

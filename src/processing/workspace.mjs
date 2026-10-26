@@ -246,8 +246,18 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     const result = visible({ outcome, drafts: outcome === 'drafted' ? drafts.size : 0 }, true);
     finished = outcome; return result;
   }
+  /** Trusted whole read of the pinned original for the direct tools: the same
+   * retained snapshot read_note ranges come from, outside the model-visible
+   * context budget. Not a model tool. */
+  async function original(input) {
+    object(input, ['target'], ['target']); await active();
+    const selected = target(input.target), snapshot = originals.get(selected.key) ?? retain(await inspect(selected), originals);
+    await assertChain(snapshot.binding.parent);
+    return freeze({ target: snapshot.file, exists: snapshot.bytes !== null, hash: snapshot.hash, totalBytes: snapshot.bytes?.length ?? 0, bytes: snapshot.bytes ? Buffer.from(snapshot.bytes) : null });
+  }
   return Object.freeze({ list_notes: input => serial(() => list_notes(input)), read_note: input => serial(() => read_note(input)), draft_note: input => serial(() => draft_note(input)),
     read_activity_log: input => serial(() => read_activity_log(input)), finish_drafting: input => serial(() => finish_drafting(input)),
+    original: input => serial(() => original(input)),
     manifest: () => serial(async () => {
       if (!finished) fail('WORKSPACE_NOT_FINISHED', 'An explicit successful drafting outcome is required.');
       return freeze({ runId, outcome: finished, drafts: finished === 'drafted' ? [...drafts.values()].map(draft => ({ ...draft, bytes: Buffer.from(draft.bytes) })) : [] });

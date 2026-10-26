@@ -93,12 +93,12 @@ test('project and settings errors use the verified caller context and keep exist
   assert.doesNotMatch(unknown.recovery, /setup|cuefluent_projects/);
 });
 
-test('hash and setup refusals distinguish settings inspection from complete note inspection', () => {
+test('hash refusals distinguish settings reads from note reads', () => {
   const setup = describeFailure({ code: 'EXPECTED_HASH_REQUIRED' }, { stage: 'command', operation: 'setup' });
   assert.match(setup.recovery, /settingsHash as expectedHash/);
   const note = describeFailure({ code: 'EXPECTED_HASH_REQUIRED' }, { stage: 'tool', toolName: 'cuefluent_update_note' });
-  assert.match(note.recovery, /complete original with cuefluent_read_note/);
-  assert.match(note.recovery, /first whole-file hash/); assert.doesNotMatch(note.recovery, /settingsHash|setup/);
+  assert.match(note.recovery, /original with cuefluent_read_note and pass the hash it returned as expectedHash/);
+  assert.doesNotMatch(note.recovery, /settingsHash|setup/);
   const proposal = describeFailure({ code: 'SETUP_ARGUMENT' }, { stage: 'command', operation: 'setup' });
   assert.match(proposal.recovery, /complete agreed project settings/);
   assert.doesNotMatch(proposal.recovery, /latest status/);

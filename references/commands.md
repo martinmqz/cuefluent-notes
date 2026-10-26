@@ -53,16 +53,16 @@ Before creating a note, check for a suitable existing subject note with
 `cuefluent_list_notes(projectId, directory?, cursor?, limit?)`. Browse only relevant
 directories; listing does not grant overwrite authority. Read a selected existing
 note with `cuefluent_read_note(projectId, target, start?, maxBytes?, expectedHash?)`.
-Reads start at byte zero by default and return at most 8 KiB per chunk with the
-whole-file hash. Follow the returned next offset; `expectedHash` is required for
-every read starting after byte zero. Reuse the first hash, so a changed file cannot
-be mistaken for one consistent read. Read the complete original before
-submitting its replacement; preserve useful content, metadata, aliases and manual
-edits. The direct tool requires complete read coverage in the same Codex chat or
-Claude connection for the exact original hash. Codex must supply the chat context
-through its MCP transport; missing context refuses an update without changing the
-original. Originals exceeding 64 KiB are refused
-before reserving a draft. Do not shorten a note to fit the submission limit.
+A call without `start` and `maxBytes` returns a note within 64 KiB whole, with its
+whole-file hash, when its serialized projection fits one result (128 KiB).
+Otherwise, and for larger notes, the read returns bounded UTF-8 ranges of at most
+8 KiB: follow the returned `next` offset, passing the first hash as `expectedHash`
+on every later range, so a changed file cannot be mistaken for one consistent
+read. Read the complete original before submitting its replacement; preserve
+useful content, metadata, aliases and manual edits. The exact original hash is
+the update's guard: a changed or missing original is a conflict. Originals
+exceeding 64 KiB are refused before reserving a draft. Do not shorten a note to
+fit the submission limit.
 
 `cuefluent_create_note` takes `projectId`, a fresh UUID `requestId`, `target`,
 `content` and `summary`; the target must be absent. `cuefluent_update_note` takes

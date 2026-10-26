@@ -26,12 +26,10 @@ untracked chats; no exact native command is needed.
    is configured, follow [setup](references/setup.md).
 2. Honor an explicit target. Otherwise use `cuefluent_list_notes` to find suitable
    existing notes before creating a duplicate. Read the selected note through
-   `cuefluent_read_note`, following its returned byte offsets until the complete
-   content is read. Keep the first returned whole-file hash and pass it as
-   `expectedHash` on subsequent chunks. Listing alone does not inspect note content.
-   Read all chunks in the same Codex chat or Claude connection before updating.
-   If Codex does not supply the current chat context, report the limitation and
-   preserve the note. Originals larger than
+   `cuefluent_read_note`: a note within 64 KiB comes back whole with its
+   whole-file hash; a larger note comes back in ranges, so follow the returned
+   `next` offsets with that hash as `expectedHash` until `next` is null. Listing
+   alone does not inspect note content. Originals larger than
    64 KiB cannot be replaced through the direct tool; report the size limit and
    preserve the file instead of shortening it.
 3. Compose the complete Markdown from the requested information. For an update,

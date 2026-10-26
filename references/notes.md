@@ -8,10 +8,10 @@ describes the separate queued-processing workflow.
 
 Use existing suitable notes before creating new ones. For direct requests,
 `cuefluent_list_notes` browses the configured destination and `cuefluent_read_note`
-returns bounded content chunks with the whole-file hash. Read the complete current
-note before proposing its replacement, use the first hash on later chunks, and
-pass that exact `expectedHash` to `cuefluent_update_note`.
-The direct tool refuses an incomplete read or an original larger than its 64 KiB
+returns a note within 64 KiB whole, or a larger note in bounded ranges, with its
+whole-file hash. Read the complete current note before proposing its replacement
+and pass that exact hash as `expectedHash` to `cuefluent_update_note`; a changed
+original is refused. The direct tool refuses an original larger than its 64 KiB
 replacement limit. Report the limit without changing or shortening the note.
 Updates stay at the same path. Explicit file destinations authorize only that
 file. New directory-routed notes use `meetings/`, `tasks/`, `knowledge-base/`,
