@@ -83,13 +83,13 @@ function assertCoverage(walked, previews, from = { draft: 0, start: 0 }) {
   assert.deepEqual(expected, { draft: previews.length, start: 0 });
 }
 
-async function fixture(t) {
+async function fixture(t, { saving = 'review' } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-review-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd); await fs.mkdir(notes);
   // Activity logging stays off: these tests observe previews and decisions, and
   // the notes directory must hold exactly the notes a test creates.
-  const project = createProject({ id: PROJECT, root: cwd, destination: { kind: 'directory', path: notes }, saving: 'review', activityLog: { enabled: false } });
+  const project = createProject({ id: PROJECT, root: cwd, destination: { kind: 'directory', path: notes }, saving, activityLog: { enabled: false } });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
   const file = target => path.join(notes, ...target.split('/'));
   const current = async () => (await inspectAttempt(store, PROJECT)).run;
@@ -124,7 +124,7 @@ async function fixture(t) {
    * Existing notes (`size`) are read once and revised by one small exact edit, so
    * a draft can be far larger than the 128 KiB submission budget; new notes
    * (`content`) are submitted whole. `pad` grows the revised text by that many bytes. */
-  async function queued(specs, drafting) {
+  async function queued(specs, drafting, { publishOnly = false } = {}) {
     const pending = drafting ?? await prepare(), originals = [];
     for (const spec of specs) {
       if (spec.size === undefined) { originals.push(null); continue; }
@@ -144,10 +144,12 @@ async function fixture(t) {
       }
       await workspace.finish_drafting({ outcome: 'drafted' });
       await persistDraftManifest(store, owner, await workspace.manifest());
+      if (publishOnly) return;
       const result = await runProcessingWork(store, owner, { action: 'process', client: 'codex', skillVersion: SKILL_VERSION, runClient: () => assert.fail('A published draft set needs no model.') });
       assert.equal(result.state, 'review');
     });
     const run = await current();
+    if (publishOnly) return { run, revision: runRevision(run), originals };
     assert.equal(run.id, pending.id); assert.equal(run.phase, 'review'); assert.equal(run.attempt, null); assert.equal(run.drafts.length, specs.length);
     return { run, revision: runRevision(run), originals };
   }
@@ -206,17 +208,18 @@ test('queued review pages fill up to the byte budget with whole drafts; followin
   assert.deepEqual(walked.map(page => page.next), [{ draft: 3, start: 0 }, { draft: 5, start: 0 }, null]);
   assert.match(revision, /^[a-f0-9]{64}$/);
   for (const page of walked) {
-    assert.deepEqual(Object.keys(page).sort(), ['choices', 'draftCount', 'drafts', 'kind', 'next', 'phase', 'projectId', 'revision', 'runId', 'savedPaths', 'state', 'warnings']);
+    assert.deepEqual(Object.keys(page).sort(), ['choices', 'draftCount', 'drafts', 'kind', 'next', 'phase', 'projectId', 'revision', 'runId', 'savedCount', 'state', 'warnings', 'warningsTruncated']);
     // The decision context never changes between pages.
     const { drafts, next, ...stable } = page;
     assert.deepEqual(stable, { state: 'review', projectId: PROJECT, runId: run.id, kind: 'project', phase: 'review', revision, draftCount: specs.length,
-      choices: QUEUED_CHOICES, savedPaths: [], warnings: [] });
+      savedCount: 0, choices: QUEUED_CHOICES, warnings: [], warningsTruncated: false });
   }
 
   const entries = walked.flatMap(page => page.drafts);
   assert.deepEqual(entries.map(entry => entry.index), specs.map((_, index) => index));
   for (const entry of entries) {
-    assert.deepEqual(Object.keys(entry).sort(), ['content', 'end', 'expectedHash', 'hash', 'heading', 'index', 'next', 'start', 'summary', 'target', 'totalBytes']);
+    assert.deepEqual(Object.keys(entry).sort(), ['content', 'end', 'expectedHash', 'hash', 'heading', 'index', 'next', 'saved', 'start', 'summary', 'target', 'totalBytes']);
+    assert.equal(entry.saved, false);
     const draft = run.drafts[entry.index], { bytes, preview } = await f.retained(run, entry.index);
     assert.equal(entry.target, f.file(specs[entry.index].target)); assert.equal(entry.target, draft.target);
     assert.equal(entry.summary, specs[entry.index].summary); assert.equal(entry.heading, 'Section 1 café');
@@ -302,7 +305,7 @@ test('a page filled to its brim still serializes within the byte budget, because
   // A test-side model of one whole entry, checked against the real page below.
   const wholeEntry = (run, index, preview) => {
     const { target, summary, heading, expectedHash, hash } = run.drafts[index], totalBytes = Buffer.byteLength(preview);
-    return { index, target, summary, heading, expectedHash, hash, totalBytes, start: 0, end: totalBytes, next: null, content: preview };
+    return { index, target, summary, heading, expectedHash, hash, saved: false, totalBytes, start: 0, end: totalBytes, next: null, content: preview };
   };
   const probe = await fixture(t), measured = await probe.queued(specs(0));
   const [probePage] = await probe.pages(measured.run);
@@ -423,7 +426,7 @@ test('a queued run that is still drafting has nothing to page, and one owned by 
   const f = await fixture(t), drafting = await f.prepare();
   const review = position => reviewRun(f.store, { projectId: PROJECT, runId: drafting.id, ...position });
   assert.deepEqual(await review(), { state: 'interrupted', projectId: PROJECT, runId: drafting.id, kind: 'project', phase: 'drafting', revision: runRevision(drafting),
-    draftCount: 0, choices: DRAFTING_CHOICES, drafts: [], next: null, savedPaths: [], warnings: [] });
+    draftCount: 0, savedCount: 0, choices: DRAFTING_CHOICES, drafts: [], next: null, warnings: [], warningsTruncated: false });
   for (const position of [{ draft: 1 }, { start: 1 }, { draft: -1 }, { start: 1.5 }]) await assert.rejects(review(position), { code: 'REVIEW_ARGUMENT' });
   // Nothing is reviewed yet, so there is nothing for a decision to save.
   await assert.rejects(decideRun(f.store, { projectId: PROJECT, runId: drafting.id, revision: runRevision(drafting), action: 'save' },
@@ -462,9 +465,9 @@ test('an interrupted partial save lists what it saved and why it stopped, keeps 
 
   const [page, ...rest] = await f.pages(run);
   assert.deepEqual(rest, []);
-  assert.deepEqual([page.state, page.phase, page.kind, page.revision, page.savedPaths, page.warnings, page.choices],
-    ['interrupted', 'saving', 'project', revision, [f.file('a.md')], [code], QUEUED_CHOICES]);
-  assert.deepEqual(page.drafts.map(entry => entry.target), [f.file('a.md'), f.file('z.md')]);
+  assert.deepEqual([page.state, page.phase, page.kind, page.revision, page.savedCount, page.warnings, page.choices],
+    ['interrupted', 'saving', 'project', revision, 1, [code], QUEUED_CHOICES]);
+  assert.deepEqual(page.drafts.map(entry => [entry.target, entry.saved]), [[f.file('a.md'), true], [f.file('z.md'), false]]);
   assertCoverage([page], await f.previewsOf(run, 2));
   // The same revision still authorizes a retry or a skip of the rest: the relay
   // carries it to the launcher. Nothing was lost on the way.
@@ -489,7 +492,7 @@ test('a run whose notes are all saved offers only Finish, and either decision fi
   });
   await interrupt('saving');
   let page = await reviewRun(f.store, { projectId: PROJECT, runId: run.id });
-  assert.deepEqual([page.state, page.phase, page.choices, page.savedPaths, page.revision], ['interrupted', 'saving', ['Finish', 'Keep pending'], [draft.target], revision]);
+  assert.deepEqual([page.state, page.phase, page.choices, page.savedCount, page.drafts[0].saved, page.revision], ['interrupted', 'saving', ['Finish', 'Keep pending'], 1, true, revision]);
   await interrupt('cleanup');
   page = await reviewRun(f.store, { projectId: PROJECT, runId: run.id });
   assert.deepEqual([page.state, page.phase, page.choices, page.drafts, page.revision], ['interrupted', 'cleanup', ['Finish', 'Keep pending'], [], revision]);
@@ -530,4 +533,60 @@ test('a typed skip binds the run it inspected: a set published before its worker
   assert.equal((await f.queue()).records, 1); assert.deepEqual(await fs.readdir(f.notes), []);
   const page = await reviewRun(f.store, { projectId: PROJECT, runId: pending.id });
   assert.equal(page.state, 'review'); assert.equal(page.revision, runRevision(published));
+});
+
+test('an automatic run interrupted after its writes offers Finish, and the decision finishes its cleanup without a model', async t => {
+  const f = await fixture(t, { saving: 'auto' });
+  const { run, revision } = await f.queued([RETRY], undefined, { publishOnly: true });
+  assert.equal(run.phase, 'saving'); assert.equal(run.settings.saving, 'auto');
+  const draft = run.drafts[0], saved = [{ draftId: draft.id, target: draft.target, hash: draft.hash, changed: true }];
+  await fs.mkdir(path.dirname(draft.target), { recursive: true }); await fs.writeFile(draft.target, await readDraftArtifact(f.store.pin, run.artifacts, draft.id));
+  await withProject(f.store, PROJECT, async ({ directory }) => {
+    const stored = await readJSON(f.store.pin, `${directory}/run.json`);
+    await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase: 'cleanup', saved, attempt: null }), { expectedHash: stored.hash });
+  });
+  const page = await reviewRun(f.store, { projectId: PROJECT, runId: run.id });
+  assert.deepEqual([page.state, page.phase, page.choices, page.savedCount], ['interrupted', 'cleanup', ['Finish', 'Keep pending'], 1]);
+  assert.equal(page.revision, runRevision((await inspectAttempt(f.store, PROJECT)).run));
+  const contexts = [];
+  const finished = await decideRun(f.store, { projectId: PROJECT, runId: run.id, revision: page.revision, action: 'save' },
+    { client: 'codex', skillVersion: SKILL_VERSION, startupTimeoutMs: process.platform === 'win32' ? 15_000 : undefined,
+      launchProcessing: context => { contexts.push(context); return f.launchWorker({ ...context, runClient: undefined }); } });
+  assert.deepEqual(finished, { state: 'running', projectId: PROJECT, runId: run.id, started: true });
+  // An automatic run resumes through process; the worker still checks the revision.
+  assert.deepEqual(contexts.map(({ action, revision: cited }) => ({ action, revision: cited })), [{ action: 'process', revision: page.revision }]);
+  const worker = f.workers.at(-1);
+  assert.deepEqual(await worker.exited, { code: 0, stderr: '' });
+  const outcome = await f.read(`outcome-${worker.attemptId}.json`);
+  assert.deepEqual([outcome.status, outcome.counts.handled, outcome.paths], ['saved', 1, [draft.target]]);
+  assert.equal(hashBytes(await fs.readFile(draft.target)), draft.hash);
+  assert.equal((await f.queue()).records, 0);
+  await assert.rejects(inspectAttempt(f.store, PROJECT), { code: 'RUN_MISSING' });
+});
+
+test('page metadata stays bounded: many long saved targets and many warnings never push a page over its budget', async t => {
+  const f = await fixture(t);
+  // 64 drafts with deep relative targets, all already written, under the
+  // processor's unchanged 64 KiB receipt budget.
+  const segment = 'section-' + 'x'.repeat(88);
+  const specs = Array.from({ length: 64 }, (_, index) => ({ target: `${segment}/${segment}/${segment}/note-${index}.md`,
+    content: `# Note ${index}\n\n## Choice\nKeep choice ${index}.\n`, summary: `Record ${index}.`, heading: 'Choice' }));
+  const { run, revision } = await f.queued(specs);
+  const saved = run.drafts.map(draft => ({ draftId: draft.id, target: draft.target, hash: draft.hash, changed: true }));
+  const warnings = Array.from({ length: 128 }, (_, index) => `SYNTHETIC_WARNING_${index} ${'w'.repeat(1000)}`);
+  await withProject(f.store, PROJECT, async ({ directory }) => {
+    const stored = await readJSON(f.store.pin, `${directory}/run.json`);
+    await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase: 'saving', saved, warnings }), { expectedHash: stored.hash });
+  });
+  assert.ok(Buffer.byteLength(JSON.stringify(warnings)) > PAGE);
+  const walked = await f.pages(run);
+  assertCoverage(walked, await f.previewsOf(run, specs.length));
+  for (const page of walked) {
+    assert.ok(serialized(page) <= PAGE, `A page serialized to ${serialized(page)} bytes.`);
+    assert.equal(page.savedCount, 64); assert.equal(page.revision, revision); assert.deepEqual(page.choices, ['Finish', 'Keep pending']);
+    assert.equal(page.warnings.length, 16); assert.equal(page.warningsTruncated, true);
+    assert.deepEqual(page.warnings, warnings.slice(0, 16));
+    for (const entry of page.drafts) assert.equal(entry.saved, true);
+  }
+  assert.equal(walked.flatMap(page => page.drafts).length, 64);
 });

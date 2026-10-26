@@ -444,7 +444,17 @@ test('auto-mode direct crash recovery publishes retained bytes while review-mode
   // against it is stale, and only the current one restores the preview.
   const interrupted = await g.call('review');
   assert.equal(interrupted.state, 'interrupted'); assert.equal(interrupted.phase, 'drafting'); assert.notEqual(interrupted.revision, original.revision);
-  assert.deepEqual(interrupted.choices, ['Discard', 'Keep pending']);
+  // A complete retained draft offers its restoration; a reservation without one
+  // can only be discarded or kept.
+  assert.deepEqual(interrupted.choices, ['Restore draft', 'Discard', 'Keep pending']);
+  const retainedPointer = (await inspectAttempt(g.store, 'demo')).run.artifacts;
+  const pointTo = artifacts => withProject(g.store, 'demo', async ({ directory }) => {
+    const stored = await readJSON(g.store.pin, `${directory}/run.json`);
+    await writeJSON(g.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, artifacts }), { expectedHash: stored.hash });
+  });
+  await pointTo(null);
+  assert.deepEqual((await g.call('review')).choices, ['Discard', 'Keep pending']);
+  await pointTo(retainedPointer);
   await assert.rejects(g.call('save', g.request.requestId, original.revision), { code: 'REVIEW_REVISION_STALE' });
   const recovered = await g.call('save', g.request.requestId, interrupted.revision); assert.equal(recovered.state, 'review');
   assert.deepEqual(recovered.drafts, original.drafts); assert.equal(recovered.revision, original.revision);

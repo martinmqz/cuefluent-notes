@@ -98,8 +98,9 @@ pending draft set, for a direct note or a queued processing run, or the latest
 completed outcome for that `runId`. A page has `state` (`review`, `interrupted`,
 `running`, or the completed outcome state such as `saved` or `skipped`),
 `projectId`, `runId`, `kind` (`direct`, `chat` or `project`), `phase`,
-`revision`, `draftCount`, `choices`, `drafts[]`, `next`, `savedPaths` and
-`warnings`. `revision` is 64 hexadecimal characters: the immutable identity of
+`revision`, `draftCount`, `savedCount`, `choices`, `drafts[]`, `next`,
+`warnings` (at most 16; `warningsTruncated` says when `status` holds more) and
+`warningsTruncated`. `revision` is 64 hexadecimal characters: the immutable identity of
 the reviewed set, covering the run id, the pinned destination and preferences,
 whether the draft set is published, and every draft's target, original hash,
 content hash and size. A partly done save does not change it, so an unchanged
@@ -108,11 +109,15 @@ run's phase: a pending review set offers `Save`, then `Discard` for a direct
 draft or `Skip draft; keep input` for queued drafts, then `Keep pending`; a run
 whose notes are all saved and only needs cleanup offers `Finish` and `Keep
 pending`; a run interrupted while drafting offers `Discard` or `Skip; keep input`,
-and `Keep pending`. `Save` and `Finish` relay to `cuefluent_save_note`; the other
-wordings relay to `cuefluent_skip_note`. Each
+and `Keep pending`, and a direct run whose retained draft is complete also offers
+`Restore draft` first. `Save`, `Finish` and `Restore draft` relay to
+`cuefluent_save_note` (`Restore draft` only restores the preview, for a fresh
+decision); `Discard`, `Skip draft; keep input` and `Skip; keep input` relay to
+`cuefluent_skip_note`; `Keep pending` makes no call. Each
 `drafts[]` entry has `index`, `target` (the absolute destination path),
-`summary`, `heading`, `expectedHash` (null for a new note), `hash`,
-`totalBytes`, `start`, `end`, `next` and `content`. The `hash` identifies the
+`summary`, `heading`, `expectedHash` (null for a new note), `hash`, `saved`
+(whether this note is already written), `totalBytes`, `start`, `end`, `next` and
+`content`. The `hash` identifies the
 complete retained private draft, including its metadata; it is not the hash of
 the preview text or of any preview file.
 
@@ -134,7 +139,8 @@ deterministic save in the separate worker and returns `running` with
 with `started: false` means a worker already owned the run, so the decision did
 not start: read `status`, and review and ask again once the run is waiting.
 Calling the tool again with the same `revision` retries an interrupted approved
-save, including one that stopped during cleanup.
+save, including one that stopped during cleanup; for an automatic run it finishes
+the interrupted save or cleanup the same way, without a model.
 `cuefluent_skip_note(projectId, runId, revision)` relays the decision not to
 save: Discard for a direct draft, `Skip draft; keep input` for queued drafts, as
 described under [skip and conflicts](#skip-and-conflicts). `Keep pending` makes

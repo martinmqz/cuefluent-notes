@@ -16,16 +16,21 @@ const invalid = message => fail('REVIEW_ARGUMENT', message);
 const continuation = (bytes, at) => at < bytes.length && (bytes[at] & 0xc0) === 0x80;
 const serialized = value => Buffer.byteLength(JSON.stringify(value));
 
-/** The exact wording to offer for a pending run. `Save` and `Finish` relay to
- * the save tool; `Discard` and the skip wordings relay to the skip tool; `Keep
- * pending` makes no call. Queued skip keeps the selected input until only
- * cleanup remains, where either tool finishes the run. */
+/** The exact wording to offer for a pending run. `Save`, `Finish` and `Restore
+ * draft` relay to the save tool; `Discard` and the skip wordings relay to the
+ * skip tool; `Keep pending` makes no call. Queued skip keeps the selected input
+ * until only cleanup remains, where either tool finishes the run. A direct run
+ * interrupted while drafting with a retained manifest can restore its preview
+ * for a fresh decision without publishing anything. */
 export function decisionChoices(run) {
   const direct = run.scope.kind === 'direct';
   if (run.phase === 'cleanup' || (run.phase === 'saving' && run.saved.length === run.drafts.length)) return ['Finish', 'Keep pending'];
-  if (run.phase === 'drafting') return [direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];
+  if (run.phase === 'drafting') return [...(direct && run.artifacts ? ['Restore draft'] : []), direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];
   return ['Save', direct ? 'Discard' : 'Skip draft; keep input', 'Keep pending'];
 }
+/** Page metadata stays bounded whatever the run accumulated: at most this many
+ * warnings travel with a page; status carries the complete list. */
+export const PAGE_WARNINGS = 16;
 
 export const completedOutcome = result => ({ state: result.status, projectId: result.projectId, runId: result.runId, result });
 
@@ -39,6 +44,7 @@ export function locateRun({ run, latest, active }, runId) {
 
 function pageEntry(run, draft, index, content, start, end) {
   return { index, target: draft.target, summary: draft.summary, heading: draft.heading, expectedHash: draft.expectedHash, hash: draft.hash,
+    saved: run.saved.some(item => item.draftId === draft.id),
     totalBytes: content.length, start, end, next: end < content.length ? end : null, content: content.subarray(start, end).toString('utf8') };
 }
 
@@ -66,8 +72,8 @@ export async function reviewRun(store, { projectId, runId, draft: first = 0, sta
     if (located.result) return located.result;
     const { run } = located;
     const page = { state: run.phase === 'review' ? 'review' : 'interrupted', projectId: run.projectId, runId: run.id, kind: run.scope.kind, phase: run.phase,
-      revision: runRevision(run), draftCount: run.drafts.length, choices: decisionChoices(run), drafts: [], next: null,
-      savedPaths: run.saved.map(item => item.target), warnings: run.warnings };
+      revision: runRevision(run), draftCount: run.drafts.length, savedCount: run.saved.length, choices: decisionChoices(run), drafts: [], next: null,
+      warnings: run.warnings.slice(0, PAGE_WARNINGS), warningsTruncated: run.warnings.length > PAGE_WARNINGS };
     if (!['review', 'saving'].includes(run.phase)) {
       if (first !== 0 || offset !== 0) invalid('This run has no reviewable draft page at that position.');
       return page;
@@ -130,13 +136,14 @@ export async function decideRun(store, { projectId, runId, revision, action }, {
     } catch (error) { return settled(store, projectId, runId, error); }
   }
   if (typeof launchProcessing !== 'function') fail('PROCESSING_LAUNCH_REQUIRED', 'A trusted separate worker launcher is required.');
-  if (action === 'save' && (run.settings.saving !== 'review' || run.phase === 'drafting')) {
-    fail('RUN_PHASE_INVALID', 'Save publishes a reviewed draft set or finishes its approved save; process resumes drafting or automatic saving.');
-  }
-  // The worker is bound to this exact run id and rechecks the revision before
+  if (action === 'save' && run.phase === 'drafting') fail('RUN_PHASE_INVALID', 'Save publishes a reviewed draft set or finishes an interrupted save; process resumes drafting.');
+  // An automatic run finishes its interrupted save or cleanup through the same
+  // resume path process uses; no model runs once drafts are published. The
+  // worker is bound to this exact run id and rechecks the revision before
   // acting; published drafts never change under one run id.
+  const workerAction = action === 'skip' ? 'skip' : run.settings.saving === 'auto' ? 'process' : 'save';
   try {
-    const launched = await launchOwnedAttempt(store, projectId, { runId, startupTimeoutMs, launch: context => launchProcessing({ ...context, action, revision }) });
+    const launched = await launchOwnedAttempt(store, projectId, { runId, startupTimeoutMs, launch: context => launchProcessing({ ...context, action: workerAction, revision }) });
     return { state: 'running', projectId, runId: launched.runId, started: launched.launched };
   } catch (error) { return settled(store, projectId, runId, error); }
 }
