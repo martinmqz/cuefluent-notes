@@ -1,12 +1,12 @@
 # Maintaining and preparing Cuefluent Notes packages
 
 Repository maintenance guidance; excluded from installed plugins. Product setup
-and native registration are documented in [distribution](../references/distribution.md)
+and native registration are documented in [limits](../references/limits.md)
 and [setup](../references/setup.md).
 
 ## Source and published artifacts
 
-The source is `src/`, the root skill, and the seven installed workflow references.
+The source is `src/`, the root skill, and the four installed references.
 `packaging/plugin/source-files.json` is the explicit runtime input list. Update it when
 adding a runtime module; build checks reject missing relative imports. Client
 descriptors live under `packaging/plugin/{codex,claude}/`. Both packages contain one
@@ -192,7 +192,7 @@ platform-specific primitive. CI does not establish native client isolation, MXC
 sandbox availability, model access, or public-file security privileges. Separate
 Windows native checks cover the explicit Codex MXC floor and a complete Claude
 owned-worker draft → review → save flow; see the platform limits in
-[verification](../references/verification.md).
+[limits](../references/limits.md).
 
 One primary shard per platform runs `tools/ci.mjs build` after its tests. This
 builds fresh candidates, verifies packages, exercises the actual detached
@@ -209,7 +209,7 @@ of the deterministic receipt. Candidates are retained for 30 days. Guidance
 checks run in a separate job. Separate
 macOS and Windows client smoke jobs exercise Claude Code 2.1.309 and Codex CLI
 0.163.0, with exact archive integrity pins in `tools/client-smoke.mjs`. The
-[adapter compatibility contract](../references/verification.md) describes the
+[adapter compatibility contract](../references/limits.md) describes the
 Claude Code 2.1.307 baseline and capability admission for newer stable 2.x clients.
 Smoke checks use disposable profiles without authenticated sessions or model
 calls. They do not establish plugin installation, hook trust, or end-to-end
@@ -265,7 +265,7 @@ prove native desktop command rendering, live hook activation, native processing
 isolation on an unaudited platform, reboot recovery, Cuefluent corpus admission,
 or search ranking. Local checks, current-revision CI results, pending jobs, and
 native acceptance evidence are separate kinds of evidence. Product limits belong
-in [verification](../references/verification.md).
+in [limits](../references/limits.md).
 
 ## Manual release preparation
 
