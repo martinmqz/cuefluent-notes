@@ -11,6 +11,9 @@ import { createControlBridge } from '../../src/client/control-server.mjs';
 import { describeFailure } from '../../src/diagnostics.mjs';
 import { initializeStore, openStore, readSettings } from '../../src/storage/store.mjs';
 import { interruptRemoval } from '../fixtures/exact-removal-worker.mjs';
+import { fork } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createAnnualLog } from '../../src/logs/index.mjs';
 
 const skillVersion = '0.18.0', systemZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -306,4 +309,38 @@ test('setup resumes a first initialization interrupted before its layout or sett
   const resumed = await opened.call('cuefluent_setup', { root: second, destination: g.destination('notes') });
   assert.equal(resumed.state, 'configured'); assert.equal(resumed.project.id, 'second');
   assert.deepEqual((await g.settings()).value.projects.map(item => item.id), ['second']);
+});
+
+test('an unpublished interrupted setup is never replayed for a different proposal: the refusal stays and nothing is written', async t => {
+  const f = await fixture(t), project = await f.folder('held'), base = await f.folder('base');
+  await f.setup({ root: base, destination: f.destination('base-notes'), activityLog: { enabled: false } });
+  const settings = await f.settings();
+  // A setup of a second project stops after publishing its first annual log,
+  // before its settings exist: the journal holds an unfinished intent.
+  const options = { storeRoot: f.storeRoot, expectedHash: settings.hash, skillVersion, now: '2026-10-22T01:00:00.000Z',
+    project: { id: 'held', root: project, destination: { kind: 'directory', path: path.join(f.root, 'notes') }, activityLog: { enabled: true, timezone: 'UTC' } } };
+  const child = fork(fileURLToPath(new URL('../fixtures/setup-worker.mjs', import.meta.url)), [f.root, JSON.stringify(options), 'annual'], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
+  const exited = new Promise(resolve => child.once('exit', () => resolve()));
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+  for (let tries = 0; ; tries++) {
+    try { await fs.access(path.join(f.root, 'setup-boundary')); break; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    assert.ok(tries < 300, `Synthetic setup did not reach its boundary: ${stderr}`); await delay(20);
+  }
+  child.kill('SIGKILL'); await exited;
+  assert.deepEqual((await f.settings()).value.projects.map(item => item.id), ['base']);
+  const annual = await fs.readFile(path.join(f.root, 'notes', 'logs', '2026.md')), logsBefore = await fs.readdir(path.join(f.root, 'notes', 'logs'));
+  // A different proposal for that project is refused and performs none of the
+  // unfinished request's writes; the opt-out destination is not created either.
+  await assert.rejects(f.setup({ id: 'held', root: project, destination: f.destination('new-notes'), activityLog: { enabled: false } }), { code: 'SETUP_PENDING' });
+  await assert.rejects(fs.stat(path.join(f.root, 'new-notes')), { code: 'ENOENT' });
+  assert.deepEqual((await f.settings()).value.projects.map(item => item.id), ['base']);
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'notes', 'logs', '2026.md')), annual);
+  assert.deepEqual(await fs.readdir(path.join(f.root, 'notes', 'logs')), logsBefore);
+  // Repeating the interrupted request itself completes it.
+  const completed = await f.setup({ id: 'held', root: project, destination: { kind: 'directory', path: path.join(f.root, 'notes') }, activityLog: { enabled: true, timezone: 'UTC' } });
+  assert.equal(completed.state, 'configured'); assert.equal(completed.project.activityLog.timezone, 'UTC');
+  assert.deepEqual((await f.settings()).value.projects.map(item => item.id).sort(), ['base', 'held']);
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'notes', 'logs', '2026.md')), annual);
 });

@@ -102,12 +102,16 @@ async function inspectLogs(project) {
   }
 }
 
-/** The exact request of an interrupted setup, if its journal is retained. A
- * caller that repeats it completes that setup; nothing else is disclosed. */
+/** The exact request of an interrupted setup, if its journal is retained, and
+ * whether its settings are already published, so that only the journal removal
+ * remains. A caller that repeats the request completes that setup; nothing
+ * else is disclosed. */
 export async function readPendingSetup(store) {
   return withShortGate(store.settingsGate, gateOptions, async () => {
     const pending = await readJSON(store.pin, JOURNAL, { missing: true });
-    return pending ? validateIntent(pending.value).request : null;
+    if (!pending) return null;
+    const intent = validateIntent(pending.value), current = await readSettings(store);
+    return Object.freeze({ request: intent.request, published: equal(current.value, intent.proposed) && intent.logs !== null });
   });
 }
 

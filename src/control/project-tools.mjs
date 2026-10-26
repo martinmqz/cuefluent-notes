@@ -123,13 +123,16 @@ export function createProjectTools({ storeRoot, store, skillVersion }) {
     let result;
     try { result = await setupProject({ storeRoot, project: proposed, expectedHash: hash, skillVersion }); }
     catch (error) {
-      // An interrupted setup of this same project is completed with its own
-      // recorded request, which the journal check requires verbatim; a request
-      // rebuilt from the published settings (an adopted log timezone, say) is
-      // not that request. A journal for another project stays a refusal.
+      // A setup of this same project whose settings are already published is
+      // completed with its own recorded request, which the journal check
+      // requires verbatim; a request rebuilt from the published settings (an
+      // adopted log timezone, say) is not that request. Completion then only
+      // removes the journal. An unpublished intent, or a journal for another
+      // project, stays a refusal: its public writes are never performed for a
+      // different proposal.
       const pending = error?.code === 'SETUP_PENDING' && store ? await readPendingSetup(store) : null;
-      if (!pending || pending.id !== proposed.id || !sameRoot(pending.root, proposed.root)) throw error;
-      await setupProject({ storeRoot, project: pending, expectedHash: (await currentSettings(store)).hash, skillVersion });
+      if (!pending?.published || pending.request.id !== proposed.id || !sameRoot(pending.request.root, proposed.root)) throw error;
+      await setupProject({ storeRoot, project: pending.request, expectedHash: (await currentSettings(store)).hash, skillVersion });
       // Then the caller's own choices apply to the completed configuration.
       const current = await currentSettings(store), selected = selectProject(current.value.projects, input);
       result = await setupProject({ storeRoot, project: proposal(current.value.projects, selected, input), expectedHash: current.hash, skillVersion });
