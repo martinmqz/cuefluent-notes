@@ -109,10 +109,11 @@ run's phase: a pending review set offers `Save`, then `Discard` for a direct
 draft or `Skip draft; keep input` for queued drafts, then `Keep pending`; a run
 whose notes are all saved and only needs cleanup offers `Finish` and `Keep
 pending`; a run interrupted while drafting offers `Discard` or `Skip; keep input`,
-and `Keep pending`, and a direct run whose retained draft is complete also offers
-`Restore draft` first. `Save`, `Finish` and `Restore draft` relay to
-`cuefluent_save_note` (`Restore draft` only restores the preview, for a fresh
-decision); `Discard`, `Skip draft; keep input` and `Skip; keep input` relay to
+and `Keep pending`; a direct run whose retained draft is complete also offers
+`Restore draft` first in review mode, or `Save` in automatic mode. `Save`,
+`Finish` and `Restore draft` relay to `cuefluent_save_note` (`Restore draft`
+only restores the preview, for a fresh decision; `Save` on a retained automatic
+draft finishes saving it); `Discard`, `Skip draft; keep input` and `Skip; keep input` relay to
 `cuefluent_skip_note`; `Keep pending` makes no call. Each
 `drafts[]` entry has `index`, `target` (the absolute destination path),
 `summary`, `heading`, `expectedHash` (null for a new note), `hash`, `saved`

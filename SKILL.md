@@ -76,8 +76,9 @@ untracked chats; no exact native command is needed.
      offers `Save`, then `Discard` (direct draft) or `Skip draft; keep input`
      (queued drafts), then `Keep pending`; a run whose notes are all saved and
      only needs cleanup offers `Finish` and `Keep pending`; a run interrupted
-     while drafting offers `Discard` or `Skip; keep input`, and `Keep pending`,
-     with `Restore draft` first when a direct draft was retained complete.
+     while drafting offers `Discard` or `Skip; keep input`, and `Keep pending`;
+     a direct draft retained complete adds `Restore draft` first in review mode,
+     or `Save` in automatic mode.
    - On `Save`, `Finish` or `Restore draft`, call `cuefluent_save_note` with
      `projectId`, `runId` and the `revision` you showed. `Restore draft` only
      restores the retained preview and returns a review page; show it and ask

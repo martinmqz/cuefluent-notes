@@ -20,12 +20,15 @@ const serialized = value => Buffer.byteLength(JSON.stringify(value));
  * draft` relay to the save tool; `Discard` and the skip wordings relay to the
  * skip tool; `Keep pending` makes no call. Queued skip keeps the selected input
  * until only cleanup remains, where either tool finishes the run. A direct run
- * interrupted while drafting with a retained manifest can restore its preview
- * for a fresh decision without publishing anything. */
+ * interrupted while drafting with a retained manifest restores its preview for
+ * a fresh decision in review mode, and saves it in automatic mode. */
 export function decisionChoices(run) {
   const direct = run.scope.kind === 'direct';
   if (run.phase === 'cleanup' || (run.phase === 'saving' && run.saved.length === run.drafts.length)) return ['Finish', 'Keep pending'];
-  if (run.phase === 'drafting') return [...(direct && run.artifacts ? ['Restore draft'] : []), direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];
+  if (run.phase === 'drafting') {
+    const retained = direct && run.artifacts ? [run.settings.saving === 'review' ? 'Restore draft' : 'Save'] : [];
+    return [...retained, direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];
+  }
   return ['Save', direct ? 'Discard' : 'Skip draft; keep input', 'Keep pending'];
 }
 /** Page metadata stays bounded whatever the run accumulated: at most this many

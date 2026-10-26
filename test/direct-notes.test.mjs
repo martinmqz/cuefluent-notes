@@ -432,9 +432,12 @@ test('auto-mode direct crash recovery publishes retained bytes while review-mode
     const stored = await readJSON(f.store.pin, `${directory}/run.json`);
     await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase: 'drafting', drafts: [] }), { expectedHash: stored.hash });
   });
-  const saved = await ownDirectAttempt(f.store, 'demo', run.id, owner => runProcessingWork(f.store, owner,
-    { action: 'process', client: 'codex', skillVersion: '0.16.0', runClient: () => assert.fail('No model during direct recovery') }));
-  assert.equal(saved.status, 'saved'); assert.deepEqual(await fs.readFile(saved.paths[0]), manifest.drafts[0].bytes);
+  // In automatic mode the retained draft offers Save, which finishes saving it.
+  const offered = await f.call('review', run.id);
+  assert.equal(offered.phase, 'drafting'); assert.deepEqual(offered.choices, ['Save', 'Discard', 'Keep pending']);
+  const saved = await f.call('save', run.id);
+  assert.equal(saved.state, 'saved'); assert.deepEqual(await fs.readFile(saved.result.paths[0]), manifest.drafts[0].bytes);
+  await assert.rejects(fs.access(path.join(f.store.root, 'processing')), { code: 'ENOENT' });
   const g = await fixture(t), original = await g.create();
   await withProject(g.store, 'demo', async ({ directory }) => {
     const stored = await readJSON(g.store.pin, `${directory}/run.json`);
