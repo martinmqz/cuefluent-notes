@@ -101,10 +101,15 @@ completed outcome for that `runId`. A page has `state` (`review`, `interrupted`,
 `revision`, `draftCount`, `choices`, `drafts[]`, `next`, `savedPaths` and
 `warnings`. `revision` is 64 hexadecimal characters: the immutable identity of
 the reviewed set, covering the run id, the pinned destination and preferences,
-and every draft's target, original hash, content hash and size. A partly done
-save does not change it, so an unchanged set stays retryable. `choices` is the
-exact wording to offer: `Save`, `Discard` and `Keep pending` for a direct draft;
-`Save`, `Skip draft; keep input` and `Keep pending` for queued drafts. Each
+whether the draft set is published, and every draft's target, original hash,
+content hash and size. A partly done save does not change it, so an unchanged
+set stays retryable. `choices` is the exact wording to offer and depends on the
+run's phase: a pending review set offers `Save`, then `Discard` for a direct
+draft or `Skip draft; keep input` for queued drafts, then `Keep pending`; a run
+whose notes are all saved and only needs cleanup offers `Finish` and `Keep
+pending`; a run interrupted while drafting offers `Discard` or `Skip; keep input`,
+and `Keep pending`. `Save` and `Finish` relay to `cuefluent_save_note`; the other
+wordings relay to `cuefluent_skip_note`. Each
 `drafts[]` entry has `index`, `target` (the absolute destination path),
 `summary`, `heading`, `expectedHash` (null for a new note), `hash`,
 `totalBytes`, `start`, `end`, `next` and `content`. The `hash` identifies the
@@ -122,11 +127,14 @@ retained draft.
 The assistant asks with the client's question UI (Claude Code: AskUserQuestion;
 Codex: its question tool when available; otherwise plain text), using exactly
 the returned `choices`, and relays only the user's answer.
-`cuefluent_save_note(projectId, runId, revision)` relays Save. A direct draft
-saves in that call and returns the saved path. A queued set starts the
-deterministic save in the separate worker and returns `running`; `status` shows
-progress and then the latest result. Calling it again with the same `revision`
-retries an interrupted approved save.
+`cuefluent_save_note(projectId, runId, revision)` relays Save or Finish. A direct
+draft saves in that call and returns the saved path. A queued set starts the
+deterministic save in the separate worker and returns `running` with
+`started: true`; `status` shows progress and then the latest result. `running`
+with `started: false` means a worker already owned the run, so the decision did
+not start: read `status`, and review and ask again once the run is waiting.
+Calling the tool again with the same `revision` retries an interrupted approved
+save, including one that stopped during cleanup.
 `cuefluent_skip_note(projectId, runId, revision)` relays the decision not to
 save: Discard for a direct draft, `Skip draft; keep input` for queued drafts, as
 described under [skip and conflicts](#skip-and-conflicts). `Keep pending` makes
@@ -136,8 +144,9 @@ them only with the user's decision.
 
 `REVIEW_REVISION_STALE` means the draft set changed after it was reviewed:
 review again, show the current draft and ask again; never reuse an earlier
-answer. `REVIEW_RUN_CHANGED` means the identified run is no longer pending or
-the latest outcome; read `status` before acting.
+answer. `REVIEW_RUN_CHANGED` means the identified run is neither pending nor
+the latest outcome; read `status` before acting. `REVIEW_ARGUMENT` means a page
+position or decision argument was invalid; nothing changed.
 
 Keep the returned `projectId`, `runId` and `revision` for review, save or skip.
 Reuse the original requestId and exact payload to retry an interrupted
@@ -221,9 +230,9 @@ no note changes and every queue is preserved. For queued drafts (`kind: chat` or
 `project`) it is `Skip draft; keep input`: the drafts are released and the next
 `process` may propose the same notes again. Skip preserves all selected input
 and any notes already saved. The result lists those notes; reprocessing may
-produce redundant prose. Skip cannot race a live writer. If every save is
-already durable and only cleanup remains, skip finishes cleanup instead of
-replaying the handled input.
+produce redundant prose. Skip cannot race a live writer. When every save is
+already durable and only cleanup remains, the review page offers `Finish`
+instead, and either tool finishes that cleanup, which consumes the handled input.
 
 A file changed after the agent read it is a conflict. A newly chosen target that
 was never read is expected to be absent. Preserve user edits, changed parents and
@@ -235,8 +244,9 @@ and let a new processing run read the current notes afresh.
 
 `status` is read-only. It reports settings, tracking and queue counts, pending
 drafts, active/interrupted work and the latest completed result. A pending run
-includes its `kind` (`direct`, `chat` or `project`) and its `revision`, the
-identity that a save or skip decision must cite. Counts are bounded snapshots;
+includes its `kind` (`direct`, `chat` or `project`); the `revision` a decision
+cites comes only from the review pages that showed the drafts. Counts are
+bounded snapshots;
 an incomplete or unknown count is not zero. It does not repair logs, retry
 synchronization or start a model.
 

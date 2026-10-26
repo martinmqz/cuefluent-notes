@@ -12,7 +12,7 @@ import { readChat, queueRelative } from '../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
 import { attachAttemptChild, inspectAttempt } from '../src/storage/attempts.mjs';
 import { executeControl } from '../src/control/execute.mjs';
-import { decideRun } from '../src/control/review.mjs';
+import { decideRun, reviewRun } from '../src/control/review.mjs';
 import { readProjectStatus } from '../src/control/status.mjs';
 import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
@@ -51,8 +51,9 @@ async function fixture(t, { saving = 'review' } = {}) {
   // worker then performs the same save or skip the typed command used to start.
   const decide = async (action, extra = {}, { revision } = {}) => {
     const status = await readProjectStatus(store, 'project');
-    const result = await decideRun(store, { projectId: 'project', runId: status.run.id, revision: revision ?? status.run.revision, action },
-      { client: 'codex', skillVersion: '0.16.0-dev.0', launchProcessing: launcher(extra) });
+    const reviewed = await reviewRun(store, { projectId: 'project', runId: status.run.id });
+    const result = await decideRun(store, { projectId: 'project', runId: status.run.id, revision: revision ?? reviewed.revision, action },
+      { client: 'codex', skillVersion: '0.16.0-dev.0', launchProcessing: launcher(extra), startupTimeoutMs });
     return { result, handle };
   };
   const append = id => withProject(store, 'project', () => appendQueueRecord(store.pin, queueRelative('codex', 'synthetic'), encodeQueueRecord(id, Buffer.from(JSON.stringify({ text: `Synthetic decision ${id}` })))));
@@ -83,13 +84,13 @@ test('full review command flow retains arrivals, reports one running run, and re
   // review set instead of acting on whichever run is current.
   for (const action of ['save', 'skip']) {
     const shown = (await f.execute(action)).result;
-    assert.equal(shown.state, 'review'); assert.equal(shown.run.kind, 'chat'); assert.match(shown.run.revision, /^[a-f0-9]{64}$/);
+    assert.equal(shown.state, 'review'); assert.equal(shown.run.kind, 'chat'); assert.equal(shown.run.revision, undefined);
     assert.equal(shown.run.drafts.length, 1);
   }
   assert.equal(f.launches, 1);
   await assert.rejects(f.decide('save', { rejectModel: true }, { revision: 'e'.repeat(64) }), { code: 'REVIEW_REVISION_STALE' });
   assert.equal(f.launches, 1);
-  const saved = await f.decide('save', { rejectModel: true }); assert.equal(saved.result.state, 'running');
+  const saved = await f.decide('save', { rejectModel: true }); assert.equal(saved.result.state, 'running'); assert.equal(saved.result.started, true);
   const result = await f.finished(saved.handle); assert.equal(result.status, 'saved'); assert.equal(result.counts.handled, 1);
   assert.equal((await f.queue()).records, 1);
   assert.equal((await f.execute('status')).result.latest.status, 'saved');
@@ -118,9 +119,13 @@ test('skip after a partial conflicted save keeps the saved note, the user collis
   const saved = await fs.readFile(path.join(f.notes, 'a.md'));
   const interrupted = await inspectAttempt(f.store, 'project');
   assert.equal(interrupted.run.saved.length, 1); assert.equal(interrupted.run.phase, 'saving');
-  // Typed save retries the approved save; typed skip releases the inactive
-  // conflicted work without another decision because no review set is pending.
   assert.equal((await f.execute('status')).result.state, 'interrupted');
+  // No review set is pending, so a typed save resumes the approved save (and
+  // meets the same collision) and a typed skip releases the inactive work.
+  const launches = f.launches, resumed = await f.execute('save', { rejectModel: true });
+  assert.equal(resumed.result.state, 'running'); assert.equal(f.launches, launches + 1);
+  assert.equal((await resumed.handle.exited).code, 1);
+  assert.deepEqual(await fs.readFile(path.join(f.notes, 'a.md')), saved);
   const result = await f.finished((await f.execute('skip', { rejectModel: true })).handle);
   assert.equal(result.status, 'skipped'); assert.equal(result.counts.saved, 1); assert.deepEqual(result.paths, [path.join(f.notes, 'a.md')]);
   assert.deepEqual(await fs.readFile(path.join(f.notes, 'a.md')), saved);

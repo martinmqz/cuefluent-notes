@@ -72,15 +72,21 @@ untracked chats; no exact native command is needed.
      Either way, name the intended destination separately.
    - Ask with the client's question UI (Claude Code: AskUserQuestion; Codex: its
      question tool when available; otherwise plain text), using exactly the
-     returned `choices`.
-   - On `Save`, call `cuefluent_save_note` with `projectId`, `runId` and the
-     `revision` you showed. A direct draft saves in that call and returns the
-     saved path; link it. A queued set starts the save in a separate worker and
-     returns `running`: report it as still running and use `status` for progress
-     and the latest result. Call it again with the same `revision` to retry an
-     interrupted approved save.
-   - On `Discard` (direct draft) or `Skip draft; keep input` (queued drafts),
-     call `cuefluent_skip_note` with `projectId`, `runId` and the `revision` you
+     returned `choices`. They depend on the run's phase: a pending review set
+     offers `Save`, then `Discard` (direct draft) or `Skip draft; keep input`
+     (queued drafts), then `Keep pending`; a run whose notes are all saved and
+     only needs cleanup offers `Finish` and `Keep pending`; a run interrupted
+     while drafting offers `Discard` or `Skip; keep input`, and `Keep pending`.
+   - On `Save` or `Finish`, call `cuefluent_save_note` with `projectId`, `runId`
+     and the `revision` you showed. A direct draft saves in that call and returns
+     the saved path; link it. A queued set starts the save in a separate worker
+     and returns `running` with `started: true`: report it as still running and
+     use `status` for progress and the latest result. `started: false` means a
+     worker already owned the run and your decision did not start; read `status`
+     and, when the run is waiting again, review and ask again. Call the tool
+     again with the same `revision` to retry an interrupted approved save.
+   - On `Discard`, `Skip draft; keep input` or `Skip; keep input`, call
+     `cuefluent_skip_note` with `projectId`, `runId` and the `revision` you
      showed. Discard clears the unused private draft and changes no note.
      Skipping queued drafts releases them, keeps the selected input queued and
      keeps notes already saved, so the next `process` may propose the same notes
@@ -168,10 +174,10 @@ While a review set is pending, a typed `save` or `skip` does not act. Its result
 is the pending review status: show the drafts with `cuefluent_review_note`, ask
 the question as in step 5 of the note workflow above, and relay the decision
 with `cuefluent_save_note` or `cuefluent_skip_note` and the reviewed `revision`.
-A typed `save` still resumes an interrupted approved save (phase `saving`), and
-a typed `skip` still releases inactive failed or conflicted work that has no
-pending review set. `status` and the review result include the run's `kind` and
-`revision`.
+A typed `save` resumes an interrupted approved save (phase `saving`), and a
+typed `skip` releases inactive failed or conflicted work that has no pending
+review set. `status` reports the run's `kind`; the `revision` a decision cites
+comes only from the review pages that showed the drafts.
 
 ## Consent and setup
 

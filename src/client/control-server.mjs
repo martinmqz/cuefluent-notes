@@ -134,8 +134,8 @@ export async function executeClaudeExpansion(envelope, selection, { executeInvoc
 /** No model-supplied path/session/prompt authority. executeInvocation must fence
  * and deduplicate the trusted current prompt durably before executeControl. The
  * bridge deliberately has no process-local receipt cache or command history.
- * The server never sends requests to the host; review decisions arrive as
- * ordinary tool calls citing the reviewed revision. */
+ * Review decisions arrive as ordinary tool calls citing the reviewed revision;
+ * the server sends the host responses only. */
 export function createControlBridge({ client, selection, codexAdapter, executeInvocation, readInvocation, directNotes } = {}) {
   if (!['claude', 'codex'].includes(client) || (client === 'codex' && (typeof codexAdapter?.bindCommand !== 'function' || typeof executeInvocation !== 'function')) ||
       (client === 'claude' && typeof readInvocation !== 'function')) fail('CONTROL_ADAPTER_INVALID', 'A trusted native control adapter is required.');
@@ -167,16 +167,21 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
             !(typeof message.id === 'string' && message.id.length <= 128) && !Number.isSafeInteger(message.id)) return null;
         if (calls.has(message.id)) return { duplicate: true };
         if (calls.size >= 64) return { duplicate: true };
-        const state = { id: message.id }; calls.set(message.id, state); return state;
+        const state = { id: message.id, cancelled: false }; calls.set(message.id, state); return state;
       };
       const finish = state => { if (state && calls.get(state.id) === state) calls.delete(state.id); };
       const error = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
       const result = (id, value) => ({ jsonrpc: '2.0', id, result: value });
-      // The server sends no requests, so a host response has nothing to settle,
-      // and a cancellation notice cannot abandon a bounded tool call midway.
-      // Both are consumed without failing the connection.
+      // A cancellation notice marks a queued call so it is refused before it
+      // starts; a call already running finishes its bounded work. Responses
+      // addressed to this server have nothing to settle. Neither fails the connection.
       const receive = message => {
-        if (message?.method === 'notifications/cancelled' && message.jsonrpc === '2.0' && !Object.hasOwn(message, 'id')) return true;
+        if (message?.method === 'notifications/cancelled' && message.jsonrpc === '2.0' && !Object.hasOwn(message, 'id')) {
+          let requestId;
+          try { requestId = fields(message.params, ['requestId'], ['reason']).requestId; } catch { return true; }
+          const state = calls.get(requestId); if (state) state.cancelled = true;
+          return true;
+        }
         return object(message) && !Object.hasOwn(message, 'method') && Object.hasOwn(message, 'id') &&
           (Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error'));
       };
@@ -207,9 +212,10 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
         const state = queuedState ?? begin(message);
         if (state?.duplicate) return error(id, -32600, 'A tool request with this identity is already pending.');
         try {
-          // A host that already ended the connection gets a coded tool failure for
-          // work it queued afterwards; nothing starts on its behalf.
+          // Work that had not started when the host ended the connection or
+          // cancelled the request gets a coded failure; nothing starts for it.
           if (closed) fail('CONTROL_CONNECTION_CLOSED', 'The control connection closed before this request ran.');
+          if (state?.cancelled) fail('CONTROL_REQUEST_CANCELLED', 'The host cancelled this request before it ran.');
           const native = transportSession(client, input._meta, sessions);
           const value = await bridge.call(input.name, input.arguments ?? {}, { meta: input._meta,
             session: native ?? connection, canInspect: client === 'claude' || native !== null });

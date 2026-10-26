@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createProject } from '../src/core/settings.mjs';
-import { replaceAttempt, runRevision } from '../src/core/run.mjs';
+import { replaceAttempt, runRevision, validateRun } from '../src/core/run.mjs';
 import { initializeStore, withProject } from '../src/storage/store.mjs';
 import { readJSON, writeJSON, hashBytes } from '../src/storage/files.mjs';
 import { readDraftArtifact } from '../src/storage/draft-artifacts.mjs';
@@ -28,9 +28,9 @@ import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 // Review pages and relayed decisions of src/control/review.mjs, for direct and
 // queued runs. Queued review sets are published without a native model, exactly
 // as a worker leaves them; only the worker-side revision check runs in a child.
-const PROJECT = 'project', SKILL_VERSION = '0.16.0', PAGE = 192 * 1024, STALE = 'e'.repeat(64);
+const PROJECT = 'project', SKILL_VERSION = '0.16.0', PAGE = 48 * 1024, STALE = 'e'.repeat(64);
 const CREATED_AT = '2026-10-01T00:00:00.000Z', DRAFTED_AT = '2026-10-25T00:00:00.000Z';
-const QUEUED_CHOICES = ['Save', 'Skip draft; keep input', 'Keep pending'];
+const QUEUED_CHOICES = ['Save', 'Skip draft; keep input', 'Keep pending'], DRAFTING_CHOICES = ['Skip; keep input', 'Keep pending'];
 const RETRY = { target: 'decisions/retry.md', content: '# Retry decision\n\n## Design\nUse exact original hashes.\n', summary: 'Record the retry design.', heading: 'Design' };
 const serialized = value => Buffer.byteLength(JSON.stringify(value));
 
@@ -191,10 +191,10 @@ async function fixture(t) {
 test('queued review pages fill up to the byte budget with whole drafts; following next visits every draft once, in order', async t => {
   const f = await fixture(t);
   assert.equal(REVIEW_PAGE_BYTES, PAGE);
-  // Serialized, the drafts are about 59, 59, 59, 96, 48, 128 and 43 KiB: three fill
-  // a page and the 96 KiB draft cannot join them, then two, then two. No draft
+  // Serialized, the drafts are about 15, 15, 15, 24, 12, 32 and 11 KiB: three fill
+  // a page and the 24 KiB draft cannot join them, then two, then two. No draft
   // alone exceeds a page, so none is split.
-  const specs = [['a', 55], ['b', 55], ['knowledge-base/c', 55], ['d', 90], ['e', 45], ['f', 120], ['g', 40]]
+  const specs = [['a', 14], ['b', 14], ['knowledge-base/c', 14], ['d', 23], ['e', 11], ['f', 30], ['g', 10]]
     .map(([name, kib]) => ({ target: `${name}.md`, size: kib * 1024, summary: `Revise ${name}.`, heading: 'Section 1 café' }));
   const { run, revision, originals } = await f.queued(specs);
   const before = { run: await f.current(), queue: await f.queue(), notes: await fs.readdir(f.notes) };
@@ -241,7 +241,7 @@ test('a draft larger than one page is previewed in contiguous UTF-8-safe pieces;
   // mostly 3- and 4-byte characters, so most byte positions fall inside one.
   const specs = [
     { target: 'new-choice.md', content: '# Café 界 decision\n\n## Choice\nKeep "quotes", tabs\tand C:\\temp\\notes intact.\n', summary: 'Record the new choice.', heading: 'Choice' },
-    { target: 'huge.md', size: 1_200_000, width: 400, summary: 'Revise the huge note.', heading: 'Section 1 café' },
+    { target: 'huge.md', size: 300_000, width: 100, summary: 'Revise the huge note.', heading: 'Section 1 café' },
     { target: 'tail.md', size: 2_000, summary: 'Revise the tail.' },
   ];
   const { run, revision, originals } = await f.queued(specs);
@@ -269,7 +269,7 @@ test('a draft larger than one page is previewed in contiguous UTF-8-safe pieces;
     if (piece.next === null) continue;
     // A piece that does not end its draft owns its page and nearly fills it.
     assert.equal(page.drafts.length, 1); assert.deepEqual(page.next, { draft: 1, start: piece.end });
-    assert.ok(serialized(page) > PAGE - 16 * 1024, `A middle piece page serialized to only ${serialized(page)} bytes.`);
+    assert.ok(serialized(page) > PAGE - 4 * 1024, `A middle piece page serialized to only ${serialized(page)} bytes.`);
   }
   // Metadata is not part of any piece, and the decision context is on every page.
   assert.ok(previews[1].length < (await f.retained(run, 1)).bytes.length);
@@ -281,7 +281,7 @@ test('a draft larger than one page is previewed in contiguous UTF-8-safe pieces;
 
   // Offsets must be UTF-8 boundaries inside the draft, and the draft must exist.
   const review = position => reviewRun(f.store, { projectId: PROJECT, runId: run.id, ...position });
-  const refused = { code: 'DIRECT_NOTE_ARGUMENT' };
+  const refused = { code: 'REVIEW_ARGUMENT' };
   const cjk = previews[1].indexOf('界'), astral = previews[1].indexOf('𝄞');
   assert.ok(cjk > 0 && astral > 0);
   for (const start of [cjk + 1, cjk + 2, astral + 1, astral + 2, astral + 3]) await assert.rejects(review({ draft: 1, start }), refused);
@@ -297,7 +297,7 @@ test('a page filled to its brim still serializes within the byte budget, because
   // A first page that ends before the last draft carries a `next` pointer, which
   // is larger than `null`. Size one draft so that it alone fits the budget but
   // leaves less room than that pointer needs: it must not be placed whole.
-  const specs = pad => [{ target: 'brim.md', size: 150 * 1024, pad }, { target: 'next.md', size: 40 * 1024 }];
+  const specs = pad => [{ target: 'brim.md', size: 37 * 1024, pad }, { target: 'next.md', size: 10 * 1024 }];
   // A test-side model of one whole entry, checked against the real page below.
   const wholeEntry = (run, index, preview) => {
     const { target, summary, heading, expectedHash, hash } = run.drafts[index], totalBytes = Buffer.byteLength(preview);
@@ -327,8 +327,8 @@ test('after the pending run is replaced, a decision citing the earlier run repla
   const a = await f.direct('a.md', first);
   assert.equal(a.state, 'review'); assert.equal(a.kind, 'direct'); assert.deepEqual(a.choices, ['Save', 'Discard', 'Keep pending']);
   // A decision must cite a well-formed revision and a supported action.
-  for (const revision of [undefined, 64, 'E'.repeat(64), a.revision.slice(1), `${a.revision}\n`]) await assert.rejects(f.decide(a.runId, revision, 'save'), { code: 'DIRECT_NOTE_ARGUMENT' });
-  await assert.rejects(f.decide(a.runId, a.revision, 'process'), { code: 'DIRECT_NOTE_ARGUMENT' });
+  for (const revision of [undefined, 64, 'E'.repeat(64), a.revision.slice(1), `${a.revision}\n`]) await assert.rejects(f.decide(a.runId, revision, 'save'), { code: 'REVIEW_ARGUMENT' });
+  await assert.rejects(f.decide(a.runId, a.revision, 'process'), { code: 'REVIEW_ARGUMENT' });
   assert.deepEqual(await fs.readdir(f.notes), []);
 
   const skipped = await f.decide(a.runId, a.revision, 'skip');
@@ -409,7 +409,7 @@ test('a queued decision is relayed to a separate worker that rechecks the revisi
   // Nothing was lost: the same decision with the true revision completes.
   const retried = await decideRun(f.store, { projectId: PROJECT, runId: run.id, revision, action: 'save' },
     { client: 'codex', skillVersion: SKILL_VERSION, launchProcessing: context => f.launchWorker(context) });
-  assert.equal(retried.state, 'running');
+  assert.deepEqual(retried, { state: 'running', projectId: PROJECT, runId: run.id, started: true });
   const saver = f.workers.at(-1);
   assert.deepEqual(await saver.exited, { code: 0, stderr: '' });
   const outcome = await f.read(`outcome-${saver.attemptId}.json`);
@@ -422,8 +422,8 @@ test('a queued run that is still drafting has nothing to page, and one owned by 
   const f = await fixture(t), drafting = await f.prepare();
   const review = position => reviewRun(f.store, { projectId: PROJECT, runId: drafting.id, ...position });
   assert.deepEqual(await review(), { state: 'interrupted', projectId: PROJECT, runId: drafting.id, kind: 'project', phase: 'drafting', revision: runRevision(drafting),
-    draftCount: 0, choices: QUEUED_CHOICES, drafts: [], next: null, savedPaths: [], warnings: [] });
-  for (const position of [{ draft: 1 }, { start: 1 }]) await assert.rejects(review(position), { code: 'DIRECT_NOTE_ARGUMENT' });
+    draftCount: 0, choices: DRAFTING_CHOICES, drafts: [], next: null, savedPaths: [], warnings: [] });
+  for (const position of [{ draft: 1 }, { start: 1 }, { draft: -1 }, { start: 1.5 }]) await assert.rejects(review(position), { code: 'REVIEW_ARGUMENT' });
   // Nothing is reviewed yet, so there is nothing for a decision to save.
   await assert.rejects(decideRun(f.store, { projectId: PROJECT, runId: drafting.id, revision: runRevision(drafting), action: 'save' },
     { client: 'codex', skillVersion: SKILL_VERSION, launchProcessing: () => assert.fail('No worker may start for unfinished drafting.') }), { code: 'RUN_PHASE_INVALID' });
@@ -433,7 +433,7 @@ test('a queued run that is still drafting has nothing to page, and one owned by 
   assert.deepEqual(reviewed.map(page => [page.state, page.phase, page.drafts.length, page.next]), [['review', 'review', 1, null]]);
   // While a worker owns the run, review and either decision only report it:
   // nothing is read, decided or launched.
-  const running = { state: 'running', projectId: PROJECT, runId: run.id };
+  const running = { state: 'running', projectId: PROJECT, runId: run.id, started: false };
   await f.own(run.id, async () => {
     assert.deepEqual(await reviewRun(f.store, { projectId: PROJECT, runId: run.id }), running);
     for (const action of ['save', 'skip']) {
@@ -475,4 +475,31 @@ test('an interrupted partial save lists what it saved and why it stopped, keeps 
   assert.deepEqual(contexts.map(({ runId, action, revision: cited }) => ({ runId, action, revision: cited })), ['save', 'skip'].map(action => ({ runId: run.id, action, revision })));
   assert.equal(await fs.readFile(f.file('z.md'), 'utf8'), 'User file arrived after drafting.');
   assert.deepEqual(await fs.readFile(f.file('a.md')), saved); assert.equal((await f.queue()).records, 1);
+});
+
+test('a run whose notes are all saved offers only Finish, and either decision finishes its cleanup and consumes the handled input', async t => {
+  const f = await fixture(t);
+  const { run, revision } = await f.queued([RETRY]);
+  const draft = run.drafts[0], saved = [{ draftId: draft.id, target: draft.target, hash: draft.hash, changed: true }];
+  // The worker published the note and stopped before cleanup finished.
+  const interrupt = phase => withProject(f.store, PROJECT, async ({ directory }) => {
+    const stored = await readJSON(f.store.pin, `${directory}/run.json`);
+    await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase, saved, attempt: null }), { expectedHash: stored.hash });
+  });
+  await interrupt('saving');
+  let page = await reviewRun(f.store, { projectId: PROJECT, runId: run.id });
+  assert.deepEqual([page.state, page.phase, page.choices, page.savedPaths, page.revision], ['interrupted', 'saving', ['Finish', 'Keep pending'], [draft.target], revision]);
+  await interrupt('cleanup');
+  page = await reviewRun(f.store, { projectId: PROJECT, runId: run.id });
+  assert.deepEqual([page.state, page.phase, page.choices, page.drafts, page.revision], ['interrupted', 'cleanup', ['Finish', 'Keep pending'], [], revision]);
+  assert.equal((await f.queue()).records, 1);
+  const finished = await decideRun(f.store, { projectId: PROJECT, runId: run.id, revision, action: 'save' },
+    { client: 'codex', skillVersion: SKILL_VERSION, launchProcessing: context => f.launchWorker(context), startupTimeoutMs: process.platform === 'win32' ? 15_000 : undefined });
+  assert.deepEqual(finished, { state: 'running', projectId: PROJECT, runId: run.id, started: true });
+  const worker = f.workers.at(-1);
+  assert.deepEqual(await worker.exited, { code: 0, stderr: '' });
+  const outcome = await f.read(`outcome-${worker.attemptId}.json`);
+  assert.deepEqual([outcome.status, outcome.counts.handled, outcome.paths], ['saved', 1, [draft.target]]);
+  assert.equal((await f.queue()).records, 0);
+  await assert.rejects(inspectAttempt(f.store, PROJECT), { code: 'RUN_MISSING' });
 });

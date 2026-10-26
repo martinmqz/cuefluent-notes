@@ -42,10 +42,14 @@ features until a release is installed.
 The chat-decision flow has not yet been verified live on any surface: Claude Code
 in Terminal, Claude Desktop's Code tab and Codex Desktop each still need an
 accepted save, a declined decision that leaves the draft pending, and a discard,
-with the saved bytes compared to the complete retained draft. Rendered previews
-are verified in Claude Desktop's Code tab and Codex Desktop. Ordinary Claude chat
-and Cowork have not been exercised. These results apply to the observed client
-surfaces, not every application that embeds Claude Code.
+with the saved bytes compared to the complete retained draft. Review pages are
+sized at 48 KiB of serialized JSON for the output a host passes to its model
+from one tool result (Claude Code's default limit is 25,000 tokens); whether each
+host delivers a full page inline, including one of CJK text, is part of that
+live check. Rendered previews are verified in Claude Desktop's Code tab and Codex
+Desktop. Ordinary Claude chat and Cowork have not been exercised. These results
+apply to the observed client surfaces, not every application that embeds Claude
+Code.
 
 The following native binding requirements apply to tracking and queued processing.
 
@@ -123,9 +127,9 @@ They send no model input and do not prove native sandbox isolation. Hosted smoke
 therefore reports `sandboxCanary: false`; production processing still requires its
 full native isolation checks before source delivery.
 
-Earlier Windows native checks covered Claude Opus and explicitly selected Codex
-GPT-6 Luna processing through private draft, review, exact-byte save and cleanup.
-The Codex checks used the previous exec transport. Codex uses
+Windows native checks covered Claude Opus and explicitly selected Codex
+GPT-6 Luna processing through private draft, review, exact-byte save and cleanup,
+with Codex on an exec transport the current adapter does not use. Codex uses
 its configured model unless the trusted host explicitly selects another available
 model or deployment. The provider-preserving Codex transport has native macOS
 coverage; its Windows and Linux acceptance must be repeated. Codex on Windows requires its explicit MXC

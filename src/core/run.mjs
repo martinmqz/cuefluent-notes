@@ -232,13 +232,14 @@ export function validateRun(input, { platform } = {}) {
     phase: input.phase, drafts, saved, warnings, cleanup, publication, logging, logEvents, logPublication, artifacts });
 }
 
-/** The immutable identity of a reviewed draft set: the run, its pinned settings
- * and every draft's target, original hash, content hash and size. Phase, save
- * receipts, attempts and warnings are excluded so an unchanged set stays
- * retryable after a partial save. Every save or skip decision cites it. */
+/** The immutable identity of a reviewed draft set: the run, its pinned settings,
+ * whether its draft set is published, and every draft's target, original hash,
+ * content hash and size. Save receipts, attempts and warnings are excluded so an
+ * unchanged set stays citable after a partial save. Every save or skip decision
+ * cites it; a run still drafting cannot be mistaken for a published empty set. */
 export function runRevision(run) {
   const checked = validateRun(run);
-  return createHash('sha256').update(JSON.stringify(['cuefluent-revision', 1, checked.id, checked.scope, checked.settings,
+  return createHash('sha256').update(JSON.stringify(['cuefluent-revision', 1, checked.id, checked.scope, checked.settings, checked.phase !== 'drafting',
     checked.drafts.map(draft => [draft.id, draft.target, draft.expectedHash, draft.hash, draft.byteLength])])).digest('hex');
 }
 

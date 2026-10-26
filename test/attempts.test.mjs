@@ -66,13 +66,14 @@ async function finish(f) {
 test('worker gate permits queue appends during work and prevents a competing launch', async t => {
   const f = await fixture(t);
   const started = await launchOwnedAttempt(f.store, 'demo', { runId: f.run.id, launch: f.launch });
-  assert.equal(started.state, 'running');
+  assert.equal(started.state, 'running'); assert.equal(started.launched, true);
   assert.equal((await inspectAttempt(f.store, 'demo')).active, true);
   await withProject(f.store, 'demo', async ({ directory }) => {
     await writeJSON(f.store.pin, `${directory}/chats/queued-during-work.json`, { exchange: 'new synthetic input' }, { expectedHash: null });
   });
   const repeated = await launchOwnedAttempt(f.store, 'demo', { runId: f.run.id, launch: () => assert.fail('Started a competing worker') });
-  assert.deepEqual(repeated, started);
+  // The same owner is reported, and the caller learns that nothing new started.
+  assert.deepEqual(repeated, { ...started, launched: false });
   assert.deepEqual(await finish(f), { ok: true });
   assert.equal((await f.children[0].exited).code, 0);
   const state = await inspectAttempt(f.store, 'demo');

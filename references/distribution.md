@@ -31,8 +31,8 @@ the variable without exposing its value. Loaded package versions are included
 in later failures, but a version is not guessed when package validation fails.
 
 `STORE_SCHEMA_UNSUPPORTED` refuses an unsupported private-state contract before use;
-follow the [fresh-setup transition](setup.md#private-location) while preserving
-the earlier store. `STORE_ROOT_OCCUPIED` means setup found foreign entries, and
+preserve that store and set up at a fresh [private location](setup.md#private-location).
+`STORE_ROOT_OCCUPIED` means setup found foreign entries, and
 `STORE_INCOMPLETE` means incomplete or changed initialization state needs inspection.
 Neither authorizes deleting retained work or recreating settings around it.
 `STORE_SETUP_BUSY` reports interference while opening the setup directory; wait
@@ -68,15 +68,11 @@ existing native login and authentication settings unchanged. Then explicitly set
 up the project and notes destination using [setup](setup.md). New installations
 track nothing; fresh settings default to manual tracking and review saving.
 
-Version 0.18.0 uses one current runtime and private-state contract and requires
-fresh setup. Settings, tracking state, queues and drafts from earlier packages are
-not discovered or imported. Follow the [storage transition](setup.md#private-location):
-finish pending work with its original package, stop its processes, preserve its
-store in place, and explicitly configure the current package. Restart the client
-so its connector, hooks and workers use the same package and store. Existing
-Markdown notes remain user content and are preserved independently of private runtime state. Published
-releases and their checksums remain immutable; a development package does not
-replace historical releases.
+The connector, hooks and workers of one installation use the same package and
+the same private store; restart the client after changing either. Markdown notes
+remain user content and are preserved independently of private runtime state.
+Published releases and their checksums remain immutable; a development package
+does not replace them.
 
 See [verification](verification.md) before relying on native client or platform
 behavior. Repository build, CI and publication procedures are maintained separately

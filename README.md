@@ -41,7 +41,7 @@ Use Node.js 26.12.1 or a newer Node 26 patch and a supported authenticated nativ
 client. Runtime libraries and their licenses are included in each detached client
 package; an installed package needs no npm install. The current Codex processing
 transport has native macOS coverage; its Windows and Linux acceptance remains
-unverified. Earlier Windows checks used the previous transport. Windows packaged
+unverified. Windows packaged
 Desktop/TUI command acceptance also remains incomplete; see
 [verification](references/verification.md).
 

@@ -162,7 +162,7 @@ test('a pending queued run keeps direct submissions busy; its decisions cite its
   assert.equal((await f.create()).state, 'busy');
   const review = await f.call('review', run.id);
   assert.equal(review.state, 'interrupted'); assert.equal(review.kind, 'project'); assert.equal(review.phase, 'drafting');
-  assert.deepEqual(review.drafts, []); assert.deepEqual(review.choices, ['Save', 'Skip draft; keep input', 'Keep pending']);
+  assert.deepEqual(review.drafts, []); assert.deepEqual(review.choices, ['Skip; keep input', 'Keep pending']);
   // Unfinished drafting has nothing reviewed to save; process retries it.
   await assert.rejects(f.call('save', run.id), { code: 'RUN_PHASE_INVALID' });
   await assert.rejects(f.call('skip', run.id, 'e'.repeat(64)), { code: 'REVIEW_REVISION_STALE' });
@@ -324,7 +324,7 @@ test('completed request IDs only replay the exact saved or skipped payload', asy
   }
 });
 
-test('busy does not disclose another draft, and another chat or connection reviews a retained draft without a confirmation step', async t => {
+test('busy does not disclose another draft, and another chat or connection reviews a retained draft', async t => {
   const f = await fixture(t), native = await nativeTools(f);
   const created = await native.call('cuefluent_create_note', f.request, 'session-a'); assert.equal(created.state, 'review');
   const busy = await native.call('cuefluent_create_note', { ...f.request, requestId: randomUUID() }, 'session-b');
@@ -440,7 +440,13 @@ test('auto-mode direct crash recovery publishes retained bytes while review-mode
     const stored = await readJSON(g.store.pin, `${directory}/run.json`);
     await writeJSON(g.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase: 'drafting', drafts: [] }), { expectedHash: stored.hash });
   });
-  const recovered = await g.call('save', g.request.requestId, original.revision); assert.equal(recovered.state, 'review');
+  // The interrupted run has its own revision; citing the reviewed set's revision
+  // against it is stale, and only the current one restores the preview.
+  const interrupted = await g.call('review');
+  assert.equal(interrupted.state, 'interrupted'); assert.equal(interrupted.phase, 'drafting'); assert.notEqual(interrupted.revision, original.revision);
+  assert.deepEqual(interrupted.choices, ['Discard', 'Keep pending']);
+  await assert.rejects(g.call('save', g.request.requestId, original.revision), { code: 'REVIEW_REVISION_STALE' });
+  const recovered = await g.call('save', g.request.requestId, interrupted.revision); assert.equal(recovered.state, 'review');
   assert.deepEqual(recovered.drafts, original.drafts); assert.equal(recovered.revision, original.revision);
   assert.deepEqual(await fs.readdir(g.notes), []);
   assert.equal((await g.call('save', g.request.requestId, original.revision)).state, 'saved');

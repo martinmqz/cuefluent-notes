@@ -7,19 +7,25 @@ import { readPrivateDraft } from '../processing/save.mjs';
 import { runProcessingWork } from '../processing/worker.mjs';
 import { readRunSnapshot } from './status.mjs';
 
-/** One review page stays well inside the 256 KiB control projection so the
- * presenter can still append bounded warning details. */
-export const REVIEW_PAGE_BYTES = 192 * 1024;
+/** One review page is sized for what a host passes to its model in one tool
+ * result (Claude Code's default is 25,000 tokens), well inside the 256 KiB
+ * control projection. The complete set is shown across pages, never cut. */
+export const REVIEW_PAGE_BYTES = 48 * 1024;
 const HASH = /^[a-f0-9]{64}$/;
-/** The same wording on every client. Queued input is preserved by skip until a
- * consuming discard is specified for it. */
-export const DECISION_CHOICES = Object.freeze({
-  direct: Object.freeze(['Save', 'Discard', 'Keep pending']),
-  queued: Object.freeze(['Save', 'Skip draft; keep input', 'Keep pending']),
-});
-const choicesFor = run => DECISION_CHOICES[run.scope.kind === 'direct' ? 'direct' : 'queued'];
+const invalid = message => fail('REVIEW_ARGUMENT', message);
 const continuation = (bytes, at) => at < bytes.length && (bytes[at] & 0xc0) === 0x80;
 const serialized = value => Buffer.byteLength(JSON.stringify(value));
+
+/** The exact wording to offer for a pending run. `Save` and `Finish` relay to
+ * the save tool; `Discard` and the skip wordings relay to the skip tool; `Keep
+ * pending` makes no call. Queued skip keeps the selected input until only
+ * cleanup remains, where either tool finishes the run. */
+export function decisionChoices(run) {
+  const direct = run.scope.kind === 'direct';
+  if (run.phase === 'cleanup' || (run.phase === 'saving' && run.saved.length === run.drafts.length)) return ['Finish', 'Keep pending'];
+  if (run.phase === 'drafting') return [direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];
+  return ['Save', direct ? 'Discard' : 'Skip draft; keep input', 'Keep pending'];
+}
 
 export const completedOutcome = result => ({ state: result.status, projectId: result.projectId, runId: result.runId, result });
 
@@ -27,8 +33,8 @@ export const completedOutcome = result => ({ state: result.status, projectId: re
  * refusal. The caller already holds the project gate. */
 export function locateRun({ run, latest, active }, runId) {
   if (latest?.runId === runId && run?.id !== runId) return { result: completedOutcome(latest) };
-  if (!run || run.id !== runId) fail('REVIEW_RUN_CHANGED', 'The identified run is no longer pending or the latest outcome.');
-  return active ? { result: { state: 'running', projectId: run.projectId, runId: run.id } } : { run };
+  if (!run || run.id !== runId) fail('REVIEW_RUN_CHANGED', 'The identified run is neither pending nor the latest outcome.');
+  return active ? { result: { state: 'running', projectId: run.projectId, runId: run.id, started: false } } : { run };
 }
 
 function pageEntry(run, draft, index, content, start, end) {
@@ -54,26 +60,26 @@ function fitPiece(run, draft, index, content, start, available) {
  * pages, with the immutable revision every decision must cite. Read-only: no
  * model, synchronization or save is started. */
 export async function reviewRun(store, { projectId, runId, draft: first = 0, start: offset = 0 }) {
-  if (![first, offset].every(value => Number.isSafeInteger(value) && value >= 0)) fail('DIRECT_NOTE_ARGUMENT', 'A review page position must be nonnegative integers.');
+  if (![first, offset].every(value => Number.isSafeInteger(value) && value >= 0)) invalid('A review page position is a nonnegative draft index and byte offset.');
   return withProject(store, projectId, async context => {
     const located = locateRun(await readRunSnapshot(store, context), runId);
     if (located.result) return located.result;
     const { run } = located;
     const page = { state: run.phase === 'review' ? 'review' : 'interrupted', projectId: run.projectId, runId: run.id, kind: run.scope.kind, phase: run.phase,
-      revision: runRevision(run), draftCount: run.drafts.length, choices: choicesFor(run), drafts: [], next: null,
+      revision: runRevision(run), draftCount: run.drafts.length, choices: decisionChoices(run), drafts: [], next: null,
       savedPaths: run.saved.map(item => item.target), warnings: run.warnings };
     if (!['review', 'saving'].includes(run.phase)) {
-      if (first !== 0 || offset !== 0) fail('DIRECT_NOTE_ARGUMENT', 'This run has no reviewable draft page at that position.');
+      if (first !== 0 || offset !== 0) invalid('This run has no reviewable draft page at that position.');
       return page;
     }
-    if (first >= run.drafts.length) fail('DIRECT_NOTE_ARGUMENT', 'The requested draft index is beyond this draft set.');
+    if (first >= run.drafts.length) invalid('The requested draft index is beyond this draft set.');
     // Measure with the largest possible continuation marker and one separator
     // per entry, so the finished page never exceeds the budget it was built to.
     let size = serialized({ ...page, next: { draft: 1023, start: 10 * 1024 * 1024 } }) + 1;
     for (let index = first; index < run.drafts.length; index++) {
       const draft = run.drafts[index];
       const content = Buffer.from(reviewNoteContent(await readPrivateDraft(store, context.directory, run, draft)), 'utf8');
-      if ((offset && offset >= content.length) || continuation(content, offset)) fail('DIRECT_NOTE_ARGUMENT', 'The requested preview offset is not a UTF-8 boundary inside this draft.');
+      if ((offset && offset >= content.length) || continuation(content, offset)) invalid('The requested preview offset is not a UTF-8 boundary inside this draft.');
       const whole = pageEntry(run, draft, index, content, offset, content.length), wholeSize = serialized(whole) + 1;
       if (size + wholeSize <= REVIEW_PAGE_BYTES) { page.drafts.push(whole); size += wholeSize; offset = 0; continue; }
       if (page.drafts.length) { page.next = { draft: index, start: offset }; break; }
@@ -87,36 +93,50 @@ export async function reviewRun(store, { projectId, runId, draft: first = 0, sta
 
 const stale = () => fail('REVIEW_REVISION_STALE', 'The reviewed draft set changed since this decision was prepared.');
 
+/** A decision that lost a race to another owner or to a finished run is
+ * answered from the current state, never with an internal ownership code. */
+async function settled(store, projectId, runId, error) {
+  if (error?.code === 'ATTEMPT_ACTIVE') return { state: 'running', projectId, runId, started: false };
+  if (!['RUN_MISSING', 'RUN_CHANGED'].includes(error?.code)) throw error;
+  const located = locateRun(await withProject(store, projectId, context => readRunSnapshot(store, context)), runId);
+  if (located.result) return located.result;
+  fail('REVIEW_RUN_CHANGED', 'The identified run changed while the decision was being applied.');
+}
+
 /** Relay a user's decision about the cited reviewed run. The revision binds the
  * exact draft set; the backend checks identity, destination state and
  * concurrency rather than proving a click. Direct drafts save or discard in
  * this process; queued sets hand the same action to the separate worker. */
-export async function decideRun(store, { projectId, runId, revision, action }, { client, skillVersion, launchProcessing } = {}) {
-  if (!['save', 'skip'].includes(action) || typeof revision !== 'string' || !HASH.test(revision)) fail('DIRECT_NOTE_ARGUMENT', 'A decision needs the reviewed revision and a supported action.');
+export async function decideRun(store, { projectId, runId, revision, action }, { client, skillVersion, launchProcessing, startupTimeoutMs } = {}) {
+  if (!['save', 'skip'].includes(action) || typeof revision !== 'string' || !HASH.test(revision)) invalid('A decision cites the reviewed revision with a save or skip action.');
   const located = locateRun(await withProject(store, projectId, context => readRunSnapshot(store, context)), runId);
   if (located.result) return located.result;
   const { run } = located, work = { client, skillVersion };
+  if (runRevision(run) !== revision) stale();
   if (run.scope.kind === 'direct') {
-    // A complete retained manifest can be restored without resubmission or a
-    // model. Review mode only restores the preview; the decision follows it.
-    if (action === 'save' && run.phase === 'drafting' && run.settings.saving === 'review') {
-      const recovered = await ownDirectAttempt(store, projectId, runId, owner => runProcessingWork(store, owner, { ...work, action: 'process' }));
-      return recovered.state === 'review' ? reviewRun(store, { projectId, runId }) : completedOutcome(recovered);
-    }
-    if (runRevision(run) !== revision) stale();
-    const result = await ownDirectAttempt(store, projectId, runId, async (owner, current) => {
-      if (runRevision(current) !== revision) stale();
-      return runProcessingWork(store, owner, { ...work, revision, action: action === 'skip' ? 'skip' : current.settings.saving === 'auto' ? 'process' : 'save' });
-    });
-    return result.state === 'review' ? reviewRun(store, { projectId, runId }) : completedOutcome(result);
+    try {
+      // A complete retained manifest of a run still drafting is restored
+      // without resubmission or a model; in review mode that only restores the
+      // preview, and the decision follows it.
+      if (action === 'save' && run.phase === 'drafting' && run.settings.saving === 'review') {
+        const recovered = await ownDirectAttempt(store, projectId, runId, owner => runProcessingWork(store, owner, { ...work, action: 'process' }));
+        return recovered.state === 'review' ? reviewRun(store, { projectId, runId }) : completedOutcome(recovered);
+      }
+      const result = await ownDirectAttempt(store, projectId, runId, async (owner, current) => {
+        if (runRevision(current) !== revision) stale();
+        return runProcessingWork(store, owner, { ...work, revision, action: action === 'skip' ? 'skip' : current.settings.saving === 'auto' ? 'process' : 'save' });
+      });
+      return result.state === 'review' ? reviewRun(store, { projectId, runId }) : completedOutcome(result);
+    } catch (error) { return settled(store, projectId, runId, error); }
   }
   if (typeof launchProcessing !== 'function') fail('PROCESSING_LAUNCH_REQUIRED', 'A trusted separate worker launcher is required.');
-  if (runRevision(run) !== revision) stale();
-  if (action === 'save' && (run.settings.saving !== 'review' || !['review', 'saving'].includes(run.phase))) {
-    fail('RUN_PHASE_INVALID', 'Save publishes a reviewed draft set; process resumes drafting or automatic saving.');
+  if (action === 'save' && (run.settings.saving !== 'review' || run.phase === 'drafting')) {
+    fail('RUN_PHASE_INVALID', 'Save publishes a reviewed draft set or finishes its approved save; process resumes drafting or automatic saving.');
   }
   // The worker is bound to this exact run id and rechecks the revision before
   // acting; published drafts never change under one run id.
-  const launched = await launchOwnedAttempt(store, projectId, { runId, launch: context => launchProcessing({ ...context, action, revision }) });
-  return { state: launched.state, projectId, runId: launched.runId };
+  try {
+    const launched = await launchOwnedAttempt(store, projectId, { runId, startupTimeoutMs, launch: context => launchProcessing({ ...context, action, revision }) });
+    return { state: 'running', projectId, runId: launched.runId, started: launched.launched };
+  } catch (error) { return settled(store, projectId, runId, error); }
 }

@@ -173,7 +173,7 @@ test('control definitions reject collisions and freeze nested schemas without mu
   assert.equal(bridge.tools[1].inputSchema.properties.count.maximum, 5);
 });
 
-test('decisions are ordinary tool calls: the server sends no requests, and host responses or cancellation notices settle nothing', async () => {
+test('decisions are ordinary tool calls: responses addressed to the server are consumed, and a running call finishes despite a cancellation', async () => {
   let saved = 0;
   const call = decisionBridge(() => { saved++; }).protocol({ version: '0.16.0' });
   await initialize(call, { sampling: {} });
@@ -187,6 +187,22 @@ test('decisions are ordinary tool calls: the server sends no requests, and host 
   assert.throws(() => decisionBridge().protocol({ version: '0.16.0', timeoutMs: 10 }), { code: 'CONTROL_ADAPTER_INVALID' });
 });
 
+test('a queued call that the host cancels before it starts is refused with a coded result and does nothing', async () => {
+  let saved = 0;
+  const call = decisionBridge(() => { saved++; }).protocol({ version: '0.16.0' });
+  await initialize(call);
+  // The stdio reader registers a call when it is read, before its turn comes.
+  const state = call.begin({ ...decisionCall, id: 7 });
+  call.receive({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 7, reason: 'user' } });
+  const refused = await call({ ...decisionCall, id: 7 }, state);
+  assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error, 'CONTROL_REQUEST_CANCELLED');
+  assert.match(refused.result.structuredContent.recovery, /Nothing was changed/); assert.equal(saved, 0);
+  // Malformed notices and unknown ids are ignored; a later call with that id runs.
+  call.receive({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'absent' } });
+  call.receive({ jsonrpc: '2.0', method: 'notifications/cancelled', params: {} });
+  assert.equal((await call({ ...decisionCall, id: 7 })).result.structuredContent.state, 'saved'); assert.equal(saved, 1);
+});
+
 test('a closed connection refuses new tool calls without affecting a completed one', async () => {
   let saved = 0;
   const call = decisionBridge(() => { saved++; }).protocol({ version: '0.16.0' });
@@ -196,6 +212,36 @@ test('a closed connection refuses new tool calls without affecting a completed o
   const refused = await call({ ...decisionCall, id: 3 });
   assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error, 'CONTROL_CONNECTION_CLOSED');
   assert.match(refused.result.structuredContent.recovery, /^Reconnect/); assert.equal(saved, 1);
+});
+
+test('over stdio, a call queued behind one in flight is refused once the host has ended the connection, while the running call finishes', async () => {
+  const input = new PassThrough(), output = new PassThrough(); let release, entered, text = '', failure;
+  const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; }), replies = [];
+  output.on('data', chunk => {
+    text += chunk;
+    for (;;) { const index = text.indexOf('\n'); if (index < 0) break; replies.push(JSON.parse(text.slice(0, index))); text = text.slice(index + 1); }
+  });
+  const bridge = createControlBridge({ client: 'claude', readInvocation: async () => ({ state: 'idle' }), directNotes: {
+    tools: [{ name: 'slow_note', inputSchema: { type: 'object', properties: {}, additionalProperties: false } }],
+    async call() { entered(); await gate; return { state: 'saved' }; },
+  } });
+  const transport = serveControl(bridge, { input, output, version: '0.16.0', onFailure: error => { failure = error; } });
+  for (const message of [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } },
+    { jsonrpc: '2.0', method: 'notifications/initialized' },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'slow_note' } },
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'slow_note' } },
+  ]) input.write(JSON.stringify(message) + '\n');
+  await started;
+  input.end();
+  await new Promise(resolve => input.once('end', () => setImmediate(resolve)));
+  release();
+  await transport.idle();
+  assert.equal(failure, undefined);
+  assert.equal(replies.find(reply => reply.id === 2).result.structuredContent.state, 'saved');
+  const refused = replies.find(reply => reply.id === 3).result;
+  assert.equal(refused.isError, true); assert.equal(refused.structuredContent.error, 'CONTROL_CONNECTION_CLOSED');
+  output.end();
 });
 
 test('stdio serializes decision calls with ordinary calls and writes only responses to the host', async () => {
@@ -212,7 +258,7 @@ test('stdio serializes decision calls with ordinary calls and writes only respon
   for (const message of [
     { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: { sampling: {} }, clientInfo: {} } },
     { jsonrpc: '2.0', method: 'notifications/initialized' }, decisionCall,
-    { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } },
+    { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'absent' } },
     { jsonrpc: '2.0', id: 3, method: 'ping' },
   ]) input.write(JSON.stringify(message) + '\n');
   await transport.idle();
