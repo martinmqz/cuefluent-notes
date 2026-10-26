@@ -7,7 +7,7 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 export const PACKAGE_LIMITS = Object.freeze({ files: 4096, fileBytes: 16 * 1024 * 1024, totalBytes: 128 * 1024 * 1024, inventoryBytes: 2 * 1024 * 1024 });
-export const REFERENCES = Object.freeze(['setup', 'commands', 'notes', 'metadata', 'storage', 'verification', 'distribution']);
+export const REFERENCES = Object.freeze(['setup', 'notes', 'commands', 'limits']);
 export const INVENTORY = 'package-inventory.json';
 // The source package version names tags, archives and manifests: an exact SemVer
 // core with an optional prerelease and no build metadata. Companion copies of

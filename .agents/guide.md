@@ -239,7 +239,7 @@ There is no linter, formatter, or type checker.
   or Cuefluent search ranking. Native CLI envelopes do not prove production
   adapters, and per-file validation does not prove admission into a full app
   corpus. A run covers only its own platform and commit;
-  `references/verification.md` states supported behavior and limits.
+  `references/limits.md` states supported behavior and limits.
 
 ## Conventions
 

@@ -63,7 +63,7 @@ test('source, tooling, tests, versions, installed prose and checkout settings al
   const files = [
     'src/runtime.mjs', 'tools/ci-plan.mjs', 'test/ci-plan.test.mjs', 'test/support/other.mjs',
     'package.json', 'package-lock.json', '.node-version', 'SKILL.md', 'README.md', 'LICENSE.md',
-    'references/distribution.md', 'templates/note.md', 'hooks/hooks.json', 'packaging/plugin/source-files.json',
+    'references/limits.md', 'templates/note.md', 'hooks/hooks.json', 'packaging/plugin/source-files.json',
     '.github/workflows/ci.yml', '.gitattributes', '.gitignore', 'plugins-extra/file',
   ];
   const f = await fixture(t); let before = f.initial;
