@@ -358,7 +358,7 @@ test('CLI Claude MCP polling is read-only and accepts no caller native identitie
   const responses = server.stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(responses.find(item => item.id === 1).result.serverInfo, { name: 'cuefluent-control', version: JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version });
   assert.deepEqual(responses.find(item => item.id === 2).result.tools.map(item => item.name),
-    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note']);
+    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note', 'cuefluent_setup', 'cuefluent_status']);
   assert.equal(responses.find(item => item.id === 3).result.structuredContent.state, 'expired');
   assert.equal(responses.find(item => item.id === 4).result.isError, true);
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
@@ -402,13 +402,22 @@ test('already running MCP servers discover first-time setup without restarting o
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
       assert.equal((await call('cuefluent_projects', {})).state, 'unconfigured');
       assert.equal((await call('cuefluent_list_notes', { projectId: 'demo' })).state, 'unconfigured');
+      assert.deepEqual(await call('cuefluent_status', { projectId: 'demo' }), { state: 'unconfigured' });
       await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
-      const configPath = path.join(f.root, 'setup.json');
-      await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
-        destination: { kind: 'directory', path: f.notes }, saving: 'auto', activityLog: { enabled: false } } }));
-      const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+      const choices = { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes }, saving: 'auto', activityLog: { enabled: false } };
+      if (client === 'codex') {
+        // The live connection creates the store itself and keeps serving after it.
+        const setup = await call('cuefluent_setup', choices);
+        assert.equal(setup.state, 'configured'); assert.equal(setup.created, true);
+        assert.equal(setup.project.id, 'demo'); assert.equal(setup.project.saving, 'auto'); assert.deepEqual(setup.project.activityLog, { enabled: false });
+      } else {
+        const configPath = path.join(f.root, 'setup.json');
+        await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: choices }));
+        const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+      }
       const projects = await call('cuefluent_projects', {});
       assert.equal(projects.state, 'configured'); assert.equal(projects.projects[0].id, 'demo');
+      assert.equal((await call('cuefluent_status', { projectId: 'demo' })).state, 'idle');
       const saved = await call('cuefluent_create_note', { projectId: 'demo', requestId: 'b37a7cde-a8a3-4b04-9d45-e288a67a8af2',
         target: 'after-setup.md', content: '# Synthetic note\n\n## Decision\nContent supplied after setup.\n', summary: 'Synthetic setup check.' });
       assert.equal(saved.state, 'saved');

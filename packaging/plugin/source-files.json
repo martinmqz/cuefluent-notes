@@ -14,6 +14,7 @@
   "src/control/direct-notes.mjs",
   "src/control/execute.mjs",
   "src/control/invocations.mjs",
+  "src/control/project-tools.mjs",
   "src/control/review.mjs",
   "src/control/setup.mjs",
   "src/control/status.mjs",

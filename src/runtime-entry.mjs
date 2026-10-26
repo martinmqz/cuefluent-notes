@@ -15,6 +15,7 @@ import { createControlBridge, serveControl, presentControlResult } from './clien
 import { claimInvocation, runClaimedInvocation, readInvocation, launchInvocationChild, reportInvocationExit } from './control/invocations.mjs';
 import { executeControl } from './control/execute.mjs';
 import { createDirectNoteTools } from './control/direct-notes.mjs';
+import { createProjectTools, PROJECT_TOOLS } from './control/project-tools.mjs';
 import { readProjectStatus } from './control/status.mjs';
 import { setupProject } from './control/setup.mjs';
 import { createSyncRuntime } from './sync/runtime.mjs';
@@ -126,7 +127,9 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
       const adapter = args.client === 'codex' ? createCodexNativeAdapter({ version: skillVersion }) : null;
       try {
         const noteTools = () => createDirectNoteTools({ store, client: args.client, skillVersion, launchProcessing: processingLauncher({ client: args.client, skillVersion }) });
-        let directNotes = noteTools(), opening = null;
+        const projectTools = () => createProjectTools({ storeRoot, store, skillVersion });
+        const projectToolNames = new Set(PROJECT_TOOLS.map(item => item.name));
+        let directNotes = noteTools(), projects = projectTools(), opening = null;
         // A server may start before explicit setup creates the private store.
         // Recheck only that absent state; once opened, keep its pinned identity.
         const refreshStore = async () => {
@@ -138,12 +141,14 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
             store = opened;
             runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
             execute = commandExecutor(store, runtime, skillVersion);
-            directNotes = noteTools();
+            directNotes = noteTools(); projects = projectTools();
           })().finally(() => { opening = null; });
           await opening;
         };
         const bridge = createControlBridge({ client: args.client, selection: contract.codex, codexAdapter: adapter,
-          directNotes: { tools: directNotes.tools, async call(...input) { await refreshStore(); return directNotes.call(...input); } },
+          directNotes: { tools: [...directNotes.tools, ...projects.tools], async call(name, ...input) {
+            await refreshStore(); return (projectToolNames.has(name) ? projects : directNotes).call(name, ...input);
+          } },
           executeInvocation: async invocation => { await refreshStore(); return invocation.action === 'status' ? execute(invocation) : submitCommand(store,
             { ...invocation, clientContract: clientContract(contract, args.client) }); },
           readInvocation: async handle => { await refreshStore(); return readInvocation(store, handle); } });
