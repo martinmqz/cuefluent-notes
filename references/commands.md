@@ -125,8 +125,8 @@ selected input and saved notes. While a review set is pending both return the
 pending review status so the drafts can be shown and the question asked. Once
 every note is saved, typed `skip` finishes the remaining cleanup in either
 saving mode and consumes the handled input; typed `save` does so in review mode,
-while in automatic mode it only reports the run, which `process` or the `Finish`
-decision completes. A save refused because a note changed after review leaves a
+while in automatic mode it only reports the run, which the matching `process`
+command above or the `Finish` decision completes. A save refused because a note changed after review leaves a
 conflict warning on the run; `Discard` or `Skip draft; keep input` releases it
 for a fresh draft, and `Save` succeeds again only once the note is back to its
 reviewed original.
