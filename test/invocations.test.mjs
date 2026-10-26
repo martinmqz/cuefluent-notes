@@ -118,7 +118,7 @@ test('a persisted failed invocation gains public guidance without rewriting its 
   const response = await call({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'cuefluent_invocation', arguments: { handle: claim.ticket } } });
   assert.equal(response.result.isError, true);
   assert.equal(response.result.structuredContent.error, outcome.reason);
-  assert.match(response.result.structuredContent.recovery, /retained run/);
+  assert.match(response.result.structuredContent.recovery, /retry with process/);
   assert.equal(JSON.stringify(response).includes('Synthetic private'), false);
   assert.equal(await fs.readFile(record, 'utf8'), before);
   assert.deepEqual(JSON.parse(before).result, { state: 'failed', reason: 'PROCESSING_CLIENT_FAILED' });

@@ -54,8 +54,11 @@ function metadata(value) {
 }
 
 /** Derive guidance only at the public boundary. Retained outcomes and their
- * warning codes stay unchanged; a historical warning is not a failed status
- * request. Only known result slots are inspected, never arbitrary nested data. */
+ * warning codes stay unchanged, and a warning is not a failed status request.
+ * Only known result slots are inspected, never arbitrary nested data: `status`
+ * and `run` warnings are current, `latest` and `result` warnings belong to a
+ * completed run and advise no retry. */
+const COMPLETED_RUN_WARNING = 'This warning was recorded by a run that has finished; it needs no retry. Read status for current work before starting a new operation.';
 export function presentControlResult(value, context = {}, { bounded = true } = {}) {
   // CLI/hook callers already hold validated store snapshots and had no MCP
   // envelope limit. Do not impose that transport's bound on their status output.
@@ -69,19 +72,15 @@ export function presentControlResult(value, context = {}, { bounded = true } = {
   const warnings = [];
   for (const [scope, item] of [['status', result], ['run', result.run], ['latest', result.latest], ['result', result.result]]) {
     if (!object(item) || !Array.isArray(item.warnings)) continue;
-    const historical = ['saved', 'nothing-useful', 'skipped', 'empty'].includes(item.status ?? item.state);
-    for (const code of new Set(item.warnings.filter(isCode))) warnings.push({ scope, code, historical });
+    for (const code of new Set(item.warnings.filter(isCode))) warnings.push({ scope, code });
   }
   if (!warnings.length) return result;
   const details = [];
-  for (const { scope, code, historical } of warnings.slice(0, 16)) {
-    const detail = { scope, ...describeFailure({ code }, diagnosticContext) };
-    if (historical) {
-      detail.historical = true;
-      detail.message = `Warning recorded during this completed run: ${detail.message}`;
-      detail.recovery = 'This run has finished. Do not retry it because of this warning. Inspect the recorded outcome and any remaining queued work before starting a new operation.';
-    }
-    details.push(detail);
+  for (const { scope, code } of warnings.slice(0, 16)) {
+    const { error, message, recovery } = describeFailure({ code }, diagnosticContext);
+    details.push(['latest', 'result'].includes(scope)
+      ? { scope, error, message, recovery: COMPLETED_RUN_WARNING }
+      : { scope, error, message, recovery });
     try {
       result = projection({ ...result, warningDetails: [...details], warningDetailsTruncated: details.length < warnings.length });
     } catch (error) {

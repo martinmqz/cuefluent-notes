@@ -28,7 +28,7 @@ test('both command transports explain retained failures and flag the failed comm
     assert.equal(response.result.isError, true);
     const value = response.result.structuredContent;
     assert.equal(value.state, 'failed'); assert.equal(value.reason, retained.reason);
-    assert.equal(value.error, retained.reason); assert.match(value.message, /drafting client/); assert.match(value.recovery, /retained run/);
+    assert.equal(value.error, retained.reason); assert.match(value.message, /drafting client/); assert.match(value.recovery, /retry with process/);
     assert.equal(value.diagnostics.pluginVersion, '0.17.1'); assert.equal(value.diagnostics.stage, 'result');
     assert.equal(value.diagnostics.toolName, name);
     assert.deepEqual(JSON.parse(response.result.content[0].text), value);
@@ -36,7 +36,7 @@ test('both command transports explain retained failures and flag the failed comm
   }
 });
 
-test('status explains scoped processing warnings without marking historical failures as new errors', async () => {
+test('status explains warnings by the slot they belong to, so a completed run\'s warning is not a new error', async () => {
   const retained = { state: 'idle', warnings: [], latest: { status: 'saved', warnings: ['PROCESSING_CLIENT_FAILED'] }, run: null };
   const call = await protocol(createControlBridge({ client: 'claude', readInvocation: async () => retained }));
   const response = await call(message('cuefluent_invocation', { handle: 'a'.repeat(86) }));
@@ -44,15 +44,16 @@ test('status explains scoped processing warnings without marking historical fail
   const value = response.result.structuredContent;
   assert.equal(value.state, 'idle'); assert.equal(value.error, undefined);
   assert.deepEqual(value.latest, retained.latest); assert.equal(retained.warningDetails, undefined);
+  assert.deepEqual(Object.keys(value.warningDetails[0]), ['scope', 'error', 'message', 'recovery']);
   assert.equal(value.warningDetails[0].scope, 'latest'); assert.equal(value.warningDetails[0].error, 'PROCESSING_CLIENT_FAILED');
-  assert.equal(value.warningDetails[0].historical, true);
+  assert.match(value.warningDetails[0].recovery, /needs no retry/);
   assert.equal(value.warningDetailsTruncated, false);
-  const current = presentControlResult({ state: 'interrupted', warnings: [], run: { warnings: ['PROCESSING_ISOLATION_UNSUPPORTED'] } });
-  assert.equal(current.warningDetails[0].scope, 'run'); assert.match(current.warningDetails[0].recovery, /do not weaken isolation/);
+  const current = presentControlResult({ state: 'idle', warnings: [], run: { phase: 'drafting', warnings: ['PROCESSING_ISOLATION_UNSUPPORTED'] } });
+  assert.equal(current.warningDetails[0].scope, 'run'); assert.match(current.warningDetails[0].recovery, /Do not weaken isolation/);
   assert.equal(current.error, undefined);
 });
 
-test('completed outcomes carry historical advice while a newer pending run retains its own recovery', async () => {
+test('completed outcomes advise no retry while a newer pending run keeps its own recovery', async () => {
   for (const status of ['saved', 'nothing-useful', 'skipped', 'empty']) {
     const warnings = ['PROCESSING_CLIENT_FAILED', 'PROCESSING_ISOLATION_UNSUPPORTED'];
     const outcome = validateResult({ schemaVersion: 1, runId: randomUUID(), projectId: 'synthetic', status,
@@ -61,8 +62,7 @@ test('completed outcomes carry historical advice while a newer pending run retai
     const current = { warnings: ['PROCESSING_CLIENT_FAILED'], phase: 'drafting' };
     const snapshots = [
       [{ state: status, result: outcome }, 'result'],
-      [{ state: 'interrupted', run: current, latest: outcome }, 'latest'],
-      [{ ...outcome, state: status }, 'status'],
+      [{ state: 'idle', run: current, latest: outcome }, 'latest'],
     ];
     for (const [retained, scope] of snapshots) {
       const before = JSON.stringify(retained);
@@ -75,18 +75,16 @@ test('completed outcomes carry historical advice while a newer pending run retai
         const response = await (await protocol(bridge))(message(name, args));
         assert.equal(response.result.isError, false);
         const value = response.result.structuredContent;
-        const historical = value.warningDetails.filter(detail => detail.scope === scope);
-        assert.equal(historical.length, warnings.length);
-        for (const detail of historical) {
-          assert.equal(detail.historical, true);
-          assert.match(detail.message, /completed run/);
-          assert.match(detail.recovery, /Do not retry it/);
-          assert.doesNotMatch(detail.recovery, /retained run|pending drafts|sign-in/);
+        const completed = value.warningDetails.filter(detail => detail.scope === scope);
+        assert.equal(completed.length, warnings.length);
+        for (const detail of completed) {
+          assert.deepEqual(Object.keys(detail), ['scope', 'error', 'message', 'recovery']);
+          assert.match(detail.recovery, /recorded by a run that has finished; it needs no retry/);
+          assert.doesNotMatch(detail.recovery, /retry with process|sign-in|isolation/);
         }
         if (scope === 'latest') {
           const pending = value.warningDetails.find(detail => detail.scope === 'run');
-          assert.equal(pending.historical, undefined);
-          assert.match(pending.recovery, /Inspect the retained run before retrying/);
+          assert.match(pending.recovery, /retry with process/);
         }
         assert.deepEqual(JSON.parse(response.result.content[0].text), value);
         assert.equal(JSON.stringify(retained), before);
@@ -141,7 +139,8 @@ test('tool recovery uses the actual tool context without echoing supplied argume
     call: async () => { throw Object.assign(new Error('synthetic-secret'), { code: 'ENOENT', path: 'synthetic-secret' }); },
   } });
   const call = await protocol(bridge), response = await call(message('cuefluent_read_note', { target: 'synthetic-secret' }));
-  assert.equal(response.result.isError, true); assert.match(response.result.structuredContent.recovery, /list the notes again/);
+  assert.equal(response.result.isError, true); assert.match(response.result.structuredContent.recovery, /configured paths exist/);
+  assert.equal(response.result.structuredContent.diagnostics.toolName, 'cuefluent_read_note');
   assert.equal(JSON.stringify(response).includes('synthetic-secret'), false);
 });
 

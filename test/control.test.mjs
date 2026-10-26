@@ -121,7 +121,9 @@ test('skip after a partial conflicted save keeps the saved note, the user collis
   const saved = await fs.readFile(path.join(f.notes, 'a.md'));
   const interrupted = await inspectAttempt(f.store, 'project');
   assert.equal(interrupted.run.saved.length, 1); assert.equal(interrupted.run.phase, 'saving');
-  assert.equal((await f.execute('status')).result.state, 'interrupted');
+  const status = (await f.execute('status')).result;
+  assert.equal(status.state, 'idle'); assert.equal(status.run.active, false); assert.equal(status.run.phase, 'saving');
+  assert.deepEqual(status.run.savedPaths, [path.join(f.notes, 'a.md')]); assert.match(status.run.recovery, /relay Save with the reviewed revision/);
   // No review set is pending, so a typed save resumes the approved save (and
   // meets the same collision) and a typed skip releases the inactive work.
   const launches = f.launches, resumed = await f.execute('save', { rejectModel: true });
@@ -149,7 +151,8 @@ test('failed drafting is retried in the existing run with the original frozen in
   const f = await fixture(t, { saving: 'auto' }), failed = await f.execute('process', { rejectModel: true });
   assert.equal((await failed.handle.exited).code, 1); await f.append('later');
   const state = (await f.execute('status')).result;
-  assert.equal(state.state, 'interrupted'); assert.ok(state.run.warnings.includes('SYNTHETIC_MODEL_FAILURE'));
+  assert.equal(state.state, 'idle'); assert.ok(state.run.warnings.includes('SYNTHETIC_MODEL_FAILURE'));
+  assert.equal(state.run.phase, 'drafting'); assert.match(state.run.recovery, /Repeat process to resume it/);
   const retried = await f.execute('process', { targets: [] }); assert.equal(retried.result.runId, failed.result.runId);
   const result = await f.finished(retried.handle); assert.equal(result.status, 'nothing-useful'); assert.equal(result.counts.handled, 1);
   assert.equal((await f.queue()).records, 1);

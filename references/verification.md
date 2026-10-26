@@ -11,10 +11,12 @@ private exception text. The diagnostic preflight targets Node 18 and later;
 older versions may fail in the native loader or parser. These checks do not
 establish how every desktop client renders diagnostics.
 Host failures before process creation remain host-reported errors, and executable
-discovery or automatic runtime installation is not provided. Public presentation
-adds bounded explanations to retained failed invocations and code-only run
-warnings without rewriting stored results or changing their status semantics.
-Historical failures in a successful status read remain historical outcomes.
+discovery or automatic runtime installation is not provided. Guidance comes from one
+table of user-facing codes; a check confirms that every code raised in the
+source resolves to it or to the generic entry. Public presentation adds bounded
+explanations to retained failed invocations and code-only run warnings without
+rewriting stored results or changing their status semantics; a completed run's
+warnings keep their completed-run guidance in a successful status read.
 
 ## Native clients
 

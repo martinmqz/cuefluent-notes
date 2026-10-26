@@ -60,12 +60,33 @@ export async function readProjectStatus(store, projectId, { chat = null, invento
     }
   }
   const run = snapshot.run;
-  return Object.freeze({ projectId, state: snapshot.active ? 'running' : run?.phase === 'review' ? 'review' : run ? 'interrupted' : 'idle',
+  // Three states: `running` needs a live worker, `review` means drafts await a
+  // decision, and `idle` covers everything else, including a retained run that
+  // stopped between phases; its `recovery` names the action that continues it.
+  return Object.freeze({ projectId, state: snapshot.active ? 'running' : run?.phase === 'review' ? 'review' : 'idle',
     settings: snapshot.settings, counts: Object.freeze(counts), warnings: Object.freeze(warnings), latest: snapshot.latest,
     // The revision a decision cites comes only from the review pages that show
     // the drafts, never from status.
     run: run ? Object.freeze({ id: run.id, scope: run.scope, kind: run.scope.kind, phase: run.phase, active: snapshot.active,
       selected: run.selection.length, saved: run.saved.length,
       drafts: Object.freeze(run.drafts.map(item => Object.freeze({ target: item.target, summary: item.summary, heading: item.heading }))),
-      savedPaths: Object.freeze(run.saved.map(item => item.target)), warnings: run.warnings }) : null });
+      savedPaths: Object.freeze(run.saved.map(item => item.target)), warnings: run.warnings,
+      recovery: runRecovery(run, snapshot.active) }) : null });
+}
+
+const RECOVERY = Object.freeze({
+  active: 'A worker is working on this run. Read status again later; do not start another command for this project.',
+  review: 'Drafts await a decision. Show them with cuefluent_review_note and relay the user\'s choice with the revision of that page.',
+  direct: 'Drafting stopped before the draft was complete. Retry the original request with its requestId, or show the retained draft with cuefluent_review_note and relay Discard.',
+  queued: 'Drafting stopped before the draft set was published. Repeat process to resume it with the same frozen input, or show it with cuefluent_review_note and relay Skip; keep input.',
+  saving: 'Saving stopped before every note was written; savedPaths lists the notes already saved. Repeat process for automatic saving, or relay Save with the reviewed revision, to finish it.',
+  directSaving: 'Saving stopped before every note was written; savedPaths lists the notes already saved. Relay Save with the reviewed revision through cuefluent_save_note to finish it.',
+  cleanup: 'Every note is saved and only cleanup remains. Show the run with cuefluent_review_note and relay Finish.',
+});
+function runRecovery(run, active) {
+  if (active) return RECOVERY.active;
+  const direct = run.scope.kind === 'direct';
+  if (run.phase === 'drafting') return direct ? RECOVERY.direct : RECOVERY.queued;
+  if (run.phase === 'saving') return direct ? RECOVERY.directSaving : RECOVERY.saving;
+  return RECOVERY[run.phase];
 }
