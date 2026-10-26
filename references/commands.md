@@ -122,9 +122,11 @@ run, `process` from the same chat for a chat run; another chat's `process` only
 reports the pending run. Typed `save` resumes an interrupted approved save (phase
 `saving`); typed `skip` releases inactive failed or conflicted work, keeping
 selected input and saved notes. While a review set is pending both return the
-pending review status so the drafts can be shown and the question asked, and
-once every note is saved both finish the remaining cleanup, which consumes the
-handled input. A save refused because a note changed after review leaves a
+pending review status so the drafts can be shown and the question asked. Once
+every note is saved, typed `skip` finishes the remaining cleanup in either
+saving mode and consumes the handled input; typed `save` does so in review mode,
+while in automatic mode it only reports the run, which `process` or the `Finish`
+decision completes. A save refused because a note changed after review leaves a
 conflict warning on the run; `Discard` or `Skip draft; keep input` releases it
 for a fresh draft, and `Save` succeeds again only once the note is back to its
 reviewed original.

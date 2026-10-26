@@ -451,6 +451,10 @@ test('multibyte note input obeys the UTF-8 byte cap rather than UTF-16 length', 
   assert.ok((await fs.readFile(result.result.paths[0], 'utf8')).endsWith(exact));
   // One byte over the cap is a size refusal, never an argument-shape refusal, so its guidance says not to shorten the note.
   await assert.rejects(f.create({ requestId: randomUUID(), target: 'too-large.md', content: exact + '界' }), { code: 'DIRECT_NOTE_CONTENT_LIMIT' });
+  // The same holds when the character count alone would already exceed the schema bound.
+  const ascii = '# Big\n\n## Content\n' + 'x'.repeat(DIRECT_NOTE_BYTES);
+  await assert.rejects(f.create({ requestId: randomUUID(), target: 'too-large.md', content: ascii }), { code: 'DIRECT_NOTE_CONTENT_LIMIT' });
+  await assert.rejects(f.tools.call('cuefluent_update_note', { ...f.request, requestId: randomUUID(), target: path.basename(result.result.paths[0]), expectedHash: 'f'.repeat(64), content: ascii }), { code: 'DIRECT_NOTE_CONTENT_LIMIT' });
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
   const listed = await f.tools.call('cuefluent_projects', {});
   assert.equal(listed.state, 'configured'); assert.equal(listed.pendingSetup, null); assert.equal(listed.projects[0].id, 'demo');

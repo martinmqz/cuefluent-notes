@@ -125,8 +125,9 @@ export function createProjectTools({ storeRoot, store, skillVersion }) {
     // settings (an adopted log timezone, say) is not that request. Naming that
     // project with no other field is the explicit "finish it as recorded".
     const pending = store ? await readPendingSetup(store) : null;
-    const named = pending && ((input.id !== undefined && pending.request.id === input.id) || (input.root !== undefined && sameRoot(pending.request.root, input.root)));
-    if (named && Object.keys(input).every(key => ['id', 'root'].includes(key))) {
+    const selectors = Object.keys(input), named = pending && selectors.length > 0 && selectors.every(key => ['id', 'root'].includes(key)) &&
+      (input.id === undefined || pending.request.id === input.id) && (input.root === undefined || sameRoot(pending.request.root, input.root));
+    if (named) {
       const completed = await setupProject({ storeRoot, project: pending.request, expectedHash: pending.settingsHash, skillVersion });
       return { state: 'configured', created: !existing, project: completed.project, logs: completed.logs };
     }

@@ -114,7 +114,10 @@ test('path, placement, alias and size refusals name their situation rather than 
     assert.match(result.message, /path is missing, escapes its destination/); assert.match(result.recovery, /missing original never authorizes a replacement/);
     assert.notEqual(result.recovery, generic);
   }
-  for (const code of ['PRIVATE_LOCATION_OVERLAP', 'PRIVATE_LOCATION_REPOSITORY']) assert.match(describeFailure({ code }).message, /separate locations outside repositories/);
+  for (const code of ['PRIVATE_LOCATION_OVERLAP', 'PRIVATE_LOCATION_REPOSITORY']) {
+    const placement = describeFailure({ code }).message;
+    assert.match(placement, /private store must lie outside repositories/); assert.doesNotMatch(placement, /destination must|root must/);
+  }
   assert.match(describeFailure({ code: 'FILE_MISSING' }).message, /missing/);
   const aliases = describeFailure({ code: 'NOTE_ALIASES_CHANGED' });
   assert.match(aliases.message, /drops existing aliases/); assert.doesNotMatch(aliases.message, /changed after/);

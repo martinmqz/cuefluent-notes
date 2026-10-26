@@ -63,12 +63,14 @@ function argumentsFor(name, input) {
   const result = fields(input, required, Object.keys(properties).filter(key => !required.includes(key)), invalid);
   for (const [key, value] of Object.entries(result)) {
     const rule = properties[key];
+    // Content over the byte cap is a size refusal whatever its character count,
+    // so its guidance says to preserve the note rather than to fix the arguments.
+    if (key === 'content' && typeof value === 'string' && Buffer.byteLength(value) > DIRECT_NOTE_BYTES) fail('DIRECT_NOTE_CONTENT_LIMIT', 'The submitted content exceeds the direct note size limit.');
     if (rule.type === 'integer') {
       if (!Number.isSafeInteger(value) || value < rule.minimum || value > rule.maximum) invalid();
     } else if (typeof value !== 'string' || value.length < (rule.minLength ?? 0) || value.length > (rule.maxLength ?? 128) ||
         (rule.pattern && new RegExp(rule.pattern).exec(value)?.[0] !== value)) invalid();
   }
-  if (result.content !== undefined && Buffer.byteLength(result.content) > DIRECT_NOTE_BYTES) fail('DIRECT_NOTE_CONTENT_LIMIT', 'The submitted content exceeds the direct note size limit.');
   if (name === 'cuefluent_read_note' && result.start > 0 && result.expectedHash === undefined) invalid();
   return Object.freeze(result);
 }

@@ -345,6 +345,14 @@ test('an unpublished interrupted setup is never replayed for a different proposa
   const listed = await (await f.notes()).call('cuefluent_projects', {});
   assert.deepEqual(listed.pendingSetup, { id: 'held', root: project }); assert.deepEqual(listed.projects.map(item => item.id), ['base']);
   await assert.rejects(f.setup({ id: 'other-name', root: project, destination: f.destination('new-notes'), activityLog: { enabled: false } }), { code: 'SETUP_PENDING' });
+  // Naming it with a conflicting second selector is a different proposal, not a completion.
+  const otherRoot = await f.folder('other-root');
+  await assert.rejects(f.setup({ id: 'held', root: otherRoot }), { code: 'SETUP_TOOL_ARGUMENT' });
+  await assert.rejects(f.setup({ id: 'held', root: otherRoot, destination: f.destination('new-notes'), activityLog: { enabled: false } }), { code: 'SETUP_PENDING' });
+  await assert.rejects(f.setup({ id: 'different-id', root: project }), { code: 'SETUP_TOOL_ARGUMENT' });
+  await assert.rejects(f.setup({ id: 'different-id', root: project, destination: f.destination('new-notes'), activityLog: { enabled: false } }), { code: 'SETUP_PENDING' });
+  assert.deepEqual((await f.settings()).value.projects.map(item => item.id), ['base']);
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json', 'setup.json']);
   const completed = await f.setup({ id: 'held' });
   assert.equal(completed.state, 'configured'); assert.equal(completed.created, true); assert.equal(completed.project.activityLog.timezone, 'UTC');
   assert.equal(completed.project.destination.path, path.join(f.root, 'notes'));

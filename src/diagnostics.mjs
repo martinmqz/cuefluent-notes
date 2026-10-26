@@ -33,7 +33,7 @@ const TABLE = [
     'A path is missing, escapes its destination, or is not a plain file or directory.',
     'Use absolute normalized paths inside the configured destination, or an existing project root for setup, with no parent segments or symbolic links. A read creates nothing, and a missing original never authorizes a replacement; preserve existing files and pending work.'],
   [['PRIVATE_LOCATION_OVERLAP', 'PRIVATE_LOCATION_REPOSITORY'],
-    'The private store, the project root and the notes destination must be separate locations outside repositories.',
+    'The private store must lie outside repositories, project roots and note destinations, and no project root or notes destination may lie inside it.',
     'Choose a notes destination and project root outside the private store, and a store location outside repositories and note destinations. Nothing was changed; preserve existing files and pending work.'],
   [['SETUP_ARGUMENT', 'SETUP_TOOL_ARGUMENT', 'SETUP_PROJECT_MISMATCH', 'SETTINGS_INVALID', 'PROJECT_ROOT_NONCANONICAL'],
     'The setup proposal is incomplete or invalid.',
