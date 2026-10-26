@@ -12,6 +12,9 @@ import { readChat, queueRelative } from '../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
 import { attachAttemptChild, inspectAttempt } from '../src/storage/attempts.mjs';
 import { executeControl } from '../src/control/execute.mjs';
+import { decideRun, reviewRun } from '../src/control/review.mjs';
+import { runRevision } from '../src/core/run.mjs';
+import { readProjectStatus } from '../src/control/status.mjs';
 import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
 async function waitFile(file) {
@@ -28,21 +31,31 @@ async function fixture(t, { saving = 'review' } = {}) {
   const project = createProject({ id: 'project', root: cwd, destination: { kind: 'directory', path: notes }, saving });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
   let launches = 0, handle, prompt = 0;
+  const contexts = [];
+  // This flow verifies retry semantics, not cold-start speed on hosted Windows.
+  const startupTimeoutMs = process.platform === 'win32' ? 15_000 : undefined;
+  const launcher = extra => context => {
+    launches++; contexts.push(context);
+    const child = fork(fileURLToPath(new URL('./fixtures/processing-worker.mjs', import.meta.url)), [root, JSON.stringify({ ...context, ...extra })],
+      { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+    let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
+    const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr: withoutFfiNotice(stderr, child.pid) })));
+    t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+    handle = { child, exited, attemptId: context.attemptId }; return attachAttemptChild(child, context);
+  };
   const execute = async (action, extra = {}) => {
     const result = await executeControl(store, { client: 'codex', sessionId: 'synthetic', promptId: `prompt-${++prompt}`, cwd, sourcePath: null, action }, {
-      // This flow verifies retry semantics, not cold-start speed on hosted Windows.
-      startupTimeoutMs: process.platform === 'win32' ? 15_000 : undefined,
-      reconcileChat: async () => ({ status: 'caught-up' }),
-      launchProcessing: context => {
-        launches++;
-        const child = fork(fileURLToPath(new URL('./fixtures/processing-worker.mjs', import.meta.url)), [root, JSON.stringify({ ...context, ...extra })],
-          { detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-        let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
-        const exited = new Promise(resolve => child.once('exit', code => resolve({ code, stderr: withoutFfiNotice(stderr, child.pid) })));
-        t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
-        handle = { child, exited, attemptId: context.attemptId }; return attachAttemptChild(child, context);
-      },
+      startupTimeoutMs, reconcileChat: async () => ({ status: 'caught-up' }), launchProcessing: launcher(extra),
     });
+    return { result, handle };
+  };
+  // The user's decision about a reviewed set is relayed with its revision; the
+  // worker then performs the same save or skip the typed command used to start.
+  const decide = async (action, extra = {}, { revision } = {}) => {
+    const status = await readProjectStatus(store, 'project');
+    const reviewed = await reviewRun(store, { projectId: 'project', runId: status.run.id });
+    const result = await decideRun(store, { projectId: 'project', runId: status.run.id, revision: revision ?? reviewed.revision, action },
+      { client: 'codex', skillVersion: '0.16.0-dev.0', launchProcessing: launcher(extra), startupTimeoutMs });
     return { result, handle };
   };
   const append = id => withProject(store, 'project', () => appendQueueRecord(store.pin, queueRelative('codex', 'synthetic'), encodeQueueRecord(id, Buffer.from(JSON.stringify({ text: `Synthetic decision ${id}` })))));
@@ -54,7 +67,7 @@ async function fixture(t, { saving = 'review' } = {}) {
     return JSON.parse(await fs.readFile(path.join(root, `outcome-${handle.attemptId}.json`), 'utf8'));
   };
   await execute('track'); await append('first');
-  return { root, notes, store, execute, append, queue, finished, get launches() { return launches; } };
+  return { root, notes, store, execute, decide, append, queue, finished, contexts, get launches() { return launches; } };
 }
 
 test('full review command flow retains arrivals, reports one running run, and removes a drained untracked queue', async t => {
@@ -69,7 +82,17 @@ test('full review command flow retains arrivals, reports one running run, and re
   assert.equal((await inspectAttempt(f.store, 'project')).run.attempt, null);
   assert.equal((await f.queue()).records, 2);
   assert.deepEqual(await fs.readdir(f.notes), []);
-  const saved = await f.execute('save', { rejectModel: true });
+  // Typed save and skip carry no reviewed reference: they show the pending
+  // review set instead of acting on whichever run is current.
+  for (const action of ['save', 'skip']) {
+    const shown = (await f.execute(action)).result;
+    assert.equal(shown.state, 'review'); assert.equal(shown.run.kind, 'chat'); assert.equal(shown.run.revision, undefined);
+    assert.equal(shown.run.drafts.length, 1);
+  }
+  assert.equal(f.launches, 1);
+  await assert.rejects(f.decide('save', { rejectModel: true }, { revision: 'e'.repeat(64) }), { code: 'REVIEW_REVISION_STALE' });
+  assert.equal(f.launches, 1);
+  const saved = await f.decide('save', { rejectModel: true }); assert.equal(saved.result.state, 'running'); assert.equal(saved.result.started, true);
   const result = await f.finished(saved.handle); assert.equal(result.status, 'saved'); assert.equal(result.counts.handled, 1);
   assert.equal((await f.queue()).records, 1);
   assert.equal((await f.execute('status')).result.latest.status, 'saved');
@@ -83,7 +106,8 @@ test('full review command flow retains arrivals, reports one running run, and re
 test('skip releases review drafts with all source data intact and no public notes', async t => {
   const f = await fixture(t); await f.finished((await f.execute('process')).handle);
   const run = (await inspectAttempt(f.store, 'project')).run;
-  const skipped = await f.finished((await f.execute('skip', { rejectModel: true })).handle);
+  assert.equal((await f.execute('skip')).result.state, 'review'); assert.equal(f.launches, 1);
+  const skipped = await f.finished((await f.decide('skip', { rejectModel: true })).handle);
   assert.equal(skipped.status, 'skipped'); assert.equal(skipped.counts.handled, 0); assert.deepEqual(skipped.paths, []);
   assert.equal((await f.queue()).records, 1); assert.deepEqual(await fs.readdir(f.notes), []);
   await assert.rejects(fs.access(path.join(f.store.root, run.artifacts.relative)), { code: 'ENOENT' });
@@ -93,9 +117,19 @@ test('skip releases review drafts with all source data intact and no public note
 test('skip after a partial conflicted save keeps the saved note, the user collision and all selected input', async t => {
   const f = await fixture(t); await f.finished((await f.execute('process', { targets: ['a.md', 'z.md'] })).handle);
   await fs.writeFile(path.join(f.notes, 'z.md'), 'User file arrived after drafting.');
-  const saving = await f.execute('save'); assert.equal((await saving.handle.exited).code, 1);
+  const saving = await f.decide('save'); assert.equal((await saving.handle.exited).code, 1);
   const saved = await fs.readFile(path.join(f.notes, 'a.md'));
-  assert.equal((await inspectAttempt(f.store, 'project')).run.saved.length, 1);
+  const interrupted = await inspectAttempt(f.store, 'project');
+  assert.equal(interrupted.run.saved.length, 1); assert.equal(interrupted.run.phase, 'saving');
+  assert.equal((await f.execute('status')).result.state, 'interrupted');
+  // No review set is pending, so a typed save resumes the approved save (and
+  // meets the same collision) and a typed skip releases the inactive work.
+  const launches = f.launches, resumed = await f.execute('save', { rejectModel: true });
+  assert.equal(resumed.result.state, 'running'); assert.equal(f.launches, launches + 1);
+  // The typed decision carries the inspected run's revision to its worker.
+  assert.equal(f.contexts.at(-1).revision, runRevision(interrupted.run));
+  assert.equal((await resumed.handle.exited).code, 1);
+  assert.deepEqual(await fs.readFile(path.join(f.notes, 'a.md')), saved);
   const result = await f.finished((await f.execute('skip', { rejectModel: true })).handle);
   assert.equal(result.status, 'skipped'); assert.equal(result.counts.saved, 1); assert.deepEqual(result.paths, [path.join(f.notes, 'a.md')]);
   assert.deepEqual(await fs.readFile(path.join(f.notes, 'a.md')), saved);

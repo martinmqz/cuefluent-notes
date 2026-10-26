@@ -57,7 +57,7 @@ export async function launchOwnedAttempt(store, projectId, { runId, launch, star
     return { run: snapshot.value, workerGate: context.gates.workerGate,
       active: Boolean(probeGate(context.gates.workerGate, gateOptions).busy) };
   });
-  if (initial.active) return Object.freeze({ state: 'running', runId: initial.run.id, attemptId: initial.run.attempt?.id ?? null });
+  if (initial.active) return Object.freeze({ state: 'running', runId: initial.run.id, attemptId: initial.run.attempt?.id ?? null, launched: false });
   const attemptId = randomUUID();
   let child, abandoned = false;
   const deadline = performance.now() + startupTimeoutMs;
@@ -87,7 +87,7 @@ export async function launchOwnedAttempt(store, projectId, { runId, launch, star
     // after we already know startup has expired.
     if (performance.now() >= deadline) fail('ATTEMPT_STARTUP_TIMEOUT', 'Worker startup did not complete.');
     await beforeDeadline(child.activate(), deadline);
-    return Object.freeze({ state: 'running', runId: initial.run.id, attemptId });
+    return Object.freeze({ state: 'running', runId: initial.run.id, attemptId, launched: true });
   } catch (error) {
     // A published but unactivated attempt stays recoverable; an activated worker
     // may continue if the caller loses the acknowledgment. Its gate is authority.

@@ -81,7 +81,11 @@ There is no linter, formatter, or type checker.
   priority.
 - Bind tracking and processing commands from native current-chat and
   invocation context. Cwd, the newest transcript, an agent-supplied identity,
-  and ordinary command mentions are not identity evidence. Synchronous hooks
+  and ordinary command mentions are not identity evidence. A save or skip
+  decision on a reviewed draft set cites the run and the immutable revision of
+  the pages that showed it; the backend checks content identity, destination
+  state and concurrency, and the assistant is responsible for having asked the
+  user. Synchronous hooks
   may dispatch bounded native metadata but never scan transcripts, call models,
   write notes, block prompts, or ask to continue. Unconfigured and ineligible
   automatic ingress makes zero filesystem writes.

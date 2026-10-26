@@ -4,8 +4,8 @@ Project settings, chat metadata, queues, complete draft bytes and current-run
 recovery records live in a private store outside repositories and note
 destinations. Use a supported local filesystem with verifiable ownership and
 permissions. Symbolic links, hard links, replaced parents and unsupported storage
-are refused. See [setup](setup.md#private-location) for locations and the 0.18.0
-fresh-setup requirement. Unsupported private-state schemas are refused before
+are refused. See [setup](setup.md#private-location) for locations.
+Unsupported private-state schemas are refused before
 settings, queues or runs are used. Fresh setup preserves and refuses foreign entries;
 only an empty interrupted first initialization can resume. Store files are not
 portable: gate identities bind exact paths, and separate stores cannot coordinate

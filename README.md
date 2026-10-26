@@ -26,8 +26,9 @@ track → work in the chat → process → review → save
 ```
 
 Use `untrack` to stop new collection while keeping queued input. `process project`
-includes all queues owned by the project. `skip` releases inactive pending work
-without rolling back saved notes. `status` is read-only.
+includes all queues owned by the project. `skip` releases inactive failed or
+conflicted work without rolling back saved notes; a pending review set is shown
+first and decided in chat. `status` is read-only.
 
 Defaults are manual tracking, review saving and activity logging on for directory
 destinations. Logging can be disabled. Automatic tracking follows new chats only;
@@ -40,9 +41,14 @@ Use Node.js 26.12.1 or a newer Node 26 patch and a supported authenticated nativ
 client. Runtime libraries and their licenses are included in each detached client
 package; an installed package needs no npm install. The current Codex processing
 transport has native macOS coverage; its Windows and Linux acceptance remains
-unverified. Earlier Windows checks used the previous transport. Windows packaged
+unverified. Windows packaged
 Desktop/TUI command acceptance also remains incomplete; see
 [verification](references/verification.md).
+
+Review decisions are asked in chat: the assistant shows the draft and relays your
+answer together with the reviewed revision. Live acceptance of this flow on Claude
+Code (terminal), the Claude Desktop Code tab and Codex Desktop is still pending.
+See the [observed client limits](references/verification.md#native-clients).
 
 Install or register the chosen client package through the client's explicit plugin
 flow and trust its hooks only if desired. Plugin installation and hook trust do
@@ -62,12 +68,9 @@ Queues and draft bytes remain in a private store outside repositories and notes.
 Original native transcripts are never deleted. Successful saves consume only the
 selected queue records; later arrivals remain. Hash checks preserve manual edits.
 Activity-log failures are reported without blocking successful note cleanup.
-
-Version 0.18.0 requires fresh settings and private storage. Earlier settings,
-tracking state, queued input and pending drafts are not imported. Finish pending
-work with the package that created it and preserve its store in place before
-following [setup](references/setup.md#private-location). Existing Markdown notes
-remain user content and can be updated under the current writer's conflict rules.
+Markdown notes remain user content and are updated only under the writer's
+conflict rules; see [setup](references/setup.md#private-location) for where the
+private store lives.
 
 ## Source development
 

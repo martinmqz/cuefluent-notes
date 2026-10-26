@@ -1,7 +1,7 @@
 import { fork } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fail } from '../core/errors.mjs';
-import { beginSaving, readyForReview, addRunWarning } from '../core/run.mjs';
+import { beginSaving, readyForReview, addRunWarning, runRevision } from '../core/run.mjs';
 import { openStore } from '../storage/store.mjs';
 import { ownAttempt, withCurrentAttempt, attachAttemptChild } from '../storage/attempts.mjs';
 import { writeJSON } from '../storage/files.mjs';
@@ -12,8 +12,14 @@ import { pinProcessingLogging, flushRunLogs, discardRunLogPublication } from './
 import { cleanupRun } from './cleanup.mjs';
 import { skipRun } from './skip.mjs';
 
-export async function runProcessingWork(store, owner, { action, client, model, effort, skillVersion, runClient, signal } = {}) {
+export async function runProcessingWork(store, owner, { action, client, model, effort, skillVersion, runClient, signal, revision } = {}) {
   if (!['process', 'save', 'skip'].includes(action) || !['claude', 'codex'].includes(client) || typeof skillVersion !== 'string') fail('WORKER_ARGUMENT', 'The worker requires a trusted action, native client and package version.');
+  if (revision !== undefined && (typeof revision !== 'string' || !/^[a-f0-9]{64}$/.test(revision))) fail('WORKER_ARGUMENT', 'A cited revision must be an exact SHA-256 hash.');
+  // A decision cites the reviewed set. Check it before any mutation so a stale
+  // decision changes nothing and records no run warning.
+  if (revision !== undefined) await withCurrentAttempt(owner, ({ run }) => {
+    if (runRevision(run) !== revision) fail('REVIEW_REVISION_STALE', 'The reviewed draft set changed since this decision was prepared.');
+  });
   const logging = { skillVersion };
   try {
     if (action === 'skip') return await skipRun(store, owner, logging);

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createProject } from '../src/core/settings.mjs';
-import { createRun, validateRun } from '../src/core/run.mjs';
+import { createRun, validateRun, runRevision } from '../src/core/run.mjs';
 import { initializeStore, withProject, readSettings, updateSettings } from '../src/storage/store.mjs';
 import { readJSON, writeJSON, hashBytes } from '../src/storage/files.mjs';
 import { readDraftArtifact } from '../src/storage/draft-artifacts.mjs';
@@ -28,20 +28,31 @@ async function fixture(t, { saving = 'review', client = 'codex', file = false } 
   const cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd); await fs.mkdir(notes);
   const project = createProject({ id: 'demo', root: cwd, destination: { kind: file ? 'file' : 'directory', path: file ? path.join(notes, 'explicit.md') : notes }, saving });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
-  const handler = createDirectNoteTools({ store, client, skillVersion: '0.16.0' });
-  const session = Object.freeze({}), confirmations = [];
-  const requestContext = { session, approve: async input => { confirmations.push(input); return true; } };
+  // Queued decisions hand off to the separate worker; this fixture records the
+  // launch request and refuses it so no detached process starts.
+  const launches = [];
+  const handler = createDirectNoteTools({ store, client, skillVersion: '0.16.0', launchProcessing: context => {
+    launches.push(context); throw Object.assign(new Error('Synthetic launch refusal.'), { code: 'SYNTHETIC_LAUNCH' });
+  } });
+  const session = Object.freeze({}), requestContext = { session };
   const tools = { tools: handler.tools, call: (name, args, context = requestContext) => handler.call(name, args, context) };
   const request = { projectId: project.id, requestId: randomUUID(), target: file ? 'explicit.md' : 'meetings/planning.md', content, summary: 'Planning decisions and actions.' };
   const create = input => tools.call('cuefluent_create_note', { ...request, ...input });
-  const call = (action, runId = request.requestId) => tools.call(`cuefluent_${action}_note`, { projectId: project.id, runId });
-  return { root, cwd, notes, project, store, tools, handler, requestContext, confirmations, request, create, call };
+  const review = (runId = request.requestId, page = {}) => tools.call('cuefluent_review_note', { projectId: project.id, runId, ...page });
+  // A decision cites the revision the user reviewed; completed outcomes replay
+  // with any well-formed revision because no further decision is executed.
+  const decide = async (action, runId = request.requestId, revision) => tools.call(`cuefluent_${action}_note`,
+    { projectId: project.id, runId, revision: revision ?? (await review(runId)).revision ?? 'f'.repeat(64) });
+  const call = (action, runId, revision) => action === 'review' ? review(runId) : decide(action, runId, revision);
+  return { root, cwd, notes, project, store, tools, handler, requestContext, launches, request, create, review, decide, call };
 }
 
 test('direct review creates one preview from supplied context without enrollment, queues, or a model, then saves exactly that draft', async t => {
   const f = await fixture(t), before = await readSettings(f.store);
   const draft = await f.create();
-  assert.equal(draft.state, 'review'); assert.equal(draft.drafts.length, 1);
+  assert.equal(draft.state, 'review'); assert.equal(draft.drafts.length, 1); assert.equal(draft.draftCount, 1);
+  assert.equal(draft.kind, 'direct'); assert.deepEqual(draft.choices, ['Save', 'Discard', 'Keep pending']);
+  assert.match(draft.revision, /^[a-f0-9]{64}$/); assert.equal(draft.next, null);
   assert.equal(draft.drafts[0].content, content);
   assert.doesNotMatch(draft.drafts[0].content, /<!--|skill_version:|session_id:|sources:/);
   const { run } = await inspectAttempt(f.store, 'demo');
@@ -135,7 +146,7 @@ test('one pending run blocks other requests, pins settings, and rejects changed 
   const f = await fixture(t); const original = await f.create();
   const second = await f.create({ requestId: randomUUID(), target: 'another.md' }); assert.equal(second.state, 'busy');
   await assert.rejects(f.create({ content: content + '\nChanged.\n' }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
-  await assert.rejects(f.call('save', randomUUID()), { code: 'DIRECT_NOTE_RUN_CHANGED' });
+  await assert.rejects(f.call('save', randomUUID(), original.revision), { code: 'REVIEW_RUN_CHANGED' });
   assert.deepEqual(await f.call('review'), original);
   const settings = await readSettings(f.store);
   await assert.rejects(updateSettings(f.store, { schemaVersion: 1, projects: [{ ...f.project, saving: 'auto' }] }, { expectedHash: settings.hash }));
@@ -143,14 +154,24 @@ test('one pending run blocks other requests, pins settings, and rejects changed 
   const secondRun = await f.create({ requestId: randomUUID() }); assert.equal(secondRun.state, 'review');
 });
 
-test('existing queue processing runs cannot be changed by direct save or skip', async t => {
+test('a pending queued run keeps direct submissions busy; its decisions cite its revision and go to the separate worker', async t => {
   const f = await fixture(t);
   await setChatTracking(f.store, { client: 'codex', sessionId: 'synthetic', promptId: 'track', action: 'track', cwd: f.cwd, sourcePath: null });
   await withProject(f.store, 'demo', () => appendQueueRecord(f.store.pin, queueRelative('codex', 'synthetic'), encodeQueueRecord('input', Buffer.from('{"text":"Queued"}'))));
   const { run } = await prepareProcessing(f.store, 'demo', { kind: 'project' }, { reconcileChat: async () => ({ status: 'caught-up' }) });
   assert.equal((await f.create()).state, 'busy');
-  for (const action of ['review', 'save', 'skip']) await assert.rejects(f.call(action, run.id), { code: 'DIRECT_NOTE_RUN_REQUIRED' });
+  const review = await f.call('review', run.id);
+  assert.equal(review.state, 'interrupted'); assert.equal(review.kind, 'project'); assert.equal(review.phase, 'drafting');
+  assert.deepEqual(review.drafts, []); assert.deepEqual(review.choices, ['Skip; keep input', 'Keep pending']);
+  // Unfinished drafting has nothing reviewed to save; process retries it.
+  await assert.rejects(f.call('save', run.id), { code: 'RUN_PHASE_INVALID' });
+  await assert.rejects(f.call('skip', run.id, 'e'.repeat(64)), { code: 'REVIEW_REVISION_STALE' });
+  assert.equal(f.launches.length, 0);
+  await assert.rejects(f.call('skip', run.id), { code: 'SYNTHETIC_LAUNCH' });
+  assert.equal(f.launches.length, 1); assert.equal(f.launches[0].action, 'skip');
+  assert.equal(f.launches[0].runId, run.id); assert.equal(f.launches[0].revision, review.revision);
   assert.deepEqual((await inspectAttempt(f.store, 'demo')).run, run);
+  for (const action of ['save', 'skip']) await assert.rejects(f.tools.call(`cuefluent_${action}_note`, { projectId: 'demo', runId: run.id }), { code: 'DIRECT_NOTE_ARGUMENT' });
 });
 
 test('direct OS ownership prevents concurrent save and stale publication, and releases on failure', async t => {
@@ -221,17 +242,14 @@ test('tampering with retained draft bytes cannot become an approved write', asyn
   assert.deepEqual(await fs.readdir(f.notes), []);
 });
 
-async function nativeTools(f, { client = 'codex', answer = { action: 'accept', content: { approve: true } }, capabilities = { elicitation: { form: {} } } } = {}) {
+async function nativeTools(f, { client = 'codex' } = {}) {
   const bridge = createControlBridge({ client, directNotes: f.tools, codexAdapter: { bindCommand: () => assert.fail('No native transcript reads') },
     executeInvocation: () => assert.fail('No native commands'), readInvocation: () => assert.fail('No native handle') });
-  const confirmations = []; let protocol, id = 1;
-  protocol = bridge.protocol({ version: '0.16.0', sendRequest: async message => {
-    confirmations.push(message);
-    await protocol({ jsonrpc: '2.0', id: message.id, result: typeof answer === 'function' ? await answer(message) : answer });
-  } });
-  await protocol({ jsonrpc: '2.0', id: id++, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities, clientInfo: {} } });
+  let id = 1;
+  const protocol = bridge.protocol({ version: '0.16.0' });
+  await protocol({ jsonrpc: '2.0', id: id++, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } });
   await protocol({ jsonrpc: '2.0', method: 'notifications/initialized' });
-  return { confirmations, protocol, call: async (name, args, thread = 'native-session') => {
+  return { protocol, call: async (name, args, thread = 'native-session') => {
     const params = { name, ...(args === undefined ? {} : { arguments: args }), ...(client === 'codex' ? {
       _meta: { 'x-codex-turn-metadata': { session_id: thread, thread_id: thread, turn_id: `turn-${id}` } },
     } : {}) };
@@ -240,7 +258,7 @@ async function nativeTools(f, { client = 'codex', answer = { action: 'accept', c
   } };
 }
 
-test('both MCP hosts execute project/list/read/update through the real response contract and confirm exact review bytes', async t => {
+test('both MCP hosts execute project/list/read/update through the real response contract and save exact reviewed bytes', async t => {
   for (const client of ['claude', 'codex']) {
     const f = await fixture(t, { client }), native = await nativeTools(f, { client });
     const target = path.join(f.notes, 'existing.md'); await fs.writeFile(target, content);
@@ -253,11 +271,11 @@ test('both MCP hosts execute project/list/read/update through the real response 
     const preview = await native.call('cuefluent_update_note', { ...f.request, target, expectedHash: read.hash, content: changed });
     assert.equal(preview.state, 'review'); assert.equal(preview.drafts[0].content, changed);
     assert.equal(await fs.readFile(target, 'utf8'), content);
-    assert.equal((await native.call('cuefluent_review_note', { projectId: 'demo', runId: f.request.requestId })).state, 'review');
-    assert.equal(native.confirmations.length, 0);
-    const saved = await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId });
-    assert.equal(saved.state, 'saved'); assert.equal(native.confirmations.length, 1);
-    assert.equal(native.confirmations[0].method, 'elicitation/create');
+    const reviewed = await native.call('cuefluent_review_note', { projectId: 'demo', runId: f.request.requestId });
+    assert.equal(reviewed.state, 'review'); assert.equal(reviewed.revision, preview.revision);
+    assert.equal((await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId })).error, 'DIRECT_NOTE_ARGUMENT');
+    const saved = await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId, revision: reviewed.revision });
+    assert.equal(saved.state, 'saved');
     assert.equal(hashBytes(await fs.readFile(target)), preview.drafts[0].hash);
   }
 });
@@ -306,38 +324,64 @@ test('completed request IDs only replay the exact saved or skipped payload', asy
   }
 });
 
-test('busy does not disclose another draft and cross-session review requires host user confirmation', async t => {
+test('busy does not disclose another draft, and another chat or connection reviews a retained draft', async t => {
   const f = await fixture(t), native = await nativeTools(f);
-  assert.equal((await native.call('cuefluent_create_note', f.request, 'session-a')).state, 'review');
+  const created = await native.call('cuefluent_create_note', f.request, 'session-a'); assert.equal(created.state, 'review');
   const busy = await native.call('cuefluent_create_note', { ...f.request, requestId: randomUUID() }, 'session-b');
   assert.deepEqual(busy, { state: 'busy', projectId: 'demo' });
   const review = await native.call('cuefluent_review_note', { projectId: 'demo', runId: f.request.requestId }, 'session-b');
-  assert.equal(review.state, 'review'); assert.equal(native.confirmations.length, 1);
-  const unsupported = await nativeTools(f, { capabilities: {} });
-  for (const action of ['review', 'save', 'skip']) {
-    assert.equal((await unsupported.call(`cuefluent_${action}_note`, { projectId: 'demo', runId: f.request.requestId })).error, 'DIRECT_NOTE_APPROVAL_UNSUPPORTED');
-  }
+  assert.equal(review.state, 'review'); assert.equal(review.revision, created.revision); assert.equal(review.drafts[0].content, content);
+  const other = await nativeTools(f, { client: 'claude' });
+  assert.equal((await other.call('cuefluent_review_note', { projectId: 'demo', runId: f.request.requestId })).revision, created.revision);
   assert.deepEqual(await fs.readdir(f.notes), []);
   assert.ok((await inspectAttempt(f.store, 'demo')).run);
 });
 
-test('declined and cancelled confirmations retain the draft; changed drafts invalidate an accepted confirmation', async t => {
-  const f = await fixture(t); await f.create();
-  for (const action of ['decline', 'cancel']) {
-    const native = await nativeTools(f, { answer: { action } });
-    const result = await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId });
-    assert.equal(result.error, action === 'cancel' ? 'DIRECT_NOTE_APPROVAL_CANCELLED' : 'DIRECT_NOTE_APPROVAL_DECLINED');
+test('a decision citing a stale or malformed revision changes nothing; the current revision is required after a draft set changes', async t => {
+  const f = await fixture(t), created = await f.create(), native = await nativeTools(f);
+  for (const revision of ['e'.repeat(64), 'E'.repeat(64), created.revision.slice(1), `${created.revision}\n`, 64]) {
+    const result = await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId, revision });
+    assert.equal(result.error, revision === 'e'.repeat(64) ? 'REVIEW_REVISION_STALE' : 'DIRECT_NOTE_ARGUMENT');
   }
-  const native = await nativeTools(f, { answer: async () => {
-    await withProject(f.store, 'demo', async ({ directory }) => {
-      const stored = await readJSON(f.store.pin, `${directory}/run.json`);
-      await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, drafts: stored.value.drafts.map(draft => ({ ...draft, summary: 'Changed while awaiting confirmation.' })) }), { expectedHash: stored.hash });
-    });
-    return { action: 'accept', content: { approve: true } };
-  } });
-  assert.equal((await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId })).error, 'DIRECT_NOTE_RUN_CHANGED');
+  // The reviewed set claims a different original, so a decision citing the
+  // revision the user saw is refused until the set is reviewed again.
+  await withProject(f.store, 'demo', async ({ directory }) => {
+    const stored = await readJSON(f.store.pin, `${directory}/run.json`);
+    await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, drafts: stored.value.drafts.map(draft => ({ ...draft, expectedHash: 'b'.repeat(64) })) }), { expectedHash: stored.hash });
+  });
+  assert.equal((await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId, revision: created.revision })).error, 'REVIEW_REVISION_STALE');
+  assert.equal((await native.call('cuefluent_skip_note', { projectId: 'demo', runId: f.request.requestId, revision: created.revision })).error, 'REVIEW_REVISION_STALE');
   assert.deepEqual(await fs.readdir(f.notes), []);
-  assert.equal((await f.call('skip')).state, 'skipped');
+  const current = await f.call('review'); assert.notEqual(current.revision, created.revision);
+  assert.equal(current.drafts[0].expectedHash, 'b'.repeat(64));
+  const skipped = await f.call('skip', f.request.requestId, current.revision);
+  assert.equal(skipped.state, 'skipped'); assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
+  // A completed outcome replays for any well-formed revision: no decision runs.
+  assert.deepEqual(await f.call('save', f.request.requestId, created.revision), skipped);
+});
+
+test('the revision binds the reviewed set, not its progress: it survives a partial save and changes with content, original, size, target or destination', async t => {
+  const f = await fixture(t), created = await f.create();
+  const { run } = await inspectAttempt(f.store, 'demo'), draft = run.drafts[0];
+  assert.equal(runRevision(run), created.revision);
+  for (const unchanged of [
+    { ...run, warnings: ['SYNTHETIC_WARNING'] }, { ...run, attempt: { id: randomUUID() } }, { ...run, phase: 'saving' },
+    { ...run, phase: 'saving', saved: [{ draftId: draft.id, target: draft.target, hash: draft.hash, changed: true }] },
+    { ...run, phase: 'saving', saved: [{ draftId: draft.id, target: draft.target, hash: draft.hash, changed: true }], logEvents: [], artifacts: run.artifacts },
+  ]) assert.equal(runRevision(unchanged), created.revision);
+  const changed = [
+    { ...run, drafts: [{ ...draft, hash: 'a'.repeat(64) }] }, { ...run, drafts: [{ ...draft, expectedHash: 'b'.repeat(64) }] },
+    { ...run, drafts: [{ ...draft, byteLength: draft.byteLength + 1 }] }, { ...run, drafts: [{ ...draft, target: path.join(f.notes, 'meetings', 'elsewhere.md') }] },
+    { ...run, projectId: 'demo', settings: { ...run.settings, saving: 'auto' }, phase: 'saving' },
+  ].map(runRevision);
+  assert.equal(new Set([created.revision, ...changed]).size, changed.length + 1);
+  // Progress recorded by a partial save does not disturb a retry with the same revision.
+  await withProject(f.store, 'demo', async ({ directory }) => {
+    const stored = await readJSON(f.store.pin, `${directory}/run.json`);
+    await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase: 'saving' }), { expectedHash: stored.hash });
+  });
+  const interrupted = await f.call('review'); assert.equal(interrupted.state, 'interrupted'); assert.equal(interrupted.revision, created.revision);
+  assert.equal((await f.call('save', f.request.requestId, created.revision)).state, 'saved');
 });
 
 test('preview and save share draft descriptor checks and no-op updates preserve exact bytes and timestamps', async t => {
@@ -388,16 +432,35 @@ test('auto-mode direct crash recovery publishes retained bytes while review-mode
     const stored = await readJSON(f.store.pin, `${directory}/run.json`);
     await writeJSON(f.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase: 'drafting', drafts: [] }), { expectedHash: stored.hash });
   });
-  const saved = await ownDirectAttempt(f.store, 'demo', run.id, owner => runProcessingWork(f.store, owner,
-    { action: 'process', client: 'codex', skillVersion: '0.16.0', runClient: () => assert.fail('No model during direct recovery') }));
-  assert.equal(saved.status, 'saved'); assert.deepEqual(await fs.readFile(saved.paths[0]), manifest.drafts[0].bytes);
+  // In automatic mode the retained draft offers Save, which finishes saving it.
+  const offered = await f.call('review', run.id);
+  assert.equal(offered.phase, 'drafting'); assert.deepEqual(offered.choices, ['Save', 'Discard', 'Keep pending']);
+  const saved = await f.call('save', run.id);
+  assert.equal(saved.state, 'saved'); assert.deepEqual(await fs.readFile(saved.result.paths[0]), manifest.drafts[0].bytes);
+  await assert.rejects(fs.access(path.join(f.store.root, 'processing')), { code: 'ENOENT' });
   const g = await fixture(t), original = await g.create();
   await withProject(g.store, 'demo', async ({ directory }) => {
     const stored = await readJSON(g.store.pin, `${directory}/run.json`);
     await writeJSON(g.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, phase: 'drafting', drafts: [] }), { expectedHash: stored.hash });
   });
-  const recovered = await g.call('save'); assert.equal(recovered.state, 'review');
-  assert.deepEqual(recovered.drafts, original.drafts); assert.equal(g.confirmations.length, 0);
+  // The interrupted run has its own revision; citing the reviewed set's revision
+  // against it is stale, and only the current one restores the preview.
+  const interrupted = await g.call('review');
+  assert.equal(interrupted.state, 'interrupted'); assert.equal(interrupted.phase, 'drafting'); assert.notEqual(interrupted.revision, original.revision);
+  // A complete retained draft offers its restoration; a reservation without one
+  // can only be discarded or kept.
+  assert.deepEqual(interrupted.choices, ['Restore draft', 'Discard', 'Keep pending']);
+  const retainedPointer = (await inspectAttempt(g.store, 'demo')).run.artifacts;
+  const pointTo = artifacts => withProject(g.store, 'demo', async ({ directory }) => {
+    const stored = await readJSON(g.store.pin, `${directory}/run.json`);
+    await writeJSON(g.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, artifacts }), { expectedHash: stored.hash });
+  });
+  await pointTo(null);
+  assert.deepEqual((await g.call('review')).choices, ['Discard', 'Keep pending']);
+  await pointTo(retainedPointer);
+  await assert.rejects(g.call('save', g.request.requestId, original.revision), { code: 'REVIEW_REVISION_STALE' });
+  const recovered = await g.call('save', g.request.requestId, interrupted.revision); assert.equal(recovered.state, 'review');
+  assert.deepEqual(recovered.drafts, original.drafts); assert.equal(recovered.revision, original.revision);
   assert.deepEqual(await fs.readdir(g.notes), []);
-  assert.equal((await g.call('save')).state, 'saved'); assert.equal(g.confirmations.length, 1);
+  assert.equal((await g.call('save', g.request.requestId, original.revision)).state, 'saved');
 });

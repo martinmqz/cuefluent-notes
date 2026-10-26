@@ -7,10 +7,9 @@ import { readSettings, withProject } from '../storage/store.mjs';
 import { ownDirectAttempt } from '../storage/attempts.mjs';
 import { openNoteWorkspace, NOTE_WORKSPACE_TOOLS } from '../processing/workspace.mjs';
 import { NOTE_PROFILE } from '../notes/index.mjs';
-import { reviewNoteContent } from '../notes/validate.mjs';
-import { readPrivateDraft } from '../processing/save.mjs';
 import { fields, freezeData } from '../client/control-server.mjs';
 import { readRunSnapshot } from './status.mjs';
+import { reviewRun, decideRun, completedOutcome } from './review.mjs';
 import { persistDraftManifest, recoverDrafts } from '../processing/draft.mjs';
 import { pinProcessingLogging } from '../processing/logging.mjs';
 import { runProcessingWork } from '../processing/worker.mjs';
@@ -24,11 +23,13 @@ const projectId = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
 const runId = { type: 'string', pattern: UUID };
 const target = workspaceSchema('read_note').target;
 const expectedHash = { type: 'string', pattern: '^[a-f0-9]{64}$' };
+const revision = { type: 'string', pattern: '^[a-f0-9]{64}$', description: 'The revision returned by the review the user decided on. A changed draft set is refused.' };
 const content = { type: 'string', minLength: 1, maxLength: DIRECT_NOTE_BYTES,
   description: 'Complete Markdown note content composed by the calling assistant. Maximum 64 KiB in UTF-8. Preserve useful existing content when updating; the writer retains existing metadata.' };
 const summary = workspaceSchema('draft_note').summary;
 const definition = (name, description, inputSchema, readOnlyHint = false) => ({ name, description, inputSchema,
   annotations: { readOnlyHint, idempotentHint: true, openWorldHint: false } });
+const REVIEW_FLOW = 'In review mode, show the returned content-only preview (a temporary Markdown file opened in the client, or rendered inline), name the destination, ask the user to choose from the returned choices, then relay the answer with cuefluent_save_note or cuefluent_skip_note and the returned revision. Auto mode saves immediately.';
 
 export const DIRECT_NOTE_TOOLS = freezeData([
   definition('cuefluent_projects', 'List configured note destinations and saving preferences. Choose the project requested by the user; ask if ambiguous. Does not inspect conversations or change settings.',
@@ -37,13 +38,16 @@ export const DIRECT_NOTE_TOOLS = freezeData([
     schema({ projectId, ...workspaceSchema('list_notes') }, ['projectId']), true),
   definition('cuefluent_read_note', 'Read a bounded UTF-8 range of an existing note and return its exact whole-file hash. Read the complete note before composing an update. For subsequent ranges, pass the returned hash as expectedHash; changed notes are refused. Does not create private state, enroll a chat, or process a queue.',
     schema({ projectId, ...workspaceSchema('read_note'), expectedHash }, ['projectId', 'target']), true),
-  definition('cuefluent_create_note', 'Create one new note from complete Markdown content you prepared for an explicit user request. Check for suitable existing notes first; use cuefluent_read_note and cuefluent_update_note to amend one. Use user-authorized context, supplied material, or task results. No tracked chat or queued input is needed. Supply a fresh UUID requestId for each request and reuse it with identical arguments on retries. In review mode, put the returned content-only preview in a temporary Markdown file and open it for user approval; auto mode saves it. The target must be absent. Content must have a topic H1 and useful H2 sections, without Cuefluent metadata.',
+  definition('cuefluent_create_note', `Create one new note from complete Markdown content you prepared for an explicit user request. Check for suitable existing notes first; use cuefluent_read_note and cuefluent_update_note to amend one. Use user-authorized context, supplied material, or task results. No tracked chat or queued input is needed. Supply a fresh UUID requestId for each request and reuse it with identical arguments on retries. ${REVIEW_FLOW} The target must be absent. Content must have a topic H1 and useful H2 sections, without Cuefluent metadata.`,
     schema({ projectId, requestId: runId, target, content, summary })),
-  definition('cuefluent_update_note', 'Update an existing note from complete reconciled Markdown prepared for an explicit user request. First read every range of the note using cuefluent_read_note in this chat and pass its exact whole-file expectedHash. Originals larger than 64 KiB are refused; never shorten them to fit. Preserve useful existing content, aliases and facts; the writer retains metadata. A changed or missing original is a conflict, never a new note or a forced overwrite. Supply a fresh UUID requestId; reuse identical arguments on retries. In review mode, put the returned content-only preview in a temporary Markdown file and open it for user approval; auto mode saves it. No tracking, transcript read or queue processing is needed.',
+  definition('cuefluent_update_note', `Update an existing note from complete reconciled Markdown prepared for an explicit user request. First read every range of the note using cuefluent_read_note in this chat and pass its exact whole-file expectedHash. Originals larger than 64 KiB are refused; never shorten them to fit. Preserve useful existing content, aliases and facts; the writer retains metadata. A changed or missing original is a conflict, never a new note or a forced overwrite. Supply a fresh UUID requestId; reuse identical arguments on retries. ${REVIEW_FLOW} No tracking, transcript read or queue processing is needed.`,
     schema({ projectId, requestId: runId, target, expectedHash, content, summary })),
-  definition('cuefluent_review_note', 'Read a content-only preview of the retained direct note draft or its latest outcome using the returned runId. Write the preview content unchanged to a temporary .md file for user approval. Cuefluent metadata and search-alias comments are omitted from the preview; hash identifies the complete private draft used for saving. No model, source synchronization, or save is started.', schema({ projectId, runId }), true),
-  definition('cuefluent_save_note', 'Request host user confirmation and publish the exact reviewed direct note draft, or retry its interrupted save. Requires a client supporting MCP form elicitation. Use its returned projectId and runId. Never use this to bypass review mode.', schema({ projectId, runId })),
-  definition('cuefluent_skip_note', 'Request host user confirmation to discard the identified inactive direct note draft. Requires MCP form elicitation. Preserve existing notes and every conversation queue. Use the returned projectId and runId.', schema({ projectId, runId })),
+  definition('cuefluent_review_note', 'Read the content-only preview of a pending direct or queued draft set, or the latest outcome, by projectId and runId. Returns the immutable revision a decision must cite, the destination of every draft, the exact choices to offer, and bounded pages: follow next.draft and next.start until next is null, concatenating pieces of one draft in order. Show the complete set before asking. Cuefluent metadata and search-alias comments are omitted from previews; hash identifies the complete private draft used for saving. No model, source synchronization, or save is started.',
+    schema({ projectId, runId, draft: { type: 'integer', minimum: 0, maximum: 1023 }, start: { type: 'integer', minimum: 0, maximum: NOTE_PROFILE.fileBytes } }, ['projectId', 'runId']), true),
+  definition('cuefluent_save_note', 'Publish the exact reviewed draft set after the user chose Save in this chat, or retry its interrupted save. Pass the projectId, runId and revision from the review; a changed revision is refused. A direct draft saves in this call; a queued set starts its save and status reports progress. Never call this without the user\'s decision or to bypass review mode.',
+    schema({ projectId, runId, revision })),
+  definition('cuefluent_skip_note', 'Relay the user\'s decision not to save the reviewed draft set. A direct draft is discarded (its unused private draft is cleared); a queued set is skipped while its queued input stays available. Pass the projectId, runId and revision from the review. Existing notes and every conversation queue are preserved.',
+    schema({ projectId, runId, revision })),
 ]);
 
 function argumentsFor(name, input) {
@@ -64,43 +68,8 @@ function argumentsFor(name, input) {
   return Object.freeze(result);
 }
 
-const outcome = result => ({ state: result.status, projectId: result.projectId, runId: result.runId, result });
 const busy = run => ({ state: 'busy', projectId: run.projectId });
 const snapshot = readRunSnapshot;
-function locate({ run, latest, active }, runId) {
-  if (latest?.runId === runId && run?.id !== runId) {
-    if (!latest.requestHash) fail('DIRECT_NOTE_RUN_REQUIRED', 'This operation only accepts direct notes.');
-    return { result: outcome(latest) };
-  }
-  if (!run || run.id !== runId) fail('DIRECT_NOTE_RUN_CHANGED', 'The requested direct note is no longer pending or the latest outcome.');
-  if (run.scope.kind !== 'direct') fail('DIRECT_NOTE_RUN_REQUIRED', 'This operation only accepts direct notes.');
-  return active ? { result: { state: 'running', projectId: run.projectId, runId: run.id } } : { run };
-}
-const approvalHash = run => hashBytes(JSON.stringify([run.id, run.scope, run.settings, run.phase, run.artifacts, run.drafts, run.saved]));
-async function confirm(approve, action, run) {
-  if (typeof approve !== 'function') fail('DIRECT_NOTE_APPROVAL_UNSUPPORTED', 'This host cannot confirm direct note actions.');
-  const targets = run.drafts.map(draft => `${draft.target}\n${draft.summary}`).join('\n');
-  const verb = action === 'save' ? 'Save the exact reviewed draft' : action === 'skip' ? 'Discard the unsaved draft' : 'Open the pending draft in this chat';
-  if (await approve(Object.freeze({ title: `${verb}?`, message: `${verb} for project ${run.projectId}?${targets ? `\n${targets}` : ''}\nDraft reference: ${approvalHash(run).slice(0, 12)}`,
-    action, projectId: run.projectId, runId: run.id, draftHash: approvalHash(run) })) !== true) fail('DIRECT_NOTE_APPROVAL_DECLINED', 'The requested action was not approved.');
-}
-
-async function review(store, input) {
-  return withProject(store, input.projectId, async context => {
-    const { run, result } = locate(await snapshot(store, context), input.runId);
-    if (result) return result;
-    const drafts = [];
-    if (['review', 'saving'].includes(run.phase)) {
-      for (const draft of run.drafts) {
-        if (draft.byteLength > DIRECT_DRAFT_BYTES || drafts.length) fail('DIRECT_NOTE_DRAFT_LIMIT', 'The direct note preview exceeds its bound.');
-        const bytes = await readPrivateDraft(store, context.directory, run, draft);
-        drafts.push({ target: draft.target, summary: draft.summary, expectedHash: draft.expectedHash, hash: draft.hash, content: reviewNoteContent(bytes) });
-      }
-    }
-    return { state: run.phase === 'review' ? 'review' : 'interrupted', projectId: run.projectId, runId: run.id,
-      phase: run.phase, reviewId: approvalHash(run).slice(0, 12), drafts, warnings: run.warnings };
-  });
-}
 
 async function manifestFor(project, input, { skillVersion, inspections }) {
   const workspace = await openNoteWorkspace({ project, runId: input.requestId, skillVersion });
@@ -129,13 +98,10 @@ async function create(store, input, options) {
   if (initial.run && initial.run.id !== input.requestId) return busy(initial.run);
   const replay = latest => {
     if (latest.requestHash !== requestHash) fail('DIRECT_NOTE_REQUEST_CHANGED', 'Reuse a requestId only with its exact original note.');
-    return outcome(latest);
+    return completedOutcome(latest);
   };
   if (!initial.run && initial.latest?.runId === input.requestId) return replay(initial.latest);
-  if (initial.run) {
-    if (initial.run.scope.kind !== 'direct' || initial.run.scope.requestHash !== requestHash) fail('DIRECT_NOTE_REQUEST_CHANGED', 'Reuse a requestId only with its exact original note.');
-    await options.claim(initial.run);
-  }
+  if (initial.run && (initial.run.scope.kind !== 'direct' || initial.run.scope.requestHash !== requestHash)) fail('DIRECT_NOTE_REQUEST_CHANGED', 'Reuse a requestId only with its exact original note.');
   let manifest;
   if (!initial.run) manifest = await manifestFor(initial.project, input, options);
   const reserved = await withProject(store, input.projectId, async context => {
@@ -150,12 +116,11 @@ async function create(store, input, options) {
     if (JSON.stringify(context.project) !== JSON.stringify(initial.project)) fail('SETTINGS_CONFLICT', 'The selected destination or preferences changed.');
     const run = createRun(context.project, [], { id: input.requestId, scope: { kind: 'direct', requestHash } });
     await writeJSON(store.pin, `${context.directory}/run.json`, run, { expectedHash: null });
-    options.remember(run);
     return { run, active: false, fresh: true };
   });
   if (reserved.result) return reserved.result;
   const reference = { projectId: input.projectId, runId: input.requestId };
-  if (reserved.active || reserved.run.phase === 'review' || reserved.run.settings.saving === 'review' && reserved.run.phase === 'saving') return review(store, reference);
+  if (reserved.active || reserved.run.phase === 'review' || reserved.run.settings.saving === 'review' && reserved.run.phase === 'saving') return reviewRun(store, reference);
   const result = await ownDirectAttempt(store, input.projectId, input.requestId, async (owner, current) => {
     if (current.phase === 'drafting') {
       if (reserved.fresh || !await recoverDrafts(store, owner)) {
@@ -164,9 +129,9 @@ async function create(store, input, options) {
         await persistDraftManifest(store, owner, manifest);
       }
     }
-    return runProcessingWork(store, owner, { ...options, action: 'process' });
+    return runProcessingWork(store, owner, { client: options.client, skillVersion: options.skillVersion, action: 'process' });
   });
-  return result.state === 'review' ? review(store, reference) : outcome(result);
+  return result.state === 'review' ? reviewRun(store, reference) : completedOutcome(result);
 }
 
 async function inspectNotes(store, name, input, skillVersion, inspections) {
@@ -190,34 +155,21 @@ async function inspectNotes(store, name, input, skillVersion, inspections) {
 
 /** These are user-requested content submissions to an explicitly chosen configured
  * destination, not native chat commands. They claim no session provenance and
- * never inspect/enroll a chat or select/consume queue records. */
-export function createDirectNoteTools({ store, client, skillVersion }) {
+ * never inspect/enroll a chat or select/consume queue records. The review and
+ * decision tools also serve queued draft sets; a decision cites the reviewed
+ * revision and the assistant is responsible for having asked the user. */
+export function createDirectNoteTools({ store, client, skillVersion, launchProcessing }) {
   packageVersion(skillVersion);
   if (!['claude', 'codex'].includes(client)) fail('DIRECT_NOTE_CLIENT_INVALID', 'A supported host client is required.');
-  const localSession = Object.freeze({}), sessions = new Map(), owners = new Map();
+  const localSession = Object.freeze({}), sessions = new Map();
   const sessionReads = session => {
     if (!sessions.has(session)) { if (sessions.size >= 16) sessions.delete(sessions.keys().next().value); sessions.set(session, new Map()); }
     return sessions.get(session);
   };
-  return Object.freeze({ tools: DIRECT_NOTE_TOOLS, async call(name, args, request = { session: localSession }) {
+  return Object.freeze({ tools: DIRECT_NOTE_TOOLS, async call(name, args, request = {}) {
     const input = argumentsFor(name, args);
-    const { session = null, canResume = true, canInspect = true, approve, assertActive = () => {} } = request;
-    const remember = run => {
-      if (!session || !canResume) return;
-      if (owners.size >= 128 && !owners.has(run.id)) owners.delete(owners.keys().next().value);
-      owners.set(run.id, session);
-    };
-    const claim = async run => {
-      if (session && canResume && owners.get(run.id) === session) return;
-      const inspected = approvalHash(run);
-      await confirm(approve, 'review', run);
-      await withProject(store, run.projectId, async context => {
-        const current = await snapshot(store, context);
-        if (!current.run || approvalHash(current.run) !== inspected || current.active) fail('DIRECT_NOTE_RUN_CHANGED', 'The pending draft changed during confirmation.');
-      });
-      remember(run);
-    };
-    const options = { client, skillVersion, inspections: canInspect ? sessionReads(session) : new Map(), claim, remember };
+    const { session = localSession, canInspect = true } = request;
+    const options = { client, skillVersion, inspections: canInspect ? sessionReads(session) : new Map() };
     if (name === 'cuefluent_projects') {
       const { value } = await readSettings(store), start = input.cursor ?? 0, projects = [];
       let bytes = 0, cursor = start;
@@ -235,27 +187,8 @@ export function createDirectNoteTools({ store, client, skillVersion }) {
       if (name === 'cuefluent_update_note' && !canInspect) fail('DIRECT_NOTE_CONTEXT_UNAVAILABLE', 'This host did not provide a current chat context for the complete note inspection.');
       return create(store, input, options);
     }
-    if (!['cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note'].includes(name)) fail('CONTROL_TOOL_UNKNOWN', 'This note tool is unavailable.');
-    const current = await withProject(store, input.projectId, context => snapshot(store, context));
-    const located = locate(current, input.runId);
-    if (located.result) return located.result;
-    if (name === 'cuefluent_review_note') { await claim(located.run); return review(store, input); }
-    const action = name === 'cuefluent_skip_note' ? 'skip' : 'save';
-    // Recover a complete retained manifest before asking approval of its bytes.
-    // In review mode this only restores the preview; the next save confirms it.
-    if (action === 'save' && located.run.phase === 'drafting' && located.run.settings.saving === 'review') {
-      await claim(located.run);
-      const recovered = await ownDirectAttempt(store, input.projectId, input.runId, owner => runProcessingWork(store, owner, { ...options, action: 'process' }));
-      return recovered.state === 'review' ? review(store, input) : outcome(recovered);
-    }
-    const inspected = approvalHash(located.run);
-    await confirm(approve, action, located.run);
-    const result = await ownDirectAttempt(store, input.projectId, input.runId, async (owner, run) => {
-      assertActive();
-      if (approvalHash(run) !== inspected) fail('DIRECT_NOTE_RUN_CHANGED', 'The draft changed after user confirmation.');
-      return runProcessingWork(store, owner, { ...options, action: action === 'skip' ? 'skip' : run.settings.saving === 'auto' ? 'process' : 'save' });
-    });
-    remember(located.run);
-    return result.state === 'review' ? review(store, input) : outcome(result);
+    if (name === 'cuefluent_review_note') return reviewRun(store, input);
+    if (!['cuefluent_save_note', 'cuefluent_skip_note'].includes(name)) fail('CONTROL_TOOL_UNKNOWN', 'This note tool is unavailable.');
+    return decideRun(store, { ...input, action: name === 'cuefluent_skip_note' ? 'skip' : 'save' }, { client, skillVersion, launchProcessing });
   } });
 }

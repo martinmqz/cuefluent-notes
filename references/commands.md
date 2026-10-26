@@ -70,45 +70,109 @@ the same fields plus the exact inspected `expectedHash`, and requires an existin
 target. Submit the complete reconciled Markdown for an update. The writer retains
 the original metadata; it does not accept invented provenance or identity changes.
 
-Review mode returns a content-only preview and the intended target. The assistant
-writes the returned `content` unchanged into a uniquely named temporary `.md` file
-outside the repository and notes destination, opens it for review, and links it
-for approval. It contains ordinary Markdown without Cuefluent metadata,
-search-alias comments, a branded wrapper or processing details. Its H1 title,
-useful H2 sections and body already use the final note structure. Approval keeps
-that content and structure; saving includes the retained metadata without
-another rewrite or reformatting pass. The returned
-`hash` identifies the complete retained private draft, including its metadata;
-it is not the preview file's hash. `cuefluent_save_note` requests confirmation from
-the client and publishes only the identified, unchanged draft after the user
-accepts. A decline, cancellation or unsupported confirmation capability leaves
-the draft pending. The preview is never used as the publication stage. Edits to the
-preview require a revised draft and fresh approval. Remove an unchanged temporary
-preview after save or discard; preserve user edits. Automatic saving returns the
-saved path from the create/update call. Both return actual
-outcomes rather than starting a second model and asking for status commands.
+Review mode returns `state: review` with a content-only preview of the draft and
+its intended target; nothing is saved yet. The assistant shows the complete
+preview, asks the user in chat and relays only the answer. By default it writes
+each returned `content` unchanged to a uniquely named temporary `.md` file in a
+private system temporary directory outside the repository and notes destination,
+opens it with the client's file viewer or preview tool, and gives a clickable
+local file link. A client with no file viewer renders the note inline in the
+reply as ordinary Markdown, not as a fenced block showing its source. Either way
+the destination path is named separately. The content is ordinary Markdown
+without Cuefluent metadata, search-alias comments, a branded wrapper or
+processing details. Its H1 title, useful H2 sections and body already use the
+final note structure. Saving keeps that content and structure and includes the
+retained metadata without another rewrite or reformatting pass. The preview is a
+presentation copy and is never used as the publication stage. An edit made
+silently in the file is neither detected nor submitted; a request for changes,
+or an edit the user reports, needs a new draft and fresh approval. Afterwards
+the assistant may remove an unchanged temporary preview it created; user edits
+are never deleted. Automatic saving returns the saved path from the
+create/update call. Both modes return actual outcomes rather than starting a
+second model and asking for status commands.
 
-Keep the returned projectId/runId for review, save or skip. Reuse the original
-requestId and exact payload to retry an interrupted submission. A changed draft
-needs an explicit discard of the old draft and a fresh requestId. Reuse of an ID cannot
-replace its pending content or silently return a previous outcome for different
-content. Only the latest completed result is retained; if a
-later result replaces it, the original target expectation still prevents an
-uninspected overwrite.
+A review-mode create or update result and
+`cuefluent_review_note(projectId, runId, draft?, start?)` return a review page.
+`cuefluent_review_note` is read-only. It returns the content-only preview of the
+pending draft set, for a direct note or a queued processing run, or the latest
+completed outcome for that `runId`. A page has `state` (`review`, `interrupted`,
+`running`, or the completed outcome state such as `saved` or `skipped`),
+`projectId`, `runId`, `kind` (`direct`, `chat` or `project`), `phase`,
+`revision`, `draftCount`, `savedCount`, `choices`, `drafts[]`, `next`,
+`warnings` (at most 16; `warningsTruncated` says when `status` holds more) and
+`warningsTruncated`. `revision` is 64 hexadecimal characters: the immutable identity of
+the reviewed set, covering the run id, the pinned destination and preferences,
+whether the draft set is published, and every draft's target, original hash,
+content hash and size. A partly done save does not change it, so an unchanged
+set stays retryable. `choices` is the exact wording to offer and depends on the
+run's phase: a pending review set offers `Save`, then `Discard` for a direct
+draft or `Skip draft; keep input` for queued drafts, then `Keep pending`; a run
+whose notes are all saved and only needs cleanup offers `Finish` and `Keep
+pending`; a run interrupted while drafting offers `Discard` or `Skip; keep input`,
+and `Keep pending`; a direct run whose retained draft is complete also offers
+`Restore draft` first in review mode, or `Save` in automatic mode. `Save`,
+`Finish` and `Restore draft` relay to `cuefluent_save_note` (`Restore draft`
+only restores the preview, for a fresh decision; `Save` on a retained automatic
+draft finishes saving it); `Discard`, `Skip draft; keep input` and `Skip; keep input` relay to
+`cuefluent_skip_note`; `Keep pending` makes no call. Each
+`drafts[]` entry has `index`, `target` (the absolute destination path),
+`summary`, `heading`, `expectedHash` (null for a new note), `hash`, `saved`
+(whether this note is already written), `totalBytes`, `start`, `end`, `next` and
+`content`. The `hash` identifies the
+complete retained private draft, including its metadata; it is not the hash of
+the preview text or of any preview file.
 
-`cuefluent_review_note` does not change stored state. Access from another
-Codex chat or Claude connection requires user confirmation before the preview is disclosed.
-Save retries keep the retained draft bytes
-and original target expectation: absent for creation, or the inspected hash for
-an update. A conflicting file is preserved. Re-read and reconcile the current note
-before proposing a new change; never substitute a fresh hash into the old draft
-to force a save. A revised draft needs fresh review under the saving preference.
-`cuefluent_skip_note` asks for client confirmation and releases only the identified direct run, preserving notes
-and all queues. Direct notes share the project's single pending-run slot with
-queued processing. A busy result does not disclose another run's identity and
-never authorizes replacing that pending work. A complete durable direct draft
-can be recovered after interruption without resubmitting content or calling a
-model; incomplete drafting still needs the original request.
+Pages are bounded. When the page's `next` is not null, call
+`cuefluent_review_note` again with `draft: next.draft` and `start: next.start`
+until it is null. A draft too large for one page arrives in byte pieces, with
+`start` and `end` as offsets into its preview; concatenate the pieces in order.
+Show the complete set. Never truncate or summarize a draft, or raise transport
+limits, to fit a page. A new connection or a different chat can review a
+retained draft.
+
+The assistant asks with the client's question UI (Claude Code: AskUserQuestion;
+Codex: its question tool when available; otherwise plain text), using exactly
+the returned `choices`, and relays only the user's answer.
+`cuefluent_save_note(projectId, runId, revision)` relays Save or Finish. A direct
+draft saves in that call and returns the saved path. A queued set starts the
+deterministic save in the separate worker and returns `running` with
+`started: true`; `status` shows progress and then the latest result. `running`
+with `started: false` means a worker already owned the run, so the decision did
+not start: read `status`, and review and ask again once the run is waiting.
+Calling the tool again with the same `revision` retries an interrupted approved
+save, including one that stopped during cleanup; for an automatic run it finishes
+the interrupted save or cleanup the same way, without a model.
+`cuefluent_skip_note(projectId, runId, revision)` relays the decision not to
+save: Discard for a direct draft, `Skip draft; keep input` for queued drafts, as
+described under [skip and conflicts](#skip-and-conflicts). `Keep pending` makes
+no call; the draft stays retained, and silence, cancellation or an unanswered
+question also leave it pending. Neither tool is a way around review mode; call
+them only with the user's decision.
+
+`REVIEW_REVISION_STALE` means the draft set changed after it was reviewed:
+review again, show the current draft and ask again; never reuse an earlier
+answer. `REVIEW_RUN_CHANGED` means the identified run is neither pending nor
+the latest outcome; read `status` before acting. `REVIEW_ARGUMENT` means a page
+position or decision argument was invalid; nothing changed.
+
+Keep the returned `projectId`, `runId` and `revision` for review, save or skip.
+Reuse the original requestId and exact payload to retry an interrupted
+submission. A changed draft needs an explicit discard of the old draft and a
+fresh requestId. Reuse of an ID cannot replace its pending content or silently
+return a previous outcome for different content. Only the latest completed
+result is retained; if a later result replaces it, the original target
+expectation still prevents an uninspected overwrite.
+
+Save retries keep the retained draft bytes and original target expectation:
+absent for creation, or the inspected hash for an update. A conflicting file is
+preserved. Re-read and reconcile the current note before proposing a new change;
+never substitute a fresh hash into the old draft to force a save. A revised
+draft needs fresh review under the saving preference. Direct notes share the
+project's single pending-run slot with queued processing. A busy result does not
+disclose another run's identity and never authorizes replacing that pending
+work. A complete durable direct draft can be recovered after interruption
+without resubmitting content or calling a model; incomplete drafting still needs
+the original request.
 
 ## Native tracking and processing commands
 
@@ -145,23 +209,37 @@ budget wait for another command. Oversized exchanges progress in ordered parts;
 ordinary prompts, replies and tool arguments are not truncated to fit one run.
 
 Review mode prepares private drafts with target paths, summaries and optional
-section headings. `save` authorizes their publication. Auto saving performs the
-same writes after an explicit process command. A successful nothing-useful result
-consumes its selected input without a note write. Failed drafting or saving
-preserves affected input.
+section headings. They are shown through `cuefluent_review_note` with their
+`revision`, and the user's Save decision, relayed with `cuefluent_save_note` and
+that `revision`, authorizes their publication. While the set is pending, a typed
+`save` or `skip` does not act: it returns the pending review status so the
+drafts can be shown and the question asked. Auto saving performs the same writes
+after an explicit process command. A successful nothing-useful result consumes
+its selected input without a note write. Failed drafting or saving preserves
+affected input.
 
 Only one run or review set is pending per project. A second command reports that
 work. `accepted` and `running` are not completion. Repeating `process` after an
-interruption resumes existing drafting or auto-saving; `save` resumes a review
-save. Complete durable drafts are reused without another model request.
+interruption resumes existing drafting or auto-saving; a typed `save` resumes an
+interrupted approved review save (phase `saving`). Complete durable drafts are
+reused without another model request.
 
 ## Skip and conflicts
 
-`skip` releases inactive failed, conflicted or review work. It preserves all
-selected input and any notes already saved. The result lists those notes;
-reprocessing may produce redundant prose. Skip cannot race a live writer.
-If every save is already durable and only cleanup remains, skip finishes cleanup
-instead of replaying the handled input.
+Typed `skip` releases inactive failed or conflicted work that has no pending
+review set. While a review set is pending it does not act: it returns the
+pending review status, the assistant shows the drafts with
+`cuefluent_review_note` and asks, and a decision not to save is relayed with
+`cuefluent_skip_note` and the reviewed `revision`. The meaning of that tool
+depends on the run's `kind`. For a direct draft (`kind: direct`) it is Discard:
+it releases only the identified direct run, the unused private draft is cleared,
+no note changes and every queue is preserved. For queued drafts (`kind: chat` or
+`project`) it is `Skip draft; keep input`: the drafts are released and the next
+`process` may propose the same notes again. Skip preserves all selected input
+and any notes already saved. The result lists those notes; reprocessing may
+produce redundant prose. Skip cannot race a live writer. When every save is
+already durable and only cleanup remains, the review page offers `Finish`
+instead, and either tool finishes that cleanup, which consumes the handled input.
 
 A file changed after the agent read it is a conflict. A newly chosen target that
 was never read is expected to be absent. Preserve user edits, changed parents and
@@ -172,9 +250,12 @@ and let a new processing run read the current notes afresh.
 ## Status and delivery
 
 `status` is read-only. It reports settings, tracking and queue counts, pending
-drafts, active/interrupted work and the latest completed result. Counts are bounded
-snapshots; an incomplete or unknown count is not zero. It does not repair logs,
-retry synchronization or start a model.
+drafts, active/interrupted work and the latest completed result. A pending run
+includes its `kind` (`direct`, `chat` or `project`); the `revision` a decision
+cites comes only from the review pages that showed the drafts. Counts are
+bounded snapshots;
+an incomplete or unknown count is not zero. It does not repair logs, retry
+synchronization or start a model.
 
 Claude's opaque invocation handle lets the skill read the result of that exact
 command; polling never starts work. A later native command replaces that chat's

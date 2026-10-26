@@ -104,12 +104,16 @@ test('hash and setup refusals distinguish settings inspection from complete note
   assert.doesNotMatch(proposal.recovery, /latest status/);
 });
 
-test('revising a pending request requires approved discard before a new identity', () => {
+test('revising a pending request requires the user\'s relayed discard before a new identity, and stale decisions ask for a fresh review', () => {
   const result = describeFailure({ code: 'DIRECT_NOTE_REQUEST_CHANGED' }, { stage: 'tool', toolName: 'cuefluent_create_note' });
   assert.match(result.recovery, /cuefluent_review_note/);
-  assert.match(result.recovery, /cuefluent_skip_note with user authorization and successful client confirmation/);
+  assert.match(result.recovery, /Discard decision through cuefluent_skip_note with the reviewed revision/);
   assert.ok(result.recovery.indexOf('cuefluent_skip_note') < result.recovery.indexOf('fresh UUID'));
   assert.match(result.recovery, /completed request/); assert.match(result.recovery, /identical arguments/);
+  const stale = describeFailure({ code: 'REVIEW_REVISION_STALE' }, { stage: 'tool', toolName: 'cuefluent_save_note' });
+  assert.match(stale.recovery, /cuefluent_review_note again/); assert.match(stale.recovery, /Do not reuse an earlier answer/);
+  const replaced = describeFailure({ code: 'REVIEW_RUN_CHANGED' }, { stage: 'tool', toolName: 'cuefluent_skip_note' });
+  assert.match(replaced.recovery, /status/); assert.match(replaced.recovery, /ask the user again/);
 });
 
 test('fatal transport limits require a new connection before mutation recovery', () => {

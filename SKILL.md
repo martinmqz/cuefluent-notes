@@ -46,44 +46,85 @@ untracked chats; no exact native command is needed.
    and a brief `summary`. Cuefluent saves the submitted content; it does not turn
    a context prompt into a note. Reuse that requestId and the exact arguments only
    when retrying the same submission.
-5. If the result is `review`, write each returned `drafts[].content` unchanged to
-   a uniquely named `.md` file in a private system temporary directory, outside
-   the repository and notes destination. This is a content-only approval copy:
-   no Cuefluent metadata, search-alias comments, branded wrapper, or processing
-   details. Use the final Cuefluent-compatible Markdown structure: topic H1,
-   useful H2 sections, prose and lists. Saving must preserve the approved content
-   and structure while including the retained metadata; do not rewrite or
-   reformat the note after approval. Open the temporary file with the
-   client's file-preview tool when available and provide a clickable local file
-   link, naming the intended note destination separately. Call `cuefluent_save_note`
-   with the returned `projectId` and `runId` to request the client's confirmation
-   of that exact retained draft. The user approves the content through that
-   confirmation. If it is `saved`, link the returned saved path.
-   Automatic saving finishes in the create/update call; do not ask for an additional
-   save command.
-   An unchanged result means no note bytes or timestamps changed.
+5. Automatic saving finishes in the create/update call and returns the saved
+   path; link it, and do not ask for an additional save command. An unchanged
+   result means no note bytes or timestamps changed. If the result is `review`,
+   nothing is saved yet: show the user the complete set, ask, and relay only
+   their answer.
+   - Read the page: it carries `projectId`, `runId`, `kind` (`direct`, `chat` or
+     `project`), `revision` (the immutable identity of the reviewed set),
+     `choices` (the exact wording to offer) and `drafts[]`, each with its
+     absolute `target` and its `content`. The `content` is ordinary Markdown
+     with the final H1 and H2 structure; the Cuefluent metadata block and
+     search-alias comments are omitted. Saving preserves the reviewed content
+     and structure and includes the retained metadata, so do not rewrite or
+     reformat the note after review. When the page's `next` is not null, call
+     `cuefluent_review_note` with `projectId`, `runId`, `draft: next.draft` and
+     `start: next.start`, until `next` is null. A draft too large for one page
+     arrives in byte pieces; concatenate them in order. Show the complete set;
+     never truncate, summarize or raise transport limits.
+   - Show it: write each `content` unchanged, with no branded wrapper or
+     processing details, to a uniquely named `.md` file in a private system
+     temporary directory, outside the repository and notes destination. Open it
+     with the client's file viewer or preview tool and give a clickable local
+     file link. If the client has no file viewer, render the note inline in the
+     reply as ordinary Markdown, not as a fenced block that shows its source.
+     Either way, name the intended destination separately.
+   - Ask with the client's question UI (Claude Code: AskUserQuestion; Codex: its
+     question tool when available; otherwise plain text), using exactly the
+     returned `choices`. They depend on the run's phase: a pending review set
+     offers `Save`, then `Discard` (direct draft) or `Skip draft; keep input`
+     (queued drafts), then `Keep pending`; a run whose notes are all saved and
+     only needs cleanup offers `Finish` and `Keep pending`; a run interrupted
+     while drafting offers `Discard` or `Skip; keep input`, and `Keep pending`;
+     a direct draft retained complete adds `Restore draft` first in review mode,
+     or `Save` in automatic mode.
+   - On `Save`, `Finish` or `Restore draft`, call `cuefluent_save_note` with
+     `projectId`, `runId` and the `revision` you showed. `Restore draft` only
+     restores the retained preview and returns a review page; show it and ask
+     again. A direct draft saves in that call and returns
+     the saved path; link it. A queued set starts the save in a separate worker
+     and returns `running` with `started: true`: report it as still running and
+     use `status` for progress and the latest result. `started: false` means a
+     worker already owned the run and your decision did not start; read `status`
+     and, when the run is waiting again, review and ask again. Call the tool
+     again with the same `revision` to retry an interrupted approved save.
+   - On `Discard`, `Skip draft; keep input` or `Skip; keep input`, call
+     `cuefluent_skip_note` with `projectId`, `runId` and the `revision` you
+     showed. Discard clears the unused private draft and changes no note.
+     Skipping queued drafts releases them, keeps the selected input queued and
+     keeps notes already saved, so the next `process` may propose the same notes
+     again.
+   - On `Keep pending`, make no call. The draft stays retained, as it does after
+     silence, cancellation or an unanswered question.
 
 Do not read native transcript files, enroll the chat, or invoke `process` for this
 workflow. A direct note does not select or consume any queued conversation. Do not
 fetch older conversation to fill missing context without the user's request.
 
-The temporary file is only an approval view, never the publication stage. Before
-saving, check that it still matches the returned preview content. If the user
-edited it, treat that as a revision and prepare a new draft for approval; do not
-save the old draft or copy the preview into the note destination. After saving or
-discarding, remove only the temporary preview you created if it is unchanged;
-preserve user edits. If preview creation or opening fails, report it and keep the
-draft pending for review.
+The temporary file is only a presentation copy, never the publication stage; do
+not copy it into the note destination. An edit made silently in it is neither
+detected nor submitted, so a request for changes, or an edit the user reports,
+needs a new draft for approval. Afterwards you may remove a temporary preview
+you created if it is unchanged; never delete user edits. If the temporary file
+cannot be created or opened, render the note inline instead; if no presentation
+is possible, report it and keep the draft pending for review.
 
-`cuefluent_review_note` retrieves the retained draft's content-only preview or
-latest result;
-`cuefluent_skip_note` discards that identified draft when requested. A busy result
-means another run is pending; explain it without saving or skipping unrelated work.
-Saving a review draft and discarding pending work require the client's user
-confirmation. If the client cannot provide it, report the returned limitation and
-leave the draft pending. Do not substitute a shell write or an agent-authored
-approval. Resuming a draft from another connection may also request confirmation
-before revealing its content.
+`cuefluent_review_note` is read-only. It returns the content-only preview of the
+pending draft set, for a direct note or a queued processing run, or the latest
+completed outcome for that `runId`. A new connection or a different chat can
+review a retained draft. `cuefluent_save_note` and
+`cuefluent_skip_note` relay the user's decision together with the `revision` of
+the draft set they saw; call them only with that decision, never as a way around
+review mode. `REVIEW_REVISION_STALE` means the draft set changed since it was
+reviewed: review again, show the current draft and ask again, and never reuse an
+earlier answer. `REVIEW_RUN_CHANGED` means the identified run is no longer
+pending or the latest outcome: read `status` before acting. A busy result means
+another run is pending; explain it without saving or skipping unrelated work.
+The workflow is the same in Claude Desktop, Codex Desktop and their CLI clients;
+only the question UI differs. Do not substitute a shell write, an
+operating-system dialog or an assistant-authored approval.
+
 Create requires an absent target; update requires the existing note's inspected
 hash and a complete bounded read. On a conflict, re-read the note and reconcile the requested change with its
 current content. In review mode, a changed proposal needs fresh review; never
@@ -91,6 +132,10 @@ refresh a hash merely to force the old draft over manual edits.
 If the user wants to revise a review draft, discard it only with their authorization
 and submit the revision with a fresh requestId. See [commands](references/commands.md)
 for limits and interrupted-save recovery.
+
+The assistant is responsible for asking the user; the backend is responsible for
+saving exactly what was reviewed, never overwriting something that changed, and
+never writing outside the configured destination.
 
 ## Dispatch an exact tracking or processing command
 
@@ -125,9 +170,18 @@ conversation has been queued or processed; report queued counts separately.
 | `untrack` | Stop new collection immediately; attempt one final catch-up. |
 | `process` | Process this chat's queued input. |
 | `process project` | Process queued input owned by this project, including untracked chats. |
-| `save` | Save the pending review drafts, or retry their interrupted save. |
-| `skip` | Release inactive pending work; preserve source input and already-saved notes. |
+| `save` | Show a pending review set for a decision; resume an interrupted approved save. |
+| `skip` | Show a pending review set for a decision; otherwise release inactive failed or conflicted work, preserving source input and already-saved notes. |
 | `status` | Read tracking, queue, pending work, settings and the latest result. |
+
+While a review set is pending, a typed `save` or `skip` does not act. Its result
+is the pending review status: show the drafts with `cuefluent_review_note`, ask
+the question as in step 5 of the note workflow above, and relay the decision
+with `cuefluent_save_note` or `cuefluent_skip_note` and the reviewed `revision`.
+A typed `save` resumes an interrupted approved save (phase `saving`), and a
+typed `skip` releases inactive failed or conflicted work that has no pending
+review set. `status` reports the run's `kind`; the `revision` a decision cites
+comes only from the review pages that showed the drafts.
 
 ## Consent and setup
 
@@ -144,10 +198,8 @@ before asking the user to repeat note or tracking commands.
 
 Fresh project defaults are **manual tracking**, **review saving**, and **activity
 logging on for directory destinations**. Respect explicit logging opt-outs and
-loaded settings. Installation does not modify existing settings. Version 0.18.0
-requires fresh setup; earlier private state stays untouched and is not imported.
-Follow the [storage transition](references/setup.md#private-location) before
-upgrading. Single-file destinations keep logging off. Queued processing always
+loaded settings. Installation does not modify existing settings. Single-file
+destinations keep logging off. Queued processing always
 requires an explicit command. Automatic tracking applies to new chats going
 forward; it does not import old chats. Explicit untrack survives cleanup and
 automatic mode. Read-only requests and opt-outs take priority.
