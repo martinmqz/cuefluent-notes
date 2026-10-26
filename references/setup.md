@@ -52,8 +52,9 @@ The result is `state: "configured"`, `created`, the saved `project` and the `log
 report (`valid`, `absent`, `empty`, `problem` or `not-applicable`; a valid report
 includes the series id, timezone and years). Tell the user the saved destination,
 preferences and logs path. The tool creates the private store on first use at the
-connector's location, and a connector started before setup serves the new
-configuration on its next call.
+connector's location, including a location that already exists but is still
+empty, and a connector started before setup serves the new configuration on its
+next call.
 
 ## Refusals
 
@@ -76,8 +77,11 @@ change; never delete private state to force setup.
 - `LOG_*`: existing `logs/` content that is not a valid series is preserved and
   reported, and blocks enabling logging until it is repaired.
 - `SETUP_TOOL_ARGUMENT`: the arguments are missing or invalid; nothing is written.
-- `SETUP_PENDING`: an interrupted setup retains its exact proposal. Repeat it with
-  the same choices to complete it.
+- `SETUP_PENDING`: an interrupted setup retains its exact proposal, and other setup
+  changes wait until it completes. `cuefluent_projects` names it in `pendingSetup`
+  (`id` and `root`); call `cuefluent_setup` with only that `id` or `root` to
+  complete it as recorded, or repeat its exact choices. A setup whose settings
+  are already published is completed on the way to any other change.
 
 ## Activity logging
 

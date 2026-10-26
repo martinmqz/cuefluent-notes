@@ -9,6 +9,7 @@ import { openNoteWorkspace, NOTE_WORKSPACE_TOOLS } from '../processing/workspace
 import { NOTE_PROFILE, decodeNote } from '../notes/index.mjs';
 import { fields, freezeData, CONTROL_LIMITS } from '../client/control-server.mjs';
 import { readRunSnapshot } from './status.mjs';
+import { readPendingSetup } from './setup.mjs';
 import { reviewRun, decideRun, completedOutcome } from './review.mjs';
 import { persistDraftManifest, recoverDrafts } from '../processing/draft.mjs';
 import { pinProcessingLogging } from '../processing/logging.mjs';
@@ -62,12 +63,14 @@ function argumentsFor(name, input) {
   const result = fields(input, required, Object.keys(properties).filter(key => !required.includes(key)), invalid);
   for (const [key, value] of Object.entries(result)) {
     const rule = properties[key];
+    // Content over the byte cap is a size refusal whatever its character count,
+    // so its guidance says to preserve the note rather than to fix the arguments.
+    if (key === 'content' && typeof value === 'string' && Buffer.byteLength(value) > DIRECT_NOTE_BYTES) fail('DIRECT_NOTE_CONTENT_LIMIT', 'The submitted content exceeds the direct note size limit.');
     if (rule.type === 'integer') {
       if (!Number.isSafeInteger(value) || value < rule.minimum || value > rule.maximum) invalid();
     } else if (typeof value !== 'string' || value.length < (rule.minLength ?? 0) || value.length > (rule.maxLength ?? 128) ||
         (rule.pattern && new RegExp(rule.pattern).exec(value)?.[0] !== value)) invalid();
   }
-  if (result.content !== undefined && Buffer.byteLength(result.content) > DIRECT_NOTE_BYTES) invalid();
   if (name === 'cuefluent_read_note' && result.start > 0 && result.expectedHash === undefined) invalid();
   return Object.freeze(result);
 }
@@ -183,7 +186,11 @@ export function createDirectNoteTools({ store, client, skillVersion, launchProce
         if (projects.length && bytes + size > 128 * 1024) break;
         projects.push(entry); bytes += size; cursor++;
       }
-      return { state: store ? 'configured' : 'unconfigured', projects, nextCursor: cursor < value.projects.length ? cursor : null };
+      // An interrupted setup is named by project so it can be completed; its
+      // choices stay private to the journal.
+      const pending = store ? await readPendingSetup(store) : null;
+      return { state: store ? 'configured' : 'unconfigured', projects, nextCursor: cursor < value.projects.length ? cursor : null,
+        pendingSetup: pending ? { id: pending.request.id, root: pending.request.root } : null };
     }
     if (!store) return { state: 'unconfigured', message: 'Set up a note destination first.' };
     if (['cuefluent_list_notes', 'cuefluent_read_note'].includes(name)) return inspectNotes(store, name, input, skillVersion);

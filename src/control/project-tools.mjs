@@ -119,22 +119,31 @@ export function createProjectTools({ storeRoot, store, skillVersion }) {
     }
     if (name !== 'cuefluent_setup') fail('CONTROL_TOOL_UNKNOWN', 'This project tool is unavailable.');
     const input = setupArguments(args), { value, hash } = await currentSettings(store);
-    const existing = selectProject(value.projects, input), proposed = proposal(value.projects, existing, input);
+    const existing = selectProject(value.projects, input);
+    // An interrupted setup is completed with its own recorded request, which
+    // the journal check requires verbatim; a request rebuilt from the published
+    // settings (an adopted log timezone, say) is not that request. Naming that
+    // project with no other field is the explicit "finish it as recorded".
+    const pending = store ? await readPendingSetup(store) : null;
+    const selectors = Object.keys(input), named = pending && selectors.length > 0 && selectors.every(key => ['id', 'root'].includes(key)) &&
+      (input.id === undefined || pending.request.id === input.id) && (input.root === undefined || sameRoot(pending.request.root, input.root));
+    if (named) {
+      const completed = await setupProject({ storeRoot, project: pending.request, expectedHash: pending.settingsHash, skillVersion });
+      return { state: 'configured', created: !existing, project: completed.project, logs: completed.logs };
+    }
+    const proposed = proposal(value.projects, existing, input);
     let result;
     try { result = await setupProject({ storeRoot, project: proposed, expectedHash: hash, skillVersion }); }
     catch (error) {
-      // A setup of this same project whose settings are already published is
-      // completed with its own recorded request, which the journal check
-      // requires verbatim; a request rebuilt from the published settings (an
-      // adopted log timezone, say) is not that request. Completion then only
-      // removes the journal. An unpublished intent, or a journal for another
-      // project, stays a refusal: its public writes are never performed for a
-      // different proposal.
-      const pending = error?.code === 'SETUP_PENDING' && store ? await readPendingSetup(store) : null;
-      if (!pending?.published || pending.request.id !== proposed.id || !sameRoot(pending.request.root, proposed.root)) throw error;
+      // A published journal only awaits its removal, a private write, so any
+      // caller completes it before its own change applies. An unpublished
+      // intent still performs public writes, so a different proposal for it
+      // stays a refusal.
+      const journal = error?.code === 'SETUP_PENDING' && store ? await readPendingSetup(store) : null;
+      if (!journal?.published) throw error;
       // The hash observed with the journal authorizes its completion and nothing
       // else: settings changed by another connection in between are a conflict.
-      await setupProject({ storeRoot, project: pending.request, expectedHash: pending.settingsHash, skillVersion });
+      await setupProject({ storeRoot, project: journal.request, expectedHash: journal.settingsHash, skillVersion });
       // Then the caller's own choices apply to the completed configuration.
       const current = await currentSettings(store), selected = selectProject(current.value.projects, input);
       result = await setupProject({ storeRoot, project: proposal(current.value.projects, selected, input), expectedHash: current.hash, skillVersion });

@@ -8,11 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createProject } from '../src/core/settings.mjs';
-import { replaceAttempt, runRevision, validateRun } from '../src/core/run.mjs';
+import { createRun, replaceAttempt, runRevision, validateRun } from '../src/core/run.mjs';
 import { initializeStore, withProject } from '../src/storage/store.mjs';
 import { readJSON, writeJSON, hashBytes } from '../src/storage/files.mjs';
-import { readDraftArtifact } from '../src/storage/draft-artifacts.mjs';
-import { ownAttempt, attachAttemptChild, launchOwnedAttempt, inspectAttempt } from '../src/storage/attempts.mjs';
+import { readDraftArtifact, prepareDraftArtifacts, writeDraftArtifact, completeDraftArtifacts } from '../src/storage/draft-artifacts.mjs';
+import { ownAttempt, attachAttemptChild, launchOwnedAttempt, inspectAttempt, ownDirectAttempt, withCurrentAttempt } from '../src/storage/attempts.mjs';
 import { setChatTracking, queueRelative } from '../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
 import { createDirectNoteTools } from '../src/control/direct-notes.mjs';
@@ -595,4 +595,77 @@ test('page metadata stays bounded: many long saved targets and many warnings nev
     for (const entry of page.drafts) assert.equal(entry.saved, true);
   }
   assert.equal(walked.flatMap(page => page.drafts).length, 64);
+});
+
+/** A direct run reserved for `requestId`, interrupted after its draft artifact
+ * pointer was persisted and, when `complete`, after its bytes were written. */
+async function interruptedDirectDraft(f, requestId, { stage }) {
+  const project = await withProject(f.store, PROJECT, async context => context.project);
+  await withProject(f.store, PROJECT, async context => writeJSON(f.store.pin, `${context.directory}/run.json`,
+    createRun(context.project, [], { id: requestId, scope: { kind: 'direct', requestHash: hashBytes(Buffer.from('synthetic request')) } }), { expectedHash: null }));
+  const workspace = await openNoteWorkspace({ project, runId: requestId, skillVersion: SKILL_VERSION });
+  await workspace.draft_note({ target: RETRY.target, content: RETRY.content, summary: RETRY.summary });
+  await workspace.finish_drafting({ outcome: 'drafted' });
+  const manifest = await workspace.manifest();
+  const metadata = { runId: manifest.runId, outcome: manifest.outcome, drafts: manifest.drafts.map(({ bytes, ...draft }) => ({ ...draft, byteLength: bytes.length })) };
+  await assert.rejects(ownDirectAttempt(f.store, PROJECT, requestId, async owner => {
+    await withCurrentAttempt(owner, async context => {
+      let current = context.run, hash = context.hash;
+      await prepareDraftArtifacts(f.store.pin, `${context.directory}/drafts/${current.id}`, metadata, { persistIntent: async pointer => {
+        current = validateRun({ ...current, artifacts: pointer });
+        hash = (await writeJSON(f.store.pin, `${context.directory}/run.json`, current, { expectedHash: hash })).hash;
+      } });
+    });
+    if (stage !== 'pointer') for (const draft of manifest.drafts) await withCurrentAttempt(owner, ({ run }) => writeDraftArtifact(f.store.pin, run.artifacts, draft.id, draft.bytes));
+    if (stage === 'complete') await withCurrentAttempt(owner, ({ run }) => completeDraftArtifacts(f.store.pin, run.artifacts));
+    throw Object.assign(new Error('Synthetic interruption.'), { code: 'SYNTHETIC_STOP' });
+  }), { code: 'SYNTHETIC_STOP' });
+  return f.current();
+}
+
+test('a direct draft whose retained bytes never completed offers no restoration, while complete payloads offer Restore draft and restore, with or without the ready marker', async t => {
+  for (const stage of ['pointer', 'payloads', 'complete']) {
+    const complete = stage !== 'pointer';
+    const f = await fixture(t), requestId = randomUUID();
+    const run = await interruptedDirectDraft(f, requestId, { stage });
+    assert.equal(run.phase, 'drafting'); assert.ok(run.artifacts);
+    const page = await reviewRun(f.store, { projectId: PROJECT, runId: requestId });
+    assert.deepEqual([page.state, page.draftCount, page.drafts], ['interrupted', 0, []]);
+    assert.deepEqual(page.choices, complete ? ['Restore draft', 'Discard', 'Keep pending'] : ['Discard', 'Keep pending']);
+    // Status describes the same choices without promising a draft the page does not carry.
+    const status = await readProjectStatus(f.store, PROJECT);
+    assert.equal(status.state, 'idle'); assert.match(status.run.recovery, /Restore draft or Save when a complete draft was retained, otherwise Discard/);
+    assert.doesNotMatch(status.run.recovery, /show the retained draft/);
+    if (complete) {
+      const restored = await f.decide(requestId, page.revision, 'save');
+      assert.equal(restored.state, 'review'); assert.equal(restored.drafts.length, 1); assert.equal(restored.drafts[0].content.includes('Use exact original hashes'), true);
+    } else {
+      const discarded = await f.decide(requestId, page.revision, 'skip');
+      assert.equal(discarded.state, 'skipped'); assert.deepEqual(await fs.readdir(path.join(f.store.root, '..', 'notes')), []);
+    }
+  }
+});
+
+test('status names the command that resumes a queued run and, after a save conflict, the release path instead of the refused Save', async t => {
+  const f = await fixture(t);
+  // A project-scope run still drafting resumes only through `process project`.
+  const drafting = await f.prepare();
+  let status = await readProjectStatus(f.store, PROJECT);
+  assert.equal(status.run.id, drafting.id); assert.match(status.run.recovery, /^Drafting stopped before the draft set was published\. Repeat process project to resume it/);
+  const g = await fixture(t), { run } = await g.queued([RETRY]);
+  const rewrite = patch => withProject(g.store, PROJECT, async ({ directory }) => {
+    const stored = await readJSON(g.store.pin, `${directory}/run.json`);
+    await writeJSON(g.store.pin, `${directory}/run.json`, validateRun({ ...stored.value, ...patch }), { expectedHash: stored.hash });
+  });
+  // An approved save that the writer refused leaves its conflict code on the run.
+  await rewrite({ phase: 'saving', saved: [], attempt: null, warnings: ['NOTE_PUBLICATION_CONFLICT'] });
+  status = await readProjectStatus(g.store, PROJECT);
+  assert.equal(status.state, 'idle'); assert.equal(status.run.phase, 'saving');
+  assert.match(status.run.recovery, /A note changed after it was reviewed, so saving it again is refused/);
+  assert.match(status.run.recovery, /Relay Skip draft; keep input to release the run/); assert.doesNotMatch(status.run.recovery, /to finish it/);
+  assert.deepEqual((await reviewRun(g.store, { projectId: PROJECT, runId: run.id })).choices, ['Save', 'Skip draft; keep input', 'Keep pending']);
+  // Without a conflict, an interrupted automatic or approved save resumes through its own command or Save.
+  await rewrite({ warnings: [] });
+  status = await readProjectStatus(g.store, PROJECT);
+  assert.match(status.run.recovery, /Repeat process project for automatic saving, or relay Save with the reviewed revision, to finish it/);
 });

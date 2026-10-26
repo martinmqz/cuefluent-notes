@@ -107,6 +107,29 @@ test('a missing hash and a changed original share the inspect-again guidance, an
   assert.doesNotMatch(proposal.recovery, /latest status/);
 });
 
+test('path, placement, alias and size refusals name their situation rather than the generic entry', () => {
+  const generic = describeFailure({}).recovery;
+  for (const code of ['PATH_MISSING', 'PATH_INVALID', 'PATH_UNSAFE']) {
+    const result = describeFailure({ code }, { stage: 'tool', toolName: 'cuefluent_list_notes' });
+    assert.match(result.message, /path is missing, escapes its destination/); assert.match(result.recovery, /missing original never authorizes a replacement/);
+    assert.notEqual(result.recovery, generic);
+  }
+  for (const code of ['PRIVATE_LOCATION_OVERLAP', 'PRIVATE_LOCATION_REPOSITORY']) {
+    const placement = describeFailure({ code }).message;
+    assert.match(placement, /private store must lie outside repositories/); assert.doesNotMatch(placement, /destination must|root must/);
+  }
+  assert.match(describeFailure({ code: 'FILE_MISSING' }).message, /missing/);
+  const aliases = describeFailure({ code: 'NOTE_ALIASES_CHANGED' });
+  assert.match(aliases.message, /drops existing aliases/); assert.doesNotMatch(aliases.message, /changed after/);
+  const size = describeFailure({ code: 'DIRECT_NOTE_CONTENT_LIMIT' }, { stage: 'tool', toolName: 'cuefluent_create_note' });
+  assert.match(size.message, /size limit/); assert.match(size.recovery, /Do not shorten, split/);
+  const conflict = describeFailure({ code: 'NOTE_PUBLICATION_CONFLICT' }, { stage: 'tool', toolName: 'cuefluent_save_note' });
+  assert.match(conflict.message, /changed after they were inspected or reviewed/); assert.match(conflict.recovery, /relay Discard or Skip to release it/);
+  assert.equal(describeFailure({ code: 'DRAFT_CHANGED' }).recovery, conflict.recovery);
+  const pending = describeFailure({ code: 'SETUP_PENDING' }, { stage: 'tool', toolName: 'cuefluent_setup' });
+  assert.match(pending.recovery, /cuefluent_projects: its pendingSetup names the interrupted project/); assert.match(pending.recovery, /only that project's id or exact root/);
+});
+
 test('a retained project is refused for its root without implying a pending run', () => {
   const retained = describeFailure({ code: 'SETTINGS_RETAINED_PROJECT' }, { stage: 'command', operation: 'setup' });
   assert.match(retained.message, /root cannot change/); assert.match(retained.recovery, /Keep the project's root/);
@@ -178,7 +201,7 @@ test('every failure code raised in the source resolves to a table entry or the g
   const runtime = new Set(['ENOENT', 'EACCES', 'EPERM', 'ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_UNKNOWN_BUILTIN_MODULE']);
   for (const code of GUIDED_CODES) assert.ok(raised.has(code) || runtime.has(code), `${code} is in the guidance table but nothing raises it`);
   const entries = new Set(GUIDED_CODES.map(code => describeFailure({ code }).message));
-  assert.ok(entries.size <= 20, `the guidance table has ${entries.size} entries`);
+  assert.ok(entries.size <= 24, `the guidance table has ${entries.size} entries`);
   for (const code of GUIDED_CODES) assert.notEqual(describeFailure({ code }).recovery, generic.recovery, code);
   // Internal codes resolve to the generic entry without a per-code sentence.
   assert.equal(describeFailure({ code: 'RUN_MISSING' }).recovery, generic.recovery);

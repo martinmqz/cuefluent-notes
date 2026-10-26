@@ -279,15 +279,18 @@ test('an identical setup repeated after an interrupted journal removal completes
   const changed = await f.setup({ id: 'journal', tracking: 'auto' });
   assert.equal(changed.project.saving, 'auto'); assert.equal(changed.project.tracking, 'auto'); assert.equal(changed.created, false);
   assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
-  // A journal for another project remains a refusal that changes nothing.
+  // A published journal for another project only awaits its removal, so a change
+  // to an unrelated project completes it first and then applies.
   const other = await f.folder('other');
   await interruptRemoval({ root: f.storeRoot, relative: 'config/setup.json', operation: 'setup', options: { storeRoot: f.storeRoot, expectedHash: (await f.settings()).hash, skillVersion,
     project: { id: 'other', root: other, destination: f.destination('other-notes'), activityLog: { enabled: false } } } });
-  const before = await f.settings();
-  await assert.rejects(f.setup({ id: 'journal', saving: 'review' }), { code: 'SETUP_PENDING' });
-  assert.equal((await f.settings()).hash, before.hash);
-  assert.equal((await f.setup({ id: 'other', root: other, destination: f.destination('other-notes'), activityLog: { enabled: false } })).project.id, 'other');
+  const listed = await (await f.notes()).call('cuefluent_projects', {});
+  assert.deepEqual(listed.pendingSetup, { id: 'other', root: other }); assert.deepEqual(listed.projects.map(item => item.id).sort(), ['journal', 'other']);
+  const unrelated = await f.setup({ id: 'journal', saving: 'review' });
+  assert.equal(unrelated.project.saving, 'review'); assert.equal(unrelated.created, false);
+  assert.deepEqual((await f.settings()).value.projects.map(item => item.id).sort(), ['journal', 'other']);
   assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+  assert.equal((await (await f.notes()).call('cuefluent_projects', {})).pendingSetup, null);
 });
 
 test('setup resumes a first initialization interrupted before its layout or settings exist', async t => {
@@ -337,9 +340,23 @@ test('an unpublished interrupted setup is never replayed for a different proposa
   assert.deepEqual((await f.settings()).value.projects.map(item => item.id), ['base']);
   assert.deepEqual(await fs.readFile(path.join(f.root, 'notes', 'logs', '2026.md')), annual);
   assert.deepEqual(await fs.readdir(path.join(f.root, 'notes', 'logs')), logsBefore);
-  // Repeating the interrupted request itself completes it.
-  const completed = await f.setup({ id: 'held', root: project, destination: { kind: 'directory', path: path.join(f.root, 'notes') }, activityLog: { enabled: true, timezone: 'UTC' } });
-  assert.equal(completed.state, 'configured'); assert.equal(completed.project.activityLog.timezone, 'UTC');
+  // The listing names the interrupted project without its choices, and naming
+  // that project alone finishes the setup exactly as recorded.
+  const listed = await (await f.notes()).call('cuefluent_projects', {});
+  assert.deepEqual(listed.pendingSetup, { id: 'held', root: project }); assert.deepEqual(listed.projects.map(item => item.id), ['base']);
+  await assert.rejects(f.setup({ id: 'other-name', root: project, destination: f.destination('new-notes'), activityLog: { enabled: false } }), { code: 'SETUP_PENDING' });
+  // Naming it with a conflicting second selector is a different proposal, not a completion.
+  const otherRoot = await f.folder('other-root');
+  await assert.rejects(f.setup({ id: 'held', root: otherRoot }), { code: 'SETUP_TOOL_ARGUMENT' });
+  await assert.rejects(f.setup({ id: 'held', root: otherRoot, destination: f.destination('new-notes'), activityLog: { enabled: false } }), { code: 'SETUP_PENDING' });
+  await assert.rejects(f.setup({ id: 'different-id', root: project }), { code: 'SETUP_TOOL_ARGUMENT' });
+  await assert.rejects(f.setup({ id: 'different-id', root: project, destination: f.destination('new-notes'), activityLog: { enabled: false } }), { code: 'SETUP_PENDING' });
+  assert.deepEqual((await f.settings()).value.projects.map(item => item.id), ['base']);
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json', 'setup.json']);
+  const completed = await f.setup({ id: 'held' });
+  assert.equal(completed.state, 'configured'); assert.equal(completed.created, true); assert.equal(completed.project.activityLog.timezone, 'UTC');
+  assert.equal(completed.project.destination.path, path.join(f.root, 'notes'));
+  assert.equal((await (await f.notes()).call('cuefluent_projects', {})).pendingSetup, null);
   assert.deepEqual((await f.settings()).value.projects.map(item => item.id).sort(), ['base', 'held']);
   assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
   assert.deepEqual(await fs.readFile(path.join(f.root, 'notes', 'logs', '2026.md')), annual);

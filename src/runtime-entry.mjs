@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fail } from './core/errors.mjs';
 import { withWindowsAclDeadline } from './storage/windows-acl.mjs';
-import { openStore, readSettings } from './storage/store.mjs';
+import { openStore, openStoreOrScaffold, readSettings } from './storage/store.mjs';
 import { pinDirectory } from './storage/paths.mjs';
 import { readJSON } from './storage/files.mjs';
 import { parseEntryArguments, selectStoreRoot, loadClientContract } from './client/entry-options.mjs';
@@ -84,15 +84,10 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
         Object.keys(request.value).some(key => !['storeRoot', 'expectedHash', 'project'].includes(key)) || !Object.hasOwn(request.value, 'expectedHash')) fail('SETUP_ARGUMENT', 'Setup needs project settings and the inspected settings hash (null for a fresh store).');
     output(await setupProject({ ...request.value, storeRoot: request.value.storeRoot ?? storeRoot, skillVersion })); return;
   }
-  let store;
-  try { store = await openStore(storeRoot); }
-  catch (error) {
-    // A first initialization that stopped before its layout exists is not a
-    // store yet. The connector still starts so explicit setup can resume it;
-    // every other operation keeps failing on that incomplete state.
-    if (args.command !== 'mcp' || error?.code !== 'FILE_MISSING') throw error;
-    store = null;
-  }
+  // The connector and the read-only commands start on a location that holds
+  // at most the resumable scaffold of a first initialization, so explicit
+  // setup can create or resume the store there; a mutation keeps failing on it.
+  let store = ['mcp', 'settings', 'status'].includes(args.command) ? await openStoreOrScaffold(storeRoot) : await openStore(storeRoot);
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
@@ -143,7 +138,7 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
         const refreshStore = async () => {
           if (store) return;
           opening ??= (async () => {
-            const opened = await openStore(storeRoot);
+            const opened = await openStoreOrScaffold(storeRoot);
             if (!opened) return;
             await runtime.close();
             store = opened;

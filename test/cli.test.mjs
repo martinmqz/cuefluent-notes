@@ -471,11 +471,18 @@ test('both CLI MCP entrypoints save supplied context and return completion witho
   }
 });
 
-test('a live connector resumes a first initialization that stopped before its layout existed, and a restarted one serves the result', async t => {
+// The shapes a location can have before its first setup completes: created by
+// the user and still empty, or the partial scaffold an interrupted first
+// initialization leaves behind. Each reads as unconfigured and setup finishes it.
+for (const [shape, directories] of [['empty', []], ['config only', ['config']], ['scaffold without a layout', ['config', 'store/locks', 'store/projects', 'store/chats']]]) {
+test(`a live connector starts on an existing ${shape} store location, serves setup there, and a restarted one serves the result`, async t => {
   const f = await fixture(t);
-  // The scaffold an interrupted first initialization leaves behind: private
-  // directories without a layout. Ordinary reads refuse it; explicit setup resumes it.
-  for (const relative of ['config', 'store/locks', 'store/projects', 'store/chats']) await fs.mkdir(path.join(f.storeRoot, relative), { recursive: true, mode: 0o700 });
+  await fs.mkdir(f.storeRoot, { recursive: true, mode: 0o700 });
+  for (const relative of directories) await fs.mkdir(path.join(f.storeRoot, relative), { recursive: true, mode: 0o700 });
+  // The CLI's read-only settings command also treats the location as unconfigured and creates nothing.
+  const settings = JSON.parse((await f.run(['settings'])).stdout);
+  assert.equal(settings.state, 'unconfigured'); assert.equal(settings.settingsHash, null);
+  assert.deepEqual((await fs.readdir(f.storeRoot)).sort(), directories.map(item => item.split('/')[0]).filter((item, index, all) => all.indexOf(item) === index).sort());
   const serve = () => {
     const child = spawn(process.execPath, [entry, 'mcp', 'codex'], { cwd: f.cwd, env: { ...process.env, CUEFLUENT_HOME: f.storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
     const pending = new Map(), lines = createInterface({ input: child.stdout });
@@ -505,8 +512,9 @@ test('a live connector resumes a first initialization that stopped before its la
   const first = serve();
   try {
     await first.start();
-    const refused = await first.call('cuefluent_projects', {});
-    assert.equal(refused.isError, true); assert.equal(refused.structuredContent.error, 'FILE_MISSING');
+    const unconfigured = await first.call('cuefluent_projects', {});
+    assert.equal(unconfigured.isError, false, JSON.stringify(unconfigured)); assert.equal(unconfigured.structuredContent.state, 'unconfigured');
+    assert.equal((await first.call('cuefluent_status', { projectId: 'demo' })).structuredContent.state, 'unconfigured');
     const choices = { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } };
     const setup = await first.call('cuefluent_setup', choices);
     assert.equal(setup.isError, false, JSON.stringify(setup)); assert.equal(setup.structuredContent.created, true);
@@ -523,3 +531,4 @@ test('a live connector resumes a first initialization that stopped before its la
     assert.equal(again.isError, false, JSON.stringify(again)); assert.equal(again.structuredContent.created, false);
   } finally { await second.stop(); }
 });
+}
