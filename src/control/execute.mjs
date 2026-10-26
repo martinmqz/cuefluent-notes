@@ -1,4 +1,5 @@
 import { fail } from '../core/errors.mjs';
+import { runRevision } from '../core/run.mjs';
 import { chooseProject } from '../core/settings.mjs';
 import { parseAction } from '../client/commands.mjs';
 import { readChat, setChatTracking, retainChatContract } from '../storage/chats.mjs';
@@ -53,5 +54,10 @@ export async function executeControl(store, invocation, { reconcileChat, launchP
     if (run.phase === 'review') return status();
   }
   const workerAction = action === 'skip' ? 'skip' : action === 'save' ? 'save' : 'process';
-  return launchOwnedAttempt(store, project.id, { runId: run.id, startupTimeoutMs, launch: context => launchProcessing({ ...context, action: workerAction }) });
+  // A typed decision binds the run it inspected: the worker rechecks this
+  // revision under its ownership and refuses if another worker published or
+  // changed the set in between, instead of acting on whatever is current.
+  const revision = ['save', 'skip'].includes(action) ? runRevision(run) : undefined;
+  return launchOwnedAttempt(store, project.id, { runId: run.id, startupTimeoutMs,
+    launch: context => launchProcessing({ ...context, action: workerAction, ...(revision === undefined ? {} : { revision }) }) });
 }

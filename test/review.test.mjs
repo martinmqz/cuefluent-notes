@@ -17,6 +17,7 @@ import { setChatTracking, queueRelative } from '../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
 import { createDirectNoteTools } from '../src/control/direct-notes.mjs';
 import { reviewRun, decideRun, REVIEW_PAGE_BYTES } from '../src/control/review.mjs';
+import { executeControl } from '../src/control/execute.mjs';
 import { prepareProcessing } from '../src/processing/prepare.mjs';
 import { runProcessingWork } from '../src/processing/worker.mjs';
 import { openNoteWorkspace } from '../src/processing/workspace.mjs';
@@ -502,4 +503,31 @@ test('a run whose notes are all saved offers only Finish, and either decision fi
   assert.deepEqual([outcome.status, outcome.counts.handled, outcome.paths], ['saved', 1, [draft.target]]);
   assert.equal((await f.queue()).records, 0);
   await assert.rejects(inspectAttempt(f.store, PROJECT), { code: 'RUN_MISSING' });
+});
+
+test('a typed skip binds the run it inspected: a set published before its worker owns the run is refused, not discarded', async t => {
+  const f = await fixture(t), pending = await f.prepare();
+  assert.equal(pending.phase, 'drafting');
+  let published, received;
+  const result = await executeControl(f.store, { action: 'skip', client: 'codex', sessionId: 'synthetic', promptId: 'typed-skip', cwd: pending.settings.root, sourcePath: null }, {
+    startupTimeoutMs: process.platform === 'win32' ? 15_000 : undefined,
+    launchProcessing: async context => {
+      received = context;
+      // Another worker finishes drafting and publishes the review set before
+      // this typed skip's worker acquires the run.
+      published = (await f.queued([RETRY], pending)).run;
+      return f.launchWorker(context);
+    },
+  });
+  assert.equal(result.state, 'running');
+  assert.equal(received.action, 'skip'); assert.equal(received.revision, runRevision(pending)); assert.equal(published.phase, 'review');
+  const worker = f.workers.at(-1);
+  assert.equal((await worker.exited).code, 1);
+  assert.equal((await f.read(`error-${worker.attemptId}.json`)).code, 'REVIEW_REVISION_STALE');
+  // The review-ready set is intact and still the pending run; its input is kept.
+  const current = await f.current();
+  assert.equal(current.phase, 'review'); assert.equal(current.drafts.length, 1); assert.deepEqual(current.warnings, []);
+  assert.equal((await f.queue()).records, 1); assert.deepEqual(await fs.readdir(f.notes), []);
+  const page = await reviewRun(f.store, { projectId: PROJECT, runId: pending.id });
+  assert.equal(page.state, 'review'); assert.equal(page.revision, runRevision(published));
 });
