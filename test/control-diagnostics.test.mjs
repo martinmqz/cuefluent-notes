@@ -93,6 +93,18 @@ test('completed outcomes advise no retry while a newer pending run keeps its own
   }
 });
 
+test('an empty selection is one completed outcome whose warnings get one completed-run recovery', () => {
+  const outcome = validateResult({ schemaVersion: 1, runId: null, projectId: 'synthetic', status: 'empty', paths: [],
+    counts: { handled: 0, saved: 0, remaining: null }, warnings: ['CHAT_INVENTORY_INVALID'] });
+  const value = presentControlResult({ state: 'empty', projectId: 'synthetic', runId: null, result: outcome });
+  assert.deepEqual(value.warningDetails.map(detail => [detail.scope, detail.error]), [['result', 'CHAT_INVENTORY_INVALID']]);
+  assert.match(value.warningDetails[0].recovery, /needs no retry/); assert.equal(value.warningDetailsTruncated, false);
+  // A genuine current warning beside an older outcome keeps both recoveries apart.
+  const both = presentControlResult({ state: 'idle', warnings: ['CHAT_INVENTORY_INVALID'], run: null, latest: outcome });
+  assert.deepEqual(both.warningDetails.map(detail => detail.scope), ['status', 'latest']);
+  assert.doesNotMatch(both.warningDetails[0].recovery, /needs no retry/); assert.match(both.warningDetails[1].recovery, /needs no retry/);
+});
+
 test('result guidance stays bounded and expands only code-only warnings in known metadata slots', () => {
   const warnings = Array.from({ length: 30 }, (_, index) => `SYNTHETIC_${index}`);
   const value = presentControlResult({ state: 'idle', warnings, nested: { warnings: ['SYNTHETIC_PRIVATE'] } });

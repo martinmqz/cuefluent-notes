@@ -77,7 +77,7 @@ export async function prepareProcessing(store, projectId, inputScope, { reconcil
         counts: { handled: 0, saved: 0, remaining: warnings.length ? null : 0 }, warnings });
       const prior = await readJSON(store.pin, `${context.directory}/result.json`, { missing: true });
       await writeJSON(store.pin, `${context.directory}/result.json`, result, { expectedHash: prior?.hash ?? null });
-      return { state: 'empty', warnings, result };
+      return { state: 'empty', projectId, runId: null, result };
     }
     // Recheck each exact frozen record and bookmark eligibility. Concurrent
     // appends are harmless; a changed selected record is never silently refreshed.

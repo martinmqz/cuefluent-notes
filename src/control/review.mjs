@@ -1,5 +1,5 @@
 import { fail } from '../core/errors.mjs';
-import { runRevision } from '../core/run.mjs';
+import { runRevision, everyNoteSaved } from '../core/run.mjs';
 import { withProject } from '../storage/store.mjs';
 import { ownDirectAttempt, launchOwnedAttempt } from '../storage/attempts.mjs';
 import { reviewNoteContent } from '../notes/validate.mjs';
@@ -24,7 +24,7 @@ const serialized = value => Buffer.byteLength(JSON.stringify(value));
  * a fresh decision in review mode, and saves it in automatic mode. */
 export function decisionChoices(run) {
   const direct = run.scope.kind === 'direct';
-  if (run.phase === 'cleanup' || (run.phase === 'saving' && run.saved.length === run.drafts.length)) return ['Finish', 'Keep pending'];
+  if (run.phase === 'cleanup' || (run.phase === 'saving' && everyNoteSaved(run))) return ['Finish', 'Keep pending'];
   if (run.phase === 'drafting') {
     const retained = direct && run.artifacts ? [run.settings.saving === 'review' ? 'Restore draft' : 'Save'] : [];
     return [...retained, direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];

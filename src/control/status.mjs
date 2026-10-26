@@ -1,5 +1,5 @@
 import { fail } from '../core/errors.mjs';
-import { validateRun } from '../core/run.mjs';
+import { validateRun, everyNoteSaved } from '../core/run.mjs';
 import { validateResult } from '../core/result.mjs';
 import { withProject, gateOptions } from '../storage/store.mjs';
 import { probeGate } from '../storage/gates.mjs';
@@ -87,6 +87,8 @@ function runRecovery(run, active) {
   if (active) return RECOVERY.active;
   const direct = run.scope.kind === 'direct';
   if (run.phase === 'drafting') return direct ? RECOVERY.direct : RECOVERY.queued;
-  if (run.phase === 'saving') return direct ? RECOVERY.directSaving : RECOVERY.saving;
+  // A worker can stop after the last durable saved receipt and before the
+  // cleanup transition; the review page then offers Finish, and so does status.
+  if (run.phase === 'saving') return everyNoteSaved(run) ? RECOVERY.cleanup : direct ? RECOVERY.directSaving : RECOVERY.saving;
   return RECOVERY[run.phase];
 }

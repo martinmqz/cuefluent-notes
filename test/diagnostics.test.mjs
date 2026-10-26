@@ -107,6 +107,15 @@ test('a missing hash and a changed original share the inspect-again guidance, an
   assert.doesNotMatch(proposal.recovery, /latest status/);
 });
 
+test('a retained project is refused for its root without implying a pending run', () => {
+  const retained = describeFailure({ code: 'SETTINGS_RETAINED_PROJECT' }, { stage: 'command', operation: 'setup' });
+  assert.match(retained.message, /root cannot change/); assert.match(retained.recovery, /Keep the project's root/);
+  assert.match(retained.recovery, /opted-out/); assert.doesNotMatch(retained.recovery, /cuefluent_review_note|pending run|saving mode/);
+  const pending = describeFailure({ code: 'SETTINGS_PENDING_RUN' }, { stage: 'tool', toolName: 'cuefluent_setup' });
+  assert.match(pending.message, /pending run pins/); assert.doesNotMatch(pending.message, /retained|root/);
+  assert.notEqual(pending.recovery, retained.recovery);
+});
+
 test('revising a pending request requires the user\'s relayed discard before a new identity, and stale decisions ask for a fresh review', () => {
   const result = describeFailure({ code: 'DIRECT_NOTE_REQUEST_CHANGED' }, { stage: 'tool', toolName: 'cuefluent_create_note' });
   assert.match(result.recovery, /cuefluent_review_note/);
