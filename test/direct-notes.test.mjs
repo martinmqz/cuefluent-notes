@@ -13,7 +13,7 @@ import { ownDirectAttempt, withCurrentAttempt, inspectAttempt } from '../src/sto
 import { setChatTracking, queueRelative } from '../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
 import { createDirectNoteTools, DIRECT_NOTE_BYTES, DIRECT_READ_BYTES } from '../src/control/direct-notes.mjs';
-import { createControlBridge } from '../src/client/control-server.mjs';
+import { createControlBridge, CONTROL_LIMITS } from '../src/client/control-server.mjs';
 import { readProjectStatus } from '../src/control/status.mjs';
 import { prepareProcessing } from '../src/processing/prepare.mjs';
 import { runProcessingWork } from '../src/processing/worker.mjs';
@@ -329,6 +329,16 @@ test('whole reads honor the exact byte cap and fall back to ranges when the esca
   assert.equal(assembled, escaped);
   // Processor budgets are untouched by the direct whole read.
   assert.equal(WORKSPACE_LIMITS.readBytes, 8192); assert.equal(WORKSPACE_LIMITS.contextBytes, 64 * 1024);
+  // The largest projection still returned whole crosses the real protocol frame: the
+  // result passes the control response bound, and the frame carrying the escaped text
+  // next to the structured content stays within a quarter of the request frame bound.
+  const dense = '# Dense\n\n## Content\n' + '\\"'.repeat(32 * 1024 - 168); await fs.writeFile(target, dense);
+  assert.ok(Buffer.byteLength(dense) <= DIRECT_NOTE_BYTES && Buffer.byteLength(JSON.stringify(dense)) > DIRECT_READ_BYTES - 1024 && Buffer.byteLength(JSON.stringify(dense)) < DIRECT_READ_BYTES - 256);
+  const native = await nativeTools(f);
+  const response = await native.protocol({ jsonrpc: '2.0', id: 90, method: 'tools/call', params: { name: 'cuefluent_read_note', arguments: { projectId: 'demo', target } } });
+  assert.equal(response.result.isError, false); assert.equal(response.result.structuredContent.next, null);
+  assert.equal(response.result.structuredContent.content, dense); assert.equal(JSON.parse(response.result.content[0].text).content, dense);
+  assert.ok(Buffer.byteLength(JSON.stringify(response)) <= CONTROL_LIMITS.requestBytes / 2);
 });
 
 test('a stale hash never authorizes an update, from any connection or chat', async t => {
