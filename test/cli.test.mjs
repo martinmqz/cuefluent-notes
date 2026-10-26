@@ -162,7 +162,7 @@ test('valid CLI and hook commands explain an invalid store-root override without
     assert.equal(hook ? result.stderr : result.stdout, '');
     const message = hook ? JSON.parse(result.stdout).systemMessage : result.stderr;
     assert.match(message, /^Cuefluent Notes \[ENTRY_STORE_ROOT_INVALID\]:/);
-    assert.match(message, /Next step: Correct CUEFLUENT_HOME/);
+    assert.match(message, /Next step: .*CUEFLUENT_HOME/);
     assert.doesNotMatch(message, /relative-private-value/);
     const diagnostics = JSON.parse(message.split('Diagnostics: ')[1]);
     assert.equal(diagnostics.stage, 'command'); assert.equal(diagnostics.operation, args[0]);

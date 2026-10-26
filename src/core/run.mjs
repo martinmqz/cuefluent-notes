@@ -303,6 +303,9 @@ export function readyForReview(run, attemptId, options = {}) {
   return releaseAttempt(checked, attemptId, options);
 }
 
+/** Every draft has a durable saved receipt; only cleanup can remain. */
+export const everyNoteSaved = run => run.saved.length === run.drafts.length;
+
 /** The command caller establishes explicit save authorization for review mode. */
 export function beginSaving(run, attemptId, options = {}) {
   const checked = assertAttempt(run, attemptId, options); phase(checked, ['review', 'saving']);

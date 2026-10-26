@@ -25,7 +25,7 @@ export function testShard(files, spec, weights) {
       (load.cost === loads[best].cost && load.files.length < loads[best].files.length) ? i : best, 0);
     loads[owner].cost += weights.get(name); loads[owner].files.push(name);
   }
-  // Node starts costly files first so a late long-running file cannot create a
-  // tail after the other file workers have emptied their queues.
+  // Weights decide only which shard a file lands in. Node runs an explicit file
+  // list in alphabetical order, so the order returned here carries no meaning.
   return loads[index - 1].files;
 }

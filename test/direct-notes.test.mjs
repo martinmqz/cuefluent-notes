@@ -34,8 +34,7 @@ async function fixture(t, { saving = 'review', client = 'codex', file = false } 
   const handler = createDirectNoteTools({ store, client, skillVersion: '0.16.0', launchProcessing: context => {
     launches.push(context); throw Object.assign(new Error('Synthetic launch refusal.'), { code: 'SYNTHETIC_LAUNCH' });
   } });
-  const session = Object.freeze({}), requestContext = { session };
-  const tools = { tools: handler.tools, call: (name, args, context = requestContext) => handler.call(name, args, context) };
+  const tools = { tools: handler.tools, call: (name, args) => handler.call(name, args) };
   const request = { projectId: project.id, requestId: randomUUID(), target: file ? 'explicit.md' : 'meetings/planning.md', content, summary: 'Planning decisions and actions.' };
   const create = input => tools.call('cuefluent_create_note', { ...request, ...input });
   const review = (runId = request.requestId, page = {}) => tools.call('cuefluent_review_note', { projectId: project.id, runId, ...page });
@@ -44,7 +43,7 @@ async function fixture(t, { saving = 'review', client = 'codex', file = false } 
   const decide = async (action, runId = request.requestId, revision) => tools.call(`cuefluent_${action}_note`,
     { projectId: project.id, runId, revision: revision ?? (await review(runId)).revision ?? 'f'.repeat(64) });
   const call = (action, runId, revision) => action === 'review' ? review(runId) : decide(action, runId, revision);
-  return { root, cwd, notes, project, store, tools, handler, requestContext, launches, request, create, review, decide, call };
+  return { root, cwd, notes, project, store, tools, handler, launches, request, create, review, decide, call };
 }
 
 test('direct review creates one preview from supplied context without enrollment, queues, or a model, then saves exactly that draft', async t => {
@@ -249,9 +248,9 @@ async function nativeTools(f, { client = 'codex' } = {}) {
   const protocol = bridge.protocol({ version: '0.16.0' });
   await protocol({ jsonrpc: '2.0', id: id++, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } });
   await protocol({ jsonrpc: '2.0', method: 'notifications/initialized' });
-  return { protocol, call: async (name, args, thread = 'native-session') => {
+  return { protocol, call: async (name, args) => {
     const params = { name, ...(args === undefined ? {} : { arguments: args }), ...(client === 'codex' ? {
-      _meta: { 'x-codex-turn-metadata': { session_id: thread, thread_id: thread, turn_id: `turn-${id}` } },
+      _meta: { 'x-codex-turn-metadata': { session_id: 'native-session', thread_id: 'native-session', turn_id: `turn-${id}` } },
     } : {}) };
     const response = await protocol({ jsonrpc: '2.0', id: id++, method: 'tools/call', params });
     return response.result.isError ? JSON.parse(response.result.content[0].text) : response.result.structuredContent;
@@ -343,14 +342,14 @@ test('whole reads honor the exact byte cap and fall back to ranges when the esca
 
 test('a stale hash never authorizes an update, from any connection or chat', async t => {
   const f = await fixture(t, { saving: 'auto' }), target = path.join(f.notes, 'existing.md'); await fs.writeFile(target, content);
-  const native = await nativeTools(f), first = await native.call('cuefluent_read_note', { projectId: 'demo', target }, 'session-a');
+  const native = await nativeTools(f), first = await native.call('cuefluent_read_note', { projectId: 'demo', target });
   const update = { ...f.request, target, expectedHash: first.hash, content: content.replace('small', 'focused') };
   await fs.writeFile(target, content + '\nManual addition.\n');
-  assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, start: 4, expectedHash: first.hash }, 'session-a')).error, 'DIRECT_NOTE_CONFLICT');
-  assert.equal((await native.call('cuefluent_update_note', update, 'session-b')).error, 'DIRECT_NOTE_CONFLICT');
+  assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, start: 4, expectedHash: first.hash })).error, 'DIRECT_NOTE_CONFLICT');
+  assert.equal((await native.call('cuefluent_update_note', update)).error, 'DIRECT_NOTE_CONFLICT');
   assert.equal(await fs.readFile(target, 'utf8'), content + '\nManual addition.\n');
-  const current = await native.call('cuefluent_read_note', { projectId: 'demo', target }, 'session-b');
-  assert.equal((await native.call('cuefluent_update_note', { ...update, expectedHash: current.hash, content: current.content.replace('small', 'focused') }, 'session-c')).state, 'saved');
+  const current = await native.call('cuefluent_read_note', { projectId: 'demo', target });
+  assert.equal((await native.call('cuefluent_update_note', { ...update, expectedHash: current.hash, content: current.content.replace('small', 'focused') })).state, 'saved');
 });
 
 test('completed request IDs only replay the exact saved or skipped payload', async t => {
@@ -369,10 +368,10 @@ test('completed request IDs only replay the exact saved or skipped payload', asy
 
 test('busy does not disclose another draft, and another chat or connection reviews a retained draft', async t => {
   const f = await fixture(t), native = await nativeTools(f);
-  const created = await native.call('cuefluent_create_note', f.request, 'session-a'); assert.equal(created.state, 'review');
-  const busy = await native.call('cuefluent_create_note', { ...f.request, requestId: randomUUID() }, 'session-b');
+  const created = await native.call('cuefluent_create_note', f.request); assert.equal(created.state, 'review');
+  const busy = await native.call('cuefluent_create_note', { ...f.request, requestId: randomUUID() });
   assert.deepEqual(busy, { state: 'busy', projectId: 'demo' });
-  const review = await native.call('cuefluent_review_note', { projectId: 'demo', runId: f.request.requestId }, 'session-b');
+  const review = await native.call('cuefluent_review_note', { projectId: 'demo', runId: f.request.requestId });
   assert.equal(review.state, 'review'); assert.equal(review.revision, created.revision); assert.equal(review.drafts[0].content, content);
   const other = await nativeTools(f, { client: 'claude' });
   assert.equal((await other.call('cuefluent_review_note', { projectId: 'demo', runId: f.request.requestId })).revision, created.revision);

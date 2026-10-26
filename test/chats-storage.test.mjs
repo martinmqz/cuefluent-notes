@@ -69,7 +69,8 @@ test('retained publication stages do not block inventory, status or project proc
   const status = await readProjectStatus(f.store, 'outer'); assert.equal(status.counts.chats, 2); assert.equal(status.counts.incomplete, true); assert.ok(status.warnings.includes('CHAT_STAGE_RETAINED'));
   let caught = 0;
   const prepared = await prepareProcessing(f.store, 'outer', { kind: 'project' }, { reconcileChat: async () => { caught++; return { status: 'caught-up' }; } });
-  assert.equal(prepared.state, 'empty'); assert.equal(caught, 2); assert.ok(prepared.warnings.includes('CHAT_STAGE_RETAINED'));
+  assert.equal(prepared.state, 'empty'); assert.equal(caught, 2); assert.ok(prepared.result.warnings.includes('CHAT_STAGE_RETAINED'));
+  assert.deepEqual(Object.keys(prepared).sort(), ['projectId', 'result', 'runId', 'state']);
   assert.equal(await fs.readFile(stage, 'utf8'), 'unpublished synthetic metadata');
 });
 

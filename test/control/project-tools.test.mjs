@@ -161,10 +161,9 @@ test('a concurrent configuration is reported as a settings conflict with setup r
   await assert.rejects(fs.stat(path.join(f.root, 'notes-b')), { code: 'ENOENT' });
   const guidance = describeFailure({ code: 'SETTINGS_CONFLICT' }, { stage: 'tool', toolName: 'cuefluent_setup' });
   assert.equal(guidance.diagnostics.toolName, 'cuefluent_setup');
-  assert.match(guidance.recovery, /cuefluent_projects/); assert.match(guidance.recovery, /repeat cuefluent_setup/);
-  assert.doesNotMatch(guidance.recovery, /settingsHash|expectedHash|CLI/);
+  assert.match(guidance.recovery, /cuefluent_projects for settings/); assert.doesNotMatch(guidance.recovery, /CLI|settingsHash/);
   const pending = describeFailure({ code: 'SETTINGS_PENDING_RUN' }, { stage: 'tool', toolName: 'cuefluent_setup' });
-  assert.match(pending.recovery, /Settle the pending run before changing its destination or saving mode/);
+  assert.match(pending.recovery, /Settle the pending run first/); assert.match(pending.recovery, /Tracking and logging preferences can change/);
   for (const code of ['SETUP_TOOL_ARGUMENT', 'SETUP_PROJECT_MISMATCH', 'SETTINGS_RETAINED_PROJECT', 'SETTINGS_INVALID', 'SETUP_PENDING']) {
     const described = describeFailure({ code }, { stage: 'tool', toolName: 'cuefluent_setup' });
     assert.equal(described.error, code); assert.doesNotMatch(described.recovery, /report the error code/i);

@@ -201,7 +201,7 @@ test('root replacement and restoration cannot hide retained work during acquisit
     try {
       await assert.rejects(initializeStore(f.privateRoot), error => {
         assert.equal(error.code, expected, error.stack);
-        if (mode === 'repeated') assert.match(describeFailure(error).recovery, /retry the same setup/i);
+        if (mode === 'repeated') assert.match(describeFailure(error).recovery, /retry the same request/i);
         return true;
       });
     } finally { injection.mock.restore(); syncStatInjection.mock.restore(); statInjection.mock.restore(); }

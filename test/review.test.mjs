@@ -18,6 +18,7 @@ import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/stora
 import { createDirectNoteTools } from '../src/control/direct-notes.mjs';
 import { reviewRun, decideRun, REVIEW_PAGE_BYTES } from '../src/control/review.mjs';
 import { executeControl } from '../src/control/execute.mjs';
+import { readProjectStatus } from '../src/control/status.mjs';
 import { prepareProcessing } from '../src/processing/prepare.mjs';
 import { runProcessingWork } from '../src/processing/worker.mjs';
 import { openNoteWorkspace } from '../src/processing/workspace.mjs';
@@ -493,9 +494,14 @@ test('a run whose notes are all saved offers only Finish, and either decision fi
   await interrupt('saving');
   let page = await reviewRun(f.store, { projectId: PROJECT, runId: run.id });
   assert.deepEqual([page.state, page.phase, page.choices, page.savedCount, page.drafts[0].saved, page.revision], ['interrupted', 'saving', ['Finish', 'Keep pending'], 1, true, revision]);
+  // Status agrees with the page: every note is saved, so the recovery is Finish, not Save.
+  let status = await readProjectStatus(f.store, PROJECT);
+  assert.deepEqual([status.state, status.run.phase, status.run.saved, status.run.savedPaths], ['idle', 'saving', 1, [draft.target]]);
+  assert.match(status.run.recovery, /only cleanup remains.*relay Finish/); assert.doesNotMatch(status.run.recovery, /Save/);
   await interrupt('cleanup');
   page = await reviewRun(f.store, { projectId: PROJECT, runId: run.id });
   assert.deepEqual([page.state, page.phase, page.choices, page.drafts, page.revision], ['interrupted', 'cleanup', ['Finish', 'Keep pending'], [], revision]);
+  status = await readProjectStatus(f.store, PROJECT); assert.match(status.run.recovery, /relay Finish/);
   assert.equal((await f.queue()).records, 1);
   const finished = await decideRun(f.store, { projectId: PROJECT, runId: run.id, revision, action: 'save' },
     { client: 'codex', skillVersion: SKILL_VERSION, launchProcessing: context => f.launchWorker(context), startupTimeoutMs: process.platform === 'win32' ? 15_000 : undefined });

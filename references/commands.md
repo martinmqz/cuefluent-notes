@@ -6,22 +6,22 @@ A failed MCP tool call retains its stable `error` code and includes a plain-lang
 `message`, a `recovery` step, and bounded `diagnostics` in both the text result and
 `structuredContent`. Diagnostics identify the runtime version, platform,
 architecture, stage, and client/package version when known. Nested causes expose
-only bounded error codes. Unknown errors receive generic guidance rather than
-their raw exception messages, stacks, paths, arguments, or environment values.
-Recovery uses the actual operation: a note lookup failure calls for inspecting
-the selected destination and note, while a missing startup module calls for
-checking the installed package. Fatal framing or queue limits close the connector;
-reconnect and inspect retained work before retrying a mutation.
+only bounded error codes. Guidance comes from one short table of
+user-facing codes, each with a fixed message and next step; any other code,
+including an internal one, receives the generic entry rather than its raw
+exception message, stack, path, arguments, or environment values. Fatal framing
+or queue limits close the connector; reconnect and read status before retrying
+a mutation.
 
 A retained invocation with `state: failed` receives the same derived guidance and
 MCP error flag when read. Stored outcomes remain unchanged. Status and processing
 results may include `warningDetails`, with fixed explanations for code-only
-warnings and a scope of `status`, `run`, `latest` or `result`. These details identify
-where the warning belongs; they do not turn a successful status read into an error.
-Warnings belonging to completed outcomes are marked `historical` and do not advise
-retrying finished work. A newer pending run keeps its own recovery guidance.
-At most 16 details are returned, within the response size bound. Additional details
-can be omitted when space is exhausted; the original warnings remain intact.
+warnings and the `scope` they belong to: `status` and `run` warnings describe
+current work and carry its recovery; `latest` and `result` warnings belong to a
+completed run and say that no retry is needed, so an older outcome is never
+presented as a new failure. Details do not turn a successful status read into an
+error. At most 16 details are returned, within the response size bound. Additional
+details can be omitted when space is exhausted; the original warnings remain intact.
 
 Explain the failure and next step to the user; include the code for support.
 Runtime details are available when investigating a problem. An error is not proof
@@ -249,13 +249,18 @@ and let a new processing run read the current notes afresh.
 
 ## Status and delivery
 
-`status` is read-only. It reports settings, tracking and queue counts, pending
-drafts, active/interrupted work and the latest completed result. A pending run
-includes its `kind` (`direct`, `chat` or `project`); the `revision` a decision
-cites comes only from the review pages that showed the drafts. Counts are
-bounded snapshots;
-an incomplete or unknown count is not zero. It does not repair logs, retry
-synchronization or start a model.
+`status` is read-only. Its `state` is `running` while a worker holds the
+project, `review` while a draft set awaits a decision, and `idle` otherwise.
+`idle` does not mean no pending work: a run that stopped between phases stays in
+`run` with `active: false`, its `phase`, `kind` (`direct`, `chat` or `project`),
+`selected` and `saved` counts, `drafts`, `savedPaths`, `warnings` and a
+`recovery` sentence naming the action that continues or releases it (repeat
+`process`, relay `Save`, `Finish`, `Discard` or `Skip; keep input` after a
+review, or retry a direct request with its `requestId`). `latest` is the most
+recent completed result, and `settings` and `counts` describe the project. The
+`revision` a decision cites comes only from the review pages that showed the
+drafts. Counts are bounded snapshots; an incomplete or unknown count is not
+zero. It does not repair logs, retry synchronization or start a model.
 
 Claude's opaque invocation handle lets the skill read the result of that exact
 command; polling never starts work. A later native command replaces that chat's

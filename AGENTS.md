@@ -165,7 +165,10 @@ There is no linter, formatter, or type checker.
   preserve queue data, pending state, and manual note edits.
 - Give every new failure a stable `code` through the module's existing error
   helper, usually `fail()` from `src/core/errors.mjs`. Error messages never
-  include conversation content.
+  include conversation content. User-facing codes are explained by the short
+  table in `src/diagnostics.mjs`, grouped by the recovery they share; every
+  other code receives the generic entry, and a test checks that each table code
+  is still raised.
 
 ## Notes and examples
 

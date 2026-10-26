@@ -187,10 +187,11 @@ For a failed tool call, explain its `message` and `recovery` guidance and retain
 the stable error code for support. Use `diagnostics` when investigating the failure;
 do not expose raw exception text, conversation content, or credentials. Distinguish
 a current call failure from an older run result returned by a successful status
-read. When `warningDetails` are returned, explain their `scope` so an older
-`latest` result is not presented as a new failure; the original warnings remain
-available when explanatory details are bounded. Do not infer that an error rolled
-back earlier writes. If the connector tools
+read. When `warningDetails` are returned, their `scope` says where each warning
+belongs: `status` and `run` are current work, `latest` and `result` are a
+completed run that needs no retry. The original warnings remain available when
+explanatory details are bounded. Do not infer that an error rolled back earlier
+writes. If the connector tools
 are missing, diagnose startup using [package requirements](references/distribution.md#startup-troubleshooting)
 before asking the user to repeat note or tracking commands.
 
