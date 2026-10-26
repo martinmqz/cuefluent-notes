@@ -94,6 +94,47 @@ function prepareGate(file, id) {
   }
 }
 
+/** Whether a location holds at most the scaffold of a first initialization
+ * that the initializer itself can resume: the two private directories, the
+ * lock directory with its gate files or their publication stages, the empty
+ * project and chat directories, and retained initial stages of the layout or
+ * settings files. Settings, a layout, a setup journal, any project or chat, or
+ * any other entry means retained state that no read may treat as absent. */
+export async function isInitializationScaffold(root) {
+  const entries = async relative => {
+    try { return await fs.readdir(path.join(root, relative), { withFileTypes: true }); }
+    catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
+  };
+  const allowed = (relative, entry) => {
+    const expected = scaffoldEntries.get(relative)?.get(entry.name);
+    if (expected) return entry.name !== 'layout.json' && (expected === 'directory' ? entry.isDirectory() : entry.isFile()) && !entry.isSymbolicLink();
+    if (!entry.isFile() || entry.isSymbolicLink()) return false;
+    if (relative === 'store') return /^\.layout\.json\.initialize\./.test(entry.name) && INITIAL_STAGE.test(entry.name);
+    if (relative === 'config') return /^\.settings\.json\.initialize\./.test(entry.name) && INITIAL_STAGE.test(entry.name);
+    if (relative === 'store/locks') return GATE_PUBLICATION.test(entry.name);
+    return false;
+  };
+  const top = await entries('');
+  if (!top) return true;
+  for (const relative of ['', 'config', 'store', 'store/locks']) {
+    const found = await entries(relative);
+    if (found && !found.every(entry => allowed(relative, entry))) return false;
+  }
+  for (const relative of ['store/projects', 'store/chats']) if ((await entries(relative))?.length) return false;
+  return true;
+}
+
+/** `openStore`, except that a location holding at most the resumable scaffold
+ * of a first initialization is reported as no store, so read-only callers can
+ * answer unconfigured and explicit setup can create or resume it there. */
+export async function openStoreOrScaffold(root) {
+  try { return await openStore(root); }
+  catch (error) {
+    if (!['FILE_MISSING', 'PATH_MISSING'].includes(error?.code) || !await isInitializationScaffold(root)) throw error;
+    return null;
+  }
+}
+
 /** No-create open. Missing root means unconfigured; partial setup is an error. */
 export async function openStore(root) {
   assertAbsolute(root);

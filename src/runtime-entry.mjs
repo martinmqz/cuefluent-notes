@@ -1,10 +1,9 @@
 import path from 'node:path';
-import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { fail } from './core/errors.mjs';
 import { withWindowsAclDeadline } from './storage/windows-acl.mjs';
-import { openStore, readSettings } from './storage/store.mjs';
+import { openStore, openStoreOrScaffold, readSettings } from './storage/store.mjs';
 import { pinDirectory } from './storage/paths.mjs';
 import { readJSON } from './storage/files.mjs';
 import { parseEntryArguments, selectStoreRoot, loadClientContract } from './client/entry-options.mjs';
@@ -25,28 +24,6 @@ import { processingLauncher } from './processing/worker.mjs';
 import { reportFailure } from './diagnostics.mjs';
 
 const ENTRY = fileURLToPath(new URL('./cli.mjs', import.meta.url)), PACKAGE = path.dirname(path.dirname(ENTRY));
-
-/** A location that exists but holds at most the empty scaffold of a first
- * initialization (`config/` and `store/` without a layout, settings, setup
- * journal, projects or chats) is not a store yet: reads answer `unconfigured`
- * and explicit setup creates or resumes it. Anything else incomplete is an
- * error that preserves the retained state. */
-async function emptyScaffold(root) {
-  const names = async directory => { try { return await fs.readdir(directory); } catch (error) { if (error?.code === 'ENOENT') return null; throw error; } };
-  const top = await names(root);
-  if (!top || top.some(name => !['config', 'store'].includes(name))) return false;
-  if ((await names(path.join(root, 'config')))?.length) return false;
-  if ((await names(path.join(root, 'store')))?.some(name => !['locks', 'projects', 'chats'].includes(name))) return false;
-  for (const name of ['projects', 'chats']) if ((await names(path.join(root, 'store', name)))?.length) return false;
-  return true;
-}
-async function openStoreOrScaffold(storeRoot) {
-  try { return await openStore(storeRoot); }
-  catch (error) {
-    if (!['FILE_MISSING', 'PATH_MISSING'].includes(error?.code) || !await emptyScaffold(storeRoot)) throw error;
-    return null;
-  }
-}
 async function version() {
   const file = await readJSON(await pinDirectory(PACKAGE), 'package.json', { maxBytes: 64 * 1024 });
   return packageIdentity(file.value);
@@ -108,8 +85,8 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
     output(await setupProject({ ...request.value, storeRoot: request.value.storeRoot ?? storeRoot, skillVersion })); return;
   }
   // The connector and the read-only commands start on a location that holds
-  // only the empty scaffold of a first initialization, so explicit setup can
-  // create or resume the store there; a mutation keeps failing on that state.
+  // at most the resumable scaffold of a first initialization, so explicit
+  // setup can create or resume the store there; a mutation keeps failing on it.
   let store = ['mcp', 'settings', 'status'].includes(args.command) ? await openStoreOrScaffold(storeRoot) : await openStore(storeRoot);
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;

@@ -599,7 +599,7 @@ test('page metadata stays bounded: many long saved targets and many warnings nev
 
 /** A direct run reserved for `requestId`, interrupted after its draft artifact
  * pointer was persisted and, when `complete`, after its bytes were written. */
-async function interruptedDirectDraft(f, requestId, { complete }) {
+async function interruptedDirectDraft(f, requestId, { stage }) {
   const project = await withProject(f.store, PROJECT, async context => context.project);
   await withProject(f.store, PROJECT, async context => writeJSON(f.store.pin, `${context.directory}/run.json`,
     createRun(context.project, [], { id: requestId, scope: { kind: 'direct', requestHash: hashBytes(Buffer.from('synthetic request')) } }), { expectedHash: null }));
@@ -616,19 +616,18 @@ async function interruptedDirectDraft(f, requestId, { complete }) {
         hash = (await writeJSON(f.store.pin, `${context.directory}/run.json`, current, { expectedHash: hash })).hash;
       } });
     });
-    if (complete) {
-      for (const draft of manifest.drafts) await withCurrentAttempt(owner, ({ run }) => writeDraftArtifact(f.store.pin, run.artifacts, draft.id, draft.bytes));
-      await withCurrentAttempt(owner, ({ run }) => completeDraftArtifacts(f.store.pin, run.artifacts));
-    }
+    if (stage !== 'pointer') for (const draft of manifest.drafts) await withCurrentAttempt(owner, ({ run }) => writeDraftArtifact(f.store.pin, run.artifacts, draft.id, draft.bytes));
+    if (stage === 'complete') await withCurrentAttempt(owner, ({ run }) => completeDraftArtifacts(f.store.pin, run.artifacts));
     throw Object.assign(new Error('Synthetic interruption.'), { code: 'SYNTHETIC_STOP' });
   }), { code: 'SYNTHETIC_STOP' });
   return f.current();
 }
 
-test('a direct draft whose retained bytes never completed offers no restoration, while a complete one offers Restore draft and restores', async t => {
-  for (const complete of [false, true]) {
+test('a direct draft whose retained bytes never completed offers no restoration, while complete payloads offer Restore draft and restore, with or without the ready marker', async t => {
+  for (const stage of ['pointer', 'payloads', 'complete']) {
+    const complete = stage !== 'pointer';
     const f = await fixture(t), requestId = randomUUID();
-    const run = await interruptedDirectDraft(f, requestId, { complete });
+    const run = await interruptedDirectDraft(f, requestId, { stage });
     assert.equal(run.phase, 'drafting'); assert.ok(run.artifacts);
     const page = await reviewRun(f.store, { projectId: PROJECT, runId: requestId });
     assert.deepEqual([page.state, page.draftCount, page.drafts], ['interrupted', 0, []]);

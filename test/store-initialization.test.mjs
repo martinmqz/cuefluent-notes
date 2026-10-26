@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { initializeStore, openStore, readSettings, gateOptions } from '../src/storage/store.mjs';
+import { initializeStore, openStore, openStoreOrScaffold, isInitializationScaffold, readSettings, gateOptions } from '../src/storage/store.mjs';
 import { emptySettings } from '../src/core/settings.mjs';
 import { createPrivateDirectory } from '../src/storage/paths.mjs';
 import { initializeGate } from '../src/storage/gates.mjs';
@@ -317,3 +317,30 @@ for (const mutation of ['bytes', 'inode']) {
     await assert.rejects(fs.access(path.join(f.storeRoot, 'config/settings.json')), { code: 'ENOENT' });
   });
 }
+
+test('a location holding only the initializer\'s resumable scaffold, including a retained layout stage and its gate files, reads as no store; retained state does not', { timeout: waitMs * 2 }, async t => {
+  const f = await fixture(t), running = await stopAt(f, 'store/layout.json', 'partial');
+  const stage = running.message.stage;
+  assert.ok(path.basename(stage).startsWith('.layout.json.initialize.') && stage.endsWith('.tmp'));
+  assert.ok((await fs.readdir(path.join(f.storeRoot, 'store/locks'))).length > 0);
+  // The connector's read-only open reports no store here, so explicit setup can resume it.
+  assert.equal(await isInitializationScaffold(f.storeRoot), true);
+  assert.equal(await openStoreOrScaffold(f.storeRoot), null);
+  await assert.rejects(openStore(f.storeRoot), { code: 'FILE_MISSING' });
+  // Anything beyond that scaffold is retained state, and the read fails as it did.
+  await fs.writeFile(path.join(f.storeRoot, 'store/projects', 'demo.json'), '{}');
+  assert.equal(await isInitializationScaffold(f.storeRoot), false);
+  await assert.rejects(openStoreOrScaffold(f.storeRoot), { code: 'FILE_MISSING' });
+  await fs.rm(path.join(f.storeRoot, 'store/projects', 'demo.json'));
+  await fs.writeFile(path.join(f.storeRoot, 'config', 'setup.json'), '{}');
+  assert.equal(await isInitializationScaffold(f.storeRoot), false);
+  await fs.rm(path.join(f.storeRoot, 'config', 'setup.json'));
+  await fs.writeFile(path.join(f.storeRoot, 'unrelated.txt'), 'x');
+  assert.equal(await isInitializationScaffold(f.storeRoot), false);
+  await fs.rm(path.join(f.storeRoot, 'unrelated.txt'));
+  assert.equal(running.child.kill('SIGKILL'), true); await running.closed;
+  // The retained stage is still the initializer's to resume.
+  const recovered = await initializeStore(f.storeRoot);
+  assert.ok(recovered); assert.ok(await openStore(f.storeRoot));
+  assert.equal(await isInitializationScaffold(f.storeRoot), false);
+});

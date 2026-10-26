@@ -33,12 +33,17 @@ export function decisionChoices(run, { retained = false } = {}) {
   return ['Save', direct ? 'Discard' : 'Skip draft; keep input', 'Keep pending'];
 }
 /** A direct draft interrupted while drafting offers its restoration only when
- * the retained artifact set is complete; a pointer whose bytes never finished
- * is not a draft to show, and the decision tool would refuse it. */
+ * every draft of its retained manifest has a complete payload, which is what
+ * recoverDrafts completes and publishes without resubmission, whether or not
+ * the final ready marker was written. A pointer whose bytes never finished is
+ * not a draft to show, and the decision tool would refuse it. */
 async function retainedComplete(store, run) {
   if (run.scope.kind !== 'direct' || run.phase !== 'drafting' || !run.artifacts) return false;
-  try { return (await inspectDraftArtifacts(store.pin, run.artifacts)).status === 'ready'; }
-  catch { return false; }
+  try {
+    const inspected = await inspectDraftArtifacts(store.pin, run.artifacts);
+    return inspected.status === 'ready' || Boolean(inspected.manifest?.drafts.length) &&
+      inspected.manifest.drafts.every(draft => inspected.drafts.some(entry => entry.id === draft.id && entry.complete));
+  } catch { return false; }
 }
 /** Page metadata stays bounded whatever the run accumulated: at most this many
  * warnings travel with a page; status carries the complete list. */
