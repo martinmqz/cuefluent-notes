@@ -1,5 +1,6 @@
 import { fail } from '../core/errors.mjs';
 import { runRevision, everyNoteSaved } from '../core/run.mjs';
+import { inspectDraftArtifacts } from '../storage/draft-artifacts.mjs';
 import { withProject } from '../storage/store.mjs';
 import { ownDirectAttempt, launchOwnedAttempt } from '../storage/attempts.mjs';
 import { reviewNoteContent } from '../notes/validate.mjs';
@@ -22,14 +23,22 @@ const serialized = value => Buffer.byteLength(JSON.stringify(value));
  * until only cleanup remains, where either tool finishes the run. A direct run
  * interrupted while drafting with a retained manifest restores its preview for
  * a fresh decision in review mode, and saves it in automatic mode. */
-export function decisionChoices(run) {
+export function decisionChoices(run, { retained = false } = {}) {
   const direct = run.scope.kind === 'direct';
   if (run.phase === 'cleanup' || (run.phase === 'saving' && everyNoteSaved(run))) return ['Finish', 'Keep pending'];
   if (run.phase === 'drafting') {
-    const retained = direct && run.artifacts ? [run.settings.saving === 'review' ? 'Restore draft' : 'Save'] : [];
-    return [...retained, direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];
+    const offered = direct && retained ? [run.settings.saving === 'review' ? 'Restore draft' : 'Save'] : [];
+    return [...offered, direct ? 'Discard' : 'Skip; keep input', 'Keep pending'];
   }
   return ['Save', direct ? 'Discard' : 'Skip draft; keep input', 'Keep pending'];
+}
+/** A direct draft interrupted while drafting offers its restoration only when
+ * the retained artifact set is complete; a pointer whose bytes never finished
+ * is not a draft to show, and the decision tool would refuse it. */
+async function retainedComplete(store, run) {
+  if (run.scope.kind !== 'direct' || run.phase !== 'drafting' || !run.artifacts) return false;
+  try { return (await inspectDraftArtifacts(store.pin, run.artifacts)).status === 'ready'; }
+  catch { return false; }
 }
 /** Page metadata stays bounded whatever the run accumulated: at most this many
  * warnings travel with a page; status carries the complete list. */
@@ -75,7 +84,7 @@ export async function reviewRun(store, { projectId, runId, draft: first = 0, sta
     if (located.result) return located.result;
     const { run } = located;
     const page = { state: run.phase === 'review' ? 'review' : 'interrupted', projectId: run.projectId, runId: run.id, kind: run.scope.kind, phase: run.phase,
-      revision: runRevision(run), draftCount: run.drafts.length, savedCount: run.saved.length, choices: decisionChoices(run), drafts: [], next: null,
+      revision: runRevision(run), draftCount: run.drafts.length, savedCount: run.saved.length, choices: decisionChoices(run, { retained: await retainedComplete(store, run) }), drafts: [], next: null,
       warnings: run.warnings.slice(0, PAGE_WARNINGS), warningsTruncated: run.warnings.length > PAGE_WARNINGS };
     if (!['review', 'saving'].includes(run.phase)) {
       if (first !== 0 || offset !== 0) invalid('This run has no reviewable draft page at that position.');

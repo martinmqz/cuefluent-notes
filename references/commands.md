@@ -116,12 +116,18 @@ private drafts shown through `cuefluent_review_note`; automatic saving writes
 after the explicit command. A nothing-useful result consumes its selected input
 without a note; failed drafting or saving preserves affected input. One run or
 review set is pending per project, a second command reports it, and `accepted`
-or `running` is not completion. Repeating `process` after an interruption resumes
-drafting or automatic saving; typed `save` resumes an interrupted approved save
-(phase `saving`) and otherwise returns the pending review status; typed `skip`
-releases inactive failed or conflicted work that has no pending review set,
-keeping selected input and saved notes, and otherwise returns the pending review
-status so the drafts can be shown and the question asked.
+or `running` is not completion. After an interruption, the command that started
+the run resumes its drafting or automatic saving: `process project` for a project
+run, `process` from the same chat for a chat run; another chat's `process` only
+reports the pending run. Typed `save` resumes an interrupted approved save (phase
+`saving`); typed `skip` releases inactive failed or conflicted work, keeping
+selected input and saved notes. While a review set is pending both return the
+pending review status so the drafts can be shown and the question asked, and
+once every note is saved both finish the remaining cleanup, which consumes the
+handled input. A save refused because a note changed after review leaves a
+conflict warning on the run; `Discard` or `Skip draft; keep input` releases it
+for a fresh draft, and `Save` succeeds again only once the note is back to its
+reviewed original.
 
 A file changed after it was read is a conflict. A new target that was never read
 is expected to be absent. Preserve user edits, changed parents and unexpected

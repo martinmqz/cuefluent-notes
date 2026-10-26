@@ -35,7 +35,9 @@ them and confirm the intended location. `STORE_INCOMPLETE` means initialization
 state is incomplete or changed, which includes a retained store whose layout or
 settings are missing while its queues, runs and gates remain: preserve it,
 investigate, and retry setup at the same location for an interrupted first
-initialization. Never switch `CUEFLUENT_HOME` to bypass pending work; a second
+initialization. A location that is empty or holds only that first scaffold is
+not a store yet: the connector and the read-only commands treat it as
+unconfigured, and `cuefluent_setup` creates or resumes the store there. Never switch `CUEFLUENT_HOME` to bypass pending work; a second
 store against the same notes cannot coordinate with the first. `STORE_SETUP_BUSY`
 means concurrent activity in the setup directory; retry the same setup at the same
 location. If the host cannot start the executable

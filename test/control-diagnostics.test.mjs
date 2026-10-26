@@ -28,7 +28,7 @@ test('both command transports explain retained failures and flag the failed comm
     assert.equal(response.result.isError, true);
     const value = response.result.structuredContent;
     assert.equal(value.state, 'failed'); assert.equal(value.reason, retained.reason);
-    assert.equal(value.error, retained.reason); assert.match(value.message, /drafting client/); assert.match(value.recovery, /retry with process/);
+    assert.equal(value.error, retained.reason); assert.match(value.message, /drafting client/); assert.match(value.recovery, /retry with the command that started it/);
     assert.equal(value.diagnostics.pluginVersion, '0.17.1'); assert.equal(value.diagnostics.stage, 'result');
     assert.equal(value.diagnostics.toolName, name);
     assert.deepEqual(JSON.parse(response.result.content[0].text), value);
@@ -80,11 +80,11 @@ test('completed outcomes advise no retry while a newer pending run keeps its own
         for (const detail of completed) {
           assert.deepEqual(Object.keys(detail), ['scope', 'error', 'message', 'recovery']);
           assert.match(detail.recovery, /recorded by a run that has finished; it needs no retry/);
-          assert.doesNotMatch(detail.recovery, /retry with process|sign-in|isolation/);
+          assert.doesNotMatch(detail.recovery, /command that started it|sign-in|isolation/);
         }
         if (scope === 'latest') {
           const pending = value.warningDetails.find(detail => detail.scope === 'run');
-          assert.match(pending.recovery, /retry with process/);
+          assert.match(pending.recovery, /retry with the command that started it/);
         }
         assert.deepEqual(JSON.parse(response.result.content[0].text), value);
         assert.equal(JSON.stringify(retained), before);

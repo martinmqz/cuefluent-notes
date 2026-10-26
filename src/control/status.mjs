@@ -74,21 +74,33 @@ export async function readProjectStatus(store, projectId, { chat = null, invento
       recovery: runRecovery(run, snapshot.active) }) : null });
 }
 
+// A queued run resumes only through the command that started it: its scope
+// and, for a chat run, its chat.
+const resume = kind => kind === 'project' ? 'Repeat process project' : 'Repeat process from the chat that started this run';
+// A save refused by the writer leaves one of these warnings on the run; the
+// same Save is refused again until the note is back to its reviewed original.
+const CONFLICT_WARNINGS = ['NOTE_PUBLICATION_CONFLICT', 'DRAFT_CHANGED', 'PATH_CHANGED', 'PATH_UNSAFE'];
 const RECOVERY = Object.freeze({
   active: 'A worker is working on this run. Read status again later; do not start another command for this project.',
   review: 'Drafts await a decision. Show them with cuefluent_review_note and relay the user\'s choice with the revision of that page.',
-  direct: 'Drafting stopped before the draft was complete. Retry the original request with its requestId, or show the retained draft with cuefluent_review_note and relay Discard.',
-  queued: 'Drafting stopped before the draft set was published. Repeat process to resume it with the same frozen input, or show it with cuefluent_review_note and relay Skip; keep input.',
-  saving: 'Saving stopped before every note was written; savedPaths lists the notes already saved. Repeat process for automatic saving, or relay Save with the reviewed revision, to finish it.',
+  direct: 'Drafting stopped. Retry the original request with its requestId, or show the run with cuefluent_review_note and relay one of its choices: Restore draft or Save when a complete draft was retained, otherwise Discard.',
+  queued: kind => `Drafting stopped before the draft set was published. ${resume(kind)} to resume it with the same frozen input, or show it with cuefluent_review_note and relay Skip; keep input.`,
+  saving: kind => `Saving stopped before every note was written; savedPaths lists the notes already saved. ${resume(kind)} for automatic saving, or relay Save with the reviewed revision, to finish it.`,
   directSaving: 'Saving stopped before every note was written; savedPaths lists the notes already saved. Relay Save with the reviewed revision through cuefluent_save_note to finish it.',
+  conflicted: direct => `A note changed after it was reviewed, so saving it again is refused; savedPaths lists the notes already saved. Relay ${direct ? 'Discard' : 'Skip draft; keep input'} to release the run, then read the current note and submit a fresh draft. Save succeeds only once the note is back to its reviewed original.`,
   cleanup: 'Every note is saved and only cleanup remains. Show the run with cuefluent_review_note and relay Finish.',
 });
 function runRecovery(run, active) {
   if (active) return RECOVERY.active;
-  const direct = run.scope.kind === 'direct';
-  if (run.phase === 'drafting') return direct ? RECOVERY.direct : RECOVERY.queued;
-  // A worker can stop after the last durable saved receipt and before the
-  // cleanup transition; the review page then offers Finish, and so does status.
-  if (run.phase === 'saving') return everyNoteSaved(run) ? RECOVERY.cleanup : direct ? RECOVERY.directSaving : RECOVERY.saving;
-  return RECOVERY[run.phase];
+  const kind = run.scope.kind, direct = kind === 'direct';
+  if (run.phase === 'review') return RECOVERY.review;
+  if (run.phase === 'drafting') return direct ? RECOVERY.direct : RECOVERY.queued(kind);
+  if (run.phase === 'saving') {
+    // A worker can stop after the last durable saved receipt and before the
+    // cleanup transition; the review page then offers Finish, and so does status.
+    if (everyNoteSaved(run)) return RECOVERY.cleanup;
+    if (run.warnings.some(warning => CONFLICT_WARNINGS.includes(warning))) return RECOVERY.conflicted(direct);
+    return direct ? RECOVERY.directSaving : RECOVERY.saving(kind);
+  }
+  return RECOVERY.cleanup;
 }

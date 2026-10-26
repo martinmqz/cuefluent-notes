@@ -449,7 +449,11 @@ test('multibyte note input obeys the UTF-8 byte cap rather than UTF-16 length', 
   const exact = body + '界'.repeat(Math.floor((DIRECT_NOTE_BYTES - Buffer.byteLength(body)) / 3));
   const result = await f.create({ content: exact }); assert.equal(result.state, 'saved');
   assert.ok((await fs.readFile(result.result.paths[0], 'utf8')).endsWith(exact));
-  await assert.rejects(f.create({ requestId: randomUUID(), target: 'too-large.md', content: exact + '界' }), { code: 'DIRECT_NOTE_ARGUMENT' });
+  // One byte over the cap is a size refusal, never an argument-shape refusal, so its guidance says not to shorten the note.
+  await assert.rejects(f.create({ requestId: randomUUID(), target: 'too-large.md', content: exact + '界' }), { code: 'DIRECT_NOTE_CONTENT_LIMIT' });
+  assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
+  const listed = await f.tools.call('cuefluent_projects', {});
+  assert.equal(listed.state, 'configured'); assert.equal(listed.pendingSetup, null); assert.equal(listed.projects[0].id, 'demo');
 });
 
 test('a Codex call without turn metadata reads and updates a note with its hash alone', async t => {
