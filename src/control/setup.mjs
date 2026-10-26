@@ -102,6 +102,15 @@ async function inspectLogs(project) {
   }
 }
 
+/** The exact request of an interrupted setup, if its journal is retained. A
+ * caller that repeats it completes that setup; nothing else is disclosed. */
+export async function readPendingSetup(store) {
+  return withShortGate(store.settingsGate, gateOptions, async () => {
+    const pending = await readJSON(store.pin, JOURNAL, { missing: true });
+    return pending ? validateIntent(pending.value).request : null;
+  });
+}
+
 /** Explicit setup only. expectedHash is the complete settings hash inspected by
  * the caller, or null for an absent store. This function configures no hooks,
  * native clients, authentication, or conversation collection. */

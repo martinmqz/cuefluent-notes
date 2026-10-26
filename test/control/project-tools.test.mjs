@@ -9,7 +9,8 @@ import { createDirectNoteTools, DIRECT_NOTE_TOOLS } from '../../src/control/dire
 import { readProjectStatus } from '../../src/control/status.mjs';
 import { createControlBridge } from '../../src/client/control-server.mjs';
 import { describeFailure } from '../../src/diagnostics.mjs';
-import { openStore, readSettings } from '../../src/storage/store.mjs';
+import { initializeStore, openStore, readSettings } from '../../src/storage/store.mjs';
+import { interruptRemoval } from '../fixtures/exact-removal-worker.mjs';
 import { createAnnualLog } from '../../src/logs/index.mjs';
 
 const skillVersion = '0.18.0', systemZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -250,4 +251,59 @@ test('the tools are advertised through the real bridge and a setup call returns 
     const invalid = await call('cuefluent_setup', { root: project, destination: f.destination('notes'), settingsHash: 'a'.repeat(64) });
     assert.equal(invalid.isError, true); assert.equal(invalid.structuredContent.error, 'SETUP_TOOL_ARGUMENT');
   }
+});
+
+test('an identical setup repeated after an interrupted journal removal completes that setup, keeps the adopted log timezone, and then applies new choices', async t => {
+  const f = await fixture(t), project = await f.folder('journal'), notes = f.destination('notes');
+  await fs.mkdir(path.join(notes.path, 'logs'), { recursive: true });
+  const annual = createAnnualLog({ year: 2025, timezone: 'Asia/Tokyo', seriesId: 'tokyo-series', noteId: randomUUID(), createdAt: '2026-10-22T01:00:00.000Z', skillVersion });
+  await fs.writeFile(path.join(notes.path, 'logs', '2025.md'), annual);
+  // The first setup publishes its settings, adopting the series timezone, and
+  // stops while removing its journal: the journal still records the request
+  // with the system timezone the tool proposed.
+  await interruptRemoval({ root: f.storeRoot, relative: 'config/setup.json', operation: 'setup', options: { storeRoot: f.storeRoot, expectedHash: null, skillVersion,
+    project: { id: 'journal', root: project, destination: notes, activityLog: { enabled: true, timezone: systemZone } } } });
+  assert.equal((await f.settings()).value.projects[0].activityLog.timezone, 'Asia/Tokyo');
+  // The identical tool arguments complete it, and the established series keeps its timezone.
+  const result = await f.setup({ id: 'journal', root: project, destination: notes });
+  assert.equal(result.state, 'configured'); assert.equal(result.project.activityLog.timezone, 'Asia/Tokyo');
+  assert.equal(result.logs.seriesId, 'tokyo-series'); assert.equal(result.project.tracking, 'manual');
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+  assert.deepEqual(await fs.readFile(path.join(notes.path, 'logs', '2025.md')), annual);
+  // A different choice for the same project also completes the interrupted setup first, then applies.
+  await interruptRemoval({ root: f.storeRoot, relative: 'config/setup.json', operation: 'setup', options: { storeRoot: f.storeRoot, expectedHash: (await f.settings()).hash, skillVersion,
+    project: { ...(await f.settings()).value.projects[0], activityLog: { enabled: true, timezone: 'Asia/Tokyo' }, saving: 'auto' } } });
+  const changed = await f.setup({ id: 'journal', tracking: 'auto' });
+  assert.equal(changed.project.saving, 'auto'); assert.equal(changed.project.tracking, 'auto'); assert.equal(changed.created, false);
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+  // A journal for another project remains a refusal that changes nothing.
+  const other = await f.folder('other');
+  await interruptRemoval({ root: f.storeRoot, relative: 'config/setup.json', operation: 'setup', options: { storeRoot: f.storeRoot, expectedHash: (await f.settings()).hash, skillVersion,
+    project: { id: 'other', root: other, destination: f.destination('other-notes'), activityLog: { enabled: false } } } });
+  const before = await f.settings();
+  await assert.rejects(f.setup({ id: 'journal', saving: 'review' }), { code: 'SETUP_PENDING' });
+  assert.equal((await f.settings()).hash, before.hash);
+  assert.equal((await f.setup({ id: 'other', root: other, destination: f.destination('other-notes'), activityLog: { enabled: false } })).project.id, 'other');
+  assert.deepEqual(await fs.readdir(path.join(f.storeRoot, 'config')), ['settings.json']);
+});
+
+test('setup resumes a first initialization interrupted before its layout or settings exist', async t => {
+  const f = await fixture(t), project = await f.folder('resume');
+  // The scaffold of an interrupted first initialization: private directories, no layout.
+  for (const relative of ['config', 'store/locks', 'store/projects', 'store/chats']) await fs.mkdir(path.join(f.storeRoot, relative), { recursive: true, mode: 0o700 });
+  await assert.rejects(openStore(f.storeRoot), { code: 'FILE_MISSING' });
+  const unopened = createProjectTools({ storeRoot: f.storeRoot, store: null, skillVersion });
+  assert.deepEqual(await unopened.call('cuefluent_status', { projectId: 'resume' }), { state: 'unconfigured' });
+  const result = await unopened.call('cuefluent_setup', { root: project, destination: f.destination('notes') });
+  assert.equal(result.state, 'configured'); assert.equal(result.created, true); assert.equal(result.project.id, 'resume');
+  assert.deepEqual((await f.settings()).value.projects.map(item => item.id), ['resume']);
+
+  // A layout published without its settings file is resumed the same way by a server that opened it.
+  const g = await fixture(t), second = await g.folder('second');
+  await initializeStore(g.storeRoot);
+  await fs.unlink(path.join(g.storeRoot, 'config', 'settings.json'));
+  const opened = createProjectTools({ storeRoot: g.storeRoot, store: await openStore(g.storeRoot), skillVersion });
+  const resumed = await opened.call('cuefluent_setup', { root: second, destination: g.destination('notes') });
+  assert.equal(resumed.state, 'configured'); assert.equal(resumed.project.id, 'second');
+  assert.deepEqual((await g.settings()).value.projects.map(item => item.id), ['second']);
 });

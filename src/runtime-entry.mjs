@@ -84,7 +84,15 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
         Object.keys(request.value).some(key => !['storeRoot', 'expectedHash', 'project'].includes(key)) || !Object.hasOwn(request.value, 'expectedHash')) fail('SETUP_ARGUMENT', 'Setup needs project settings and the inspected settings hash (null for a fresh store).');
     output(await setupProject({ ...request.value, storeRoot: request.value.storeRoot ?? storeRoot, skillVersion })); return;
   }
-  let store = await openStore(storeRoot);
+  let store;
+  try { store = await openStore(storeRoot); }
+  catch (error) {
+    // A first initialization that stopped before its layout exists is not a
+    // store yet. The connector still starts so explicit setup can resume it;
+    // every other operation keeps failing on that incomplete state.
+    if (args.command !== 'mcp' || error?.code !== 'FILE_MISSING') throw error;
+    store = null;
+  }
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
@@ -147,6 +155,10 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
         };
         const bridge = createControlBridge({ client: args.client, selection: contract.codex, codexAdapter: adapter,
           directNotes: { tools: [...directNotes.tools, ...projects.tools], async call(name, ...input) {
+            // Setup runs against the selected location itself, so it can resume
+            // an interrupted initialization that no open can read yet; the
+            // store it created or completed is opened for the calls that follow.
+            if (name === 'cuefluent_setup') { const result = await projects.call(name, ...input); await refreshStore(); return result; }
             await refreshStore(); return (projectToolNames.has(name) ? projects : directNotes).call(name, ...input);
           } },
           executeInvocation: async invocation => { await refreshStore(); return invocation.action === 'status' ? execute(invocation) : submitCommand(store,

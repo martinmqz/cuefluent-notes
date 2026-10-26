@@ -5,7 +5,7 @@ import { SETTINGS_LIMITS } from '../core/settings.mjs';
 import { readSettings } from '../storage/store.mjs';
 import { assertAbsolute } from '../storage/paths.mjs';
 import { fields, freezeData } from '../client/control-server.mjs';
-import { setupProject } from './setup.mjs';
+import { setupProject, readPendingSetup } from './setup.mjs';
 import { readProjectStatus } from './status.mjs';
 
 const ID_PATTERN = '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$';
@@ -118,9 +118,29 @@ export function createProjectTools({ storeRoot, store, skillVersion }) {
       return readProjectStatus(store, input.projectId);
     }
     if (name !== 'cuefluent_setup') fail('CONTROL_TOOL_UNKNOWN', 'This project tool is unavailable.');
-    const input = setupArguments(args), { value, hash } = await readSettings(store);
-    const existing = selectProject(value.projects, input);
-    const result = await setupProject({ storeRoot, project: proposal(value.projects, existing, input), expectedHash: hash, skillVersion });
+    const input = setupArguments(args), { value, hash } = await currentSettings(store);
+    const existing = selectProject(value.projects, input), proposed = proposal(value.projects, existing, input);
+    let result;
+    try { result = await setupProject({ storeRoot, project: proposed, expectedHash: hash, skillVersion }); }
+    catch (error) {
+      // An interrupted setup of this same project is completed with its own
+      // recorded request, which the journal check requires verbatim; a request
+      // rebuilt from the published settings (an adopted log timezone, say) is
+      // not that request. A journal for another project stays a refusal.
+      const pending = error?.code === 'SETUP_PENDING' && store ? await readPendingSetup(store) : null;
+      if (!pending || pending.id !== proposed.id || !sameRoot(pending.root, proposed.root)) throw error;
+      await setupProject({ storeRoot, project: pending, expectedHash: (await currentSettings(store)).hash, skillVersion });
+      // Then the caller's own choices apply to the completed configuration.
+      const current = await currentSettings(store), selected = selectProject(current.value.projects, input);
+      result = await setupProject({ storeRoot, project: proposal(current.value.projects, selected, input), expectedHash: current.hash, skillVersion });
+    }
     return { state: 'configured', created: !existing, project: result.project, logs: result.logs };
   } });
+}
+
+/** A store whose first initialization stopped before its settings file exists
+ * has no settings yet; setup resumes that initialization with a null hash. */
+async function currentSettings(store) {
+  try { return await readSettings(store); }
+  catch (error) { if (error?.code !== 'FILE_MISSING') throw error; return readSettings(null); }
 }

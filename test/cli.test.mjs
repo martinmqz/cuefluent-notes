@@ -470,3 +470,56 @@ test('both CLI MCP entrypoints save supplied context and return completion witho
     assert.equal(JSON.parse((await f.run(['status', '--project', 'demo'])).stdout).counts.chats, 0);
   }
 });
+
+test('a live connector resumes a first initialization that stopped before its layout existed, and a restarted one serves the result', async t => {
+  const f = await fixture(t);
+  // The scaffold an interrupted first initialization leaves behind: private
+  // directories without a layout. Ordinary reads refuse it; explicit setup resumes it.
+  for (const relative of ['config', 'store/locks', 'store/projects', 'store/chats']) await fs.mkdir(path.join(f.storeRoot, relative), { recursive: true, mode: 0o700 });
+  const serve = () => {
+    const child = spawn(process.execPath, [entry, 'mcp', 'codex'], { cwd: f.cwd, env: { ...process.env, CUEFLUENT_HOME: f.storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const pending = new Map(), lines = createInterface({ input: child.stdout });
+    let nextId = 0, stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const rejectPending = error => { for (const waiter of pending.values()) waiter.reject(error); pending.clear(); };
+    const closed = new Promise(resolve => child.once('close', code => { rejectPending(new Error(`Synthetic MCP closed with code ${code}`)); resolve(code); }));
+    child.once('error', rejectPending);
+    lines.on('line', line => {
+      try { const response = JSON.parse(line), waiter = pending.get(response.id); if (!waiter) return; pending.delete(response.id); waiter.resolve(response); }
+      catch (error) { rejectPending(error); }
+    });
+    const request = (method, params) => new Promise((resolve, reject) => {
+      const id = ++nextId;
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error('Synthetic MCP response timed out')); child.kill(); }, process.platform === 'win32' ? 60000 : 20000);
+      pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+    const call = async (name, args) => (await request('tools/call', { name, arguments: args })).result;
+    const start = async () => {
+      await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } });
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+    };
+    const stop = async () => { child.stdin.end(); lines.close(); const code = await closed; assert.equal(code, 0, stderr); };
+    return { start, call, stop };
+  };
+  const first = serve();
+  try {
+    await first.start();
+    const refused = await first.call('cuefluent_projects', {});
+    assert.equal(refused.isError, true); assert.equal(refused.structuredContent.error, 'FILE_MISSING');
+    const choices = { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } };
+    const setup = await first.call('cuefluent_setup', choices);
+    assert.equal(setup.isError, false, JSON.stringify(setup)); assert.equal(setup.structuredContent.created, true);
+    assert.equal((await first.call('cuefluent_projects', {})).structuredContent.state, 'configured');
+    assert.equal((await first.call('cuefluent_status', { projectId: 'demo' })).structuredContent.state, 'idle');
+  } finally { await first.stop(); }
+  const second = serve();
+  try {
+    await second.start();
+    const projects = await second.call('cuefluent_projects', {});
+    assert.equal(projects.structuredContent.state, 'configured'); assert.equal(projects.structuredContent.projects[0].id, 'demo');
+    // Repeating the same choices changes nothing.
+    const again = await second.call('cuefluent_setup', { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } });
+    assert.equal(again.isError, false, JSON.stringify(again)); assert.equal(again.structuredContent.created, false);
+  } finally { await second.stop(); }
+});
