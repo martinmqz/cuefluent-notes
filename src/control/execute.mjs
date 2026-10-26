@@ -46,6 +46,11 @@ export async function executeControl(store, invocation, { reconcileChat, launchP
     try { run = (await inspectAttempt(store, project.id)).run; }
     catch (error) { if (error.code === 'RUN_MISSING') return status(); throw error; }
     if (action === 'save' && (run.phase === 'drafting' || run.settings.saving !== 'review')) return status();
+    // A typed command carries no reviewed reference. Show the pending review
+    // set first; the decision then cites its revision through the review tools.
+    // Save still resumes an interrupted approved save, and skip still releases
+    // inactive failed or conflicted work that has no pending review set.
+    if (run.phase === 'review') return status();
   }
   const workerAction = action === 'skip' ? 'skip' : action === 'save' ? 'save' : 'process';
   return launchOwnedAttempt(store, project.id, { runId: run.id, startupTimeoutMs, launch: context => launchProcessing({ ...context, action: workerAction }) });

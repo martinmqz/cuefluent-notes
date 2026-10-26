@@ -19,18 +19,25 @@ file. New directory-routed notes use `meetings/`, `tasks/`, `knowledge-base/`,
 
 ## Direct-note content approval
 
-In review mode, the assistant opens and links a temporary `.md` containing the
-proposed content for approval. The file already uses the final compatible note
+In review mode, the assistant shows the proposed content for approval: by
+default as an opened and linked temporary `.md` file or, when the client has no
+file viewer, rendered inline as ordinary Markdown. It names the intended
+destination path separately. The content already uses the final compatible note
 structure, including the topic H1 and useful H2 sections. It omits the Cuefluent
 metadata block, search-alias comments and any added processing wrapper. The
 complete metadata and aliases remain in the retained private draft.
 
-The save tool requests user confirmation through the client. Approval saves that
-exact draft with the content and structure the user reviewed;
-it does not trigger rewriting or reformatting. The temporary file lives outside
-the repository and notes destination and is only a presentation copy. Changes to
-it require a revised draft and fresh approval. See [commands](commands.md) for
-retry, conflict and temporary-file cleanup behavior.
+The assistant then asks in chat with the exact choices the review result
+returns: `Save`, `Discard` and `Keep pending` for a direct draft. Save and
+Discard are relayed with `cuefluent_save_note` or `cuefluent_skip_note` and the
+`revision` of the draft that was reviewed. A Save writes that exact draft with
+the content and structure the user reviewed; it does not trigger rewriting or
+reformatting, and a draft that changed after review is refused. `Keep pending`
+makes no call and leaves the draft retained. The temporary file lives outside
+the repository and notes destination and is only a presentation copy. A request
+for changes, or an edit made to the file, requires a new draft and fresh
+approval. See [commands](commands.md) for retry, conflict, revision and
+temporary-file cleanup behavior.
 
 ## Structure
 

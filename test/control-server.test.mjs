@@ -139,20 +139,27 @@ test('control protocol identity carries the exact package version and refuses ma
   for (const version of ['0.16.0-dev.0', '0.16.0', '2.0.0', '10.4.1-rc.2']) assert.equal(typeof codex().protocol({ version }), 'function');
 });
 
-function approvalBridge(onApproved = () => {}) {
+function decisionBridge(onSaved = () => {}) {
   return createControlBridge({ client: 'claude', readInvocation: async () => ({ state: 'idle' }), directNotes: {
-    tools: [{ name: 'confirm_note', inputSchema: { type: 'object', properties: {}, additionalProperties: false } }],
-    async call(_name, _args, { approve }) {
-      await approve({ title: 'Save draft?', message: 'Save the exact reviewed synthetic draft?' });
-      onApproved(); return { state: 'saved' };
+    tools: [{ name: 'decide_note', inputSchema: { type: 'object', properties: {}, additionalProperties: false } }],
+    async call(_name, _args, request) {
+      assert.deepEqual(Object.keys(request).sort(), ['canInspect', 'session']);
+      await new Promise(resolve => setImmediate(resolve));
+      onSaved(); return { state: 'saved' };
     },
   } });
 }
-async function initializeApproval(protocol, capabilities = { elicitation: { form: {} } }) {
+async function initialize(protocol, capabilities = {}) {
   await protocol({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities, clientInfo: {} } });
   await protocol({ jsonrpc: '2.0', method: 'notifications/initialized' });
 }
-const approvalCall = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'confirm_note' } };
+const decisionCall = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'decide_note' } };
+
+test('protocol options accept only the package version', () => {
+  const bridge = codex();
+  assert.equal(typeof bridge.protocol({ version: '0.16.0' }), 'function');
+  for (const extra of [{ onRequest: () => {} }, { timeoutMs: 1000 }]) assert.throws(() => bridge.protocol({ version: '0.16.0', ...extra }), { code: 'CONTROL_ADAPTER_INVALID' });
+});
 
 test('control definitions reject collisions and freeze nested schemas without mutating supplied definitions', () => {
   for (const names of [['cuefluent_control'], ['duplicate', 'duplicate']]) {
@@ -166,85 +173,52 @@ test('control definitions reject collisions and freeze nested schemas without mu
   assert.equal(bridge.tools[1].inputSchema.properties.count.maximum, 5);
 });
 
-test('elicitation needs a supported host and exact accepted form response; other outcomes cannot authorize mutation', async () => {
-  let approved = 0;
-  for (const answer of [{ action: 'decline' }, { action: 'cancel' }, { action: 'accept', content: { approve: false } },
-    { action: 'accept', content: { approve: true, injected: true } }, { action: 'accept' }]) {
-    let call;
-    call = approvalBridge(() => { approved++; }).protocol({ version: '0.16.0', sendRequest: request => call({ jsonrpc: '2.0', id: request.id, result: answer }) });
-    await initializeApproval(call);
-    const response = await call(approvalCall);
-    assert.equal(response.result.isError, true); assert.match(JSON.parse(response.result.content[0].text).error, /^DIRECT_NOTE_APPROVAL_/);
-  }
-  const unavailable = approvalBridge(() => { approved++; }).protocol({ version: '0.16.0', sendRequest: () => assert.fail('No unsupported elicitation') });
-  await initializeApproval(unavailable, { elicitation: { url: {} } });
-  assert.equal(JSON.parse((await unavailable(approvalCall)).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_UNSUPPORTED');
-  assert.equal(approved, 0);
-});
-
-test('elicitation cancellation, expiration and unmatched or replayed responses cannot authorize a later call', async () => {
-  let approved = 0, request, sent;
-  const sentPromise = new Promise(resolve => { sent = resolve; });
-  const call = approvalBridge(() => { approved++; }).protocol({ version: '0.16.0', sendRequest: value => { request = value; sent(); } });
-  await initializeApproval(call);
-  const pending = call(approvalCall); await sentPromise;
-  await call({ jsonrpc: '2.0', id: 'unrelated', result: { action: 'accept', content: { approve: true } } });
-  await call({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } });
-  assert.equal(JSON.parse((await pending).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_CANCELLED');
-  await call({ jsonrpc: '2.0', id: request.id, result: { action: 'accept', content: { approve: true } } });
-  assert.equal(approved, 0);
-  const expired = approvalBridge(() => { approved++; }).protocol({ version: '0.16.0', approvalMs: 10, sendRequest: () => {} });
-  await initializeApproval(expired);
-  assert.equal(JSON.parse((await expired(approvalCall)).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_TIMEOUT');
-  assert.equal(approved, 0);
+test('decisions are ordinary tool calls: the server sends no requests, and host responses or cancellation notices settle nothing', async () => {
+  let saved = 0;
+  const call = decisionBridge(() => { saved++; }).protocol({ version: '0.16.0' });
+  await initialize(call, { sampling: {} });
+  assert.equal(await call({ jsonrpc: '2.0', id: 'unrelated', result: { answer: 'yes' } }), null);
+  assert.equal(await call({ jsonrpc: '2.0', id: 'unrelated', error: { code: -1, message: 'synthetic' } }), null);
+  const pending = call(decisionCall);
+  assert.equal(await call({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } }), null);
+  assert.equal((await pending).result.structuredContent.state, 'saved'); assert.equal(saved, 1);
+  assert.equal((await call({ ...decisionCall, id: 3 })).result.structuredContent.state, 'saved'); assert.equal(saved, 2);
   assert.equal((await call({})).error.code, -32600);
+  assert.throws(() => decisionBridge().protocol({ version: '0.16.0', timeoutMs: 10 }), { code: 'CONTROL_ADAPTER_INVALID' });
 });
 
-test('stdio handles a host confirmation while serializing ordinary calls without deadlocking the frame reader', async () => {
-  const input = new PassThrough(), output = new PassThrough(); let approved = 0, failure, text = '';
-  const replies = [], requests = [];
+test('a closed connection refuses new tool calls without affecting a completed one', async () => {
+  let saved = 0;
+  const call = decisionBridge(() => { saved++; }).protocol({ version: '0.16.0' });
+  await initialize(call);
+  assert.equal((await call(decisionCall)).result.structuredContent.state, 'saved');
+  call.close();
+  const refused = await call({ ...decisionCall, id: 3 });
+  assert.equal(refused.result.isError, true); assert.equal(refused.result.structuredContent.error, 'CONTROL_CONNECTION_CLOSED');
+  assert.match(refused.result.structuredContent.recovery, /^Reconnect/); assert.equal(saved, 1);
+});
+
+test('stdio serializes decision calls with ordinary calls and writes only responses to the host', async () => {
+  const input = new PassThrough(), output = new PassThrough(); let saved = 0, failure, text = '';
+  const replies = [];
   output.on('data', chunk => {
     text += chunk;
     for (;;) {
       const index = text.indexOf('\n'); if (index < 0) break;
-      const message = JSON.parse(text.slice(0, index)); text = text.slice(index + 1);
-      if (message.method === 'elicitation/create') {
-        requests.push(message);
-        input.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { action: 'accept', content: { approve: true } } }) + '\n');
-      } else replies.push(message);
+      replies.push(JSON.parse(text.slice(0, index))); text = text.slice(index + 1);
     }
   });
-  const transport = serveControl(approvalBridge(() => { approved++; }), { input, output, version: '0.16.0', onFailure: error => { failure = error; } });
+  const transport = serveControl(decisionBridge(() => { saved++; }), { input, output, version: '0.16.0', onFailure: error => { failure = error; } });
   for (const message of [
-    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: { elicitation: { form: {} } }, clientInfo: {} } },
-    { jsonrpc: '2.0', method: 'notifications/initialized' }, approvalCall,
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: { sampling: {} }, clientInfo: {} } },
+    { jsonrpc: '2.0', method: 'notifications/initialized' }, decisionCall,
+    { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } },
     { jsonrpc: '2.0', id: 3, method: 'ping' },
   ]) input.write(JSON.stringify(message) + '\n');
   await transport.idle();
-  assert.equal(failure, undefined); assert.equal(approved, 1); assert.equal(requests.length, 1);
+  assert.equal(failure, undefined); assert.equal(saved, 1);
+  assert.equal(replies.some(reply => Object.hasOwn(reply, 'method')), false);
   assert.equal(replies.find(reply => reply.id === 2).result.structuredContent.state, 'saved');
   assert.deepEqual(replies.find(reply => reply.id === 3).result, {});
   input.end(); output.end();
-});
-
-test('a cancellation before the handler reaches elicitation remains bound to that active request', async () => {
-  let approved = 0, asked = 0;
-  const bridge = createControlBridge({ client: 'claude', readInvocation: async () => ({ state: 'idle' }), directNotes: {
-    tools: [{ name: 'delayed_confirmation', inputSchema: { type: 'object', properties: {} } }],
-    async call(_name, _args, { approve }) {
-      await new Promise(resolve => setImmediate(resolve));
-      await approve({ title: 'Save?', message: 'Save the reviewed draft?' });
-      approved++; return { state: 'saved' };
-    },
-  } });
-  let call;
-  call = bridge.protocol({ version: '0.16.0', sendRequest: request => { asked++; return call({ jsonrpc: '2.0', id: request.id, result: { action: 'accept', content: { approve: true } } }); } });
-  await initializeApproval(call);
-  const pending = call({ ...approvalCall, params: { name: 'delayed_confirmation' } });
-  call.receive({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } });
-  assert.equal(JSON.parse((await pending).result.content[0].text).error, 'DIRECT_NOTE_APPROVAL_CANCELLED');
-  assert.equal(asked, 0); assert.equal(approved, 0);
-  // A later request may legitimately reuse the now-completed JSON-RPC identity.
-  assert.equal((await call({ ...approvalCall, params: { name: 'delayed_confirmation' } })).result.structuredContent.state, 'saved');
-  assert.equal(approved, 1);
 });

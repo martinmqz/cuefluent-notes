@@ -28,12 +28,24 @@ updates require an existing note's inspected whole-file hash and complete read
 coverage in the same Codex chat or Claude connection. A Codex update needs
 host-supplied chat context; missing context is refused. Originals larger than 64 KiB are refused
 by the direct replacement tool. Reads return bounded 8 KiB chunks, with the
-original hash required on later chunks. Direct review saves and discards require
-MCP form confirmation from the host; unsupported hosts leave drafts pending.
+original hash required on later chunks. Review decisions for direct and queued
+drafts are asked in chat: the assistant shows the draft and relays the user's
+answer to `cuefluent_save_note` or `cuefluent_skip_note` together with the
+immutable `revision` of the reviewed set. The backend checks content identity,
+destination state and concurrency; it does not check that a human answered, and
+a draft stays pending until a decision is relayed.
 The agent-supplied content workflow and the writer's platform behavior need native
 desktop acceptance separately from deterministic protocol and filesystem tests.
 Existing published snapshots do not gain new source
 features until a release is installed.
+
+The chat-decision flow has not yet been verified live on any surface: Claude Code
+in Terminal, Claude Desktop's Code tab and Codex Desktop each still need an
+accepted save, a declined decision that leaves the draft pending, and a discard,
+with the saved bytes compared to the complete retained draft. Rendered previews
+are verified in Claude Desktop's Code tab and Codex Desktop. Ordinary Claude chat
+and Cowork have not been exercised. These results apply to the observed client
+surfaces, not every application that embeds Claude Code.
 
 The following native binding requirements apply to tracking and queued processing.
 

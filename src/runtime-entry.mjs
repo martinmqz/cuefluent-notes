@@ -125,7 +125,8 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
     if (args.command === 'mcp') {
       const adapter = args.client === 'codex' ? createCodexNativeAdapter({ version: skillVersion }) : null;
       try {
-        let directNotes = createDirectNoteTools({ store, client: args.client, skillVersion }), opening = null;
+        const noteTools = () => createDirectNoteTools({ store, client: args.client, skillVersion, launchProcessing: processingLauncher({ client: args.client, skillVersion }) });
+        let directNotes = noteTools(), opening = null;
         // A server may start before explicit setup creates the private store.
         // Recheck only that absent state; once opened, keep its pinned identity.
         const refreshStore = async () => {
@@ -137,7 +138,7 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
             store = opened;
             runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
             execute = commandExecutor(store, runtime, skillVersion);
-            directNotes = createDirectNoteTools({ store, client: args.client, skillVersion });
+            directNotes = noteTools();
           })().finally(() => { opening = null; });
           await opening;
         };

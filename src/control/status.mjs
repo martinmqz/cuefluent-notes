@@ -1,5 +1,5 @@
 import { fail } from '../core/errors.mjs';
-import { validateRun } from '../core/run.mjs';
+import { validateRun, runRevision } from '../core/run.mjs';
 import { validateResult } from '../core/result.mjs';
 import { withProject, gateOptions } from '../storage/store.mjs';
 import { probeGate } from '../storage/gates.mjs';
@@ -62,7 +62,7 @@ export async function readProjectStatus(store, projectId, { chat = null, invento
   const run = snapshot.run;
   return Object.freeze({ projectId, state: snapshot.active ? 'running' : run?.phase === 'review' ? 'review' : run ? 'interrupted' : 'idle',
     settings: snapshot.settings, counts: Object.freeze(counts), warnings: Object.freeze(warnings), latest: snapshot.latest,
-    run: run ? Object.freeze({ id: run.id, scope: run.scope, phase: run.phase, active: snapshot.active,
+    run: run ? Object.freeze({ id: run.id, scope: run.scope, kind: run.scope.kind, phase: run.phase, active: snapshot.active, revision: runRevision(run),
       selected: run.selection.length, saved: run.saved.length,
       drafts: Object.freeze(run.drafts.map(item => Object.freeze({ target: item.target, summary: item.summary, heading: item.heading }))),
       savedPaths: Object.freeze(run.saved.map(item => item.target)), warnings: run.warnings }) : null });

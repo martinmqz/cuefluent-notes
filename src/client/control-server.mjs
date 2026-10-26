@@ -1,12 +1,11 @@
 import { fail } from '../core/errors.mjs';
 import { describeFailure } from '../diagnostics.mjs';
-import { randomUUID } from 'node:crypto';
 import { packageVersion } from '../core/version.mjs';
 import { bindClaudeCommand, parseAction } from './commands.mjs';
 import { readFrames, writeFrame } from '../processing/draft-protocol.mjs';
 
 // Leave room for both MCP structuredContent and its escaped text projection.
-export const CONTROL_LIMITS = Object.freeze({ requestBytes: 1024 * 1024, responseBytes: 256 * 1024, nodes: 10000, depth: 20, approvalMs: 45000 });
+export const CONTROL_LIMITS = Object.freeze({ requestBytes: 1024 * 1024, responseBytes: 256 * 1024, nodes: 10000, depth: 20 });
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 const ACTIONS = ['track', 'untrack', 'process', 'process project', 'save', 'skip', 'status'];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -134,7 +133,9 @@ export async function executeClaudeExpansion(envelope, selection, { executeInvoc
 
 /** No model-supplied path/session/prompt authority. executeInvocation must fence
  * and deduplicate the trusted current prompt durably before executeControl. The
- * bridge deliberately has no process-local receipt cache or command history. */
+ * bridge deliberately has no process-local receipt cache or command history.
+ * The server never sends requests to the host; review decisions arrive as
+ * ordinary tool calls citing the reviewed revision. */
 export function createControlBridge({ client, selection, codexAdapter, executeInvocation, readInvocation, directNotes } = {}) {
   if (!['claude', 'codex'].includes(client) || (client === 'codex' && (typeof codexAdapter?.bindCommand !== 'function' || typeof executeInvocation !== 'function')) ||
       (client === 'claude' && typeof readInvocation !== 'function')) fail('CONTROL_ADAPTER_INVALID', 'A trusted native control adapter is required.');
@@ -145,8 +146,8 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
   if (names.some(name => typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name)) || new Set(names).size !== names.length) fail('CONTROL_ADAPTER_INVALID', 'Control tool names must be unique and disjoint.');
   const bridge = {
     tools: freezeData([definition, ...noteTools]),
-    async call(name, args, { meta, session = null, canResume = false, canInspect = false, approve, assertActive } = {}) {
-      if (noteTools.some(item => item.name === name)) return metadata(await directNotes.call(name, args, { session, canResume, canInspect, approve, assertActive }));
+    async call(name, args, { meta, session = null, canInspect = false } = {}) {
+      if (noteTools.some(item => item.name === name)) return metadata(await directNotes.call(name, args, { session, canInspect }));
       if (name !== definition.name) fail('CONTROL_TOOL_UNKNOWN', 'The control tool is unavailable.');
       if (client === 'claude') { const input = fields(args, ['handle']); return metadata(await readInvocation(handle(input.handle))); }
       const input = fields(args, ['action']), action = parseAction(input.action);
@@ -156,62 +157,28 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
       if (resolved?.status !== 'ready' || resolved.binding?.client !== 'codex' || resolved.binding.action !== action) fail('NATIVE_COMMAND_MISMATCH', 'The requested action does not match the exact native invocation.');
       return metadata(await executeInvocation(resolved.binding));
     },
-    protocol({ version, sendRequest, approvalMs = CONTROL_LIMITS.approvalMs } = {}) {
+    protocol(options = {}) {
+      const { version } = fields(options, [], ['version'], () => fail('CONTROL_ADAPTER_INVALID', 'The control protocol accepts only its package version.'));
       const serverVersion = packageVersion(version);
-      if (!Number.isSafeInteger(approvalMs) || approvalMs < 1 || approvalMs > CONTROL_LIMITS.approvalMs) fail('CONTROL_ADAPTER_INVALID', 'The approval wait must be bounded.');
-      let initialized = false, ready = false, formSupported = false, closed = false;
-      const approvals = new Map(), sessions = new Map(), calls = new Map(), connection = Object.freeze({});
-      const refusal = code => Object.assign(new Error('The requested user confirmation was not completed.'), { code });
-      const assertActive = state => { if (closed || state.cancelled) throw refusal('DIRECT_NOTE_APPROVAL_CANCELLED'); };
+      let initialized = false, ready = false, closed = false;
+      const sessions = new Map(), calls = new Map(), connection = Object.freeze({});
       const begin = message => {
         if (message?.method !== 'tools/call' || !Object.hasOwn(message, 'id') ||
             !(typeof message.id === 'string' && message.id.length <= 128) && !Number.isSafeInteger(message.id)) return null;
         if (calls.has(message.id)) return { duplicate: true };
         if (calls.size >= 64) return { duplicate: true };
-        const state = { id: message.id, cancelled: false }; calls.set(message.id, state); return state;
+        const state = { id: message.id }; calls.set(message.id, state); return state;
       };
       const finish = state => { if (state && calls.get(state.id) === state) calls.delete(state.id); };
-      const approve = async (details, state) => {
-        assertActive(state);
-        if (closed || !formSupported || typeof sendRequest !== 'function') throw refusal('DIRECT_NOTE_APPROVAL_UNSUPPORTED');
-        const id = `cuefluent-approval-${randomUUID()}`;
-        const accepted = new Promise((resolve, reject) => {
-          const timer = setTimeout(() => { approvals.delete(id); reject(refusal('DIRECT_NOTE_APPROVAL_TIMEOUT')); }, approvalMs);
-          approvals.set(id, { parentId: state.id, resolve: () => { clearTimeout(timer); resolve(true); }, reject: code => { clearTimeout(timer); reject(refusal(code)); } });
-        });
-        try {
-          await sendRequest({ jsonrpc: '2.0', id, method: 'elicitation/create', params: {
-            mode: 'form', message: details.message,
-            requestedSchema: { type: 'object', properties: { approve: { type: 'boolean', title: details.title, default: false } }, required: ['approve'] },
-          } });
-        } catch { const pending = approvals.get(id); approvals.delete(id); pending?.reject('DIRECT_NOTE_APPROVAL_UNAVAILABLE'); }
-        await accepted; assertActive(state); return true;
-      };
       const error = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
       const result = (id, value) => ({ jsonrpc: '2.0', id, result: value });
+      // The server sends no requests, so a host response has nothing to settle,
+      // and a cancellation notice cannot abandon a bounded tool call midway.
+      // Both are consumed without failing the connection.
       const receive = message => {
-        if (message?.method === 'notifications/cancelled' && message.jsonrpc === '2.0' && !Object.hasOwn(message, 'id')) {
-          let parentId;
-          try { parentId = fields(message.params, ['requestId'], ['reason']).requestId; } catch { return false; }
-          const state = calls.get(parentId); if (state) state.cancelled = true;
-          for (const [id, pending] of approvals) if (pending.parentId === parentId) { approvals.delete(id); pending.reject('DIRECT_NOTE_APPROVAL_CANCELLED'); }
-          return true;
-        }
-        if (!object(message) || Object.hasOwn(message, 'method') || !Object.hasOwn(message, 'id') ||
-            (!Object.hasOwn(message, 'result') && !Object.hasOwn(message, 'error'))) return false;
-        const pending = approvals.get(message.id);
-        if (!pending) return true;
-        approvals.delete(message.id);
-        try {
-          const response = fields(message, ['jsonrpc', 'id', 'result']);
-          if (response.jsonrpc !== '2.0') throw new Error();
-          const answer = fields(response.result, ['action'], ['content', '_meta']);
-          if (answer.action !== 'accept') { pending.reject(answer.action === 'cancel' ? 'DIRECT_NOTE_APPROVAL_CANCELLED' : 'DIRECT_NOTE_APPROVAL_DECLINED'); return true; }
-          const content = fields(answer.content, ['approve']);
-          if (content.approve !== true) { pending.reject('DIRECT_NOTE_APPROVAL_DECLINED'); return true; }
-          pending.resolve();
-        } catch { pending.reject('DIRECT_NOTE_APPROVAL_INVALID'); }
-        return true;
+        if (message?.method === 'notifications/cancelled' && message.jsonrpc === '2.0' && !Object.hasOwn(message, 'id')) return true;
+        return object(message) && !Object.hasOwn(message, 'method') && Object.hasOwn(message, 'id') &&
+          (Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error'));
       };
       const protocol = async (message, queuedState) => {
         if (receive(message)) return null;
@@ -227,9 +194,6 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
           try { input = fields(params, ['protocolVersion', 'capabilities', 'clientInfo'], ['_meta']); } catch { return error(id, -32602, 'Invalid initialization.'); }
           if (initialized || typeof input.protocolVersion !== 'string' || !object(input.capabilities) || !object(input.clientInfo)) return error(id, -32602, 'Invalid initialization.');
           initialized = true;
-          const elicitation = input.capabilities.elicitation;
-          formSupported = input.protocolVersion !== '2024-11-05' && input.protocolVersion !== '2025-03-26' &&
-            object(elicitation) && (!Object.keys(elicitation).length || object(elicitation.form));
           return result(id, { protocolVersion: VERSIONS.includes(input.protocolVersion) ? input.protocolVersion : VERSIONS[0], capabilities: { tools: {} }, serverInfo: { name: 'cuefluent-control', version: serverVersion } });
         }
         if (!ready) return error(id, -32002, 'Initialize the control connection first.');
@@ -243,11 +207,12 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
         const state = queuedState ?? begin(message);
         if (state?.duplicate) return error(id, -32600, 'A tool request with this identity is already pending.');
         try {
-          assertActive(state);
+          // A host that already ended the connection gets a coded tool failure for
+          // work it queued afterwards; nothing starts on its behalf.
+          if (closed) fail('CONTROL_CONNECTION_CLOSED', 'The control connection closed before this request ran.');
           const native = transportSession(client, input._meta, sessions);
           const value = await bridge.call(input.name, input.arguments ?? {}, { meta: input._meta,
-            session: native ?? connection, canResume: client === 'claude' || native !== null, canInspect: client === 'claude' || native !== null,
-            approve: details => approve(details, state), assertActive: () => assertActive(state) });
+            session: native ?? connection, canInspect: client === 'claude' || native !== null });
           const presented = presentControlResult(value, { client, version: serverVersion, toolName: input.name });
           return result(id, { content: [{ type: 'text', text: JSON.stringify(presented) }], structuredContent: presented, isError: value.state === 'failed' });
         } catch (caught) {
@@ -258,7 +223,7 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
       protocol.begin = begin;
       protocol.finish = finish;
       protocol.receive = receive;
-      protocol.close = () => { closed = true; for (const state of calls.values()) state.cancelled = true; for (const pending of approvals.values()) pending.reject('DIRECT_NOTE_APPROVAL_CANCELLED'); approvals.clear(); sessions.clear(); };
+      protocol.close = () => { closed = true; sessions.clear(); };
       return protocol;
     },
   };
@@ -268,7 +233,7 @@ export function createControlBridge({ client, selection, codexAdapter, executeIn
 /** Serial bounded MCP stdio. Host entrypoints own exit policy and resources. */
 export function serveControl(bridge, { input = process.stdin, output = process.stdout, onFailure = () => {}, version } = {}) {
   if (typeof bridge?.protocol !== 'function' || typeof onFailure !== 'function') fail('CONTROL_ADAPTER_INVALID', 'A control protocol is required.');
-  const protocol = bridge.protocol({ version, sendRequest: message => writeFrame(output, message) });
+  const protocol = bridge.protocol({ version });
   let work = Promise.resolve(), queuedBytes = 0, queued = 0, stopped = false;
   const stop = error => { if (stopped) return; stopped = true; protocol.close(); onFailure(error); };
   const reader = readFrames(input, message => {
