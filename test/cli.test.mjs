@@ -358,7 +358,7 @@ test('CLI Claude MCP polling is read-only and accepts no caller native identitie
   const responses = server.stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(responses.find(item => item.id === 1).result.serverInfo, { name: 'cuefluent-control', version: JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version });
   assert.deepEqual(responses.find(item => item.id === 2).result.tools.map(item => item.name),
-    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note']);
+    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note', 'cuefluent_setup', 'cuefluent_status']);
   assert.equal(responses.find(item => item.id === 3).result.structuredContent.state, 'expired');
   assert.equal(responses.find(item => item.id === 4).result.isError, true);
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
@@ -402,13 +402,22 @@ test('already running MCP servers discover first-time setup without restarting o
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
       assert.equal((await call('cuefluent_projects', {})).state, 'unconfigured');
       assert.equal((await call('cuefluent_list_notes', { projectId: 'demo' })).state, 'unconfigured');
+      assert.deepEqual(await call('cuefluent_status', { projectId: 'demo' }), { state: 'unconfigured' });
       await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
-      const configPath = path.join(f.root, 'setup.json');
-      await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
-        destination: { kind: 'directory', path: f.notes }, saving: 'auto', activityLog: { enabled: false } } }));
-      const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+      const choices = { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes }, saving: 'auto', activityLog: { enabled: false } };
+      if (client === 'codex') {
+        // The live connection creates the store itself and keeps serving after it.
+        const setup = await call('cuefluent_setup', choices);
+        assert.equal(setup.state, 'configured'); assert.equal(setup.created, true);
+        assert.equal(setup.project.id, 'demo'); assert.equal(setup.project.saving, 'auto'); assert.deepEqual(setup.project.activityLog, { enabled: false });
+      } else {
+        const configPath = path.join(f.root, 'setup.json');
+        await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: choices }));
+        const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+      }
       const projects = await call('cuefluent_projects', {});
       assert.equal(projects.state, 'configured'); assert.equal(projects.projects[0].id, 'demo');
+      assert.equal((await call('cuefluent_status', { projectId: 'demo' })).state, 'idle');
       const saved = await call('cuefluent_create_note', { projectId: 'demo', requestId: 'b37a7cde-a8a3-4b04-9d45-e288a67a8af2',
         target: 'after-setup.md', content: '# Synthetic note\n\n## Decision\nContent supplied after setup.\n', summary: 'Synthetic setup check.' });
       assert.equal(saved.state, 'saved');
@@ -460,4 +469,57 @@ test('both CLI MCP entrypoints save supplied context and return completion witho
     assert.ok((await fs.readFile(path.join(f.notes, 'context.md'), 'utf8')).endsWith(content));
     assert.equal(JSON.parse((await f.run(['status', '--project', 'demo'])).stdout).counts.chats, 0);
   }
+});
+
+test('a live connector resumes a first initialization that stopped before its layout existed, and a restarted one serves the result', async t => {
+  const f = await fixture(t);
+  // The scaffold an interrupted first initialization leaves behind: private
+  // directories without a layout. Ordinary reads refuse it; explicit setup resumes it.
+  for (const relative of ['config', 'store/locks', 'store/projects', 'store/chats']) await fs.mkdir(path.join(f.storeRoot, relative), { recursive: true, mode: 0o700 });
+  const serve = () => {
+    const child = spawn(process.execPath, [entry, 'mcp', 'codex'], { cwd: f.cwd, env: { ...process.env, CUEFLUENT_HOME: f.storeRoot }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const pending = new Map(), lines = createInterface({ input: child.stdout });
+    let nextId = 0, stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const rejectPending = error => { for (const waiter of pending.values()) waiter.reject(error); pending.clear(); };
+    const closed = new Promise(resolve => child.once('close', code => { rejectPending(new Error(`Synthetic MCP closed with code ${code}`)); resolve(code); }));
+    child.once('error', rejectPending);
+    lines.on('line', line => {
+      try { const response = JSON.parse(line), waiter = pending.get(response.id); if (!waiter) return; pending.delete(response.id); waiter.resolve(response); }
+      catch (error) { rejectPending(error); }
+    });
+    const request = (method, params) => new Promise((resolve, reject) => {
+      const id = ++nextId;
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error('Synthetic MCP response timed out')); child.kill(); }, process.platform === 'win32' ? 60000 : 20000);
+      pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+    const call = async (name, args) => (await request('tools/call', { name, arguments: args })).result;
+    const start = async () => {
+      await request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } });
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+    };
+    const stop = async () => { child.stdin.end(); lines.close(); const code = await closed; assert.equal(code, 0, stderr); };
+    return { start, call, stop };
+  };
+  const first = serve();
+  try {
+    await first.start();
+    const refused = await first.call('cuefluent_projects', {});
+    assert.equal(refused.isError, true); assert.equal(refused.structuredContent.error, 'FILE_MISSING');
+    const choices = { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } };
+    const setup = await first.call('cuefluent_setup', choices);
+    assert.equal(setup.isError, false, JSON.stringify(setup)); assert.equal(setup.structuredContent.created, true);
+    assert.equal((await first.call('cuefluent_projects', {})).structuredContent.state, 'configured');
+    assert.equal((await first.call('cuefluent_status', { projectId: 'demo' })).structuredContent.state, 'idle');
+  } finally { await first.stop(); }
+  const second = serve();
+  try {
+    await second.start();
+    const projects = await second.call('cuefluent_projects', {});
+    assert.equal(projects.structuredContent.state, 'configured'); assert.equal(projects.structuredContent.projects[0].id, 'demo');
+    // Repeating the same choices changes nothing.
+    const again = await second.call('cuefluent_setup', { id: 'demo', root: f.cwd, destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } });
+    assert.equal(again.isError, false, JSON.stringify(again)); assert.equal(again.structuredContent.created, false);
+  } finally { await second.stop(); }
 });

@@ -15,6 +15,7 @@ import { createControlBridge, serveControl, presentControlResult } from './clien
 import { claimInvocation, runClaimedInvocation, readInvocation, launchInvocationChild, reportInvocationExit } from './control/invocations.mjs';
 import { executeControl } from './control/execute.mjs';
 import { createDirectNoteTools } from './control/direct-notes.mjs';
+import { createProjectTools, PROJECT_TOOLS } from './control/project-tools.mjs';
 import { readProjectStatus } from './control/status.mjs';
 import { setupProject } from './control/setup.mjs';
 import { createSyncRuntime } from './sync/runtime.mjs';
@@ -83,7 +84,15 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
         Object.keys(request.value).some(key => !['storeRoot', 'expectedHash', 'project'].includes(key)) || !Object.hasOwn(request.value, 'expectedHash')) fail('SETUP_ARGUMENT', 'Setup needs project settings and the inspected settings hash (null for a fresh store).');
     output(await setupProject({ ...request.value, storeRoot: request.value.storeRoot ?? storeRoot, skillVersion })); return;
   }
-  let store = await openStore(storeRoot);
+  let store;
+  try { store = await openStore(storeRoot); }
+  catch (error) {
+    // A first initialization that stopped before its layout exists is not a
+    // store yet. The connector still starts so explicit setup can resume it;
+    // every other operation keeps failing on that incomplete state.
+    if (args.command !== 'mcp' || error?.code !== 'FILE_MISSING') throw error;
+    store = null;
+  }
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
@@ -126,7 +135,9 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
       const adapter = args.client === 'codex' ? createCodexNativeAdapter({ version: skillVersion }) : null;
       try {
         const noteTools = () => createDirectNoteTools({ store, client: args.client, skillVersion, launchProcessing: processingLauncher({ client: args.client, skillVersion }) });
-        let directNotes = noteTools(), opening = null;
+        const projectTools = () => createProjectTools({ storeRoot, store, skillVersion });
+        const projectToolNames = new Set(PROJECT_TOOLS.map(item => item.name));
+        let directNotes = noteTools(), projects = projectTools(), opening = null;
         // A server may start before explicit setup creates the private store.
         // Recheck only that absent state; once opened, keep its pinned identity.
         const refreshStore = async () => {
@@ -138,12 +149,18 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
             store = opened;
             runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
             execute = commandExecutor(store, runtime, skillVersion);
-            directNotes = noteTools();
+            directNotes = noteTools(); projects = projectTools();
           })().finally(() => { opening = null; });
           await opening;
         };
         const bridge = createControlBridge({ client: args.client, selection: contract.codex, codexAdapter: adapter,
-          directNotes: { tools: directNotes.tools, async call(...input) { await refreshStore(); return directNotes.call(...input); } },
+          directNotes: { tools: [...directNotes.tools, ...projects.tools], async call(name, ...input) {
+            // Setup runs against the selected location itself, so it can resume
+            // an interrupted initialization that no open can read yet; the
+            // store it created or completed is opened for the calls that follow.
+            if (name === 'cuefluent_setup') { const result = await projects.call(name, ...input); await refreshStore(); return result; }
+            await refreshStore(); return (projectToolNames.has(name) ? projects : directNotes).call(name, ...input);
+          } },
           executeInvocation: async invocation => { await refreshStore(); return invocation.action === 'status' ? execute(invocation) : submitCommand(store,
             { ...invocation, clientContract: clientContract(contract, args.client) }); },
           readInvocation: async handle => { await refreshStore(); return readInvocation(store, handle); } });

@@ -102,6 +102,20 @@ async function inspectLogs(project) {
   }
 }
 
+/** The exact request of an interrupted setup, if its journal is retained,
+ * whether its settings are already published (so only the journal removal
+ * remains), and the settings hash observed with it. A caller that repeats the
+ * request under that same hash completes that setup; a concurrent change in
+ * between is a conflict, never a replay. Nothing else is disclosed. */
+export async function readPendingSetup(store) {
+  return withShortGate(store.settingsGate, gateOptions, async () => {
+    const pending = await readJSON(store.pin, JOURNAL, { missing: true });
+    if (!pending) return null;
+    const intent = validateIntent(pending.value), current = await readSettings(store);
+    return Object.freeze({ request: intent.request, published: equal(current.value, intent.proposed) && intent.logs !== null, settingsHash: current.hash });
+  });
+}
+
 /** Explicit setup only. expectedHash is the complete settings hash inspected by
  * the caller, or null for an absent store. This function configures no hooks,
  * native clients, authentication, or conversation collection. */

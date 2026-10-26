@@ -35,15 +35,27 @@ destinations. Logging can be disabled. Automatic tracking follows new chats only
 processing remains explicit. Annual activity logs record successful note changes
 at `logs/YYYY.md` within a directory destination.
 
+### Quick start
+
+1. Install the client package through the client's plugin flow: the Claude Code
+   plugin marketplace, or the Codex plugin flow. Trust its hooks only if desired.
+2. Open a chat in the project and ask the assistant to set up Cuefluent Notes for
+   it. It proposes the project root, notes destination, tracking, saving and
+   activity logging, and calls `cuefluent_setup` once you agree.
+3. Ask for a note, for example the request in the workflow above.
+
+Setup can be repeated to change a choice; only the choices you name change. If the
+connector tools are unavailable, [setup](references/setup.md#fallback-the-cli)
+describes the command-line fallback.
+
 ## Requirements and setup
 
 Use Node.js 26.12.1 or a newer Node 26 patch and a supported authenticated native
 client. Runtime libraries and their licenses are included in each detached client
 package; an installed package needs no npm install. The current Codex processing
 transport has native macOS coverage; its Windows and Linux acceptance remains
-unverified. Windows packaged
-Desktop/TUI command acceptance also remains incomplete; see
-[verification](references/verification.md).
+unverified. Windows packaged Desktop/TUI command acceptance also remains
+incomplete; see [verification](references/verification.md).
 
 Review decisions are asked in chat: the assistant shows the draft and relays your
 answer together with the reviewed revision. Live acceptance of this flow on Claude
