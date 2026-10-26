@@ -3,271 +3,271 @@
   "platforms": {
     "win32": {
       "test/attempts.test.mjs": {
-        "ms": 52736.245,
+        "ms": 91429.014,
         "bytes": 15587
       },
       "test/chat.test.mjs": {
-        "ms": 178.626,
+        "ms": 213.16,
         "bytes": 7569
       },
       "test/chats-storage.test.mjs": {
-        "ms": 16115.347,
-        "bytes": 6347
+        "ms": 21421.679,
+        "bytes": 6447
       },
       "test/ci-plan.test.mjs": {
-        "ms": 25793.125,
-        "bytes": 17635
+        "ms": 24839.811,
+        "bytes": 17629
       },
       "test/ci-source.test.mjs": {
-        "ms": 16319.241,
+        "ms": 16112.289,
         "bytes": 5640
       },
       "test/ci.test.mjs": {
-        "ms": 12077.377,
+        "ms": 16321.719,
         "bytes": 22189
       },
       "test/cli.test.mjs": {
-        "ms": 132855.889,
-        "bytes": 38512
+        "ms": 139491.33,
+        "bytes": 38506
       },
       "test/client-smoke.test.mjs": {
-        "ms": 770.542,
+        "ms": 1009.109,
         "bytes": 8648
       },
       "test/client.test.mjs": {
-        "ms": 91.276,
+        "ms": 140.113,
         "bytes": 11059
       },
       "test/codex-native.test.mjs": {
-        "ms": 1220.687,
+        "ms": 957.09,
         "bytes": 18310
       },
       "test/collect-history.test.mjs": {
-        "ms": 50772.923,
+        "ms": 107737.952,
         "bytes": 21612
       },
       "test/collect.test.mjs": {
-        "ms": 217077.881,
+        "ms": 180172.77,
         "bytes": 25765
       },
       "test/control-diagnostics.test.mjs": {
-        "ms": 558.198,
-        "bytes": 12557
+        "ms": 431.848,
+        "bytes": 13676
       },
       "test/control-server.test.mjs": {
-        "ms": 204.921,
+        "ms": 180.568,
         "bytes": 20178
       },
       "test/control.test.mjs": {
-        "ms": 66886.748,
+        "ms": 119041.514,
         "bytes": 11317
       },
       "test/control/project-tools.test.mjs": {
-        "ms": 119847.501,
+        "ms": 77889.874,
         "bytes": 31161
       },
       "test/control/setup.test.mjs": {
-        "ms": 68592.552,
+        "ms": 118896.206,
         "bytes": 22845
       },
       "test/diagnostics.test.mjs": {
-        "ms": 150.151,
-        "bytes": 14676
+        "ms": 272.987,
+        "bytes": 15422
       },
       "test/direct-notes.test.mjs": {
-        "ms": 188905.256,
+        "ms": 374146.438,
         "bytes": 40240
       },
       "test/draft-artifacts.test.mjs": {
-        "ms": 29684.954,
+        "ms": 27386.748,
         "bytes": 23161
       },
       "test/entry-options.test.mjs": {
-        "ms": 2274.763,
+        "ms": 4347.036,
         "bytes": 11046
       },
       "test/files.test.mjs": {
-        "ms": 8712.097,
+        "ms": 15207.475,
         "bytes": 21871
       },
       "test/gates.test.mjs": {
-        "ms": 12808.326,
+        "ms": 15725.952,
         "bytes": 44663
       },
       "test/historical-commands.test.mjs": {
-        "ms": 530.938,
+        "ms": 679.236,
         "bytes": 18474
       },
       "test/history.test.mjs": {
-        "ms": 780.932,
+        "ms": 699.683,
         "bytes": 23294
       },
       "test/hooks-completion.test.mjs": {
-        "ms": 13168.529,
+        "ms": 33839.516,
         "bytes": 6414
       },
       "test/hooks.test.mjs": {
-        "ms": 2564.826,
+        "ms": 4779.186,
         "bytes": 9131
       },
       "test/ingress.test.mjs": {
-        "ms": 90921.319,
+        "ms": 84113.839,
         "bytes": 22143
       },
       "test/install.test.mjs": {
-        "ms": 42860.189,
+        "ms": 58490.896,
         "bytes": 7982
       },
       "test/invocations.test.mjs": {
-        "ms": 27039.009,
-        "bytes": 11072
+        "ms": 41068.048,
+        "bytes": 11078
       },
       "test/logs/logs.test.mjs": {
-        "ms": 893.715,
+        "ms": 1496.708,
         "bytes": 13979
       },
       "test/logs/processing.test.mjs": {
-        "ms": 114690.7,
+        "ms": 158998.57,
         "bytes": 18940
       },
       "test/logs/storage.test.mjs": {
-        "ms": 2367.4,
+        "ms": 4007.748,
         "bytes": 10918
       },
       "test/macos-acl.test.mjs": {
-        "ms": 133.505,
+        "ms": 76.333,
         "bytes": 6336
       },
       "test/main-evidence.test.mjs": {
-        "ms": 251.785,
+        "ms": 303.398,
         "bytes": 30630
       },
       "test/marketplace.test.mjs": {
-        "ms": 5615.083,
+        "ms": 5123.707,
         "bytes": 8243
       },
       "test/note-writer.test.mjs": {
-        "ms": 653618.651,
+        "ms": 759271.085,
         "bytes": 49482
       },
       "test/notes/examples.test.mjs": {
-        "ms": 235.152,
+        "ms": 231.753,
         "bytes": 1576
       },
       "test/notes/metadata.test.mjs": {
-        "ms": 138.136,
+        "ms": 224.033,
         "bytes": 11441
       },
       "test/notes/validate.test.mjs": {
-        "ms": 280.348,
+        "ms": 435.844,
         "bytes": 10185
       },
       "test/packaging.test.mjs": {
-        "ms": 26179.308,
+        "ms": 24388.866,
         "bytes": 21243
       },
       "test/platform.test.mjs": {
-        "ms": 2310.751,
+        "ms": 3606.072,
         "bytes": 4837
       },
       "test/processing.test.mjs": {
-        "ms": 77913.897,
+        "ms": 51243.774,
         "bytes": 10941
       },
       "test/processing/clients/canary.test.mjs": {
-        "ms": 61.67,
+        "ms": 91.457,
         "bytes": 6500
       },
       "test/processing/clients/clients.test.mjs": {
-        "ms": 4021.769,
+        "ms": 4851.385,
         "bytes": 18454
       },
       "test/processing/clients/executable.test.mjs": {
-        "ms": 109.496,
+        "ms": 96.678,
         "bytes": 2840
       },
       "test/processing/clients/protocol.test.mjs": {
-        "ms": 60.04,
+        "ms": 80.535,
         "bytes": 4932
       },
       "test/processing/draft-bridge.test.mjs": {
-        "ms": 292.645,
+        "ms": 302.235,
         "bytes": 6487
       },
       "test/processing/draft.test.mjs": {
-        "ms": 27850.99,
+        "ms": 51080.256,
         "bytes": 5807
       },
       "test/processing/save.test.mjs": {
-        "ms": 156649.715,
+        "ms": 139808.447,
         "bytes": 8981
       },
       "test/processing/workspace.test.mjs": {
-        "ms": 339.087,
+        "ms": 643.873,
         "bytes": 19955
       },
       "test/project-path.test.mjs": {
-        "ms": 54.126,
+        "ms": 85.702,
         "bytes": 1641
       },
       "test/queue.test.mjs": {
-        "ms": 115591.314,
+        "ms": 140930.481,
         "bytes": 30656
       },
       "test/release-candidate.test.mjs": {
-        "ms": 1031.333,
+        "ms": 1271.255,
         "bytes": 25136
       },
       "test/release-request.test.mjs": {
-        "ms": 144.997,
+        "ms": 110.092,
         "bytes": 3599
       },
       "test/result.test.mjs": {
-        "ms": 52.864,
+        "ms": 79.933,
         "bytes": 2024
       },
       "test/review.test.mjs": {
-        "ms": 220377.069,
-        "bytes": 42396
+        "ms": 167421.917,
+        "bytes": 42973
       },
       "test/run.test.mjs": {
-        "ms": 205.114,
+        "ms": 172.26,
         "bytes": 17863
       },
       "test/settings.test.mjs": {
-        "ms": 81.03,
+        "ms": 142.747,
         "bytes": 12713
       },
       "test/stat.test.mjs": {
-        "ms": 1148.19,
+        "ms": 1821.615,
         "bytes": 8701
       },
       "test/store-initialization.test.mjs": {
-        "ms": 85337.148,
+        "ms": 141787.39,
         "bytes": 17482
       },
       "test/store.test.mjs": {
-        "ms": 52322.529,
+        "ms": 73572.061,
         "bytes": 28630
       },
       "test/sync-runtime.test.mjs": {
-        "ms": 14694.086,
+        "ms": 26377.072,
         "bytes": 9122
       },
       "test/test-sharding.test.mjs": {
-        "ms": 1774.695,
+        "ms": 1759.923,
         "bytes": 7559
       },
       "test/transcript/normalize.test.mjs": {
-        "ms": 1592.181,
+        "ms": 2134.081,
         "bytes": 40443
       },
       "test/version.test.mjs": {
-        "ms": 83.318,
+        "ms": 98.299,
         "bytes": 3229
       },
       "test/windows-acl-deadline.test.mjs": {
-        "ms": 91.643,
+        "ms": 117.255,
         "bytes": 1535
       }
     },
@@ -282,11 +282,11 @@
       },
       "test/chats-storage.test.mjs": {
         "ms": 1669,
-        "bytes": 6347
+        "bytes": 6447
       },
       "test/ci-plan.test.mjs": {
         "ms": 4784,
-        "bytes": 17635
+        "bytes": 17629
       },
       "test/ci-source.test.mjs": {
         "ms": 2518,
@@ -298,7 +298,7 @@
       },
       "test/cli.test.mjs": {
         "ms": 9649,
-        "bytes": 38512
+        "bytes": 38506
       },
       "test/client-smoke.test.mjs": {
         "ms": 518,
@@ -322,7 +322,7 @@
       },
       "test/control-diagnostics.test.mjs": {
         "ms": 169,
-        "bytes": 12557
+        "bytes": 13676
       },
       "test/control-server.test.mjs": {
         "ms": 55,
@@ -342,7 +342,7 @@
       },
       "test/diagnostics.test.mjs": {
         "ms": 67,
-        "bytes": 14676
+        "bytes": 15422
       },
       "test/direct-notes.test.mjs": {
         "ms": 22264,
@@ -390,7 +390,7 @@
       },
       "test/invocations.test.mjs": {
         "ms": 3657,
-        "bytes": 11072
+        "bytes": 11078
       },
       "test/logs/logs.test.mjs": {
         "ms": 449,
@@ -498,7 +498,7 @@
       },
       "test/review.test.mjs": {
         "ms": 14535,
-        "bytes": 42396
+        "bytes": 42973
       },
       "test/run.test.mjs": {
         "ms": 57,
