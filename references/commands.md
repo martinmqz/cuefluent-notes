@@ -55,7 +55,8 @@ bounded at 48 KiB of serialized JSON: when `next` is not null, call again with
 byte pieces of one draft in order. Show the complete set; never truncate,
 summarize or raise limits.
 
-`choices` is the exact wording to offer. A pending review set offers `Save`, then
+`choices` is the exact wording to offer, through the client's question UI or in
+plain text when no question tool is available. A pending review set offers `Save`, then
 `Discard` (direct) or `Skip draft; keep input` (queued), then `Keep pending`. A run
 whose notes are all saved offers `Finish` and `Keep pending`. A run interrupted
 while drafting offers `Discard` or `Skip; keep input`, and `Keep pending`; a direct

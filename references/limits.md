@@ -27,11 +27,18 @@ and do not fail the user's prompt. A closed diagnostic pipe never interrupts an
 operation.
 
 `ENTRY_STORE_ROOT_INVALID` is a malformed `CUEFLUENT_HOME`; the diagnostic names
-the variable without its value. `STORE_SCHEMA_UNSUPPORTED`, `STORE_ROOT_OCCUPIED`
-and `STORE_INCOMPLETE` refuse an unusable private store; preserve it and set up at
-a fresh [private location](setup.md#private-location) rather than deleting
-retained work. `STORE_SETUP_BUSY` means concurrent activity in the setup directory;
-retry the same setup at the same location. If the host cannot start the executable
+the variable without its value. `STORE_SCHEMA_UNSUPPORTED` means the store's state
+schema is not supported: preserve it in place, and only an explicitly agreed new
+setup at a fresh [private location](setup.md#private-location) continues.
+`STORE_ROOT_OCCUPIED` means the selected location holds foreign entries: preserve
+them and confirm the intended location. `STORE_INCOMPLETE` means initialization
+state is incomplete or changed, which includes a retained store whose layout or
+settings are missing while its queues, runs and gates remain: preserve it,
+investigate, and retry setup at the same location for an interrupted first
+initialization. Never switch `CUEFLUENT_HOME` to bypass pending work; a second
+store against the same notes cannot coordinate with the first. `STORE_SETUP_BUSY`
+means concurrent activity in the setup directory; retry the same setup at the same
+location. If the host cannot start the executable
 or load the entry script, Cuefluent has not run and produces no diagnostic: check
 the configured executable, installed path and working directory in the client's
 connector settings or startup log. Diagnostics install no Node, change no client

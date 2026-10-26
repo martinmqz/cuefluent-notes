@@ -68,8 +68,9 @@ generation:
 Preserve the exact inspected original when retrying a save.
 ```
 
-Identity, creation time and the generating package version are written by the
-writer and never change on update. Optional descriptive fields are `type`,
+The writer sets these fields: `id` and `created` never change on an update,
+while `updated` and `generation.skill_version` are refreshed by a useful edit and
+left alone by a no-op. Optional descriptive fields are `type`,
 `context`, `sources`, `series`, `sprint`, `period` and `generation.content_hash`.
 Unfamiliar metadata and existing source descriptions are preserved; new provenance
 uses only supported schema-1 source shapes with known values, never invented

@@ -39,7 +39,8 @@ Example: "Use Cuefluent to save the meeting details above as a note."
      file viewer and link it; without a viewer, render it inline as Markdown. Name
      the destination separately. The file is a presentation copy: a silent edit is
      not submitted, and a request for changes needs a new draft.
-   - Ask with the client's question UI (Claude Code: AskUserQuestion) using exactly
+   - Ask with the client's question UI (Claude Code: AskUserQuestion; Codex: its
+     question tool when available) or, without one, in plain text, offering exactly
      the returned `choices`.
    - `Save`, `Finish` and `Restore draft` relay to `cuefluent_save_note`;
      `Discard`, `Skip draft; keep input` and `Skip; keep input` relay to
