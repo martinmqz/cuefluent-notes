@@ -85,7 +85,7 @@ export async function inspectActivityLogSeries(destination) {
 /** Approved setup only, under the caller's destination writer gate. The setup
  * operation owns and durably persists its publication intent; settings are not
  * changed here. Existing valid shared series wins over requested defaults. */
-export async function establishActivityLogSeries(pin, { year, timezone, seriesId, noteId, createdAt, skillVersion, runId, publication = null, persistIntent } = {}) {
+export async function establishActivityLogSeries(pin, { year, timezone, seriesId, noteId, createdAt, skillVersion, expandedMetadata = false, runId, publication = null, persistIntent } = {}) {
   requireLog(pin?.private === false && typeof persistIntent === 'function' && typeof skillVersion === 'string', 'LOG_ARGUMENT');
   const relative = logRelative(year); await assertDirectory(pin);
   if (!publication) {
@@ -99,7 +99,7 @@ export async function establishActivityLogSeries(pin, { year, timezone, seriesId
       return Object.freeze({ root: pin.root, parent: state.parent, seriesId: series.seriesId, timezone: series.timezone });
     }
   }
-  const bytes = createAnnualLog({ year, timezone, seriesId, noteId, createdAt, skillVersion });
+  const bytes = createAnnualLog({ year, timezone, seriesId, noteId, createdAt, skillVersion, expandedMetadata });
   let note = publication ?? await prepareNotePublication(pin, relative, bytes, { runId, draftId: noteId, expectedHash: null, hash: hashBytes(bytes) });
   requireLog(note.root === pin.root && note.relative === relative && note.runId === runId && note.draftId === noteId && note.hash === hashBytes(bytes) && note.expectedHash === null, 'LOG_SETUP_CONFLICT');
   if (!publication) await persistIntent(note);
@@ -111,10 +111,10 @@ export async function establishActivityLogSeries(pin, { year, timezone, seriesId
 
 /** Reproducible candidate from exact inspected original bytes and frozen event.
  * An absent annual file gets a deterministic note ID within the pinned series. */
-export function logCandidate(binding, event, original, { skillVersion } = {}) {
+export function logCandidate(binding, event, original, { skillVersion, expandedMetadata = false } = {}) {
   requireLog(typeof skillVersion === 'string', 'LOG_ARGUMENT');
   const year = logYear(event.savedAt, binding.timezone), options = { year, seriesId: binding.seriesId, timezone: binding.timezone };
-  const before = original ?? createAnnualLog({ ...options, noteId: annualId(binding.seriesId, year), createdAt: event.savedAt, skillVersion });
+  const before = original ?? createAnnualLog({ ...options, noteId: annualId(binding.seriesId, year), createdAt: event.savedAt, skillVersion, expandedMetadata });
   const result = appendLogEntry(before, event, options);
   return Object.freeze({ ...result, year, relative: logRelative(year) });
 }

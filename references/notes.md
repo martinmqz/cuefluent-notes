@@ -49,24 +49,27 @@ and conflicts.
 
 ## Portable metadata
 
-The note format is independent of plugin settings and private runtime state. A
-generated note starts with one `cuefluent` YAML comment whose closing `-->` is on
-its own line:
+The note format is independent of private runtime state. Metadata is compact by
+default: one YAML flow mapping between the opening and closing comment lines.
+The project preference `expandedMetadata` is off (`false`) unless the user asks
+for expanded YAML (`true`). Both formats contain the same metadata values:
 
 ```markdown
 <!-- cuefluent
-schema_version: 1
-id: "9dd25a37-780e-4490-9738-40c601c5b6f5"
-created: "2026-01-01T12:00:00.000Z"
-updated: "2026-01-01T12:00:00.000Z"
-generation:
-  skill_version: "0.16.0"
+{schema_version: 1, id: "9dd25a37-780e-4490-9738-40c601c5b6f5", created: "2026-01-01T12:00:00.000Z", updated: "2026-01-01T12:00:00.000Z", generation: {skill_version: "0.19.0"}}
 -->
 # Retry policy
 
 ## Decision
 Preserve the exact inspected original when retrying a save.
 ```
+
+Formatting applies to new notes, useful edits to supported notes, and newly
+created annual logs. A pending run keeps its captured preference and exact draft
+bytes. Changing the preference alone rewrites no files: no-op saves keep their
+original bytes, and log appends preserve existing headers. Handwritten metadata
+comments are preserved even when they require additional lines in compact mode.
+Plain notes stay plain; this preference does not add metadata to them.
 
 The writer sets these fields: `id` and `created` never change on an update,
 while `updated` and `generation.skill_version` are refreshed by a useful edit and

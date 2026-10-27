@@ -13,6 +13,7 @@ hook trust or an ordinary chat message is not consent.
 | --- | --- |
 | Tracking | `manual` (default), `auto` for existing and new chats, starting with their next prompt after enabling it |
 | Saving | `review` (default), `auto` after explicit processing |
+| Metadata | Compact by default (`expandedMetadata: false`); expanded YAML only when explicitly requested (`true`). |
 | Activity log | On by default for directory destinations, with a recorded IANA timezone; explicit off is kept. Single-file destinations are off and cannot log. |
 
 Automatic tracking enrolls each eligible chat when its next user prompt is submitted,
@@ -21,8 +22,8 @@ prompt and subsequent exchanges, never earlier history or the exchange already
 underway during setup. Claude forks with an unverified inherited boundary stay
 pending instead of collecting copied history; see [native collection limits](limits.md#native-clients-and-collection).
 Tell the user these limits when offering automatic tracking. Native hooks must be enabled. Mode changes do not untrack existing chats or override
-opt-outs. A pending run pins its destination, saving preference and logging settings; logging changes apply to
-later runs. The nearest configured ancestor owns a newly bound chat, and ownership
+opt-outs. A pending run pins its destination, saving preference, logging settings and metadata formatting; logging and formatting
+changes apply to later runs. The nearest configured ancestor owns a newly bound chat, and ownership
 does not move when nested projects are added.
 
 ## `cuefluent_setup`
@@ -30,7 +31,8 @@ does not move when nested projects are added.
 Call `cuefluent_projects` to see what is configured, then `cuefluent_setup` once
 with the agreed choices: `id`, `root`, `destination`
 (`{ "kind": "directory" | "file", "path": ... }`), `tracking`, `saving` and
-`activityLog` (`{ "enabled": ..., "timezone": ... }`). Every field is optional;
+`activityLog` (`{ "enabled": ..., "timezone": ... }`), with optional
+`expandedMetadata` (boolean, default `false`). Every field is optional;
 paths are absolute, normalized and free of symbolic links. The tool takes no
 settings hash and no logs path: it reads the current settings itself and applies
 the change only if they are unchanged, and logs always live at `logs/` inside a
@@ -45,7 +47,7 @@ Omitted preferences take the defaults above.
 
 An existing project is selected by `id`, or by its exact `root` when no `id` is
 given. Only the supplied fields change; omitted fields keep their values, including
-an explicit logging opt-out and an established timezone. A root never changes, and
+an explicit logging opt-out, an established timezone and an expanded-metadata preference. A root never changes, and
 an `id` and `root` that belong to different projects are refused
 (`SETUP_PROJECT_MISMATCH`). `activityLog: { "enabled": true }` without a timezone
 keeps the timezone of a project that already logs and otherwise uses the system's
@@ -69,7 +71,7 @@ change; never delete private state to force setup.
 
 - `SETTINGS_PENDING_RUN`: a pending run pins its destination and saving mode.
   Settle it first (decide its review set, or read `cuefluent_status` while it
-  works); tracking and logging remain editable.
+  works); tracking, logging and metadata formatting remain editable.
 - `SETTINGS_RETAINED_PROJECT`: a project with retained chats or work keeps its
   root and cannot be removed; change only its destination or preferences.
 - `SETTINGS_CONFLICT`: the settings changed concurrently. Call `cuefluent_projects`
@@ -129,6 +131,7 @@ repeat every preference to keep, and an existing project keeps its `id`.
     "destination": { "kind": "directory", "path": "/absolute/notes" },
     "tracking": "manual",
     "saving": "review",
+    "expandedMetadata": false,
     "activityLog": { "enabled": true, "timezone": "America/Los_Angeles" }
   }
 }

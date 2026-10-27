@@ -24,7 +24,7 @@ test('series setup refuses missing/conflicting metadata, duplicate identities an
   const first = create(), second = create({ year: 2027 });
   assert.deepEqual(inspectLogSeries([{ year: 2027, bytes: second }, { year: 2026, bytes: first }]), { seriesId: options.seriesId, timezone: options.timezone, years: [2026, 2027] });
   assert.equal(inspectLogSeries([], options), null);
-  for (const bad of [first.toString().replace('log_format_version: 1', 'log_format_version: 2'), first.toString().replace('  id: synthetic-series\n', ''), first.toString().replace('2026-12-31', '2026-12-30'), '# Note activity — 2026\n\n## About this log\n\nPlain text.']) {
+  for (const bad of [first.toString().replace('log_format_version: 1', 'log_format_version: 2'), first.toString().replace('series: {id: synthetic-series}', 'series: {}'), first.toString().replace('2026-12-31', '2026-12-30'), '# Note activity — 2026\n\n## About this log\n\nPlain text.']) {
     assert.throws(() => inspectAnnualLog(bad, options), error => error.code.startsWith('LOG_'));
   }
   assert.throws(() => inspectLogSeries([{ year: 2026, bytes: first }, { year: 2027, bytes: create({ year: 2027, timezone: 'UTC' }) }]), { code: 'LOG_SERIES_CONFLICT' });
@@ -67,7 +67,7 @@ test('reviewed visible summary and heading padding is preserved safely in the lo
 });
 
 test('delayed entries insert into the correct month without rewriting metadata, manual text, CRLF or other months', () => {
-  let bytes = Buffer.from(create().toString().replace(/\n/g, '\r\n').replace('type: log', 'type: log # Keep this metadata comment'));
+  let bytes = Buffer.from(create({ expandedMetadata: true }).toString().replace(/\n/g, '\r\n').replace('type: log', 'type: log # Keep this metadata comment'));
   const metadata = inspectMetadata(bytes).raw;
   bytes = append(bytes, 1, { savedAt: '2026-10-10T15:00:00Z' });
   bytes = Buffer.from(bytes.toString() + '\r\nPersonal addition: keep exactly.\r\n');
@@ -169,4 +169,14 @@ test('invalid annual structures report their annual filename and concrete source
   assert.throws(() => inspectAnnualLog(bad, options), error => error.code === 'LOG_INVALID' && error.file === '2026.md' && error.line > 1 && error.message.includes(`2026.md:${error.line}`));
   const malformed = append(create()).toString().replace(' | created | ', ' | unsupported | ');
   assert.throws(() => inspectLogSeries([{ year: 2026, bytes: malformed }]), error => error.code === 'LOG_ENTRY_INVALID' && error.line > 1 && error.message.includes(`2026.md:${error.line}`));
+});
+
+
+test('new annual log metadata defaults to compact and supports expanded opt-in without changing log identity', () => {
+  const compact = create(), expanded = create({ expandedMetadata: true });
+  const a = inspectMetadata(compact), b = inspectMetadata(expanded);
+  assert.equal(a.raw.trim().split('\n').length, 3);
+  assert.ok(b.raw.trim().split('\n').length > 3);
+  assert.deepEqual(a.value, b.value);
+  assert.deepEqual(inspectAnnualLog(compact, options).noteId, inspectAnnualLog(expanded, options).noteId);
 });

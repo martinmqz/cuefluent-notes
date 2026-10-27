@@ -180,7 +180,7 @@ export async function setupProject({ storeRoot, project: input, expectedHash, sk
     resultProject = request;
     if (request.activityLog.enabled) {
       const binding = await establishActivityLogSeries(pin, { year: logYear(intent.createdAt, request.activityLog.timezone), timezone: request.activityLog.timezone,
-        seriesId: intent.seriesId, noteId: intent.noteId, createdAt: intent.createdAt, skillVersion: intent.skillVersion, runId: intent.id, publication: intent.publication,
+        seriesId: intent.seriesId, noteId: intent.noteId, createdAt: intent.createdAt, skillVersion: intent.skillVersion, expandedMetadata: request.expandedMetadata, runId: intent.id, publication: intent.publication,
         persistIntent: publication => saveIntent({ ...intent, logParent: publication.parent, publication }) });
       resultProject = createProject({ ...request, activityLog: { ...request.activityLog, timezone: binding.timezone } });
       const inspected = await inspectActivityLogSeries(request.destination);

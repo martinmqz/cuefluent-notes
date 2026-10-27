@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createProject } from '../src/core/settings.mjs';
+import { inspectMetadata } from '../src/notes/index.mjs';
 import { createRun, validateRun, runRevision } from '../src/core/run.mjs';
 import { initializeStore, withProject, readSettings, updateSettings } from '../src/storage/store.mjs';
 import { readJSON, writeJSON, hashBytes } from '../src/storage/files.mjs';
@@ -22,11 +23,11 @@ import { persistDraftManifest } from '../src/processing/draft.mjs';
 import { pinProcessingLogging } from '../src/processing/logging.mjs';
 
 const content = '# Planning meeting\n\n## Decisions\nKeep the release small.\n\n## Actions\nSam will verify the result.\n';
-async function fixture(t, { saving = 'review', client = 'codex', file = false } = {}) {
+async function fixture(t, { saving = 'review', client = 'codex', file = false, expandedMetadata = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-direct-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd); await fs.mkdir(notes);
-  const project = createProject({ id: 'demo', root: cwd, destination: { kind: file ? 'file' : 'directory', path: file ? path.join(notes, 'explicit.md') : notes }, saving });
+  const project = createProject({ id: 'demo', root: cwd, destination: { kind: file ? 'file' : 'directory', path: file ? path.join(notes, 'explicit.md') : notes }, saving, expandedMetadata });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
   // Queued decisions hand off to the separate worker; this fixture records the
   // launch request and refuses it so no detached process starts.
@@ -513,4 +514,22 @@ test('auto-mode direct crash recovery publishes retained bytes while review-mode
   assert.deepEqual(recovered.drafts, original.drafts); assert.equal(recovered.revision, original.revision);
   assert.deepEqual(await fs.readdir(g.notes), []);
   assert.equal((await g.call('save', g.request.requestId, original.revision)).state, 'saved');
+});
+
+
+test('direct drafts pin metadata formatting through approval; changed preferences apply to the next request in both clients', async t => {
+  for (const client of ['codex', 'claude']) for (const expandedMetadata of [false, true]) {
+    const f = await fixture(t, { client, expandedMetadata }); await f.create();
+    const { run } = await inspectAttempt(f.store, 'demo');
+    const retained = await readDraftArtifact(f.store.pin, run.artifacts, run.drafts[0].id);
+    assert.equal(inspectMetadata(retained).raw.trim().split('\n').length > 3, expandedMetadata);
+    const settings = await readSettings(f.store);
+    await updateSettings(f.store, { schemaVersion: 1, projects: [{ ...f.project, expandedMetadata: !expandedMetadata }] }, { expectedHash: settings.hash });
+    const saved = await f.call('save'); assert.equal(saved.state, 'saved');
+    assert.deepEqual(await fs.readFile(saved.result.paths[0]), retained);
+    await f.create({ requestId: randomUUID(), target: 'meetings/next.md' });
+    const next = (await inspectAttempt(f.store, 'demo')).run;
+    const bytes = await readDraftArtifact(f.store.pin, next.artifacts, next.drafts[0].id);
+    assert.equal(inspectMetadata(bytes).raw.trim().split('\n').length > 3, !expandedMetadata);
+  }
 });

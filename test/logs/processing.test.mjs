@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { waitForReplacement } from '../fixtures/publication-boundary.mjs';
+import { inspectMetadata } from '../../src/notes/index.mjs';
 import { createProject } from '../../src/core/settings.mjs';
 import { createRun, validateRun, replaceAttempt, failLogEvent, confirmLogEvent, setLogPublication } from '../../src/core/run.mjs';
 import { initializeStore, withProject, withWriter } from '../../src/storage/store.mjs';
@@ -19,12 +20,12 @@ import { establishActivityLogSeries, logCandidate, readActivityLog } from '../..
 import { pinProcessingLogging, flushRunLogs, discardRunLogPublication } from '../../src/processing/logging.mjs';
 
 const version = { skillVersion: '0.16.0' }, savedAt = '2026-10-22T01:00:00.000Z';
-async function fixture(t, { saved = true, pinned = true } = {}) {
+async function fixture(t, { saved = true, pinned = true, expandedMetadata = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-log-process-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd); await fs.mkdir(notes);
   const pin = await pinDirectory(notes), binding = await establishActivityLogSeries(pin, { ...version, year: 2026, timezone: 'America/Los_Angeles', seriesId: 'synthetic-series', noteId: randomUUID(), runId: randomUUID(), createdAt: savedAt, persistIntent: async () => {} });
-  const project = createProject({ id: 'synthetic', root: cwd, saving: 'auto', destination: { kind: 'directory', path: notes }, activityLog: { enabled: true, timezone: 'UTC' } });
+  const project = createProject({ id: 'synthetic', root: cwd, saving: 'auto', expandedMetadata, destination: { kind: 'directory', path: notes }, activityLog: { enabled: true, timezone: 'UTC' } });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
   const bytes = Buffer.from('# Synthetic topic\n\n## Choice\nKeep this saved choice.\n'), target = path.join(notes, 'topic.md'); await fs.writeFile(target, bytes);
   const draft = { id: randomUUID(), target, expectedHash: null, hash: hashBytes(bytes), summary: 'Keep the selected choice.', heading: 'Choice', byteLength: bytes.length, binding: { root: notes, parent: (await inspectParent(pin, 'topic.md')).chain } };
@@ -254,4 +255,18 @@ test('temporary writer contention before drafting retries outside short gates an
     assert.deepEqual(await pinning, f.binding);
   });
   assert.equal((await f.read()).warnings.length, 0);
+});
+
+
+test('a new annual log uses the pending run metadata preference and leaves existing years untouched', async t => {
+  for (const expandedMetadata of [false, true]) {
+    const f = await fixture(t, { expandedMetadata }), before = await fs.readFile(f.annual);
+    await f.own(async owner => {
+      await f.mutate(owner, run => validateRun({ ...run, logEvents: run.logEvents.map(event => ({ ...event, savedAt: '2027-06-01T12:00:00.000Z' })) }));
+      assert.equal((await flushRunLogs(f.store, owner, version)).logEvents[0].confirmed, true);
+    });
+    const bytes = await fs.readFile(path.join(f.notes, 'logs', '2027.md'));
+    assert.equal(inspectMetadata(bytes).raw.trim().split('\n').length > 3, expandedMetadata);
+    assert.deepEqual(await fs.readFile(f.annual), before);
+  }
 });

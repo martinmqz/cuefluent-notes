@@ -90,14 +90,14 @@ export async function flushRunLogs(store, owner, { skillVersion } = {}) {
           if (state.run.logPublication) {
             if (state.run.logPublication.eventId !== eventId) fail('LOG_PUBLICATION_BUSY', 'Finish the current log event first.');
             const source = await readPublicationSource(pin, state.run.logPublication.note);
-            bytes = source.status === 'applied' ? source.bytes : logCandidate(state.run.logging, input, source.bytes, { skillVersion }).bytes;
+            bytes = source.status === 'applied' ? source.bytes : logCandidate(state.run.logging, input, source.bytes, { skillVersion, expandedMetadata: state.run.settings.expandedMetadata }).bytes;
             if (hashBytes(bytes) !== state.run.logPublication.note.hash || bytes.length !== state.run.logPublication.note.bytes) fail('LOG_CANDIDATE_CHANGED', 'The exact pending log proposal cannot be reconstructed.');
           } else {
             const series = await inspectActivityLogSeries(state.run.settings.destination);
             if (series.binding.seriesId !== state.run.logging.seriesId || series.binding.timezone !== state.run.logging.timezone) fail('LOG_SERIES_CONFLICT', 'The pinned series no longer matches the destination.');
             const relative = logRelative(logYear(current.savedAt, state.run.logging.timezone));
             const original = await readSnapshot(pin, relative, { missing: true, maxBytes: NOTE_PROFILE.fileBytes });
-            const candidate = logCandidate(state.run.logging, input, original?.bytes ?? null, { skillVersion }); bytes = candidate.bytes;
+            const candidate = logCandidate(state.run.logging, input, original?.bytes ?? null, { skillVersion, expandedMetadata: state.run.settings.expandedMetadata }); bytes = candidate.bytes;
             if (!candidate.changed) { await state.persist(confirmLogEvent(state.run, owner.attemptId, eventId)); return; }
             const note = await prepareNotePublication(pin, relative, bytes, { runId: state.run.id, draftId: eventId, expectedHash: original?.hash ?? null, hash: hashBytes(bytes), expectedParentChain: state.run.logging.parent });
             await state.persist(setLogPublication(state.run, owner.attemptId, eventId, note));
@@ -117,7 +117,7 @@ export async function flushRunLogs(store, owner, { skillVersion } = {}) {
               // A missing event never permits rebasing the interrupted proposal.
               try {
                 const latest = await readSnapshot(pin, state.run.logPublication.note.relative, { missing: true, maxBytes: NOTE_PROFILE.fileBytes });
-                if (latest && !logCandidate(state.run.logging, eventInput(state.run, current), latest.bytes, { skillVersion }).changed) {
+                if (latest && !logCandidate(state.run.logging, eventInput(state.run, current), latest.bytes, { skillVersion, expandedMetadata: state.run.settings.expandedMetadata }).changed) {
                   let confirmed = confirmLogEvent(state.run, owner.attemptId, eventId);
                   if (discarded.backupPreserved) confirmed = addRunWarning(confirmed, owner.attemptId, `Activity log entry ${eventId} was confirmed; an interrupted publication backup was preserved for inspection.`);
                   await state.persist(confirmed); return;

@@ -3,7 +3,8 @@ import path from 'node:path';
 export const SETTINGS_SCHEMA_VERSION = 1;
 export const SETTINGS_LIMITS = Object.freeze({ projects: 1024, pathBytes: 32768, idLength: 128, timezoneLength: 128 });
 
-const PROJECT_FIELDS = ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog'];
+const PROJECT_FIELDS = ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog', 'expandedMetadata'];
+const REQUIRED_PROJECT_FIELDS = PROJECT_FIELDS.filter(field => field !== 'expandedMetadata');
 
 function fail(code, message) {
   const error = new Error(message);
@@ -89,9 +90,11 @@ function activityLog(value, target, paths, defaults) {
 }
 
 function validateProject(input, paths, defaults = false) {
-  record(input, PROJECT_FIELDS, defaults ? ['id', 'root', 'destination'] : PROJECT_FIELDS, 'project');
+  record(input, PROJECT_FIELDS, defaults ? ['id', 'root', 'destination'] : REQUIRED_PROJECT_FIELDS, 'project');
   const tracking = Object.hasOwn(input, 'tracking') ? input.tracking : 'manual';
   const saving = Object.hasOwn(input, 'saving') ? input.saving : 'review';
+  const expandedMetadata = Object.hasOwn(input, 'expandedMetadata') ? input.expandedMetadata : false;
+  if (typeof expandedMetadata !== 'boolean') invalid('expandedMetadata must be a boolean');
   if (!['manual', 'auto'].includes(tracking)) invalid('tracking must be manual or auto');
   if (!['review', 'auto'].includes(saving)) invalid('saving must be review or auto');
   const target = destination(input.destination, paths);
@@ -100,7 +103,7 @@ function validateProject(input, paths, defaults = false) {
     : { enabled: false }, target, paths, defaults);
   if (target.kind === 'file' && logging.enabled) invalid('Activity logging requires a directory destination');
   return Object.freeze({ id: projectId(input.id), root: canonicalPath(input.root, paths, 'project.root'),
-    destination: target, tracking, saving, activityLog: logging });
+    destination: target, tracking, saving, activityLog: logging, expandedMetadata });
 }
 
 /** Fresh settings enable no tracking, saving or logging. This function performs no I/O. */

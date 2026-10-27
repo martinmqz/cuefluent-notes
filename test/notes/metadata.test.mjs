@@ -150,7 +150,7 @@ test('schema-1 notes without optional generation metadata accept useful edits', 
   const result = inspectMetadata(updated.bytes);
   assert.equal(result.status, 'supported'); assert.equal(result.value.id, 'stable');
   assert.equal(result.value.created, '2026-10-21T00:00:00Z'); assert.equal(result.value.generation.skill_version, options.skillVersion);
-  assert.match(updated.bytes.toString(), /custom: retained # Preserve explanation/);
+  assert.match(updated.bytes.toString(), /custom: retained,? # Preserve explanation/);
 });
 
 test('similarly named body comments do not claim the cuefluent metadata marker', () => {
@@ -160,4 +160,35 @@ test('similarly named body comments do not claim the cuefluent metadata marker',
     assert.equal(preserveMetadata(original, original.replace('checked', 'verified')).bytes.toString(), original.replace('checked', 'verified'));
   }
   assert.equal(inspectMetadata(`${body}\n<!-- cuefluent\nschema_version: 1\nid: misplaced\n-->`).status, 'invalid');
+});
+
+
+test('metadata is compact by default and expanded only by explicit opt-in, with identical values', () => {
+  const extra = { context: { project: 'synthetic', topics: ['café', '日本語'] }, custom: { text: 'first\nsecond', quoted: 'a: [b], "c"', zero: -0 } };
+  const compact = createGeneratedNote(body, { ...options, metadata: extra });
+  const expanded = createGeneratedNote(body, { ...options, metadata: extra, expandedMetadata: true });
+  const a = inspectMetadata(compact), b = inspectMetadata(expanded);
+  assert.equal(a.status, 'supported'); assert.equal(b.status, 'supported');
+  assert.equal(a.raw.trim().split('\n').length, 3);
+  assert.ok(b.raw.trim().split('\n').length > 3);
+  assert.deepEqual(a.value, b.value);
+  assert.equal(compact.toString().slice(a.end), body);
+  assert.equal(expanded.toString().slice(b.end), body);
+  for (const expandedMetadata of [null, 'false', 0]) {
+    assert.throws(() => createGeneratedNote(body, { ...options, expandedMetadata }), { code: 'NOTE_METADATA_INVALID' });
+  }
+});
+
+test('useful note edits honor compact or expanded formatting; no-op edits retain exact original bytes', () => {
+  const original = createGeneratedNote(body, { ...options, expandedMetadata: true });
+  const next = body.replace('checked', 'verified');
+  for (const expandedMetadata of [false, true]) {
+    const changed = preserveMetadata(original, next, { updated: '2026-10-27T01:00:00Z', expandedMetadata });
+    const m = inspectMetadata(changed.bytes);
+    assert.equal(m.raw.trim().split('\n').length > 3, expandedMetadata);
+    assert.equal(m.value.id, options.id); assert.equal(m.value.created, options.now);
+    assert.equal(m.value.updated, '2026-10-27T01:00:00Z');
+    assert.equal(changed.bytes.toString().slice(m.end), next);
+    assert.deepEqual(preserveMetadata(original, body, { expandedMetadata }).bytes, original);
+  }
 });

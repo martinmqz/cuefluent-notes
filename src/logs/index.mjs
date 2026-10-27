@@ -159,10 +159,10 @@ function inspect(input, options = {}) {
 }
 
 /** Pure creation; the caller establishes the file under the destination lock. */
-export function createAnnualLog({ year, noteId, seriesId, timezone, skillVersion, createdAt } = {}) {
+export function createAnnualLog({ year, noteId, seriesId, timezone, skillVersion, createdAt, expandedMetadata = false } = {}) {
   const annual = yearValue(year); zoneValue(timezone);
   const body = `# Note activity — ${annual}\n\n## About this log\n\nDates are note save times, not the dates of the events described. Only projects with activity logging enabled contribute, so shared notes may have partial project coverage. Gaps are possible, including changes made before this log was created or entries that could not be written. Read the linked current notes before drawing conclusions about their contents.\n`;
-  const bytes = createGeneratedNote(body, { ...(noteId === undefined ? {} : { id: noteId }), now: createdAt, skillVersion, metadata: { type: 'log', log_format_version: 1, series: { id: seriesId }, period: { start: `${annual}-01-01`, end: `${annual}-12-31`, timezone } } });
+  const bytes = createGeneratedNote(body, { ...(noteId === undefined ? {} : { id: noteId }), now: createdAt, skillVersion, expandedMetadata, metadata: { type: 'log', log_format_version: 1, series: { id: seriesId }, period: { start: `${annual}-01-01`, end: `${annual}-12-31`, timezone } } });
   inspect(bytes, { year, seriesId, timezone }); return bytes;
 }
 

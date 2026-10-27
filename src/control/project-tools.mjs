@@ -16,10 +16,10 @@ const definition = (name, description, inputSchema, readOnlyHint = false) => ({ 
 const pathRule = description => ({ type: 'string', minLength: 1, maxLength: SETTINGS_LIMITS.pathBytes, description });
 
 export const PROJECT_TOOLS = freezeData([
-  definition('cuefluent_setup', 'Set up or change one Cuefluent Notes project: its project root, note destination, tracking, saving and activity logging. ' +
+  definition('cuefluent_setup', 'Set up or change one Cuefluent Notes project: its project root, note destination, tracking, saving, activity logging and metadata formatting. ' +
     'Call cuefluent_projects first, and agree every choice with the user before calling; installation, hook trust, discussing setup or reading notes is not consent. ' +
     'A new project needs root (the absolute project folder) and destination ({ kind: "directory" | "file", path }, absolute; a file is a Markdown .md file). ' +
-    'Without id, a new project takes an id derived from the root folder name. For a new project, omitted tracking is manual, saving is review, and activityLog is on with the system timezone for a directory destination and off for a file destination. ' +
+    'Without id, a new project takes an id derived from the root folder name. For a new project, omitted tracking is manual, saving is review, and activityLog is on with the system timezone for a directory destination and off for a file destination. expandedMetadata defaults to false (compact metadata); set true only when the user asks for expanded YAML. ' +
     'An existing project is selected by id or by its exact root, and only the supplied fields change; omitted fields keep their current values, including a logging opt-out and an established timezone. ' +
     'activityLog is { enabled, timezone? }, and a timezone needs enabled true. A pending run pins its destination and saving mode, and a project with retained chats or work cannot move to another root. ' +
     'Creates the private store on first use. Changes no hook, client authentication or chat tracking.',
@@ -30,6 +30,7 @@ export const PROJECT_TOOLS = freezeData([
         description: 'The note destination. Required for a new project.' },
       tracking: { type: 'string', enum: ['manual', 'auto'], description: 'Auto enrolls existing and new chats from their next prompt after enabling it; earlier history is excluded and explicit untrack opt-outs remain.' },
       saving: { type: 'string', enum: ['review', 'auto'] },
+      expandedMetadata: { type: 'boolean', description: 'Expanded YAML metadata, off by default. Applies to newly generated notes/logs and useful note updates; existing log headers and retained drafts keep their bytes.' },
       activityLog: { ...schema({ enabled: { type: 'boolean' }, timezone: { type: 'string', minLength: 1, maxLength: SETTINGS_LIMITS.timezoneLength, description: 'IANA timezone; only with enabled true. An established log series keeps its recorded timezone.' } }, ['enabled']),
         description: 'Activity logging, directory destinations only. Its reserved logs path is derived from the destination.' },
     }, [])),
@@ -48,7 +49,7 @@ function absolutePath(value) {
 }
 
 function setupArguments(args) {
-  const input = fields(args, [], ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog'], invalid), result = {};
+  const input = fields(args, [], ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog', 'expandedMetadata'], invalid), result = {};
   if (Object.hasOwn(input, 'id')) { if (typeof input.id !== 'string' || !PROJECT_ID.test(input.id)) invalid(); result.id = input.id; }
   if (Object.hasOwn(input, 'root')) result.root = absolutePath(input.root);
   if (Object.hasOwn(input, 'destination')) {
@@ -58,6 +59,7 @@ function setupArguments(args) {
   }
   if (Object.hasOwn(input, 'tracking')) { if (!['manual', 'auto'].includes(input.tracking)) invalid(); result.tracking = input.tracking; }
   if (Object.hasOwn(input, 'saving')) { if (!['review', 'auto'].includes(input.saving)) invalid(); result.saving = input.saving; }
+  if (Object.hasOwn(input, 'expandedMetadata')) { if (typeof input.expandedMetadata !== 'boolean') invalid(); result.expandedMetadata = input.expandedMetadata; }
   if (Object.hasOwn(input, 'activityLog')) {
     const log = fields(input.activityLog, ['enabled'], ['timezone'], invalid);
     if (typeof log.enabled !== 'boolean') invalid();
@@ -98,12 +100,12 @@ function mergedLogging(existing, supplied) {
 
 function proposal(projects, existing, input) {
   if (existing) return { id: existing.id, root: existing.root, destination: input.destination ?? existing.destination,
-    tracking: input.tracking ?? existing.tracking, saving: input.saving ?? existing.saving, activityLog: mergedLogging(existing, input.activityLog) };
+    tracking: input.tracking ?? existing.tracking, saving: input.saving ?? existing.saving, expandedMetadata: input.expandedMetadata ?? existing.expandedMetadata, activityLog: mergedLogging(existing, input.activityLog) };
   if (input.root === undefined || input.destination === undefined) invalid();
   const activityLog = mergedLogging(null, input.activityLog);
   return { id: input.id ?? deriveProjectId(input.root, new Set(projects.map(project => project.id))), root: input.root, destination: input.destination,
     ...(input.tracking === undefined ? {} : { tracking: input.tracking }), ...(input.saving === undefined ? {} : { saving: input.saving }),
-    ...(activityLog === undefined ? {} : { activityLog }) };
+    ...(activityLog === undefined ? {} : { activityLog }), ...(input.expandedMetadata === undefined ? {} : { expandedMetadata: input.expandedMetadata }) };
 }
 
 /** Explicit, user-agreed project setup and the read-only project status as MCP

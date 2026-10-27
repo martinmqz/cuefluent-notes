@@ -12,7 +12,7 @@ const throwsCode = (action, code = 'SETTINGS_INVALID') => assert.throws(action, 
 test('fresh project defaults are independent and settings start empty', () => {
   assert.deepEqual(emptySettings(), { schemaVersion: 1, projects: [] });
   assert.deepEqual(project(), { id: 'work', root: '/projects/work', destination: { kind: 'directory', path: '/notes' },
-    tracking: 'manual', saving: 'review', activityLog: { enabled: true, timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone, path: '/notes/logs' } });
+    tracking: 'manual', saving: 'review', activityLog: { enabled: true, timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone, path: '/notes/logs' }, expandedMetadata: false });
   assert.equal(project({ tracking: 'auto' }).saving, 'review');
   assert.equal(project({ saving: 'auto' }).tracking, 'manual');
   assert.equal(project({ activityLog: { enabled: true, timezone: 'America/Los_Angeles' } }).tracking, 'manual');
@@ -184,4 +184,15 @@ test('Windows roots and destinations reject ambiguous or reserved spellings', ()
   }
   throwsCode(() => project({ root: 'C:\\Work', destination: { kind: 'file', path: 'D:\\Notes\\CON.md' } }, windows));
   assert.equal(project({ root: 'C:\\', destination: { kind: 'file', path: 'D:\\Notes\\Work.MD' } }, windows).root, 'C:\\');
+});
+
+
+test('expanded metadata is an independent opt-in and omitted settings mean compact', () => {
+  assert.equal(project().expandedMetadata, false);
+  const optedIn = project({ expandedMetadata: true });
+  assert.equal(validateSettings(settings(optedIn), posix).projects[0].expandedMetadata, true);
+  const omitted = { ...optedIn }; delete omitted.expandedMetadata;
+  assert.equal(validateSettings(settings(omitted), posix).projects[0].expandedMetadata, false);
+  assert.equal(project({ expandedMetadata: false }).expandedMetadata, false);
+  for (const expandedMetadata of [null, undefined, 0, 'false']) throwsCode(() => project({ expandedMetadata }));
 });
