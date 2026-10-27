@@ -24,10 +24,15 @@ function record(value, keys) {
  * or stat a transcript; the supplied source identity is separately verified.
  */
 export function validateNativeEvent(input) {
-  record(input, ['client', 'sessionId', 'cwd', 'kind', 'source', 'startSource', 'newSession', 'completion', 'history', 'launchMarker', ...(Object.hasOwn(input ?? {}, 'clientContract') ? ['clientContract'] : [])]);
+  record(input, ['client', 'sessionId', 'cwd', 'kind', 'source', 'startSource', 'newSession', 'completion', 'history', 'launchMarker', ...(Object.hasOwn(input ?? {}, 'clientContract') ? ['clientContract'] : []), ...(Object.hasOwn(input ?? {}, 'promptId') ? ['promptId'] : [])]);
   const clientContract = validateClientContract(Object.hasOwn(input, 'clientContract') ? input.clientContract : null);
-  if (!['claude', 'codex'].includes(input.client) || !['start', 'completed', 'interrupted', 'failed', 'end'].includes(input.kind) || typeof input.newSession !== 'boolean') fail('INGRESS_INVALID', 'Unsupported native lifecycle event.');
+  if (!['claude', 'codex'].includes(input.client) || !['prompt', 'start', 'completed', 'interrupted', 'failed', 'end'].includes(input.kind) || typeof input.newSession !== 'boolean') fail('INGRESS_INVALID', 'Unsupported native lifecycle event.');
   nativeId(input.sessionId); assertAbsolute(input.cwd);
+  if (input.kind !== 'prompt' && Object.hasOwn(input, 'promptId')) fail('INGRESS_INVALID', 'Only prompt submission supplies an enrollment boundary.');
+  if (input.kind === 'prompt') {
+    nativeId(input.promptId);
+    if (input.startSource !== null || input.newSession || input.completion !== null || input.history !== null) fail('INGRESS_INVALID', 'Prompt submission carries only its native start boundary.');
+  }
   if (input.cwd.length > 32768 || !(input.startSource === null || ['startup', 'resume', 'fork', 'clear', 'compact'].includes(input.startSource)) ||
       (input.kind === 'start' && input.startSource === null) || (input.newSession && (input.kind !== 'start' || !['startup', 'fork', 'clear'].includes(input.startSource)))) fail('INGRESS_INVALID', 'The lifecycle signal does not prove a newly created native chat.');
   if (!(input.launchMarker === null || typeof input.launchMarker === 'string' && /^[A-Za-z0-9_.:-]{16,256}$/.test(input.launchMarker))) fail('INGRESS_INVALID', 'An invocation-only launch marker must be bounded opaque metadata.');
@@ -45,7 +50,8 @@ export function validateNativeEvent(input) {
     if (['completed', 'interrupted', 'failed'].includes(input.kind) && completion.kind !== input.kind) fail('INGRESS_INVALID', 'Completion expectation differs from the native lifecycle event.');
   } else if (['completed', 'interrupted', 'failed'].includes(input.kind)) fail('INGRESS_INVALID', 'Native completion events require their exact prompt expectation.');
   return frozen({ client: input.client, sessionId: input.sessionId, cwd: input.cwd, kind: input.kind, source: chat.source,
-    startSource: input.startSource, newSession: input.newSession, completion, history, launchMarker: input.launchMarker, clientContract });
+    startSource: input.startSource, newSession: input.newSession, completion, history, launchMarker: input.launchMarker, clientContract,
+    ...(input.kind === 'prompt' ? { promptId: input.promptId } : {}) });
 }
 
 function observedSource(chat, source) {
@@ -57,10 +63,10 @@ function observedSource(chat, source) {
 }
 
 async function registerNativeMetadata(event, register) {
-  // SessionStart is one-shot native authority. Retry transient gate contention
+  // The first prompt supplies the enrollment boundary. Retry transient gate contention
   // within the ten-second hook profile, always rechecking current settings and
   // ownership. Failed or ineligible checks publish no enrollment breadcrumb.
-  const attempts = event.kind === 'start' && event.newSession ? 3 : 1;
+  const attempts = event.kind === 'prompt' ? 3 : 1;
   for (let attempt = 0; ; attempt++) {
     try { return await register(); }
     catch (error) {
@@ -93,9 +99,9 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     if (found && !found.value.tracked) return durableResult = { state: found.value, status: 'untracked', work: found.value.pending?.reason === 'untrack' };
     let chat;
     if (!found) {
-      if (context.project.tracking !== 'auto' || !event.newSession || event.kind !== 'start') return { status: 'ineligible', work: false };
+      if (context.project.tracking !== 'auto' || event.kind !== 'prompt') return { status: 'ineligible', work: false };
       chat = createChat({ client: event.client, sessionId: event.sessionId, projectId: context.project.id, source: event.source,
-        history: event.history ?? { mode: 'automatic', startSource: event.startSource, inheritedBoundary: null } });
+        history: { mode: 'automatic', startSource: 'prompt', inheritedBoundary: null, startPromptId: event.promptId } });
       chat = validateChat({ ...chat, tracked: true });
     } else chat = observedSource(found.value, event.source);
     chat = retainChatClientContract(chat, event.clientContract);

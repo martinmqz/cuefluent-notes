@@ -1,5 +1,22 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/src/cli.mjs",
+              "hook",
+              "claude"
+            ],
+            "timeout": 10,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

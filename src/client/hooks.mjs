@@ -35,11 +35,12 @@ export function mapNativeHook(client, input, { claudeCommand = null, launchMarke
     const command = claudeCommand === null ? null : bindClaudeCommand(input, claudeCommand);
     return result(null, command === null ? null : Object.freeze({ ...command, clientContract: installed }));
   }
-  // Prompt-submit is not a completed human exchange. PreCompact is not a final
-  // message. SessionEnd (including reason:other/clear) proves no turn outcome.
-  if (!['SessionStart', 'Stop', 'SessionEnd', ...(client === 'claude' ? ['PostCompact', 'StopFailure'] : ['Interrupt'])].includes(hook)) return result();
+  // Prompt-submit establishes the forward-only enrollment boundary, not a
+  // completed exchange. SessionEnd and compaction prove no turn outcome.
+  if (!['UserPromptSubmit', 'SessionStart', 'Stop', 'SessionEnd', ...(client === 'claude' ? ['PostCompact', 'StopFailure'] : ['Interrupt'])].includes(hook)) return result();
   let kind = 'end', startSource = null, newSession = false, completion = null;
-  if (hook === 'SessionStart') {
+  if (hook === 'UserPromptSubmit') kind = 'prompt';
+  else if (hook === 'SessionStart') {
     if (!STARTS.has(input.source)) fail('NATIVE_HOOK_UNSUPPORTED', 'The native session-start source is unsupported.');
     kind = 'start'; startSource = input.source; newSession = ['startup', 'fork', 'clear'].includes(startSource);
   } else if (hook === 'Stop') {
@@ -60,7 +61,8 @@ export function mapNativeHook(client, input, { claudeCommand = null, launchMarke
   const path = input.transcript_path;
   const source = path === null || path === undefined || path === '' ? null : { path, identity: null };
   const event = validateNativeEvent({ client, sessionId: input.session_id, cwd: input.cwd, kind, source,
-    startSource, newSession, completion, history: null, launchMarker, clientContract: installed });
+    startSource, newSession, completion, history: null, launchMarker, clientContract: installed,
+    ...(hook === 'UserPromptSubmit' ? { promptId: client === 'claude' ? input.prompt_id : input.turn_id } : {}) });
   return result(event);
 }
 

@@ -26,7 +26,7 @@ async function fixture(t) {
   const identity = { session_id: sessionId, cwd, transcript_path: sourcePath };
   const options = { clientContract: { name: 'notes:notes', skillPath: path.join(root, 'plugin', 'SKILL.md') }, schedule: async () => {} };
   const hook = input => handleNativeHook(store, 'claude', { ...identity, ...input }, options);
-  await hook({ hook_event_name: 'SessionStart', source: 'startup' });
+  await hook({ hook_event_name: 'UserPromptSubmit', prompt_id: promptId });
   const runtime = createSyncRuntime({ store }); t.after(() => runtime.close());
   const collect = () => runtime.collect({ client: 'claude', sessionId });
   const queue = () => selectChatQueue(store, 'project', 'claude', sessionId);

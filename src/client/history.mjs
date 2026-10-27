@@ -181,7 +181,7 @@ async function composite(active, segments, history, owned) {
 export async function resolveNativeHistory(active, { client, sessionId, mode = 'manual', startSource = 'startup', resolveSource,
   inheritedBoundary = null, limits: inputLimits = {} } = {}) {
   assertSource(active); nativeId(sessionId);
-  if (!['claude', 'codex'].includes(client) || !['manual', 'automatic'].includes(mode) || !['startup', 'resume', 'fork', 'clear', 'compact'].includes(startSource)) {
+  if (!['claude', 'codex'].includes(client) || !['manual', 'automatic'].includes(mode) || !['prompt', 'startup', 'resume', 'fork', 'clear', 'compact'].includes(startSource)) {
     transcriptError('HISTORY_CONTEXT_INVALID', 'Unsupported native history context');
   }
   const limits = transcriptLimits(inputLimits), owned = new Set(), seen = new Set();

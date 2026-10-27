@@ -34,6 +34,10 @@ or a newer Node 26 patch must be the Node the client launches; see
    select `$cuefluent-notes` and type `track` in Codex. Later, `process` drafts
    notes from the queue, and `status` is read-only.
 
+Automatic tracking includes existing and new chats from their next prompt after
+it is enabled. Earlier history stays excluded, and explicit untrack opt-outs remain.
+Processing is always explicit.
+
 Defaults are manual tracking, review saving and activity logging on for directory
 destinations, where `logs/YYYY.md` records successful note changes. Repeat setup to
 change a choice; only the choices you name change. If the connector tools are

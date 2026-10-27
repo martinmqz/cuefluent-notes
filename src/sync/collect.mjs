@@ -120,6 +120,15 @@ export async function collectChat(store, { client, sessionId, classifyCommand = 
     }
     if (JSON.stringify(saved.value.historySources) !== JSON.stringify(historySources)) saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
       change: chat => validateChat({ ...chat, historySources }) });
+    if (saved.value.history.startPromptId && saved.value.checkpoint.offset === 0 && !saved.value.checkpoint.exchange) {
+      for await (const event of normalizeTranscript(source, { client, sessionId, checkpoint: saved.value.checkpoint,
+        fromPromptId: saved.value.history.startPromptId, limits })) {
+        await source.verify(event.checkpoint.anchor);
+        saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
+          change: chat => advanceChat(chat, { generation, checkpoint: event.checkpoint, requestId }) });
+        if (event.type === 'pending') return { status: 'pending', reason: event.reason, parts, ...progress() };
+      }
+    }
     if (saved.value.uncommitted) {
       // Reconstruct exactly the retained emission plan, including its original
       // outcome and range. A newer hook or appended final row cannot change the

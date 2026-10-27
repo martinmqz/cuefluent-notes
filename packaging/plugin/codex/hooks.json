@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const p=require('node:path').join(process.env.PLUGIN_ROOT||process.env.CLAUDE_PLUGIN_ROOT,'src','cli.mjs');const r=require('node:child_process').spawnSync(process.execPath,[p,'hook','codex'],{stdio:'inherit'});process.exitCode=r.status??1\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

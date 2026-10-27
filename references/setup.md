@@ -11,12 +11,16 @@ hook trust or an ordinary chat message is not consent.
 
 | Preference | Choices |
 | --- | --- |
-| Tracking | `manual` (default), `auto` for new chats going forward |
+| Tracking | `manual` (default), `auto` for existing and new chats, starting with their next prompt after enabling it |
 | Saving | `review` (default), `auto` after explicit processing |
 | Activity log | On by default for directory destinations, with a recorded IANA timezone; explicit off is kept. Single-file destinations are off and cannot log. |
 
-Mode changes do not untrack existing chats or override opt-outs. A pending run pins
-its destination, saving preference and logging settings; logging changes apply to
+Automatic tracking enrolls each eligible chat when its next user prompt is submitted,
+including chats already open during setup and chats resumed later. It collects that
+prompt and subsequent exchanges, never earlier history or the exchange already
+underway during setup. Tell the user this when offering automatic tracking. Native
+hooks must be enabled. Mode changes do not untrack existing chats or override
+opt-outs. A pending run pins its destination, saving preference and logging settings; logging changes apply to
 later runs. The nearest configured ancestor owns a newly bound chat, and ownership
 does not move when nested projects are added.
 

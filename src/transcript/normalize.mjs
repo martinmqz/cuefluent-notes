@@ -155,9 +155,10 @@ async function* emitRange(source, initial, until, options) {
  * Publish each part durably before its accompanying checkpoint, and make queued
  * parts processable only after that checkpoint is durable. No queue I/O occurs
  * here. A stop boundary is preflighted before any conversation part is yielded.
+ * fromPromptId only seeks the initial collection position; it emits no content.
  */
 export async function* normalizeTranscript(source, { client, sessionId, checkpoint: input = null, completion: signal = null,
-  beforePromptId = null, beforeRowId = null, commands = [], classifyCommand = null, limits: inputLimits = {} } = {}) {
+  beforePromptId = null, beforeRowId = null, fromPromptId = null, commands = [], classifyCommand = null, limits: inputLimits = {} } = {}) {
   assertSource(source);
   if (classifyCommand !== null && typeof classifyCommand !== 'function') transcriptError('TRANSCRIPT_COMMAND_INVALID', 'Historical command classification requires a trusted callback');
   const limits = transcriptLimits(inputLimits), excluded = controls(commands), completion = completionSignal(signal);
@@ -167,6 +168,12 @@ export async function* normalizeTranscript(source, { client, sessionId, checkpoi
   if (state.anchor) await verify(source, state.anchor, limits);
   try {
     let end = source.size;
+    if (fromPromptId !== null) {
+      nativeId(fromPromptId);
+      if (beforePromptId !== null || beforeRowId !== null || state.offset !== 0 || state.scanOffset !== 0 || state.exchange || state.cursor)
+        transcriptError('TRANSCRIPT_BOUNDARY_CONFLICT', 'An initial prompt boundary requires an untouched collection position.');
+      beforePromptId = fromPromptId;
+    }
     if (beforePromptId !== null) {
       const retainedAnchor = state.anchor;
       nativeId(beforePromptId);
@@ -192,6 +199,14 @@ export async function* normalizeTranscript(source, { client, sessionId, checkpoi
       }
       if (boundary.start === null) { yield { type: 'pending', reason: 'TRANSCRIPT_BOUNDARY_PENDING', checkpoint: state }; return; }
       end = boundary.start;
+      if (fromPromptId !== null) {
+        // This pass seeks metadata only. Never normalize or emit the earlier
+        // exchanges, even if a completion or untrack arrived before collection.
+        const first = await inspectNativeRow(source, end, { limits });
+        state = checkpoint({ ...state, offset: end, scanOffset: end, boundary: null,
+          anchor: anchor(first, classifyNativeRow(first, nativeOptions(source, first, options)).rowId) });
+        yield { type: 'checkpoint', checkpoint: state }; return;
+      }
       // A continuously tracked collector may commit beyond this command before
       // its detached dispatcher publishes the tracking change. The verified
       // boundary still stops this pass immediately. Preserve that earlier

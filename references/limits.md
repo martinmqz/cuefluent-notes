@@ -100,10 +100,12 @@ are collected without origin fields, so text resembling local-command output may
 be retained; rows without a prompt identity are reported gaps unless native
 metadata marks them as bookkeeping. Image and tool-reference blocks produce
 omission notices. A Stop hook may precede final persistence; durable retries and
-idle reconciliation collect late rows. A Claude fork with an unknown inherited
-prefix stays pending for automatic enrollment; Codex uses verified history
-cutoffs and reports missing sources. Automatic tracking requires enabled native
-hooks, and a stopped host keeps state without running an OS service.
+idle reconciliation collect late rows. Automatic enrollment retains the first
+post-setup prompt identity and waits for that exact boundary before collecting;
+older and copied fork history stays excluded. Missing or ambiguous boundaries stay
+pending. Codex uses verified history cutoffs and reports missing sources. Automatic
+tracking requires enabled native hooks, and a stopped host keeps state without
+running an OS service.
 
 ## Processing isolation
 

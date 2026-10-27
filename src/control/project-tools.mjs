@@ -28,7 +28,7 @@ export const PROJECT_TOOLS = freezeData([
       root: pathRule('Absolute, normalized project root. Selects an existing project by exact match; required for a new project.'),
       destination: { ...schema({ kind: { type: 'string', enum: ['directory', 'file'] }, path: pathRule('Absolute, normalized notes folder, or an absolute .md file for kind file.') }),
         description: 'The note destination. Required for a new project.' },
-      tracking: { type: 'string', enum: ['manual', 'auto'] },
+      tracking: { type: 'string', enum: ['manual', 'auto'], description: 'Auto enrolls existing and new chats from their next prompt after enabling it; earlier history is excluded and explicit untrack opt-outs remain.' },
       saving: { type: 'string', enum: ['review', 'auto'] },
       activityLog: { ...schema({ enabled: { type: 'boolean' }, timezone: { type: 'string', minLength: 1, maxLength: SETTINGS_LIMITS.timezoneLength, description: 'IANA timezone; only with enabled true. An established log series keeps its recorded timezone.' } }, ['enabled']),
         description: 'Activity logging, directory destinations only. Its reserved logs path is derived from the destination.' },
