@@ -126,6 +126,9 @@ async function create(store, input, options) {
     return { run, active: false, fresh: true };
   });
   if (reserved.result) return reserved.result;
+  // Another retry may have reserved this request with different preferences.
+  // Only our fresh reservation can use the manifest built before the gate.
+  if (!reserved.fresh) manifest = undefined;
   const reference = { projectId: input.projectId, runId: input.requestId };
   if (reserved.active || reserved.run.phase === 'review' || reserved.run.settings.saving === 'review' && reserved.run.phase === 'saving') return reviewRun(store, reference);
   const result = await ownDirectAttempt(store, input.projectId, input.requestId, async (owner, current) => {

@@ -22,3 +22,8 @@ export function decodeNote(input) {
   try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(input); }
   catch (cause) { fail('NOTE_UTF8_INVALID', 'Note bytes are not valid UTF-8.', cause); }
 }
+
+/** Use the note's existing line-ending convention for inserted text. */
+export function noteNewline(source) {
+  return source.includes('\r\n') ? '\r\n' : source.includes('\r') ? '\r' : '\n';
+}

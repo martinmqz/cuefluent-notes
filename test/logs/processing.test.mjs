@@ -11,7 +11,7 @@ import { waitForReplacement } from '../fixtures/publication-boundary.mjs';
 import { inspectMetadata } from '../../src/notes/index.mjs';
 import { createProject } from '../../src/core/settings.mjs';
 import { createRun, validateRun, replaceAttempt, failLogEvent, confirmLogEvent, setLogPublication } from '../../src/core/run.mjs';
-import { initializeStore, withProject, withWriter } from '../../src/storage/store.mjs';
+import { initializeStore, withProject, withWriter, readSettings, updateSettings } from '../../src/storage/store.mjs';
 import { readJSON, writeJSON, hashBytes } from '../../src/storage/files.mjs';
 import { ownAttempt, withCurrentAttempt, attachAttemptChild, launchOwnedAttempt, inspectAttempt } from '../../src/storage/attempts.mjs';
 import { pinDirectory, inspectParent } from '../../src/storage/paths.mjs';
@@ -24,7 +24,7 @@ async function fixture(t, { saved = true, pinned = true, expandedMetadata = fals
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cue-log-process-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const cwd = path.join(root, 'project'), notes = path.join(root, 'notes'); await fs.mkdir(cwd); await fs.mkdir(notes);
-  const pin = await pinDirectory(notes), binding = await establishActivityLogSeries(pin, { ...version, year: 2026, timezone: 'America/Los_Angeles', seriesId: 'synthetic-series', noteId: randomUUID(), runId: randomUUID(), createdAt: savedAt, persistIntent: async () => {} });
+  const pin = await pinDirectory(notes), binding = await establishActivityLogSeries(pin, { ...version, expandedMetadata: false, year: 2026, timezone: 'America/Los_Angeles', seriesId: 'synthetic-series', noteId: randomUUID(), runId: randomUUID(), createdAt: savedAt, persistIntent: async () => {} });
   const project = createProject({ id: 'synthetic', root: cwd, saving: 'auto', expandedMetadata, destination: { kind: 'directory', path: notes }, activityLog: { enabled: true, timezone: 'UTC' } });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
   const bytes = Buffer.from('# Synthetic topic\n\n## Choice\nKeep this saved choice.\n'), target = path.join(notes, 'topic.md'); await fs.writeFile(target, bytes);
@@ -129,7 +129,7 @@ test('missing pinned series reports unavailable, then releases without a cross-r
 test('an exact interrupted log candidate cannot rebase over a public manual edit and its stage is discarded', async t => {
   const f = await fixture(t), original = await fs.readFile(f.annual);
   await f.own(async owner => {
-    const candidate = logCandidate(f.binding, { eventId: f.event.id, projectId: f.project.id, savedAt, action: 'created', target: 'topic.md', heading: f.draft.heading, summary: f.draft.summary }, original, version);
+    const candidate = logCandidate(f.binding, { eventId: f.event.id, projectId: f.project.id, savedAt, action: 'created', target: 'topic.md', heading: f.draft.heading, summary: f.draft.summary }, original, { ...version, expandedMetadata: f.project.expandedMetadata });
     let note = await prepareNotePublication(f.pin, candidate.relative, candidate.bytes, { runId: f.run.id, draftId: f.event.id, expectedHash: hashBytes(original), hash: hashBytes(candidate.bytes) });
     await f.mutate(owner, run => setLogPublication(run, owner.attemptId, f.event.id, note));
     await withWriter(f.store, async () => {
@@ -155,7 +155,7 @@ test('a complete hand-edited event is acknowledged after publication but before 
     await withCurrentAttempt(owner, context => withWriter(f.store, async () => {
       let run = context.run, hash = context.hash;
       const persist = async next => { hash = (await writeJSON(f.store.pin, `${context.directory}/run.json`, next, { expectedHash: hash })).hash; run = next; };
-      const candidate = logCandidate(f.binding, { eventId: f.event.id, projectId: f.project.id, savedAt, action: 'created', target: 'topic.md', heading: f.draft.heading, summary: f.draft.summary }, original, version);
+      const candidate = logCandidate(f.binding, { eventId: f.event.id, projectId: f.project.id, savedAt, action: 'created', target: 'topic.md', heading: f.draft.heading, summary: f.draft.summary }, original, { ...version, expandedMetadata: f.project.expandedMetadata });
       const note = await prepareNotePublication(f.pin, candidate.relative, candidate.bytes, { runId: f.run.id, draftId: f.event.id, expectedHash: hashBytes(original), hash: hashBytes(candidate.bytes) });
       await persist(setLogPublication(run, owner.attemptId, f.event.id, note));
       await publishNotePublication(f.pin, note, candidate.bytes, { persistIntent: next => persist(setLogPublication(run, owner.attemptId, f.event.id, next)) });
@@ -190,7 +190,7 @@ test('a durably journaled stage before content write is reconstructed exactly, o
       await withCurrentAttempt(owner, context => withWriter(f.store, async () => {
         let run = context.run, hash = context.hash;
         const persist = async next => { hash = (await writeJSON(f.store.pin, `${context.directory}/run.json`, next, { expectedHash: hash })).hash; run = next; };
-        const candidate = logCandidate(f.binding, { eventId: f.event.id, projectId: f.project.id, savedAt, action: 'created', target: 'topic.md', heading: f.draft.heading, summary: f.draft.summary }, original, version);
+        const candidate = logCandidate(f.binding, { eventId: f.event.id, projectId: f.project.id, savedAt, action: 'created', target: 'topic.md', heading: f.draft.heading, summary: f.draft.summary }, original, { ...version, expandedMetadata: f.project.expandedMetadata });
         const note = await prepareNotePublication(f.pin, candidate.relative, candidate.bytes, { runId: f.run.id, draftId: f.event.id, expectedHash: hashBytes(original), hash: hashBytes(candidate.bytes) });
         await persist(setLogPublication(run, owner.attemptId, f.event.id, note));
         await assert.rejects(publishNotePublication(f.pin, note, candidate.bytes, { persistIntent: async next => {
@@ -269,4 +269,34 @@ test('a new annual log uses the pending run metadata preference and leaves exist
     assert.equal(inspectMetadata(bytes).raw.trim().split('\n').length > 3, expandedMetadata);
     assert.deepEqual(await fs.readFile(f.annual), before);
   }
+});
+
+
+test('interrupted new-year publication reconstructs the pinned expanded format after settings change', async t => {
+  const f = await fixture(t, { expandedMetadata: true }), nextYear = '2027-06-01T12:00:00.000Z';
+  const target = path.join(f.notes, 'logs', '2027.md'); let expected;
+  await f.own(async owner => {
+    await f.mutate(owner, run => validateRun({ ...run, logEvents: run.logEvents.map(event => ({ ...event, savedAt: nextYear })) }));
+    await withCurrentAttempt(owner, context => withWriter(f.store, async () => {
+      let run = context.run, hash = context.hash;
+      const persist = async next => { hash = (await writeJSON(f.store.pin, `${context.directory}/run.json`, next, { expectedHash: hash })).hash; run = next; };
+      const input = { eventId: f.event.id, projectId: f.project.id, savedAt: nextYear, action: 'created', target: 'topic.md', heading: f.draft.heading, summary: f.draft.summary };
+      const candidate = logCandidate(f.binding, input, null, { ...version, expandedMetadata: run.settings.expandedMetadata });
+      expected = candidate.bytes;
+      const note = await prepareNotePublication(f.pin, candidate.relative, expected, { runId: f.run.id, draftId: f.event.id, expectedHash: null, hash: hashBytes(expected) });
+      await persist(setLogPublication(run, owner.attemptId, f.event.id, note));
+      await assert.rejects(publishNotePublication(f.pin, note, expected, { persistIntent: async next => {
+        await persist(setLogPublication(run, owner.attemptId, f.event.id, next));
+        throw Object.assign(new Error(), { code: 'SYNTHETIC_STOP' });
+      } }), { code: 'SYNTHETIC_STOP' });
+    }));
+    await assert.rejects(fs.access(target), { code: 'ENOENT' });
+    const settings = await readSettings(f.store);
+    await updateSettings(f.store, { ...settings.value, projects: [{ ...f.project, expandedMetadata: false }] }, { expectedHash: settings.hash });
+    const result = await flushRunLogs(f.store, owner, version);
+    assert.equal(result.logEvents[0].confirmed, true); assert.equal(result.logEvents[0].failure, null);
+    assert.equal(result.logPublication, null); assert.equal(result.settings.expandedMetadata, true);
+  });
+  assert.deepEqual(await fs.readFile(target), expected);
+  assert.equal((await readActivityLog(f.project.destination, { year: 2027 })).entries.length, 1);
 });

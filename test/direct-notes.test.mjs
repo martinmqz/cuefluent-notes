@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { parseDocument } from 'yaml';
 import { createProject } from '../src/core/settings.mjs';
 import { inspectMetadata } from '../src/notes/index.mjs';
 import { createRun, validateRun, runRevision } from '../src/core/run.mjs';
@@ -531,5 +533,93 @@ test('direct drafts pin metadata formatting through approval; changed preference
     const next = (await inspectAttempt(f.store, 'demo')).run;
     const bytes = await readDraftArtifact(f.store.pin, next.artifacts, next.drafts[0].id);
     assert.equal(inspectMetadata(bytes).raw.trim().split('\n').length > 3, !expandedMetadata);
+  }
+});
+
+
+test('a concurrent same-request retry rebuilds with the settings pinned by the winning reservation', async t => {
+  for (const expandedMetadata of [false, true]) {
+    const f = await fixture(t, { expandedMetadata }), actor = new AsyncLocalStorage();
+    const entered = Promise.withResolvers(), resume = Promise.withResolvers();
+    const lstat = fs.lstat, rename = fs.rename;
+    let paused = false, interrupted = false;
+    const statMock = t.mock.method(fs, 'lstat', async (...args) => {
+      const result = await lstat(...args);
+      // A has already read settings, but its prospective draft has not reserved
+      // a run. No store gate is held while it inspects the note destination.
+      if (actor.getStore() === 'A' && args[0] === f.notes && !paused) {
+        paused = true; entered.resolve(); await resume.promise;
+      }
+      return result;
+    });
+    const renameMock = t.mock.method(fs, 'rename', async (...args) => {
+      await rename(...args);
+      // B publishes its run and then loses the response before owning an attempt.
+      // The real reservation remains durable; A must join that exact run.
+      if (actor.getStore() === 'B' && path.basename(args[1]) === 'run.json' && !interrupted) {
+        interrupted = true;
+        throw Object.assign(new Error('Synthetic reservation interruption.'), { code: 'SYNTHETIC_RESERVATION_INTERRUPTED' });
+      }
+    });
+    const first = actor.run('A', () => f.create());
+    const settled = first.then(value => ({ value }), error => ({ error }));
+    try {
+      await Promise.race([entered.promise, settled.then(() => assert.fail('A must pause before reservation.'))]);
+      const settings = await readSettings(f.store);
+      await updateSettings(f.store, { schemaVersion: 1, projects: [{ ...f.project, expandedMetadata: !expandedMetadata }] }, { expectedHash: settings.hash });
+      await assert.rejects(actor.run('B', () => f.create()), { code: 'SYNTHETIC_RESERVATION_INTERRUPTED' });
+      const pending = await inspectAttempt(f.store, 'demo');
+      assert.equal(pending.run.settings.expandedMetadata, !expandedMetadata);
+      assert.equal(pending.run.phase, 'drafting'); assert.equal(pending.run.drafts.length, 0);
+      resume.resolve();
+      assert.equal((await first).state, 'review');
+      const { run } = await inspectAttempt(f.store, 'demo');
+      const bytes = await readDraftArtifact(f.store.pin, run.artifacts, run.drafts[0].id);
+      const metadata = inspectMetadata(bytes);
+      assert.equal(metadata.status, 'supported');
+      const payload = /^<!-- cuefluent\n([\s\S]*?)\n-->/.exec(metadata.raw)[1];
+      assert.equal(parseDocument(payload).contents.flow === true, !run.settings.expandedMetadata);
+      assert.deepEqual(await fs.readdir(f.notes), []);
+      const saved = await f.call('save');
+      assert.equal(saved.state, 'saved'); assert.deepEqual(await fs.readFile(saved.result.paths[0]), bytes);
+    } finally {
+      resume.resolve(); await settled;
+      statMock.mock.restore(); renameMock.mock.restore();
+    }
+  }
+});
+
+
+test('both MCP hosts preserve metadata edge cases through update review and exact save', async t => {
+  const header = 'schema_version: 1\nid: stable\ncreated: "2026-01-01T00:00:00Z"\n';
+  const line = 'C:\\Work\\Folder\\ "quoted" value '.repeat(43);
+  const cases = [
+    { name: 'blank-list-item', expandedMetadata: false, flow: true, payload: header + 'reviewers:\n - sam\n -\n - kim' },
+    { name: 'escaped-whitespace-line', expandedMetadata: true, flow: false, payload: JSON.stringify({ schema_version: 1, id: 'stable', created: '2026-01-01T00:00:00Z', summary: 'First line of a handwritten summary here\n \nThird' }) },
+    { name: 'large-block-values', expandedMetadata: false, flow: false, payload: header + Array.from({ length: 45 }, (_, i) => `custom${i}: |-\n  ${line}\n  Tail`).join('\n') },
+  ];
+  for (const client of ['claude', 'codex']) for (const item of cases) {
+    const f = await fixture(t, { client, expandedMetadata: item.expandedMetadata }), native = await nativeTools(f, { client });
+    const target = path.join(f.notes, `${item.name}.md`), original = Buffer.from(`<!-- cuefluent\n${item.payload}\n-->\n${content}`);
+    const before = inspectMetadata(original);
+    assert.equal(before.status, 'supported'); assert.ok(original.length < DIRECT_NOTE_BYTES);
+    await fs.writeFile(target, original);
+    const read = await native.call('cuefluent_read_note', { projectId: 'demo', target });
+    assert.equal(read.state, 'read'); assert.equal(read.next, null); assert.equal(read.hash, hashBytes(original));
+    const changed = content.replace('small', 'focused');
+    const preview = await native.call('cuefluent_update_note', { ...f.request, target, expectedHash: read.hash, content: changed });
+    assert.equal(preview.state, 'review'); assert.equal(preview.drafts[0].content, changed);
+    assert.deepEqual(await fs.readFile(target), original);
+    const { run } = await inspectAttempt(f.store, 'demo');
+    const reviewed = await readDraftArtifact(f.store.pin, run.artifacts, run.drafts[0].id);
+    const saved = await native.call('cuefluent_save_note', { projectId: 'demo', runId: f.request.requestId, revision: preview.revision });
+    assert.equal(saved.state, 'saved');
+    const bytes = await fs.readFile(target), after = inspectMetadata(bytes);
+    assert.deepEqual(bytes, reviewed); assert.equal(hashBytes(bytes), preview.drafts[0].hash);
+    assert.equal(after.status, 'supported');
+    assert.deepEqual(after.value, { ...before.value, updated: after.value.updated, generation: { skill_version: '0.16.0' } });
+    assert.equal(bytes.toString().slice(after.end), changed);
+    const payload = /^<!-- cuefluent\n([\s\S]*?)\n-->/.exec(after.raw)[1];
+    assert.equal(parseDocument(payload).contents.flow === true, item.flow);
   }
 });

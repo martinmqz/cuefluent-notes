@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar, visit } from 'yaml';
+import { isDeepStrictEqual } from 'node:util';
+import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar, visit as visitYaml } from 'yaml';
 import { fail } from '../core/errors.mjs';
 import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
-import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
+import { decodeNote, noteNewline, NOTE_PROFILE as P } from './profile.mjs';
 import { parseMarkdown } from './markdown.mjs';
 
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -225,16 +226,26 @@ export function noteContent(input) {
 }
 function quoted(value) { const scalar = new Scalar(value); scalar.type = Scalar.QUOTE_DOUBLE; return scalar; }
 
-function renderMetadata(document, expandedMetadata) {
+function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOverflow = false) {
   requireValue(typeof expandedMetadata === 'boolean');
-  // Flow style keeps the existing YAML contract and preserves comments/scalar
-  // values. Handwritten comments may need extra lines; never discard them.
-  if (!expandedMetadata) visit(document, { Scalar(_key, node) {
+  const expected = validateMetadata(document.toJS({ maxAliasCount: 0 })), candidate = document.clone();
+  // Flow style must spell out blank sequence items and escape multiline strings.
+  // Preserve comments even when they need additional lines in compact output.
+  if (!expandedMetadata) visitYaml(candidate, { Scalar(_key, node) {
+    if (node.value === null) node.source = undefined;
     if (typeof node.value === 'string' && /[\r\n]/.test(node.value)) node.type = Scalar.QUOTE_DOUBLE;
   } });
-  const payload = document.toString({ lineWidth: 0, collectionStyle: expandedMetadata ? 'block' : 'flow',
-    flowCollectionPadding: false, doubleQuotedAsJSON: !expandedMetadata });
-  return `<!-- cuefluent\n${payload}-->\n`;
+  const serialize = (value, collectionStyle) => {
+    const payload = value.toString({ lineWidth: 0, collectionStyle, flowCollectionPadding: false, doubleQuotedAsJSON: true });
+    return `<!-- cuefluent\n${payload}-->\n`.replace(/\n/g, newline);
+  };
+  let raw = serialize(candidate, expandedMetadata ? 'block' : 'flow');
+  // Escaping a large handwritten block scalar can exceed the fixed metadata
+  // limit. A formatting preference must not prevent an otherwise valid edit.
+  if (!expandedMetadata && preserveLayoutOnOverflow && Buffer.byteLength(raw) > P.metadataBytes) raw = serialize(document, 'any');
+  const rendered = inspectMetadata(raw);
+  requireValue(rendered.status === 'supported' && isDeepStrictEqual(rendered.value, expected));
+  return raw;
 }
 
 /** Existing metadata owns identity/descriptions. Agent-supplied replacements do
@@ -269,10 +280,7 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       const value = `sha256:${createHash('sha256').update(prefix + newBody).digest('hex')}`;
       document.getIn(['generation', 'content_hash'], true).value = value;
     }
-    validateMetadata(document.toJS({ maxAliasCount: 0 }));
-    const newline = raw.includes('\r\n') ? '\r\n' : raw.includes('\r') ? '\r' : '\n';
-    raw = renderMetadata(document, expandedMetadata).replace(/\n/g, newline);
-    requireValue(Buffer.byteLength(raw) <= P.metadataBytes);
+    raw = renderMetadata(document, expandedMetadata, noteNewline(raw), true);
   }
   const bytes = Buffer.from(prefix + raw + newBody);
   return { bytes, changed: !bytes.equals(Buffer.from(original)), diagnostics: before.diagnostics };
@@ -285,6 +293,6 @@ export function createGeneratedNote(bodyInput, { id = randomUUID(), now, skillVe
   const value = validateMetadata({ ...metadata, schema_version: 1, id, created: now, updated: now, generation: { ...metadata.generation, skill_version: skillVersion } });
   const document = parseDocument(''); document.contents = document.createNode(value);
   document.set('created', quoted(now)); document.set('updated', quoted(now));
-  const result = Buffer.from(renderMetadata(document, expandedMetadata) + body);
+  const result = Buffer.from(renderMetadata(document, expandedMetadata, noteNewline(body)) + body);
   requireValue(inspectMetadata(result).status === 'supported'); return result;
 }

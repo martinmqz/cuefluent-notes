@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
-import { createGeneratedNote, decodeNote, inspectMetadata, isLogEntryMarker, isNoteTimestamp, validateNote } from '../notes/index.mjs';
+import { createGeneratedNote, decodeNote, noteNewline, inspectMetadata, isLogEntryMarker, isNoteTimestamp, validateNote } from '../notes/index.mjs';
 import { inlineText, parseMarkdown } from '../notes/markdown.mjs';
 
 const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -197,7 +197,7 @@ export function appendLogEntry(bytes, entry, options) {
     return Object.freeze({ bytes: Buffer.from(annual.source), changed: false, eventId: value.eventId });
   }
   requireLog(annual.markers.every(marker => marker.entry), 'LOG_INVALID');
-  const newline = annual.source.includes('\r\n') ? '\r\n' : annual.source.includes('\r') ? '\r' : '\n';
+  const newline = noteNewline(annual.source);
   const month = +value.savedAt.slice(5, 7), section = annual.monthSections.find(item => item.month === month);
   // An older missing month is inserted before the next chronological section;
   // existing sections and manual additions are never sorted or rewritten.

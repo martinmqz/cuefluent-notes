@@ -4,7 +4,6 @@ export const SETTINGS_SCHEMA_VERSION = 1;
 export const SETTINGS_LIMITS = Object.freeze({ projects: 1024, pathBytes: 32768, idLength: 128, timezoneLength: 128 });
 
 const PROJECT_FIELDS = ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog', 'expandedMetadata'];
-const REQUIRED_PROJECT_FIELDS = PROJECT_FIELDS.filter(field => field !== 'expandedMetadata');
 
 function fail(code, message) {
   const error = new Error(message);
@@ -90,7 +89,7 @@ function activityLog(value, target, paths, defaults) {
 }
 
 function validateProject(input, paths, defaults = false) {
-  record(input, PROJECT_FIELDS, defaults ? ['id', 'root', 'destination'] : REQUIRED_PROJECT_FIELDS, 'project');
+  record(input, PROJECT_FIELDS, defaults ? ['id', 'root', 'destination'] : PROJECT_FIELDS, 'project');
   const tracking = Object.hasOwn(input, 'tracking') ? input.tracking : 'manual';
   const saving = Object.hasOwn(input, 'saving') ? input.saving : 'review';
   const expandedMetadata = Object.hasOwn(input, 'expandedMetadata') ? input.expandedMetadata : false;

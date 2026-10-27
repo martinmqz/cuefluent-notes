@@ -85,8 +85,8 @@ export async function inspectActivityLogSeries(destination) {
 /** Approved setup only, under the caller's destination writer gate. The setup
  * operation owns and durably persists its publication intent; settings are not
  * changed here. Existing valid shared series wins over requested defaults. */
-export async function establishActivityLogSeries(pin, { year, timezone, seriesId, noteId, createdAt, skillVersion, expandedMetadata = false, runId, publication = null, persistIntent } = {}) {
-  requireLog(pin?.private === false && typeof persistIntent === 'function' && typeof skillVersion === 'string', 'LOG_ARGUMENT');
+export async function establishActivityLogSeries(pin, { year, timezone, seriesId, noteId, createdAt, skillVersion, expandedMetadata, runId, publication = null, persistIntent } = {}) {
+  requireLog(pin?.private === false && typeof persistIntent === 'function' && typeof skillVersion === 'string' && typeof expandedMetadata === 'boolean', 'LOG_ARGUMENT');
   const relative = logRelative(year); await assertDirectory(pin);
   if (!publication) {
     const logs = path.join(pin.root, 'logs'), existing = await lstatOrNull(logs);
@@ -111,8 +111,8 @@ export async function establishActivityLogSeries(pin, { year, timezone, seriesId
 
 /** Reproducible candidate from exact inspected original bytes and frozen event.
  * An absent annual file gets a deterministic note ID within the pinned series. */
-export function logCandidate(binding, event, original, { skillVersion, expandedMetadata = false } = {}) {
-  requireLog(typeof skillVersion === 'string', 'LOG_ARGUMENT');
+export function logCandidate(binding, event, original, { skillVersion, expandedMetadata } = {}) {
+  requireLog(typeof skillVersion === 'string' && typeof expandedMetadata === 'boolean', 'LOG_ARGUMENT');
   const year = logYear(event.savedAt, binding.timezone), options = { year, seriesId: binding.seriesId, timezone: binding.timezone };
   const before = original ?? createAnnualLog({ ...options, noteId: annualId(binding.seriesId, year), createdAt: event.savedAt, skillVersion, expandedMetadata });
   const result = appendLogEntry(before, event, options);

@@ -37,7 +37,7 @@ test('settings snapshots detach from caller objects and freeze every nested obje
 });
 
 test('validate complete settings without silently adding creation defaults', () => {
-  for (const field of ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog']) {
+  for (const field of ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog', 'expandedMetadata']) {
     const incomplete = structuredClone(project()); delete incomplete[field];
     throwsCode(() => validateSettings(settings(incomplete), posix));
   }
@@ -187,12 +187,13 @@ test('Windows roots and destinations reject ambiguous or reserved spellings', ()
 });
 
 
-test('expanded metadata is an independent opt-in and omitted settings mean compact', () => {
+test('expanded metadata defaults only at creation and loaded settings require the explicit preference', () => {
   assert.equal(project().expandedMetadata, false);
   const optedIn = project({ expandedMetadata: true });
   assert.equal(validateSettings(settings(optedIn), posix).projects[0].expandedMetadata, true);
   const omitted = { ...optedIn }; delete omitted.expandedMetadata;
-  assert.equal(validateSettings(settings(omitted), posix).projects[0].expandedMetadata, false);
+  throwsCode(() => validateSettings(settings(omitted), posix));
+  assert.equal(createProject(omitted, posix).expandedMetadata, false);
   assert.equal(project({ expandedMetadata: false }).expandedMetadata, false);
   for (const expandedMetadata of [null, undefined, 0, 'false']) throwsCode(() => project({ expandedMetadata }));
 });
