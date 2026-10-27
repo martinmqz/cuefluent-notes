@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { Database } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { tryAcquireExistingGate } from '../src/storage/gates.mjs';
+import { buildClaudePromptContext } from '../src/client/history.mjs';
 import { createProject } from '../src/core/settings.mjs';
 import { advanceChat } from '../src/core/chat.mjs';
 import { initializeStore, readSettings, updateSettings, gateOptions } from '../src/storage/store.mjs';
@@ -70,7 +71,7 @@ test('automatic enrollment durably records its first prompt before scheduling; m
     scheduled = request; const chat = await readChat(f.store, 'claude', 'synthetic');
     assert.equal(chat.value.tracked, true); assert.equal(chat.value.pending.id, request.requestId); assert.equal(chat.value.generation, request.generation);
   } });
-  assert.deepEqual(result, { status: 'enrolled', scheduled: true }); assert.equal(scheduled.storeRoot, f.store.root);
+  assert.deepEqual(result, { status: 'enrolled', scheduled: true, enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce }); assert.equal(scheduled.storeRoot, f.store.root);
   const settings = await readSettings(f.store); await updateSettings(f.store, { schemaVersion: 1, projects: [{ ...f.project, tracking: 'manual' }] }, { expectedHash: settings.hash });
   const completion = { promptId: 'first', kind: 'completed', finalTextHash: 'a'.repeat(64) };
   assert.deepEqual(await ingestNativeEvent(f.store, { ...f.event, kind: 'completed', newSession: false, startSource: null, completion }, { schedule: async () => {} }), { status: 'tracked', scheduled: true });
@@ -83,7 +84,8 @@ test('automatic enrollment durably records its first prompt before scheduling; m
 
 test('automatic prompt enrollment remains durable pending when scheduling fails', async t => {
   const f = await fixture(t), event = { ...f.event, startSource: 'fork' };
-  assert.deepEqual(await ingestNativeEvent(f.store, prompt(event), { schedule: async () => { throw new Error('Synthetic unavailable runner'); } }), { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE' });
+  const ingress = await ingestNativeEvent(f.store, prompt(event), { schedule: async () => { throw new Error('Synthetic unavailable runner'); } });
+  assert.deepEqual(ingress, { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE', enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce });
   const saved = await readChat(f.store, 'claude', 'synthetic'); assert.equal(saved.value.history.startPromptId, 'one-human'); assert.equal(saved.value.history.inheritedBoundary, null);
   assert.equal(saved.value.pending.reason, 'periodic'); assert.equal(saved.value.checkpoint.offset, 0);
   let inspected = 0, delays = []; const controller = new AbortController();
@@ -228,7 +230,10 @@ test('independent detached steward retries collector death and late native persi
     launched = spawn(...args); exited = new Promise(resolve => launched.once('close', resolve)); return launched;
   } });
   t.after(async () => { if (launched?.exitCode === null) launched.kill('SIGTERM'); await exited; });
-  assert.deepEqual(await ingestNativeEvent(f.store, prompt(f.event), { schedule: () => ensureSyncSteward(f.store, { launch }) }), { status: 'enrolled', scheduled: true });
+  const { enrollmentNonce, ...enrolled } = await ingestNativeEvent(f.store, prompt(f.event), { schedule: () => ensureSyncSteward(f.store, { launch }) });
+  assert.deepEqual(enrolled, { status: 'enrolled', scheduled: true });
+  await fs.appendFile(f.sourcePath, line({ type: 'attachment', sessionId: 'synthetic', uuid: 'enrollment-proof', parentUuid: 'one-human',
+    attachment: { type: 'hook_additional_context', hookName: 'UserPromptSubmit', hookEvent: 'UserPromptSubmit', content: [buildClaudePromptContext(enrollmentNonce)] } }));
   await waitFor(() => marker(path.join(f.root, 'collector-crashed.json')));
   assert.deepEqual(await ensureSyncSteward(f.store, { launch: () => assert.fail('Started a duplicate live steward') }), { status: 'running' });
   assert.deepEqual(await selectChatQueue(f.store, 'project', 'claude', 'synthetic'), []);
@@ -262,7 +267,7 @@ test('first-prompt authority retries transient gate contention without writing i
       const result = await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => { scheduled++; } });
       assert.equal(released, true); // exceeds the ordinary one-second gate wait
       if (tracking === 'auto') {
-        assert.deepEqual(result, { status: 'enrolled', scheduled: true });
+        assert.deepEqual(result, { status: 'enrolled', scheduled: true, enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce });
         const chat = (await readChat(f.store, 'claude', 'synthetic')).value;
         assert.equal(chat.tracked, true); assert.equal(chat.history.startSource, 'prompt'); assert.ok(chat.pending);
         assert.equal(scheduled, 1);
@@ -285,7 +290,7 @@ test('durable hook metadata still schedules reconciliation when gate release fai
     return result;
   });
   const result = await ingestNativeEvent(f.store, prompt(f.event), { schedule: async request => { scheduled = request; } });
-  assert.deepEqual(result, { status: 'pending', reason: 'GATE_RELEASE_FAILED', scheduled: true });
+  assert.deepEqual(result, { status: 'pending', reason: 'GATE_RELEASE_FAILED', scheduled: true, enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce });
   assert.ok(scheduled);
   assert.equal((await readChat(f.store, f.event.client, f.event.sessionId)).value.pending.id, scheduled.requestId);
 });

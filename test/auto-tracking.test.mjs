@@ -8,6 +8,7 @@ import { initializeStore, readSettings, updateSettings, gateOptions } from '../s
 import { readChat, setChatTracking, selectChatQueue } from '../src/storage/chats.mjs';
 import { handleNativeHook } from '../src/client/hooks.mjs';
 import { collectChat } from '../src/sync/collect.mjs';
+import { buildClaudePromptContext } from '../src/client/history.mjs';
 import { openTranscript } from '../src/client/source.mjs';
 import { tryAcquireExistingGate } from '../src/storage/gates.mjs';
 import { readProjectStatus } from '../src/control/status.mjs';
@@ -34,17 +35,24 @@ async function fixture(t, client, tracking = 'auto') {
   await fs.writeFile(sourcePath, encode([...header, human('old'), ...answer('old')]));
   const project = createProject({ id: 'project', root: cwd, destination: { kind: 'directory', path: path.join(root, 'notes') }, tracking });
   const store = await initializeStore(path.join(root, 'private'), { schemaVersion: 1, projects: [project] });
-  let scheduled = 0;
-  const hook = input => handleNativeHook(store, client, { session_id: sessionId, cwd, transcript_path: sourcePath, ...input }, { schedule: async () => { scheduled++; } });
+  let scheduled = 0; const receipts = new Map();
+  const hook = async input => {
+    const result = await handleNativeHook(store, client, { session_id: sessionId, cwd, transcript_path: sourcePath, ...input }, { schedule: async () => { scheduled++; } });
+    if (result.ingress?.enrollmentNonce) receipts.set(input.prompt_id, result.ingress.enrollmentNonce);
+    return result;
+  };
+  const proof = id => ({ type: 'attachment', sessionId, uuid: `proof:${id}`, parentUuid: `human:${id}`,
+    attachment: { type: 'hook_additional_context', hookName: 'UserPromptSubmit', hookEvent: 'UserPromptSubmit', content: [buildClaudePromptContext(receipts.get(id))] } });
   const prompt = id => hook({ hook_event_name: 'UserPromptSubmit', prompt_id: id, turn_id: id, prompt: 'Never store the hook prompt text.' });
   const stop = id => hook({ hook_event_name: 'Stop', prompt_id: id, turn_id: id, last_assistant_message: `Answer ${id}` });
-  const append = rows => fs.appendFile(sourcePath, encode(rows));
+  const append = rows => fs.appendFile(sourcePath, encode(rows.flatMap(row =>
+    client === 'claude' && row.type === 'user' && row.uuid === `human:${row.promptId}` && receipts.has(row.promptId) ? [row, proof(row.promptId)] : [row])));
   const collect = (limits, options = {}) => collectChat(store, { client, sessionId, classifyCommand: () => null, limits, ...options });
   const queue = () => selectChatQueue(store, project.id, client, sessionId);
   const setAuto = async () => { const settings = await readSettings(store); await updateSettings(store,
     { ...settings.value, projects: [{ ...project, tracking: 'auto' }] }, { expectedHash: settings.hash }); };
   const untrack = id => setChatTracking(store, { client, sessionId, cwd, sourcePath, action: 'untrack', promptId: id });
-  return { root, cwd, store, sourcePath, human, answer, hook, prompt, stop, append, collect, queue, setAuto, untrack, scheduled: () => scheduled };
+  return { root, cwd, store, sourcePath, human, answer, hook, prompt, stop, append, proof, collect, queue, setAuto, untrack, scheduled: () => scheduled };
 }
 const humanText = records => records.flatMap(record => record.data.segments).filter(segment => segment.kind === 'human').map(segment => segment.text);
 
@@ -113,6 +121,7 @@ for (const client of ['claude', 'codex']) {
     await fs.appendFile(f.sourcePath, line.slice(0, -2));
     for (let i = 0; i < 30; i++) { await f.collect({ rows: 2 }); assert.deepEqual(await f.queue(), []); }
     await fs.appendFile(f.sourcePath, line.slice(-2));
+    if (client === 'claude') await f.append([f.proof('first')]);
     await f.append([...f.answer('first'), f.human('later'), ...f.answer('later')]); await f.stop('later');
     let result;
     for (let i = 0; i < 100; i++) { result = await f.collect({ rows: 2 }); if (result.status === 'caught-up') break; }
@@ -174,6 +183,24 @@ for (const client of ['claude', 'codex']) {
     assert.match(guidance.recovery, /new chat/);
   });
 }
+
+for (const configured of [true, false]) test(`Claude prompt enrollment cannot publish a fork prefix missed before auto setup (configured ${configured})`, async t => {
+  const f = await fixture(t, 'claude', 'manual');
+  if (!configured) {
+    const saved = await readSettings(f.store);
+    await updateSettings(f.store, { ...saved.value, projects: [] }, { expectedHash: saved.hash });
+  }
+  await f.hook({ hook_event_name: 'SessionStart', source: 'fork' });
+  assert.equal(await readChat(f.store, 'claude', sessionId), null);
+  await f.setAuto();
+  await fs.writeFile(f.sourcePath, encode([{ ...f.human('inherited'), promptId: 'current' }, ...f.answer('inherited')]));
+  await f.prompt('current');
+  await f.collect();
+  assert.deepEqual(await f.queue(), []);
+  await f.append([f.human('current'), ...f.answer('current')]);
+  assert.equal((await f.collect()).status, 'caught-up');
+  assert.deepEqual((await f.queue()).flatMap(record => record.data.segments.map(segment => segment.text)), ['Prompt current', 'Answer current']);
+});
 
 for (const explicitOrigin of [true, false]) test(`Claude forks retain unknown inheritance when copied rows reuse the current prompt ID (origin ${explicitOrigin})`, async t => {
   const f = await fixture(t, 'claude');

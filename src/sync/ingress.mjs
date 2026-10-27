@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fail } from '../core/errors.mjs';
@@ -92,15 +93,17 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
   const claudeFork = event.client === 'claude' && event.kind === 'start' && event.startSource === 'fork' && event.newSession;
   const enrollmentEvent = event.kind === 'prompt' || claudeFork;
   const existing = enrollmentEvent ? await readChat(store, event.client, event.sessionId) : null;
+  const receipt = chat => event.kind === 'prompt' && chat?.tracked && chat.history.startPromptNonce &&
+    chat.history.startPromptId === event.promptId ? { enrollmentNonce: chat.history.startPromptNonce } : {};
   // Later prompts need no mutation gate, rewrite or collector launch. Completion
   // and lifecycle events still reconcile late output and source relocation.
-  if (event.kind === 'prompt' && existing) return { status: existing.value.tracked ? 'tracked' : 'untracked' };
+  if (event.kind === 'prompt' && existing) return { status: existing.value.tracked ? 'tracked' : 'untracked', ...receipt(existing.value) };
   let found, durableResult, releaseWarning, result;
   try { result = await registerNativeMetadata(() => withSelectedProject(store, async settings => {
     found = await readChat(store, event.client, event.sessionId);
     return chooseProject(settings, event.cwd, { existingOwnerId: found?.value.projectId })?.id ?? null;
   }, async context => {
-    if (found && event.kind === 'prompt') return { status: found.value.tracked ? 'tracked' : 'untracked', work: false };
+    if (found && event.kind === 'prompt') return { state: found.value, status: found.value.tracked ? 'tracked' : 'untracked', work: false };
     if (found && !found.value.tracked) return durableResult = { state: found.value, status: 'untracked', work: found.value.pending?.reason === 'untrack' };
     let chat;
     if (!found) {
@@ -109,7 +112,8 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
       // native fork policy before that prompt arrives, and await its exact prefix.
       chat = createChat({ client: event.client, sessionId: event.sessionId, projectId: context.project.id, source: event.source,
         history: claudeFork ? event.history ?? { mode: 'automatic', startSource: 'fork', inheritedBoundary: null } :
-          { mode: 'automatic', startSource: 'prompt', inheritedBoundary: null, startPromptId: event.promptId } });
+          { mode: 'automatic', startSource: 'prompt', inheritedBoundary: null, startPromptId: event.promptId,
+            ...(event.client === 'claude' ? { startPromptNonce: randomUUID() } : {}) } });
       chat = validateChat({ ...chat, tracked: true });
     } else chat = observedSource(found.value, event.source);
     chat = retainChatClientContract(chat, event.clientContract);
@@ -127,12 +131,13 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     result = durableResult; releaseWarning = error.code;
   }
   if (!result) return { status: 'unconfigured' };
-  if (!result.work) return { status: result.status };
+  const proof = receipt(result.state);
+  if (!result.work) return { status: result.status, ...proof };
   const request = frozen({ storeRoot: store.root, client: event.client, sessionId: event.sessionId,
     generation: result.state.generation, requestId: result.state.pending?.id ?? null });
-  if (!schedule) return { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE' };
-  try { await schedule(request); return releaseWarning ? { status: 'pending', reason: releaseWarning, scheduled: true } : { status: result.status, scheduled: true }; }
-  catch (error) { return { status: 'pending', reason: code(error) }; }
+  if (!schedule) return { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE', ...proof };
+  try { await schedule(request); return { ...(releaseWarning ? { status: 'pending', reason: releaseWarning } : { status: result.status }), scheduled: true, ...proof }; }
+  catch (error) { return { status: 'pending', reason: code(error), ...proof }; }
 }
 
 /** A probe is only an optimization; concurrent launches still contend on the

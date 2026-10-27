@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { inspectNativeRow, metaValue as value, assertSource, verifyRow, rowTokenStream, transcriptError, transcriptLimits } from '../transcript/source.mjs';
+import { inspectNativeRow, metaValue as value, assertSource, verifyRow, rowTokenStream, transcriptError, transcriptLimits, TRANSCRIPT_LIMITS } from '../transcript/source.mjs';
+import { classifyNativeRow } from '../transcript/native.mjs';
 import { validateCheckpoint, nativeId } from '../transcript/checkpoint.mjs';
 
 const MAX_SOURCES = 32;
@@ -16,6 +17,14 @@ export function buildClaudeCommandContext(nonce) {
     transcriptError('HISTORY_CONTEXT_INVALID', 'A fresh unpredictable invocation nonce is required');
   }
   return `Cuefluent Notes invocation: ${nonce}`;
+}
+
+/** The prompt hook emits this once, after automatic enrollment is durable. */
+export function buildClaudePromptContext(nonce) {
+  if (typeof nonce !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(nonce)) {
+    transcriptError('HISTORY_CONTEXT_INVALID', 'Prompt enrollment requires its unpredictable hook nonce');
+  }
+  return `Cuefluent Notes enrollment: ${nonce}`;
 }
 
 async function singleContext(source, row, limits) {
@@ -70,6 +79,49 @@ export async function resolveClaudeCommandBoundary(source, { sessionId, promptId
   await source.verify?.();
   for (const inspected of matched.anchors) await verifyRow(source, inspected, { limits });
   return matched;
+}
+
+/** A prompt ID can be rewritten onto inherited Claude rows. Only the fresh
+ * UserPromptSubmit attachment and its intact native parent chain identify the
+ * new human row. Attachment chains are bounded; no transcript content is kept.
+ */
+export async function resolveClaudePromptBoundary(source, { sessionId, promptId, nonce, limits: inputLimits = {} } = {}) {
+  assertSource(source); nativeId(sessionId); nativeId(promptId);
+  const context = buildClaudePromptContext(nonce), expected = createHash('sha256').update(context).digest('hex'), limits = transcriptLimits(inputLimits);
+  let chain = [], matched = null;
+  for (let offset = 0; offset < source.size;) {
+    const row = await inspectNativeRow(source, offset, { limits });
+    if (row.pending) return pending('TRANSCRIPT_BOUNDARY_PENDING');
+    const classified = classifyNativeRow(row, { client: 'claude', sessionId });
+    const text = row.strings[JSON.stringify(['attachment', 'content', 0])];
+    const proof = value(row, 'type') === 'attachment' && value(row, 'attachment', 'type') === 'hook_additional_context' &&
+      value(row, 'attachment', 'hookName') === 'UserPromptSubmit' && value(row, 'attachment', 'hookEvent') === 'UserPromptSubmit' &&
+      value(row, 'isSidechain') !== true && value(row, 'sessionId') === sessionId && text?.hash === expected && text.units === context.length &&
+      await singleContext(source, row, limits);
+    if (classified.kind === 'human') chain = classified.promptId === promptId ? [row] : [];
+    else if (chain.length) {
+      const previous = chain.at(-1), type = value(row, 'type');
+      if (value(row, 'sessionId') === sessionId && value(row, 'isSidechain') !== true &&
+          value(row, 'parentUuid') === value(previous, 'uuid') && typeof value(row, 'uuid') === 'string' &&
+          (type === 'attachment' || type === 'user' && value(row, 'isMeta') === true && value(row, 'turnCompanion') === true && value(row, 'promptId') === promptId) &&
+          chain.length < TRANSCRIPT_LIMITS.rows) chain.push(row);
+      else chain = [];
+    }
+    if (proof) {
+      if (matched) {
+        const first = matched[0];
+        return Object.freeze({ ...pending('TRANSCRIPT_BOUNDARY_AMBIGUOUS'), anchor: Object.freeze({ start: first.start, end: first.end, hash: first.hash, rowId: nativeId(value(first, 'uuid')) }) });
+      }
+      if (!chain.length) return pending('TRANSCRIPT_BOUNDARY_PENDING');
+      matched = [...chain];
+    }
+    offset = row.end;
+  }
+  if (!matched) return pending('TRANSCRIPT_BOUNDARY_PENDING');
+  await source.verify?.();
+  for (const row of matched) await verifyRow(source, row, { limits });
+  const first = matched[0];
+  return Object.freeze({ status: 'ready', anchor: Object.freeze({ start: first.start, end: first.end, hash: first.hash, rowId: nativeId(value(first, 'uuid')) }) });
 }
 
 function position(input) {

@@ -3,7 +3,7 @@ import { advanceChat, rebindChatSource, requestReconciliation, resolveChatHistor
 import { fail } from '../core/errors.mjs';
 import { openTranscript } from '../client/source.mjs';
 import { createHistoricalCommandClassifiers } from '../client/historical-commands.mjs';
-import { resolveClaudeCommandBoundary, resolveNativeHistory, reanchorNativeCheckpoint } from '../client/history.mjs';
+import { resolveClaudeCommandBoundary, resolveClaudePromptBoundary, resolveNativeHistory, reanchorNativeCheckpoint } from '../client/history.mjs';
 import { normalizeTranscript } from '../transcript/index.mjs';
 import { hashBytes } from '../storage/files.mjs';
 import { encodeQueueRecord } from '../storage/queue-format.mjs';
@@ -129,7 +129,15 @@ export async function collectChat(store, { client, sessionId, classifyCommand = 
     const point = saved.value.checkpoint, startPromptId = saved.value.history.startPromptId;
     const seekingStart = startPromptId && point.offset === 0 && !point.exchange && !saved.value.uncommitted &&
       (point.anchor === null || point.boundary?.promptId === startPromptId && point.boundary.rowId === null);
-    if (seekingStart) {
+    if (seekingStart && client === 'claude') {
+      const proof = await resolveClaudePromptBoundary(source, { sessionId, promptId: startPromptId, nonce: saved.value.history.startPromptNonce, limits });
+      if (proof.status !== 'ready') {
+        if (proof.reason === 'TRANSCRIPT_BOUNDARY_AMBIGUOUS') await publishCheckpoint({ ...point, anchor: proof.anchor,
+          boundary: { promptId: startPromptId, rowId: null, start: proof.anchor.start, scanOffset: proof.anchor.end, matches: 2, scanPromptId: startPromptId } });
+        return { status: 'pending', reason: proof.reason, parts, ...progress() };
+      }
+      await publishCheckpoint({ ...point, offset: proof.anchor.start, scanOffset: proof.anchor.start, anchor: proof.anchor, boundary: null });
+    } else if (seekingStart) {
       for await (const event of normalizeTranscript(source, { client, sessionId, checkpoint: point, fromPromptId: startPromptId, limits })) {
         await publishCheckpoint(event.checkpoint);
         if (event.type === 'pending') return { status: 'pending', reason: event.reason, parts, ...progress() };

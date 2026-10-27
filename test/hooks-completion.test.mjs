@@ -9,6 +9,7 @@ import { createProject } from '../src/core/settings.mjs';
 import { initializeStore } from '../src/storage/store.mjs';
 import { readChat, selectChatQueue } from '../src/storage/chats.mjs';
 import { handleNativeHook } from '../src/client/hooks.mjs';
+import { buildClaudePromptContext } from '../src/client/history.mjs';
 import { createSyncRuntime } from '../src/sync/runtime.mjs';
 import { launchSyncAttempt } from '../src/sync/ingress.mjs';
 
@@ -26,7 +27,11 @@ async function fixture(t) {
   const identity = { session_id: sessionId, cwd, transcript_path: sourcePath };
   const options = { clientContract: { name: 'notes:notes', skillPath: path.join(root, 'plugin', 'SKILL.md') }, schedule: async () => {} };
   const hook = input => handleNativeHook(store, 'claude', { ...identity, ...input }, options);
-  await hook({ hook_event_name: 'UserPromptSubmit', prompt_id: promptId });
+  const enrolled = await hook({ hook_event_name: 'UserPromptSubmit', prompt_id: promptId });
+  const proof = { type: 'attachment', sessionId, uuid: 'enrollment', parentUuid: human.uuid, isSidechain: false,
+    attachment: { type: 'hook_additional_context', hookName: 'UserPromptSubmit', hookEvent: 'UserPromptSubmit',
+      content: [buildClaudePromptContext(enrolled.ingress.enrollmentNonce)] } };
+  await fs.writeFile(sourcePath, encode([human, proof, tool, output('result', 'Exact partial tool output.')]));
   const runtime = createSyncRuntime({ store }); t.after(() => runtime.close());
   const collect = () => runtime.collect({ client: 'claude', sessionId });
   const queue = () => selectChatQueue(store, 'project', 'claude', sessionId);

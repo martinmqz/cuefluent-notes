@@ -102,7 +102,12 @@ metadata marks them as bookkeeping. Image and tool-reference blocks produce
 omission notices. A Stop hook may precede final persistence; durable retries and
 idle reconciliation collect late rows. Automatic enrollment retains the first
 post-setup prompt identity and waits for that exact boundary before collecting;
-older history stays excluded. `TRANSCRIPT_BOUNDARY_PENDING` means the boundary is
+older history stays excluded. Claude prompt enrollment also requires the fresh
+`UserPromptSubmit` hook context linked to that prompt by its native parent chain;
+a copied prompt ID alone never authorizes collection. The proof accepts at most
+256 linked native rows and keeps missing or unsupported proof pending. This also
+protects chats whose fork happened before setup, without recording unconfigured
+or manual-mode chats. `TRANSCRIPT_BOUNDARY_PENDING` means the boundary is
 not yet synchronized: let the turn and background collection finish, then check
 status. `TRANSCRIPT_BOUNDARY_AMBIGUOUS` means the native identity does not uniquely
 locate it. Preserve the chat and queued work; use a new chat without forking for
@@ -110,8 +115,9 @@ future automatic tracking or ask to save selected content as a direct note.
 Resetting tracking does not resolve an ambiguous boundary.
 
 Claude rewrites copied fork rows to the fork's current prompt ID, so that ID cannot
-separate inherited history from new input. A native Claude fork therefore retains
-its fork policy and stays pending with `HISTORY_INHERITED_BOUNDARY_UNKNOWN` until
+separate inherited history from new input. A Claude fork already registered with
+an unknown inherited boundary retains its fork policy and stays pending with
+`HISTORY_INHERITED_BOUNDARY_UNKNOWN` until
 a trusted inherited prefix is available. Status reports this limitation. Codex
 uses verified history cutoffs to omit parent history. A prompt hook without its
 native prompt identity is ignored. Automatic tracking requires enabled supported
