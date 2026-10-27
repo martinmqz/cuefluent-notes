@@ -169,6 +169,21 @@ test('completed native bookmarks re-anchor only at identical record identity and
   await result.source.close();
 });
 
+test('an enrollment bookmark stays before the same row when relocation shifts it, and rejects missing or duplicate anchors', async () => {
+  const rows = [...parentRows(), human('parent', 'new-prompt', 4, 'First eligible input'), answer('new-prompt', 5, 'Eligible reply'), done(6)];
+  const original = physical('original', rows); let point;
+  for await (const event of normalizeTranscript(original, { client: 'codex', sessionId: 'parent', fromPromptId: 'turn:new-prompt' })) point = event.checkpoint;
+  assert.equal(point.offset, point.anchor.start); assert.equal(point.exchange, null);
+  const movedRows = [{ ...rows[0], syntheticPadding: 'Relocated header bytes' }, ...rows.slice(1)];
+  const moved = physical('moved', movedRows);
+  const result = await reanchorNativeCheckpoint(moved, point, { client: 'codex', sessionId: 'parent' });
+  assert.equal(result.status, 'ready'); assert.notEqual(result.checkpoint.offset, point.offset);
+  assert.equal(result.checkpoint.offset, result.checkpoint.anchor.start);
+  assert.deepEqual((await normalized(moved, 'parent', result.checkpoint)).parts.map(part => part.exchangeId), ['new-prompt']);
+  assert.equal((await reanchorNativeCheckpoint(physical('missing', parentRows()), point, { client: 'codex', sessionId: 'parent' })).reason, 'HISTORY_ANCHOR_MISSING');
+  assert.equal((await reanchorNativeCheckpoint(physical('duplicate', [...rows, rows[4]]), point, { client: 'codex', sessionId: 'parent' })).reason, 'HISTORY_ANCHOR_AMBIGUOUS');
+});
+
 const commandSession = 'fork-child', commandPrompt = 'rewritten-current-prompt', commandName = 'cuefluent-notes:notes';
 const commandSkill = path.resolve('synthetic-skill', 'SKILL.md'), nonce = 'fedcba98-7654-4321-8abc-0123456789ab';
 const oldNonce = '12345678-90ab-4cde-9f01-23456789abcd';

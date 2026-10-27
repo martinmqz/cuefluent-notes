@@ -532,3 +532,14 @@ test(`a live connector starts on an existing ${shape} store location, serves set
   } finally { await second.stop(); }
 });
 }
+
+
+test('prompt hooks without native prompt identity stay silent and create no store', async t => {
+  const f = await fixture(t);
+  for (const client of ['claude', 'codex']) {
+    const result = await f.run(['hook', client], JSON.stringify({ hook_event_name: 'UserPromptSubmit',
+      session_id: 'synthetic', cwd: f.cwd, transcript_path: null, prompt: 'Synthetic ordinary prompt.' }));
+    assert.deepEqual(result, { code: 0, stdout: '', stderr: '' });
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});

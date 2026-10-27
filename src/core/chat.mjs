@@ -176,10 +176,11 @@ export function rebindChatSource(input, { generation, source: nextSource, checkp
   if (chat.uncommitted) fail('CHAT_PART_UNCOMMITTED', 'Finish the exact interrupted append before changing native source.');
   const next = validateCheckpoint(checkpoint, { client: chat.client, sessionId: chat.sessionId });
   const sameMeaning = point => ({ ...point, offset: 0, scanOffset: 0,
-    anchor: point.anchor && { hash: point.anchor.hash, rowId: point.anchor.rowId },
+    anchor: point.anchor && { hash: point.anchor.hash, rowId: point.anchor.rowId, edge: point.offset === point.anchor.start ? 'start' : 'end' },
     exchange: point.exchange && { ...point.exchange, start: 0 } });
   const inactive = point => !point.cursor && !point.boundary && (!point.exchange || point.exchange.completed) &&
-    point.scanOffset === point.offset && (point.anchor === null ? point.offset === 0 : point.offset === point.anchor.end);
+    point.scanOffset === point.offset && (point.anchor === null ? point.offset === 0 :
+      point.offset === point.anchor.end || !point.exchange && point.offset === point.anchor.start);
   if (!inactive(chat.checkpoint) || !inactive(next) ||
       JSON.stringify(sameMeaning(chat.checkpoint)) !== JSON.stringify(sameMeaning(next))) fail('CHAT_SOURCE_TRANSITION_INVALID', 'A source transition must preserve the exact retained native record and exchange identity.');
   return validateChat({ ...chat, source: nextSource, sourceCandidate: null, checkpoint: next });

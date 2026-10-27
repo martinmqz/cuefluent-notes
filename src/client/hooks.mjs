@@ -39,7 +39,12 @@ export function mapNativeHook(client, input, { claudeCommand = null, launchMarke
   // completed exchange. SessionEnd and compaction prove no turn outcome.
   if (!['UserPromptSubmit', 'SessionStart', 'Stop', 'SessionEnd', ...(client === 'claude' ? ['PostCompact', 'StopFailure'] : ['Interrupt'])].includes(hook)) return result();
   let kind = 'end', startSource = null, newSession = false, completion = null;
-  if (hook === 'UserPromptSubmit') kind = 'prompt';
+  if (hook === 'UserPromptSubmit') {
+    // A host without a native prompt identity cannot establish enrollment.
+    // Ignore this optional event without affecting the user's prompt.
+    if ((client === 'claude' ? input.prompt_id : input.turn_id) == null) return result();
+    kind = 'prompt';
+  }
   else if (hook === 'SessionStart') {
     if (!STARTS.has(input.source)) fail('NATIVE_HOOK_UNSUPPORTED', 'The native session-start source is unsupported.');
     kind = 'start'; startSource = input.source; newSession = ['startup', 'fork', 'clear'].includes(startSource);

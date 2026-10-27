@@ -120,12 +120,18 @@ export async function collectChat(store, { client, sessionId, classifyCommand = 
     }
     if (JSON.stringify(saved.value.historySources) !== JSON.stringify(historySources)) saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
       change: chat => validateChat({ ...chat, historySources }) });
-    if (saved.value.history.startPromptId && saved.value.checkpoint.offset === 0 && !saved.value.checkpoint.exchange) {
-      for await (const event of normalizeTranscript(source, { client, sessionId, checkpoint: saved.value.checkpoint,
-        fromPromptId: saved.value.history.startPromptId, limits })) {
-        await source.verify(event.checkpoint.anchor);
-        saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
-          change: chat => advanceChat(chat, { generation, checkpoint: event.checkpoint, requestId }) });
+    const publishCheckpoint = async checkpoint => {
+      await source.verify(checkpoint.anchor);
+      // Metadata never advances past an interrupted queue publication.
+      if (!saved.value.uncommitted) saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
+        change: chat => advanceChat(chat, { generation, checkpoint, requestId }) });
+    };
+    const point = saved.value.checkpoint, startPromptId = saved.value.history.startPromptId;
+    const seekingStart = startPromptId && point.offset === 0 && !point.exchange && !saved.value.uncommitted &&
+      (point.anchor === null || point.boundary?.promptId === startPromptId && point.boundary.rowId === null);
+    if (seekingStart) {
+      for await (const event of normalizeTranscript(source, { client, sessionId, checkpoint: point, fromPromptId: startPromptId, limits })) {
+        await publishCheckpoint(event.checkpoint);
         if (event.type === 'pending') return { status: 'pending', reason: event.reason, parts, ...progress() };
       }
     }
@@ -171,20 +177,15 @@ export async function collectChat(store, { client, sessionId, classifyCommand = 
       beforePromptId: initial.pending?.beforePromptId ?? null, beforeRowId, classifyCommand,
       limits: { ...limits, parts: (limits.parts ?? 64) - parts },
     })) {
-      await source.verify(event.checkpoint.anchor);
       if (event.type === 'part') {
+        await source.verify(event.checkpoint.anchor);
         const record = transcriptPartRecord(event.part);
         saved = await commitChatPart(store, projectId, client, sessionId, {
           expectedHash: saved.hash, generation, checkpoint: event.checkpoint, requestId, record,
         });
         parts++;
       } else {
-        // Replay metadata while reconstructing an interrupted part cannot move
-        // its durable bookmark past bytes that are still ineligible to process.
-        if (!saved.value.uncommitted) {
-          saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
-            change: chat => advanceChat(chat, { generation, checkpoint: event.checkpoint, requestId }) });
-        }
+        await publishCheckpoint(event.checkpoint);
         if (event.type === 'pending') pendingReason = event.reason;
       }
     }

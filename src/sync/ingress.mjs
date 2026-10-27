@@ -62,11 +62,9 @@ function observedSource(chat, source) {
   return chat;
 }
 
-async function registerNativeMetadata(event, register) {
-  // The first prompt supplies the enrollment boundary. Retry transient gate contention
-  // within the ten-second hook profile, always rechecking current settings and
-  // ownership. Failed or ineligible checks publish no enrollment breadcrumb.
-  const attempts = event.kind === 'prompt' ? 3 : 1;
+async function registerNativeMetadata(register, attempts) {
+  // Retry only a possible first enrollment, within the ten-second hook profile.
+  // Every attempt rechecks settings and ownership before publishing metadata.
   for (let attempt = 0; ; attempt++) {
     try { return await register(); }
     catch (error) {
@@ -91,17 +89,27 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     if (processing) return { status: 'excluded', reason: 'PROCESSING_SESSION' };
   }
   if (event.launchMarker !== null) return { status: 'pending', reason: 'PROCESSING_IDENTITY_UNVERIFIED' };
+  const claudeFork = event.client === 'claude' && event.kind === 'start' && event.startSource === 'fork' && event.newSession;
+  const enrollmentEvent = event.kind === 'prompt' || claudeFork;
+  const existing = enrollmentEvent ? await readChat(store, event.client, event.sessionId) : null;
+  // Later prompts need no mutation gate, rewrite or collector launch. Completion
+  // and lifecycle events still reconcile late output and source relocation.
+  if (event.kind === 'prompt' && existing) return { status: existing.value.tracked ? 'tracked' : 'untracked' };
   let found, durableResult, releaseWarning, result;
-  try { result = await registerNativeMetadata(event, () => withSelectedProject(store, async settings => {
+  try { result = await registerNativeMetadata(() => withSelectedProject(store, async settings => {
     found = await readChat(store, event.client, event.sessionId);
     return chooseProject(settings, event.cwd, { existingOwnerId: found?.value.projectId })?.id ?? null;
   }, async context => {
+    if (found && event.kind === 'prompt') return { status: found.value.tracked ? 'tracked' : 'untracked', work: false };
     if (found && !found.value.tracked) return durableResult = { state: found.value, status: 'untracked', work: found.value.pending?.reason === 'untrack' };
     let chat;
     if (!found) {
-      if (context.project.tracking !== 'auto' || event.kind !== 'prompt') return { status: 'ineligible', work: false };
+      if (context.project.tracking !== 'auto' || !enrollmentEvent) return { status: 'ineligible', work: false };
+      // Claude rewrites copied fork rows to the current prompt ID. Retain the
+      // native fork policy before that prompt arrives, and await its exact prefix.
       chat = createChat({ client: event.client, sessionId: event.sessionId, projectId: context.project.id, source: event.source,
-        history: { mode: 'automatic', startSource: 'prompt', inheritedBoundary: null, startPromptId: event.promptId } });
+        history: claudeFork ? event.history ?? { mode: 'automatic', startSource: 'fork', inheritedBoundary: null } :
+          { mode: 'automatic', startSource: 'prompt', inheritedBoundary: null, startPromptId: event.promptId } });
       chat = validateChat({ ...chat, tracked: true });
     } else chat = observedSource(found.value, event.source);
     chat = retainChatClientContract(chat, event.clientContract);
@@ -112,7 +120,7 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     if (!found || JSON.stringify(chat) !== JSON.stringify(found.value)) await writeJSON(store.pin,
       chatRelative(context.project.id, event.client, event.sessionId), chat, { expectedHash: found?.hash ?? null, maxBytes: 64 * 1024 });
     return durableResult = { state: chat, status: found ? 'tracked' : 'enrolled', work: true };
-  })); } catch (error) {
+  }), enrollmentEvent && !existing ? 3 : 1); } catch (error) {
     if (error.code !== 'GATE_RELEASE_FAILED' || !durableResult?.work) throw error;
     // The metadata write completed. Gate release trouble remains visible, but
     // cannot erase the independent reconciliation dispatch it just authorized.

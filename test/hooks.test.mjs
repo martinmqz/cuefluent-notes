@@ -109,6 +109,8 @@ test('prompt submission retains only native boundary metadata and never claims c
     assert.equal(event.completion, null); assert.equal(event.newSession, false); assert.equal(command, null);
     assert(!JSON.stringify(event).includes(input.prompt));
     delete input[client === 'claude' ? 'prompt_id' : 'turn_id'];
+    assert.deepEqual(mapNativeHook(client, input), { event: null, command: null });
+    input[client === 'claude' ? 'prompt_id' : 'turn_id'] = '';
     assert.throws(() => mapNativeHook(client, input), { code: 'TRANSCRIPT_IDENTITY_INVALID' });
   }
 });

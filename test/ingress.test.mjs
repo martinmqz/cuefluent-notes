@@ -199,7 +199,9 @@ test('explicit opt-out survives auto ingress without writes and only its final e
   const invocation = { client: 'claude', sessionId: 'synthetic', cwd: f.cwd, sourcePath: f.sourcePath, promptId: 'untrack', action: 'untrack' };
   let stopped = await setChatTracking(f.store, invocation), launched = 0;
   await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => { launched++; } });
-  assert.equal((await readChat(f.store, 'claude', 'synthetic')).hash, stopped.hash); assert.equal(launched, 1);
+  assert.equal((await readChat(f.store, 'claude', 'synthetic')).hash, stopped.hash); assert.equal(launched, 0);
+  await ingestNativeEvent(f.store, { ...f.event, kind: 'end', startSource: null, newSession: false }, { schedule: async () => { launched++; } });
+  assert.equal(launched, 1);
   stopped = await updateChat(f.store, 'project', 'claude', 'synthetic', { expectedHash: stopped.hash, change: chat => advanceChat(chat,
     { generation: chat.generation, checkpoint: chat.checkpoint, requestId: chat.pending.id, complete: true }) });
   const before = await inventory(f.store.root);

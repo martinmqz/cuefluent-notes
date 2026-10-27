@@ -18,8 +18,9 @@ hook trust or an ordinary chat message is not consent.
 Automatic tracking enrolls each eligible chat when its next user prompt is submitted,
 including chats already open during setup and chats resumed later. It collects that
 prompt and subsequent exchanges, never earlier history or the exchange already
-underway during setup. Tell the user this when offering automatic tracking. Native
-hooks must be enabled. Mode changes do not untrack existing chats or override
+underway during setup. Claude forks with an unverified inherited boundary stay
+pending instead of collecting copied history; see [native collection limits](limits.md#native-clients-and-collection).
+Tell the user these limits when offering automatic tracking. Native hooks must be enabled. Mode changes do not untrack existing chats or override
 opt-outs. A pending run pins its destination, saving preference and logging settings; logging changes apply to
 later runs. The nearest configured ancestor owns a newly bound chat, and ownership
 does not move when nested projects are added.

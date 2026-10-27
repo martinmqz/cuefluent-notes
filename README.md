@@ -36,7 +36,8 @@ or a newer Node 26 patch must be the Node the client launches; see
 
 Automatic tracking includes existing and new chats from their next prompt after
 it is enabled. Earlier history stays excluded, and explicit untrack opt-outs remain.
-Processing is always explicit.
+Processing is always explicit. Claude forks whose inherited history cannot be
+verified stay pending; see [native collection limits](references/limits.md#native-clients-and-collection).
 
 Defaults are manual tracking, review saving and activity logging on for directory
 destinations, where `logs/YYYY.md` records successful note changes. Repeat setup to

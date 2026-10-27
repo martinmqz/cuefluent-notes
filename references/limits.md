@@ -102,10 +102,20 @@ metadata marks them as bookkeeping. Image and tool-reference blocks produce
 omission notices. A Stop hook may precede final persistence; durable retries and
 idle reconciliation collect late rows. Automatic enrollment retains the first
 post-setup prompt identity and waits for that exact boundary before collecting;
-older and copied fork history stays excluded. Missing or ambiguous boundaries stay
-pending. Codex uses verified history cutoffs and reports missing sources. Automatic
-tracking requires enabled native hooks, and a stopped host keeps state without
-running an OS service.
+older history stays excluded. `TRANSCRIPT_BOUNDARY_PENDING` means the boundary is
+not yet synchronized: let the turn and background collection finish, then check
+status. `TRANSCRIPT_BOUNDARY_AMBIGUOUS` means the native identity does not uniquely
+locate it. Preserve the chat and queued work; use a new chat without forking for
+future automatic tracking or ask to save selected content as a direct note.
+Resetting tracking does not resolve an ambiguous boundary.
+
+Claude rewrites copied fork rows to the fork's current prompt ID, so that ID cannot
+separate inherited history from new input. A native Claude fork therefore retains
+its fork policy and stays pending with `HISTORY_INHERITED_BOUNDARY_UNKNOWN` until
+a trusted inherited prefix is available. Status reports this limitation. Codex
+uses verified history cutoffs to omit parent history. A prompt hook without its
+native prompt identity is ignored. Automatic tracking requires enabled supported
+native hooks, and a stopped host keeps state without running an OS service.
 
 ## Processing isolation
 

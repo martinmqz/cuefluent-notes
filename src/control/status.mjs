@@ -39,6 +39,11 @@ export async function readProjectStatus(store, projectId, { chat = null, invento
     // it needs neither a transcript scan nor a status-side metadata mutation.
     if (item.client === 'claude' && item.history.mode === 'automatic' && item.history.startSource === 'fork' && item.history.inheritedBoundary === null &&
         !warnings.includes('HISTORY_INHERITED_BOUNDARY_UNKNOWN') && warnings.length < 32) warnings.push('HISTORY_INHERITED_BOUNDARY_UNKNOWN');
+    const boundary = item.checkpoint.boundary;
+    const boundaryWarning = boundary?.matches > 1 ? 'TRANSCRIPT_BOUNDARY_AMBIGUOUS' :
+      item.history.startPromptId && item.pending && item.checkpoint.offset === 0 && !item.checkpoint.exchange &&
+      (item.checkpoint.anchor === null || boundary?.promptId === item.history.startPromptId) ? 'TRANSCRIPT_BOUNDARY_PENDING' : null;
+    if (boundaryWarning && !warnings.includes(boundaryWarning) && warnings.length < 32) warnings.push(boundaryWarning);
     if (item.clientContractOverflow && !warnings.includes('CLIENT_CONTRACT_LIMIT') && warnings.length < 32) warnings.push('CLIENT_CONTRACT_LIMIT');
     try {
       const queue = await inspectQueue(store.pin, queueRelative(item.client, item.sessionId));

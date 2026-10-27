@@ -284,7 +284,7 @@ function stableRowId(row) {
     (value(row, 'ordinal') !== undefined ? `ordinal:${value(row, 'ordinal')}` : null);
 }
 
-/** Relocate an inactive completed bookmark only at the same native record/hash.
+/** Relocate an inactive bookmark before or after the same native record/hash.
  * Removed anchors, active field cursors and unresolved stop boundaries retain the
  * original checkpoint and return pending. No hashes or run selections refresh.
  */
@@ -292,7 +292,8 @@ export async function reanchorNativeCheckpoint(source, input, { client, sessionI
   assertSource(source);
   const original = validateCheckpoint(input, { client, sessionId }), limits = transcriptLimits(inputLimits);
   if (original.offset === 0 && original.anchor === null && original.exchange === null) return Object.freeze({ status: 'ready', checkpoint: original });
-  if (original.cursor || original.boundary || original.scanOffset !== original.offset || original.offset !== original.anchor?.end ||
+  const beforeRow = !original.exchange && original.offset === original.anchor?.start;
+  if (original.cursor || original.boundary || original.scanOffset !== original.offset || (!beforeRow && original.offset !== original.anchor?.end) ||
       (original.exchange && !original.exchange.completed) || original.anchor?.rowId.startsWith('offset:')) return pending('HISTORY_REANCHOR_PENDING');
   let found = null, human = null, duplicates = false;
   for (let offset = 0; offset < source.size;) {
@@ -307,7 +308,8 @@ export async function reanchorNativeCheckpoint(source, input, { client, sessionI
   if (duplicates) return pending('HISTORY_ANCHOR_AMBIGUOUS');
   if (human && human.start > found.start) return pending('HISTORY_ANCHOR_MISSING');
   await source.verify?.(); await verifyRow(source, found, { limits });
-  const relocated = validateCheckpoint({ ...original, offset: found.end, scanOffset: found.end,
+  const offset = beforeRow ? found.start : found.end;
+  const relocated = validateCheckpoint({ ...original, offset, scanOffset: offset,
     anchor: { ...original.anchor, start: found.start, end: found.end }, exchange: original.exchange ? { ...original.exchange, start: human.start } : null }, { client, sessionId });
   return Object.freeze({ status: 'ready', checkpoint: relocated });
 }

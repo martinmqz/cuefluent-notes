@@ -75,7 +75,8 @@ There is no linter, formatter, or type checker.
   single-file destination. The three settings are independent. Preserve
   explicit opt-outs and loaded settings. Tracking `auto` enrolls eligible existing
   and new native chats at their first prompt after it is enabled, excluding earlier
-  history and exchanges already underway during setup. Processing is always explicit. An explicit untrack
+  history and exchanges already underway during setup. Claude forks with an unverified
+  inherited boundary remain pending. Processing is always explicit. An explicit untrack
   survives cleanup and `auto` tracking; read-only requests and opt-outs take
   priority.
 - Bind tracking and processing commands from native current-chat and
