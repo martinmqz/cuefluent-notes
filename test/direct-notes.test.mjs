@@ -597,6 +597,8 @@ test('both MCP hosts preserve metadata edge cases through update review and exac
     { name: 'blank-list-item', expandedMetadata: false, flow: true, payload: header + 'reviewers:\n - sam\n -\n - kim' },
     { name: 'escaped-whitespace-line', expandedMetadata: true, flow: false, payload: JSON.stringify({ schema_version: 1, id: 'stable', created: '2026-01-01T00:00:00Z', summary: 'First line of a handwritten summary here\n \nThird' }) },
     { name: 'large-block-values', expandedMetadata: false, flow: false, payload: header + Array.from({ length: 45 }, (_, i) => `custom${i}: |-\n  ${line}\n  Tail`).join('\n') },
+    { name: 'large-flow-values', expandedMetadata: true, flow: true, payload: JSON.stringify({ schema_version: 1, id: 'stable', created: '2026-01-01T00:00:00Z',
+      entries: Array.from({ length: 100 }, () => ({ a: { b: { c: { d: { values: Array.from({ length: 16 }, () => 'x'.repeat(29)) } } } } })) }) },
   ];
   for (const client of ['claude', 'codex']) for (const item of cases) {
     const f = await fixture(t, { client, expandedMetadata: item.expandedMetadata }), native = await nativeTools(f, { client });

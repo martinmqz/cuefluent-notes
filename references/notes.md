@@ -69,10 +69,11 @@ created annual logs. A pending run keeps its captured preference and exact draft
 bytes. Changing the preference alone rewrites no files: no-op saves keep their
 original bytes, and log appends preserve existing headers. Handwritten metadata
 comments are preserved even when they require additional lines in compact mode.
-If compact escaping would exceed the metadata byte limit, a useful update keeps
-the original layout instead; metadata values are never shortened to fit. Projects
-sharing a note destination use the editing project's captured preference, so use
-the same preference when consistent formatting across those projects matters.
+If switching formats would exceed the metadata byte limit through escaping or
+indentation, a useful update keeps the original layout instead; metadata values
+are never shortened to fit. Projects sharing a note destination use the editing
+project's captured preference, so use the same preference when consistent
+formatting across those projects matters.
 Plain notes stay plain; this preference does not add metadata to them.
 
 The writer sets these fields: `id` and `created` never change on an update,

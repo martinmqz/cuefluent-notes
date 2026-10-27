@@ -240,9 +240,9 @@ function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOve
     return `<!-- cuefluent\n${payload}-->\n`.replace(/\n/g, newline);
   };
   let raw = serialize(candidate, expandedMetadata ? 'block' : 'flow');
-  // Escaping a large handwritten block scalar can exceed the fixed metadata
-  // limit. A formatting preference must not prevent an otherwise valid edit.
-  if (!expandedMetadata && preserveLayoutOnOverflow && Buffer.byteLength(raw) > P.metadataBytes) raw = serialize(document, 'any');
+  // Escaping or indentation can exceed the fixed metadata limit in either
+  // format. A formatting preference must not prevent an otherwise valid edit.
+  if (preserveLayoutOnOverflow && Buffer.byteLength(raw) > P.metadataBytes) raw = serialize(document, 'any');
   const rendered = inspectMetadata(raw);
   requireValue(rendered.status === 'supported' && isDeepStrictEqual(rendered.value, expected));
   return raw;

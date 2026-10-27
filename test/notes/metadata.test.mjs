@@ -235,6 +235,21 @@ test('compact overflow preserves existing metadata layout and values without inc
   assert.throws(() => createGeneratedNote(body, { ...options, metadata: before.value }), { code: 'NOTE_METADATA_INVALID' });
 });
 
+test('expanded overflow preserves a valid compact layout and metadata values within the same limit', () => {
+  const value = { schema_version: 1, id: 'stable', entries: Array.from({ length: 100 }, () =>
+    ({ a: { b: { c: { d: { values: Array.from({ length: 16 }, () => 'x'.repeat(29)) } } } } })) };
+  const original = metadata(JSON.stringify(value)), before = inspectMetadata(original);
+  assert.equal(before.status, 'supported'); assert.ok(Buffer.byteLength(before.raw) < NOTE_PROFILE.metadataBytes);
+  const updated = '2026-10-27T01:00:00Z', proposed = body.replace('checked', 'verified');
+  const result = preserveMetadata(original, proposed, { updated, expandedMetadata: true });
+  const after = inspectMetadata(result.bytes); assert.equal(after.status, 'supported');
+  assert.deepEqual(after.value, { ...before.value, updated });
+  assert.ok(Buffer.byteLength(after.raw) <= NOTE_PROFILE.metadataBytes);
+  assert.equal(metadataDocument(result.bytes).contents.flow, true);
+  assert.equal(result.bytes.toString().slice(after.end), proposed);
+  assert.throws(() => createGeneratedNote(body, { ...options, metadata: value, expandedMetadata: true }), { code: 'NOTE_METADATA_INVALID' });
+});
+
 test('metadata serialization rejects a valid-looking YAML result whose values changed', t => {
   const original = createGeneratedNote(body, options);
   const stringify = Document.prototype.toString;
