@@ -73,8 +73,10 @@ There is no linter, formatter, or type checker.
 - A new project defaults to tracking `manual` and saving `review`. Activity
   logging defaults to on for a directory destination and stays off for a
   single-file destination. The three settings are independent. Preserve
-  explicit opt-outs and loaded settings. Tracking `auto` enrolls eligible new
-  native chats only, and processing is always explicit. An explicit untrack
+  explicit opt-outs and loaded settings. Tracking `auto` enrolls eligible existing
+  and new native chats at their first prompt after it is enabled, excluding earlier
+  history and exchanges already underway during setup. Claude forks with an unverified
+  inherited boundary remain pending. Processing is always explicit. An explicit untrack
   survives cleanup and `auto` tracking; read-only requests and opt-outs take
   priority.
 - Bind tracking and processing commands from native current-chat and

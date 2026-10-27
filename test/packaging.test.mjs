@@ -170,7 +170,7 @@ test('hook launch descriptors preserve stdin/stdout and hostile-looking plugin p
   for (const item of built.packages) {
     const source = path.join(f.root, 'built', item.path), root = path.join(f.root, `${item.client} space ' apostrophe $dollar \x60tick\x60`); await fs.rename(source, root);
     const hooks = JSON.parse(await fs.readFile(path.join(root, 'hooks/hooks.json'), 'utf8')).hooks;
-    assert.deepEqual(Object.keys(hooks).sort(), (item.client === 'claude' ? ['SessionStart', 'Stop', 'StopFailure', 'SessionEnd', 'PostCompact', 'UserPromptExpansion'] : ['SessionStart', 'Stop', 'SessionEnd', 'Interrupt']).sort());
+    assert.deepEqual(Object.keys(hooks).sort(), (item.client === 'claude' ? ['UserPromptSubmit', 'SessionStart', 'Stop', 'StopFailure', 'SessionEnd', 'PostCompact', 'UserPromptExpansion'] : ['UserPromptSubmit', 'SessionStart', 'Stop', 'SessionEnd', 'Interrupt']).sort());
     if (item.client === 'codex') for (const [event, groups] of Object.entries(hooks)) for (const group of groups) for (const handler of group.hooks) {
       assert.equal(handler.timeout, ['SessionEnd', 'Interrupt'].includes(event) ? 3 : 10, `${event} must use its native timeout profile`);
     }

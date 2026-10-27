@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fail } from '../core/errors.mjs';
@@ -24,10 +25,15 @@ function record(value, keys) {
  * or stat a transcript; the supplied source identity is separately verified.
  */
 export function validateNativeEvent(input) {
-  record(input, ['client', 'sessionId', 'cwd', 'kind', 'source', 'startSource', 'newSession', 'completion', 'history', 'launchMarker', ...(Object.hasOwn(input ?? {}, 'clientContract') ? ['clientContract'] : [])]);
+  record(input, ['client', 'sessionId', 'cwd', 'kind', 'source', 'startSource', 'newSession', 'completion', 'history', 'launchMarker', ...(Object.hasOwn(input ?? {}, 'clientContract') ? ['clientContract'] : []), ...(Object.hasOwn(input ?? {}, 'promptId') ? ['promptId'] : [])]);
   const clientContract = validateClientContract(Object.hasOwn(input, 'clientContract') ? input.clientContract : null);
-  if (!['claude', 'codex'].includes(input.client) || !['start', 'completed', 'interrupted', 'failed', 'end'].includes(input.kind) || typeof input.newSession !== 'boolean') fail('INGRESS_INVALID', 'Unsupported native lifecycle event.');
+  if (!['claude', 'codex'].includes(input.client) || !['prompt', 'start', 'completed', 'interrupted', 'failed', 'end'].includes(input.kind) || typeof input.newSession !== 'boolean') fail('INGRESS_INVALID', 'Unsupported native lifecycle event.');
   nativeId(input.sessionId); assertAbsolute(input.cwd);
+  if (input.kind !== 'prompt' && Object.hasOwn(input, 'promptId')) fail('INGRESS_INVALID', 'Only prompt submission supplies an enrollment boundary.');
+  if (input.kind === 'prompt') {
+    nativeId(input.promptId);
+    if (input.startSource !== null || input.newSession || input.completion !== null || input.history !== null) fail('INGRESS_INVALID', 'Prompt submission carries only its native start boundary.');
+  }
   if (input.cwd.length > 32768 || !(input.startSource === null || ['startup', 'resume', 'fork', 'clear', 'compact'].includes(input.startSource)) ||
       (input.kind === 'start' && input.startSource === null) || (input.newSession && (input.kind !== 'start' || !['startup', 'fork', 'clear'].includes(input.startSource)))) fail('INGRESS_INVALID', 'The lifecycle signal does not prove a newly created native chat.');
   if (!(input.launchMarker === null || typeof input.launchMarker === 'string' && /^[A-Za-z0-9_.:-]{16,256}$/.test(input.launchMarker))) fail('INGRESS_INVALID', 'An invocation-only launch marker must be bounded opaque metadata.');
@@ -45,7 +51,8 @@ export function validateNativeEvent(input) {
     if (['completed', 'interrupted', 'failed'].includes(input.kind) && completion.kind !== input.kind) fail('INGRESS_INVALID', 'Completion expectation differs from the native lifecycle event.');
   } else if (['completed', 'interrupted', 'failed'].includes(input.kind)) fail('INGRESS_INVALID', 'Native completion events require their exact prompt expectation.');
   return frozen({ client: input.client, sessionId: input.sessionId, cwd: input.cwd, kind: input.kind, source: chat.source,
-    startSource: input.startSource, newSession: input.newSession, completion, history, launchMarker: input.launchMarker, clientContract });
+    startSource: input.startSource, newSession: input.newSession, completion, history, launchMarker: input.launchMarker, clientContract,
+    ...(input.kind === 'prompt' ? { promptId: input.promptId } : {}) });
 }
 
 function observedSource(chat, source) {
@@ -56,11 +63,9 @@ function observedSource(chat, source) {
   return chat;
 }
 
-async function registerNativeMetadata(event, register) {
-  // SessionStart is one-shot native authority. Retry transient gate contention
-  // within the ten-second hook profile, always rechecking current settings and
-  // ownership. Failed or ineligible checks publish no enrollment breadcrumb.
-  const attempts = event.kind === 'start' && event.newSession ? 3 : 1;
+async function registerNativeMetadata(register, attempts) {
+  // Retry only a possible first enrollment, within the ten-second hook profile.
+  // Every attempt rechecks settings and ownership before publishing metadata.
   for (let attempt = 0; ; attempt++) {
     try { return await register(); }
     catch (error) {
@@ -85,17 +90,30 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     if (processing) return { status: 'excluded', reason: 'PROCESSING_SESSION' };
   }
   if (event.launchMarker !== null) return { status: 'pending', reason: 'PROCESSING_IDENTITY_UNVERIFIED' };
+  const claudeFork = event.client === 'claude' && event.kind === 'start' && event.startSource === 'fork' && event.newSession;
+  const enrollmentEvent = event.kind === 'prompt' || claudeFork;
+  const existing = enrollmentEvent ? await readChat(store, event.client, event.sessionId) : null;
+  const receipt = chat => event.kind === 'prompt' && chat?.tracked && chat.history.startPromptNonce &&
+    chat.history.startPromptId === event.promptId ? { enrollmentNonce: chat.history.startPromptNonce } : {};
+  // Later prompts need no mutation gate, rewrite or collector launch. Completion
+  // and lifecycle events still reconcile late output and source relocation.
+  if (event.kind === 'prompt' && existing) return { status: existing.value.tracked ? 'tracked' : 'untracked', ...receipt(existing.value) };
   let found, durableResult, releaseWarning, result;
-  try { result = await registerNativeMetadata(event, () => withSelectedProject(store, async settings => {
+  try { result = await registerNativeMetadata(() => withSelectedProject(store, async settings => {
     found = await readChat(store, event.client, event.sessionId);
     return chooseProject(settings, event.cwd, { existingOwnerId: found?.value.projectId })?.id ?? null;
   }, async context => {
+    if (found && event.kind === 'prompt') return { state: found.value, status: found.value.tracked ? 'tracked' : 'untracked', work: false };
     if (found && !found.value.tracked) return durableResult = { state: found.value, status: 'untracked', work: found.value.pending?.reason === 'untrack' };
     let chat;
     if (!found) {
-      if (context.project.tracking !== 'auto' || !event.newSession || event.kind !== 'start') return { status: 'ineligible', work: false };
+      if (context.project.tracking !== 'auto' || !enrollmentEvent) return { status: 'ineligible', work: false };
+      // Claude rewrites copied fork rows to the current prompt ID. Retain the
+      // native fork policy before that prompt arrives, and await its exact prefix.
       chat = createChat({ client: event.client, sessionId: event.sessionId, projectId: context.project.id, source: event.source,
-        history: event.history ?? { mode: 'automatic', startSource: event.startSource, inheritedBoundary: null } });
+        history: claudeFork ? event.history ?? { mode: 'automatic', startSource: 'fork', inheritedBoundary: null } :
+          { mode: 'automatic', startSource: 'prompt', inheritedBoundary: null, startPromptId: event.promptId,
+            ...(event.client === 'claude' ? { startPromptNonce: randomUUID() } : {}) } });
       chat = validateChat({ ...chat, tracked: true });
     } else chat = observedSource(found.value, event.source);
     chat = retainChatClientContract(chat, event.clientContract);
@@ -106,19 +124,20 @@ export async function ingestNativeEvent(store, input, { verifyProcessingSession 
     if (!found || JSON.stringify(chat) !== JSON.stringify(found.value)) await writeJSON(store.pin,
       chatRelative(context.project.id, event.client, event.sessionId), chat, { expectedHash: found?.hash ?? null, maxBytes: 64 * 1024 });
     return durableResult = { state: chat, status: found ? 'tracked' : 'enrolled', work: true };
-  })); } catch (error) {
+  }), enrollmentEvent && !existing ? 3 : 1); } catch (error) {
     if (error.code !== 'GATE_RELEASE_FAILED' || !durableResult?.work) throw error;
     // The metadata write completed. Gate release trouble remains visible, but
     // cannot erase the independent reconciliation dispatch it just authorized.
     result = durableResult; releaseWarning = error.code;
   }
   if (!result) return { status: 'unconfigured' };
-  if (!result.work) return { status: result.status };
+  const proof = receipt(result.state);
+  if (!result.work) return { status: result.status, ...proof };
   const request = frozen({ storeRoot: store.root, client: event.client, sessionId: event.sessionId,
     generation: result.state.generation, requestId: result.state.pending?.id ?? null });
-  if (!schedule) return { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE' };
-  try { await schedule(request); return releaseWarning ? { status: 'pending', reason: releaseWarning, scheduled: true } : { status: result.status, scheduled: true }; }
-  catch (error) { return { status: 'pending', reason: code(error) }; }
+  if (!schedule) return { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE', ...proof };
+  try { await schedule(request); return { ...(releaseWarning ? { status: 'pending', reason: releaseWarning } : { status: result.status }), scheduled: true, ...proof }; }
+  catch (error) { return { status: 'pending', reason: code(error), ...proof }; }
 }
 
 /** A probe is only an optimization; concurrent launches still contend on the

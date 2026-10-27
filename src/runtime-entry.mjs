@@ -9,7 +9,7 @@ import { readJSON } from './storage/files.mjs';
 import { parseEntryArguments, selectStoreRoot, loadClientContract } from './client/entry-options.mjs';
 import { handleNativeHook } from './client/hooks.mjs';
 import { isClaudeCommandExpansion } from './client/commands.mjs';
-import { buildClaudeCommandContext } from './client/history.mjs';
+import { buildClaudeCommandContext, buildClaudePromptContext } from './client/history.mjs';
 import { createCodexNativeAdapter } from './client/codex-native.mjs';
 import { createControlBridge, serveControl, presentControlResult } from './client/control-server.mjs';
 import { claimInvocation, runClaimedInvocation, readInvocation, launchInvocationChild, reportInvocationExit } from './control/invocations.mjs';
@@ -115,11 +115,13 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
       const mapped = await handleNativeHook(store, args.client, envelope, { claudeCommand: contract.claude,
         clientContract: clientContract(contract, args.client), schedule: () => runtime.schedule() });
       if (!mapped.command) {
+        if (mapped.ingress?.enrollmentNonce) output({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit',
+          additionalContext: buildClaudePromptContext(mapped.ingress.enrollmentNonce) } });
         if (args.client === 'claude' && isClaudeCommandExpansion(envelope, contract.claude)) {
           output({ hookSpecificOutput: { hookEventName: 'UserPromptExpansion', additionalContext:
             'Cuefluent Notes did not execute a tracking or processing command. No tracking or processing state was changed. Natural-language note requests may use the direct note tools. If the user intended a tracking or processing action, explain that it did not run and ask for one exact action: track, untrack, process, process project, save, skip, or status.' } });
         }
-        return; // Ordinary lifecycle hooks inject no context.
+        return; // Other lifecycle hooks inject no context.
       }
       const result = presentControlResult(mapped.command.action === 'status' ? await execute(mapped.command) : await submitCommand(store, mapped.command),
         { stage: 'result', operation: args.command, client: args.client, version: skillVersion }, { bounded: false });

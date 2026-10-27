@@ -80,8 +80,16 @@ export function validateHistorySources(input, { client } = {}) {
 /** Initial enrollment policy is immutable. Hook-provided inherited boundaries
  * are exact prefix metadata, never inferred from an EOF or copied prompt ID. */
 export function validateChatHistory(input, { client } = {}) {
-  object(input, ['mode', 'startSource', 'inheritedBoundary']);
-  if (!['manual', 'automatic'].includes(input.mode) || !['startup', 'resume', 'fork', 'clear', 'compact'].includes(input.startSource)) fail('CHAT_HISTORY_INVALID', 'Unsupported native enrollment history policy.');
+  object(input, ['mode', 'startSource', 'inheritedBoundary', ...(Object.hasOwn(input ?? {}, 'startPromptId') ? ['startPromptId'] : []),
+    ...(Object.hasOwn(input ?? {}, 'startPromptNonce') ? ['startPromptNonce'] : [])]);
+  if (Object.hasOwn(input, 'startPromptId')) {
+    if (input.mode !== 'automatic' || input.startSource !== 'prompt') fail('CHAT_HISTORY_INVALID', 'A prompt enrollment boundary belongs to automatic prompt tracking.');
+    nativeId(input.startPromptId);
+  }
+  if (!['manual', 'automatic'].includes(input.mode) || !['prompt', 'startup', 'resume', 'fork', 'clear', 'compact'].includes(input.startSource)) fail('CHAT_HISTORY_INVALID', 'Unsupported native enrollment history policy.');
+  if (input.startSource === 'prompt' && !Object.hasOwn(input, 'startPromptId')) fail('CHAT_HISTORY_INVALID', 'Prompt enrollment requires its first native prompt identity.');
+  if (client === 'claude' && input.startSource === 'prompt' && uuid(input.startPromptNonce)[14] !== '4') fail('CHAT_HISTORY_INVALID', 'Prompt enrollment requires a random UUID.');
+  if (Object.hasOwn(input, 'startPromptNonce') && (client !== 'claude' || input.startSource !== 'prompt')) fail('CHAT_HISTORY_INVALID', 'Only Claude prompt enrollment carries native hook proof.');
   let inheritedBoundary = null;
   if (input.inheritedBoundary !== null) {
     if (client !== 'claude' || input.mode !== 'automatic' || input.startSource !== 'fork') fail('CHAT_HISTORY_INVALID', 'Only an automatically enrolled Claude fork accepts a separately verified inherited prefix.');
@@ -97,7 +105,9 @@ export function validateChatHistory(input, { client } = {}) {
     } else if (prefix.anchor !== null) fail('CHAT_HISTORY_INVALID', 'An empty inherited prefix has no source anchor.');
     inheritedBoundary = Object.freeze({ endByteOffset: prefix.endByteOffset, hash: prefix.hash, anchor });
   }
-  return Object.freeze({ mode: input.mode, startSource: input.startSource, inheritedBoundary });
+  return Object.freeze({ mode: input.mode, startSource: input.startSource, inheritedBoundary,
+    ...(Object.hasOwn(input, 'startPromptId') ? { startPromptId: input.startPromptId } : {}),
+    ...(Object.hasOwn(input, 'startPromptNonce') ? { startPromptNonce: input.startPromptNonce } : {}) });
 }
 
 function completion(input) {
@@ -170,10 +180,11 @@ export function rebindChatSource(input, { generation, source: nextSource, checkp
   if (chat.uncommitted) fail('CHAT_PART_UNCOMMITTED', 'Finish the exact interrupted append before changing native source.');
   const next = validateCheckpoint(checkpoint, { client: chat.client, sessionId: chat.sessionId });
   const sameMeaning = point => ({ ...point, offset: 0, scanOffset: 0,
-    anchor: point.anchor && { hash: point.anchor.hash, rowId: point.anchor.rowId },
+    anchor: point.anchor && { hash: point.anchor.hash, rowId: point.anchor.rowId, edge: point.offset === point.anchor.start ? 'start' : 'end' },
     exchange: point.exchange && { ...point.exchange, start: 0 } });
   const inactive = point => !point.cursor && !point.boundary && (!point.exchange || point.exchange.completed) &&
-    point.scanOffset === point.offset && (point.anchor === null ? point.offset === 0 : point.offset === point.anchor.end);
+    point.scanOffset === point.offset && (point.anchor === null ? point.offset === 0 :
+      point.offset === point.anchor.end || !point.exchange && point.offset === point.anchor.start);
   if (!inactive(chat.checkpoint) || !inactive(next) ||
       JSON.stringify(sameMeaning(chat.checkpoint)) !== JSON.stringify(sameMeaning(next))) fail('CHAT_SOURCE_TRANSITION_INVALID', 'A source transition must preserve the exact retained native record and exchange identity.');
   return validateChat({ ...chat, source: nextSource, sourceCandidate: null, checkpoint: next });

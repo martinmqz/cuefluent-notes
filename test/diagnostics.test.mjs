@@ -183,9 +183,9 @@ test('every failure code raised in the source resolves to a table entry or the g
       const file = path.join(directory, entry.name);
       if (entry.isDirectory()) await visit(file);
       // A code literal in argument position of any error helper, or the preflight's
-      // plain `{ code }` object, which runs before any module loads. The table itself is excluded.
+      // plain `{ code }` object and returned pending reasons. The table itself is excluded.
       else if (entry.name.endsWith('.mjs') && file !== path.join(root, 'diagnostics.mjs')) {
-        for (const match of (await fs.readFile(file, 'utf8')).matchAll(/(?:[(,]\s*|code\s*[:=]\s*)'([A-Z][A-Z0-9_]{5,})'(?=\s*[,);}\]])/g)) raised.add(match[1]);
+        for (const match of (await fs.readFile(file, 'utf8')).matchAll(/(?:[(,]\s*|(?:code|reason)\s*[:=]\s*)'([A-Z][A-Z0-9_]{5,})'(?=\s*[,);}\]])/g)) raised.add(match[1]);
       }
     }
   }

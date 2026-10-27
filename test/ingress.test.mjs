@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { Database } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { tryAcquireExistingGate } from '../src/storage/gates.mjs';
+import { buildClaudePromptContext } from '../src/client/history.mjs';
 import { createProject } from '../src/core/settings.mjs';
 import { advanceChat } from '../src/core/chat.mjs';
 import { initializeStore, readSettings, updateSettings, gateOptions } from '../src/storage/store.mjs';
@@ -26,6 +27,7 @@ async function fixture(t, tracking = 'auto') {
     startSource: 'startup', newSession: true, completion: null, history: null, launchMarker: null };
   return { root, cwd, store, project, sourcePath, event };
 }
+const prompt = event => ({ ...event, kind: 'prompt', startSource: null, newSession: false, history: null, promptId: 'one-human' });
 async function inventory(root) {
   const output = [];
   async function walk(directory) {
@@ -51,7 +53,7 @@ async function marker(file) { try { return JSON.parse(await fs.readFile(file, 'u
 test('automatic ingress writes nothing for unconfigured, manual-untracked, historical resume and excluded processing sessions', async t => {
   const f = await fixture(t, 'manual'), before = await inventory(f.store.root), never = () => assert.fail('Ineligible event launched a worker');
   assert.deepEqual(await ingestNativeEvent(null, f.event, { schedule: never }), { status: 'unconfigured' });
-  assert.deepEqual(await ingestNativeEvent(f.store, f.event, { schedule: never }), { status: 'ineligible' });
+  assert.deepEqual(await ingestNativeEvent(f.store, prompt(f.event), { schedule: never }), { status: 'ineligible' });
   assert.deepEqual(await inventory(f.store.root), before);
   const settings = await readSettings(f.store); await updateSettings(f.store, { schemaVersion: 1, projects: [{ ...f.project, tracking: 'auto' }] }, { expectedHash: settings.hash });
   const autoBefore = await inventory(f.store.root);
@@ -63,13 +65,13 @@ test('automatic ingress writes nothing for unconfigured, manual-untracked, histo
   assert(before.length > 0);
 });
 
-test('new automatic enrollment durably records first-exchange consent and request before scheduling; settings changes affect future chats only', async t => {
+test('automatic enrollment durably records its first prompt before scheduling; manual mode prevents further enrollment', async t => {
   const f = await fixture(t); let scheduled;
-  const result = await ingestNativeEvent(f.store, f.event, { schedule: async request => {
+  const result = await ingestNativeEvent(f.store, prompt(f.event), { schedule: async request => {
     scheduled = request; const chat = await readChat(f.store, 'claude', 'synthetic');
     assert.equal(chat.value.tracked, true); assert.equal(chat.value.pending.id, request.requestId); assert.equal(chat.value.generation, request.generation);
   } });
-  assert.deepEqual(result, { status: 'enrolled', scheduled: true }); assert.equal(scheduled.storeRoot, f.store.root);
+  assert.deepEqual(result, { status: 'enrolled', scheduled: true, enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce }); assert.equal(scheduled.storeRoot, f.store.root);
   const settings = await readSettings(f.store); await updateSettings(f.store, { schemaVersion: 1, projects: [{ ...f.project, tracking: 'manual' }] }, { expectedHash: settings.hash });
   const completion = { promptId: 'first', kind: 'completed', finalTextHash: 'a'.repeat(64) };
   assert.deepEqual(await ingestNativeEvent(f.store, { ...f.event, kind: 'completed', newSession: false, startSource: null, completion }, { schedule: async () => {} }), { status: 'tracked', scheduled: true });
@@ -80,22 +82,23 @@ test('new automatic enrollment durably records first-exchange consent and reques
   assert.deepEqual(await ingestNativeEvent(f.store, { ...f.event, sessionId: 'future' }, { schedule: async () => assert.fail('Manual future chat launched') }), { status: 'ineligible' });
 });
 
-test('unknown automatic fork remains durable pending and scheduling failure preserves its source and consent', async t => {
+test('automatic prompt enrollment remains durable pending when scheduling fails', async t => {
   const f = await fixture(t), event = { ...f.event, startSource: 'fork' };
-  assert.deepEqual(await ingestNativeEvent(f.store, event, { schedule: async () => { throw new Error('Synthetic unavailable runner'); } }), { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE' });
-  const saved = await readChat(f.store, 'claude', 'synthetic'); assert.equal(saved.value.history.startSource, 'fork'); assert.equal(saved.value.history.inheritedBoundary, null);
+  const ingress = await ingestNativeEvent(f.store, prompt(event), { schedule: async () => { throw new Error('Synthetic unavailable runner'); } });
+  assert.deepEqual(ingress, { status: 'pending', reason: 'SYNC_RUNNER_UNAVAILABLE', enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce });
+  const saved = await readChat(f.store, 'claude', 'synthetic'); assert.equal(saved.value.history.startPromptId, 'one-human'); assert.equal(saved.value.history.inheritedBoundary, null);
   assert.equal(saved.value.pending.reason, 'periodic'); assert.equal(saved.value.checkpoint.offset, 0);
   let inspected = 0, delays = []; const controller = new AbortController();
   const result = await runSyncSteward(f.store, { signal: controller.signal, retryDelayMs: 2, maxRetryDelayMs: 5, idleDelayMs: 7,
     observeSource: async () => 'unchanged-native-metadata',
-    attempt: async () => { inspected++; return { status: 'pending', reason: 'HISTORY_INHERITED_BOUNDARY_UNKNOWN', parts: 0 }; },
+    attempt: async () => { inspected++; return { status: 'pending', reason: 'TRANSCRIPT_BOUNDARY_PENDING', parts: 0 }; },
     wait: async ms => { delays.push(ms); if (delays.length === 4) controller.abort(); } });
   assert.equal(result.status, 'stopped'); assert.equal(inspected, 4); assert.deepEqual(delays, [2, 4, 5, 5]);
   assert.equal((await readChat(f.store, 'claude', 'synthetic')).hash, saved.hash);
 });
 
 test('ephemeral source-version cache skips only settled repeated sources and never a new durable request', async t => {
-  const f = await fixture(t); await ingestNativeEvent(f.store, f.event, { schedule: async () => {} });
+  const f = await fixture(t); await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => {} });
   let saved = await readChat(f.store, 'claude', 'synthetic');
   await updateChat(f.store, 'project', 'claude', 'synthetic', { expectedHash: saved.hash, change: chat => advanceChat(chat,
     { generation: chat.generation, checkpoint: chat.checkpoint, requestId: chat.pending.id, complete: true }) });
@@ -111,7 +114,7 @@ test('ephemeral source-version cache skips only settled repeated sources and nev
 });
 
 test('bounded collector progress resets retry backoff while genuine no-progress pending work backs off', async t => {
-  const f = await fixture(t); await ingestNativeEvent(f.store, f.event, { schedule: async () => {} });
+  const f = await fixture(t); await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => {} });
   const controller = new AbortController(), waits = []; let attempts = 0;
   await runSyncSteward(f.store, { signal: controller.signal, retryDelayMs: 2, maxRetryDelayMs: 8, idleDelayMs: 9,
     observeSource: async () => null,
@@ -123,7 +126,7 @@ test('bounded collector progress resets retry backoff while genuine no-progress 
 
 test('idle Codex polling uses physical hints but periodically rechecks authority and immediately handles fresh requests or bytes', async t => {
   const f = await fixture(t), event = { ...f.event, client: 'codex' };
-  await ingestNativeEvent(f.store, event, { schedule: async () => {} });
+  await ingestNativeEvent(f.store, prompt(event), { schedule: async () => {} });
   let saved = await readChat(f.store, 'codex', 'synthetic');
   await updateChat(f.store, 'project', 'codex', 'synthetic', { expectedHash: saved.hash, change: chat => advanceChat(chat,
     { generation: chat.generation, checkpoint: chat.checkpoint, requestId: chat.pending.id, complete: true }) });
@@ -141,11 +144,11 @@ test('idle Codex polling uses physical hints but periodically rechecks authority
 });
 
 test('unchanged pending source retries become quiet after bounded attempts and wake on a fresh request', async t => {
-  const f = await fixture(t); await ingestNativeEvent(f.store, f.event, { schedule: async () => {} });
+  const f = await fixture(t); await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => {} });
   let clock = 0, sweeps = 0, attempts = 0; const controller = new AbortController();
   await runSyncSteward(f.store, { signal: controller.signal, now: () => clock, idleRecheckMs: 100,
     retryDelayMs: 1, maxRetryDelayMs: 4, idleDelayMs: 5,
-    attempt: async () => { attempts++; return { status: 'pending', reason: 'HISTORY_INHERITED_BOUNDARY_UNKNOWN', parts: 0 }; },
+    attempt: async () => { attempts++; return { status: 'pending', reason: 'TRANSCRIPT_BOUNDARY_PENDING', parts: 0 }; },
     wait: async () => { sweeps++; clock++;
       if (sweeps === 6) await ingestNativeEvent(f.store, { ...f.event, kind: 'completed', startSource: null, newSession: false,
         completion: { promptId: 'new-turn', kind: 'completed', finalTextHash: null } }, { schedule: async () => {} });
@@ -155,7 +158,7 @@ test('unchanged pending source retries become quiet after bounded attempts and w
 });
 
 test('a removed or replaced launch path retires its steward and releases the OS gate without losing work', async t => {
-  const f = await fixture(t); await ingestNativeEvent(f.store, f.event, { schedule: async () => {} });
+  const f = await fixture(t); await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => {} });
   const launchFile = path.join(f.root, 'entry.mjs'); await fs.writeFile(launchFile, 'synthetic entry');
   const before = await readChat(f.store, 'claude', 'synthetic'); let attempts = 0;
   const result = await runSyncSteward(f.store, { launchAvailable: createSyncLaunchGuard(launchFile),
@@ -169,7 +172,7 @@ test('a removed or replaced launch path retires its steward and releases the OS 
 });
 
 test('repeated collector startup failures retire the current owner after retrying transient process death', async t => {
-  const f = await fixture(t); await ingestNativeEvent(f.store, f.event, { schedule: async () => {} });
+  const f = await fixture(t); await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => {} });
   let attempts = 0;
   const result = await runSyncSteward(f.store, { observeSource: async () => null,
     attempt: async () => { attempts++; return { status: 'pending', reason: 'SYNC_COLLECTOR_FAILED', parts: 0 }; }, wait: async () => {} });
@@ -194,15 +197,17 @@ test('finishing a command boundary requires an unrestricted collection pass befo
 });
 
 test('explicit opt-out survives auto ingress without writes and only its final existing catch-up may schedule', async t => {
-  const f = await fixture(t); await ingestNativeEvent(f.store, f.event, { schedule: async () => {} });
+  const f = await fixture(t); await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => {} });
   const invocation = { client: 'claude', sessionId: 'synthetic', cwd: f.cwd, sourcePath: f.sourcePath, promptId: 'untrack', action: 'untrack' };
   let stopped = await setChatTracking(f.store, invocation), launched = 0;
-  await ingestNativeEvent(f.store, f.event, { schedule: async () => { launched++; } });
-  assert.equal((await readChat(f.store, 'claude', 'synthetic')).hash, stopped.hash); assert.equal(launched, 1);
+  await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => { launched++; } });
+  assert.equal((await readChat(f.store, 'claude', 'synthetic')).hash, stopped.hash); assert.equal(launched, 0);
+  await ingestNativeEvent(f.store, { ...f.event, kind: 'end', startSource: null, newSession: false }, { schedule: async () => { launched++; } });
+  assert.equal(launched, 1);
   stopped = await updateChat(f.store, 'project', 'claude', 'synthetic', { expectedHash: stopped.hash, change: chat => advanceChat(chat,
     { generation: chat.generation, checkpoint: chat.checkpoint, requestId: chat.pending.id, complete: true }) });
   const before = await inventory(f.store.root);
-  assert.deepEqual(await ingestNativeEvent(f.store, f.event, { schedule: async () => assert.fail('Opted-out chat relaunched') }), { status: 'untracked' });
+  assert.deepEqual(await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => assert.fail('Opted-out chat relaunched') }), { status: 'untracked' });
   assert.deepEqual(await inventory(f.store.root), before); assert.equal((await readChat(f.store, 'claude', 'synthetic')).hash, stopped.hash);
 });
 
@@ -225,7 +230,10 @@ test('independent detached steward retries collector death and late native persi
     launched = spawn(...args); exited = new Promise(resolve => launched.once('close', resolve)); return launched;
   } });
   t.after(async () => { if (launched?.exitCode === null) launched.kill('SIGTERM'); await exited; });
-  assert.deepEqual(await ingestNativeEvent(f.store, f.event, { schedule: () => ensureSyncSteward(f.store, { launch }) }), { status: 'enrolled', scheduled: true });
+  const { enrollmentNonce, ...enrolled } = await ingestNativeEvent(f.store, prompt(f.event), { schedule: () => ensureSyncSteward(f.store, { launch }) });
+  assert.deepEqual(enrolled, { status: 'enrolled', scheduled: true });
+  await fs.appendFile(f.sourcePath, line({ type: 'attachment', sessionId: 'synthetic', uuid: 'enrollment-proof', parentUuid: 'one-human',
+    attachment: { type: 'hook_additional_context', hookName: 'UserPromptSubmit', hookEvent: 'UserPromptSubmit', content: [buildClaudePromptContext(enrollmentNonce)] } }));
   await waitFor(() => marker(path.join(f.root, 'collector-crashed.json')));
   assert.deepEqual(await ensureSyncSteward(f.store, { launch: () => assert.fail('Started a duplicate live steward') }), { status: 'running' });
   assert.deepEqual(await selectChatQueue(f.store, 'project', 'claude', 'synthetic'), []);
@@ -249,19 +257,19 @@ test('independent detached steward retries collector death and late native persi
 });
 
 
-test('one-shot new-session authority retries transient gate contention without writing ineligible enrollment metadata', async t => {
+test('first-prompt authority retries transient gate contention without writing ineligible enrollment metadata', async t => {
   for (const tracking of ['auto', 'manual']) {
     const f = await fixture(t, tracking), before = await inventory(f.store.root);
     const owned = tryAcquireExistingGate(f.store.settingsGate, gateOptions).acquired;
     assert.ok(owned); let released = false, scheduled = 0;
     const timer = setTimeout(() => { released = true; owned.release(); }, 1250);
     try {
-      const result = await ingestNativeEvent(f.store, f.event, { schedule: async () => { scheduled++; } });
+      const result = await ingestNativeEvent(f.store, prompt(f.event), { schedule: async () => { scheduled++; } });
       assert.equal(released, true); // exceeds the ordinary one-second gate wait
       if (tracking === 'auto') {
-        assert.deepEqual(result, { status: 'enrolled', scheduled: true });
+        assert.deepEqual(result, { status: 'enrolled', scheduled: true, enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce });
         const chat = (await readChat(f.store, 'claude', 'synthetic')).value;
-        assert.equal(chat.tracked, true); assert.equal(chat.history.startSource, 'startup'); assert.ok(chat.pending);
+        assert.equal(chat.tracked, true); assert.equal(chat.history.startSource, 'prompt'); assert.ok(chat.pending);
         assert.equal(scheduled, 1);
       } else {
         assert.deepEqual(result, { status: 'ineligible' }); assert.equal(scheduled, 0);
@@ -281,8 +289,8 @@ test('durable hook metadata still schedules reconciliation when gate release fai
     if (!failed && sql === 'ROLLBACK') { failed = true; throw new Error('Synthetic release failure after durable ingress.'); }
     return result;
   });
-  const result = await ingestNativeEvent(f.store, f.event, { schedule: async request => { scheduled = request; } });
-  assert.deepEqual(result, { status: 'pending', reason: 'GATE_RELEASE_FAILED', scheduled: true });
+  const result = await ingestNativeEvent(f.store, prompt(f.event), { schedule: async request => { scheduled = request; } });
+  assert.deepEqual(result, { status: 'pending', reason: 'GATE_RELEASE_FAILED', scheduled: true, enrollmentNonce: (await readChat(f.store, 'claude', 'synthetic')).value.history.startPromptNonce });
   assert.ok(scheduled);
   assert.equal((await readChat(f.store, f.event.client, f.event.sessionId)).value.pending.id, scheduled.requestId);
 });

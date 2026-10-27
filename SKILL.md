@@ -75,9 +75,11 @@ work and warnings. Example: `/cuefluent-notes:cuefluent-notes process`, then rev
 
 Agree every choice with the user before calling `cuefluent_setup` once: project
 root, notes destination (a directory or one `.md` file), tracking (`manual`
-default, `auto`), saving (`review` default, `auto`) and activity logging (on with
-a timezone for a directory destination, off for a file). Report the saved project
-and log path. To change a project, pass its `id` or exact `root` and only the
+default, or `auto` for existing and new chats from their next prompt, without
+earlier history and respecting explicit opt-outs), saving (`review` default, `auto`)
+and activity logging (on with a timezone for a directory destination, off for a
+file). Explain the [native collection limits](references/limits.md#native-clients-and-collection)
+for Claude forks. Report the saved project and log path. To change a project, pass its `id` or exact `root` and only the
 fields that change; omitted preferences and opt-outs stay. `cuefluent_status` with
 a `projectId` is read-only. Example: "Set up Cuefluent for this repository with
 notes in ./notes, review saving and logging on."

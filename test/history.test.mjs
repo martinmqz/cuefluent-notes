@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { resolveNativeHistory, reanchorNativeCheckpoint, buildClaudeCommandContext, resolveClaudeCommandBoundary } from '../src/client/history.mjs';
+import { resolveNativeHistory, reanchorNativeCheckpoint, buildClaudeCommandContext, resolveClaudeCommandBoundary, buildClaudePromptContext, resolveClaudePromptBoundary } from '../src/client/history.mjs';
 import { createHistoricalCommandClassifier } from '../src/client/historical-commands.mjs';
 import { normalizeTranscript, inspectNativeRow } from '../src/transcript/index.mjs';
 
@@ -169,6 +169,21 @@ test('completed native bookmarks re-anchor only at identical record identity and
   await result.source.close();
 });
 
+test('an enrollment bookmark stays before the same row when relocation shifts it, and rejects missing or duplicate anchors', async () => {
+  const rows = [...parentRows(), human('parent', 'new-prompt', 4, 'First eligible input'), answer('new-prompt', 5, 'Eligible reply'), done(6)];
+  const original = physical('original', rows); let point;
+  for await (const event of normalizeTranscript(original, { client: 'codex', sessionId: 'parent', fromPromptId: 'turn:new-prompt' })) point = event.checkpoint;
+  assert.equal(point.offset, point.anchor.start); assert.equal(point.exchange, null);
+  const movedRows = [{ ...rows[0], syntheticPadding: 'Relocated header bytes' }, ...rows.slice(1)];
+  const moved = physical('moved', movedRows);
+  const result = await reanchorNativeCheckpoint(moved, point, { client: 'codex', sessionId: 'parent' });
+  assert.equal(result.status, 'ready'); assert.notEqual(result.checkpoint.offset, point.offset);
+  assert.equal(result.checkpoint.offset, result.checkpoint.anchor.start);
+  assert.deepEqual((await normalized(moved, 'parent', result.checkpoint)).parts.map(part => part.exchangeId), ['new-prompt']);
+  assert.equal((await reanchorNativeCheckpoint(physical('missing', parentRows()), point, { client: 'codex', sessionId: 'parent' })).reason, 'HISTORY_ANCHOR_MISSING');
+  assert.equal((await reanchorNativeCheckpoint(physical('duplicate', [...rows, rows[4]]), point, { client: 'codex', sessionId: 'parent' })).reason, 'HISTORY_ANCHOR_AMBIGUOUS');
+});
+
 const commandSession = 'fork-child', commandPrompt = 'rewritten-current-prompt', commandName = 'cuefluent-notes:notes';
 const commandSkill = path.resolve('synthetic-skill', 'SKILL.md'), nonce = 'fedcba98-7654-4321-8abc-0123456789ab';
 const oldNonce = '12345678-90ab-4cde-9f01-23456789abcd';
@@ -262,4 +277,38 @@ test('composite verification falls back to exact prefix hashing without physical
   current = Buffer.from(current); current[current.indexOf('Copied')] = 'c'.charCodeAt(0);
   await assert.rejects(result.source.verify(), { code: 'TRANSCRIPT_SOURCE_CHANGED' });
   await result.source.close();
+});
+
+
+test('Claude prompt proof selects the new row through its native attachment chain, never a copied prompt ID', async () => {
+  const sessionId = 'fork', promptId = 'rewritten', nonce = '12345678-1234-4234-8234-123456789abc';
+  const request = { sessionId, promptId, nonce };
+  const human = (uuid, content) => ({ type: 'user', sessionId, promptId, uuid, message: { role: 'user', content } });
+  const attachment = (uuid, parentUuid, type) => ({ type: 'attachment', sessionId, uuid, parentUuid, attachment: { type } });
+  const old = human('inherited', 'Copied history'), current = human('current', 'New prompt');
+  const environment = attachment('environment', 'current', 'environment');
+  const model = attachment('model', 'environment', 'model');
+  const proof = { ...attachment('proof', 'model', 'hook_additional_context'), attachment: {
+    type: 'hook_additional_context', hookName: 'UserPromptSubmit', hookEvent: 'UserPromptSubmit', content: [buildClaudePromptContext(nonce)] } };
+  const rows = [old, current, environment, model, proof];
+  assert.equal((await resolveClaudePromptBoundary(physical('prefix', [old]), request)).reason, 'TRANSCRIPT_BOUNDARY_PENDING');
+  const exact = await resolveClaudePromptBoundary(physical('complete', rows), request);
+  assert.equal(exact.status, 'ready'); assert.equal(exact.anchor.rowId, 'current');
+  for (const changed of [
+    { ...proof, parentUuid: 'inherited' },
+    { ...proof, attachment: { ...proof.attachment, hookEvent: 'UserPromptExpansion' } },
+    { ...proof, attachment: { ...proof.attachment, content: [buildClaudePromptContext(nonce), 'extra'] } },
+    human('ordinary-text', buildClaudePromptContext(nonce)),
+  ]) assert.equal((await resolveClaudePromptBoundary(physical('invalid-proof', [...rows.slice(0, -1), changed]), request)).reason, 'TRANSCRIPT_BOUNDARY_PENDING');
+  assert.equal((await resolveClaudePromptBoundary(physical('replayed', [...rows, ...rows.slice(1)]), request)).reason, 'TRANSCRIPT_BOUNDARY_AMBIGUOUS');
+  const torn = physical('torn', rows); torn.size -= 2;
+  assert.equal((await resolveClaudePromptBoundary(torn, request)).reason, 'TRANSCRIPT_BOUNDARY_PENDING');
+  assert.equal((await resolveClaudePromptBoundary(physical('small-batch', rows), { ...request, limits: { rows: 1 } })).status, 'ready');
+  const longChain = [old, current];
+  for (let index = 0; index < 256; index++) longChain.push(attachment(`context-${index}`, longChain.at(-1).uuid, 'environment'));
+  longChain.push({ ...proof, parentUuid: longChain.at(-1).uuid });
+  assert.equal((await resolveClaudePromptBoundary(physical('bounded-chain', longChain), request)).reason, 'TRANSCRIPT_BOUNDARY_PENDING');
+  const changed = physical('changed-parent-chain', rows);
+  changed.verify = async () => { changed.bytes[changed.bytes.indexOf('environment')] = 88; };
+  await assert.rejects(resolveClaudePromptBoundary(changed, request), { code: 'TRANSCRIPT_SOURCE_CHANGED' });
 });

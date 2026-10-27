@@ -51,7 +51,7 @@ test('Stop pins exact native prompt and UTF8 final-message hash; end/compact do 
     last_assistant_message: 'Private authentication diagnostics must not be collected' }).event;
   assert.equal(verification.kind, 'failed'); assert.deepEqual(verification.completion, { promptId: 'verification-prompt', kind: 'failed', finalTextHash: null });
   assert(!JSON.stringify(verification).includes('Private authentication'));
-  for (const hook_event_name of ['UserPromptSubmit', 'PreCompact', 'UnknownHook']) {
+  for (const hook_event_name of ['PreCompact', 'UnknownHook']) {
     assert.deepEqual(mapNativeHook('claude', { ...identity, hook_event_name, prompt: '/notes:notes track' }), { event: null, command: null });
   }
 });
@@ -98,4 +98,19 @@ test('hook ingress preserves zero-write manual policy and returns commands witho
   assert.equal(excluded.command, null); assert.equal(excluded.ingress.status, 'excluded');
   const unknown = await handleNativeHook(store, 'claude', expansion(), { claudeCommand, launchMarker: randomUUID() });
   assert.equal(unknown.command, null); assert.equal(unknown.ingress.reason, 'PROCESSING_IDENTITY_UNVERIFIED');
+});
+
+
+test('prompt submission retains only native boundary metadata and never claims completion', () => {
+  for (const client of ['claude', 'codex']) {
+    const input = { ...identity, hook_event_name: 'UserPromptSubmit', prompt_id: 'claude-prompt', turn_id: 'codex-turn', prompt: 'Synthetic text that must not enter metadata.' };
+    const { event, command } = mapNativeHook(client, input);
+    assert.equal(event.kind, 'prompt'); assert.equal(event.promptId, client === 'claude' ? input.prompt_id : input.turn_id);
+    assert.equal(event.completion, null); assert.equal(event.newSession, false); assert.equal(command, null);
+    assert(!JSON.stringify(event).includes(input.prompt));
+    delete input[client === 'claude' ? 'prompt_id' : 'turn_id'];
+    assert.deepEqual(mapNativeHook(client, input), { event: null, command: null });
+    input[client === 'claude' ? 'prompt_id' : 'turn_id'] = '';
+    assert.throws(() => mapNativeHook(client, input), { code: 'TRANSCRIPT_IDENTITY_INVALID' });
+  }
 });

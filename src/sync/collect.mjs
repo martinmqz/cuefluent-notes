@@ -3,7 +3,7 @@ import { advanceChat, rebindChatSource, requestReconciliation, resolveChatHistor
 import { fail } from '../core/errors.mjs';
 import { openTranscript } from '../client/source.mjs';
 import { createHistoricalCommandClassifiers } from '../client/historical-commands.mjs';
-import { resolveClaudeCommandBoundary, resolveNativeHistory, reanchorNativeCheckpoint } from '../client/history.mjs';
+import { resolveClaudeCommandBoundary, resolveClaudePromptBoundary, resolveNativeHistory, reanchorNativeCheckpoint } from '../client/history.mjs';
 import { normalizeTranscript } from '../transcript/index.mjs';
 import { hashBytes } from '../storage/files.mjs';
 import { encodeQueueRecord } from '../storage/queue-format.mjs';
@@ -120,6 +120,29 @@ export async function collectChat(store, { client, sessionId, classifyCommand = 
     }
     if (JSON.stringify(saved.value.historySources) !== JSON.stringify(historySources)) saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
       change: chat => validateChat({ ...chat, historySources }) });
+    const publishCheckpoint = async checkpoint => {
+      await source.verify(checkpoint.anchor);
+      // Metadata never advances past an interrupted queue publication.
+      if (!saved.value.uncommitted) saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
+        change: chat => advanceChat(chat, { generation, checkpoint, requestId }) });
+    };
+    const point = saved.value.checkpoint, startPromptId = saved.value.history.startPromptId;
+    const seekingStart = startPromptId && point.offset === 0 && !point.exchange && !saved.value.uncommitted &&
+      (point.anchor === null || point.boundary?.promptId === startPromptId && point.boundary.rowId === null);
+    if (seekingStart && client === 'claude') {
+      const proof = await resolveClaudePromptBoundary(source, { sessionId, promptId: startPromptId, nonce: saved.value.history.startPromptNonce, limits });
+      if (proof.status !== 'ready') {
+        if (proof.reason === 'TRANSCRIPT_BOUNDARY_AMBIGUOUS') await publishCheckpoint({ ...point, anchor: proof.anchor,
+          boundary: { promptId: startPromptId, rowId: null, start: proof.anchor.start, scanOffset: proof.anchor.end, matches: 2, scanPromptId: startPromptId } });
+        return { status: 'pending', reason: proof.reason, parts, ...progress() };
+      }
+      await publishCheckpoint({ ...point, offset: proof.anchor.start, scanOffset: proof.anchor.start, anchor: proof.anchor, boundary: null });
+    } else if (seekingStart) {
+      for await (const event of normalizeTranscript(source, { client, sessionId, checkpoint: point, fromPromptId: startPromptId, limits })) {
+        await publishCheckpoint(event.checkpoint);
+        if (event.type === 'pending') return { status: 'pending', reason: event.reason, parts, ...progress() };
+      }
+    }
     if (saved.value.uncommitted) {
       // Reconstruct exactly the retained emission plan, including its original
       // outcome and range. A newer hook or appended final row cannot change the
@@ -162,20 +185,15 @@ export async function collectChat(store, { client, sessionId, classifyCommand = 
       beforePromptId: initial.pending?.beforePromptId ?? null, beforeRowId, classifyCommand,
       limits: { ...limits, parts: (limits.parts ?? 64) - parts },
     })) {
-      await source.verify(event.checkpoint.anchor);
       if (event.type === 'part') {
+        await source.verify(event.checkpoint.anchor);
         const record = transcriptPartRecord(event.part);
         saved = await commitChatPart(store, projectId, client, sessionId, {
           expectedHash: saved.hash, generation, checkpoint: event.checkpoint, requestId, record,
         });
         parts++;
       } else {
-        // Replay metadata while reconstructing an interrupted part cannot move
-        // its durable bookmark past bytes that are still ineligible to process.
-        if (!saved.value.uncommitted) {
-          saved = await updateChat(store, projectId, client, sessionId, { expectedHash: saved.hash,
-            change: chat => advanceChat(chat, { generation, checkpoint: event.checkpoint, requestId }) });
-        }
+        await publishCheckpoint(event.checkpoint);
         if (event.type === 'pending') pendingReason = event.reason;
       }
     }

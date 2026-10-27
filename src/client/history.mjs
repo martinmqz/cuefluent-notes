@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { inspectNativeRow, metaValue as value, assertSource, verifyRow, rowTokenStream, transcriptError, transcriptLimits } from '../transcript/source.mjs';
+import { inspectNativeRow, metaValue as value, assertSource, verifyRow, rowTokenStream, transcriptError, transcriptLimits, TRANSCRIPT_LIMITS } from '../transcript/source.mjs';
+import { classifyNativeRow } from '../transcript/native.mjs';
 import { validateCheckpoint, nativeId } from '../transcript/checkpoint.mjs';
 
 const MAX_SOURCES = 32;
@@ -16,6 +17,14 @@ export function buildClaudeCommandContext(nonce) {
     transcriptError('HISTORY_CONTEXT_INVALID', 'A fresh unpredictable invocation nonce is required');
   }
   return `Cuefluent Notes invocation: ${nonce}`;
+}
+
+/** The prompt hook emits this once, after automatic enrollment is durable. */
+export function buildClaudePromptContext(nonce) {
+  if (typeof nonce !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(nonce)) {
+    transcriptError('HISTORY_CONTEXT_INVALID', 'Prompt enrollment requires its unpredictable hook nonce');
+  }
+  return `Cuefluent Notes enrollment: ${nonce}`;
 }
 
 async function singleContext(source, row, limits) {
@@ -70,6 +79,49 @@ export async function resolveClaudeCommandBoundary(source, { sessionId, promptId
   await source.verify?.();
   for (const inspected of matched.anchors) await verifyRow(source, inspected, { limits });
   return matched;
+}
+
+/** A prompt ID can be rewritten onto inherited Claude rows. Only the fresh
+ * UserPromptSubmit attachment and its intact native parent chain identify the
+ * new human row. Attachment chains are bounded; no transcript content is kept.
+ */
+export async function resolveClaudePromptBoundary(source, { sessionId, promptId, nonce, limits: inputLimits = {} } = {}) {
+  assertSource(source); nativeId(sessionId); nativeId(promptId);
+  const context = buildClaudePromptContext(nonce), expected = createHash('sha256').update(context).digest('hex'), limits = transcriptLimits(inputLimits);
+  let chain = [], matched = null;
+  for (let offset = 0; offset < source.size;) {
+    const row = await inspectNativeRow(source, offset, { limits });
+    if (row.pending) return pending('TRANSCRIPT_BOUNDARY_PENDING');
+    const classified = classifyNativeRow(row, { client: 'claude', sessionId });
+    const text = row.strings[JSON.stringify(['attachment', 'content', 0])];
+    const proof = value(row, 'type') === 'attachment' && value(row, 'attachment', 'type') === 'hook_additional_context' &&
+      value(row, 'attachment', 'hookName') === 'UserPromptSubmit' && value(row, 'attachment', 'hookEvent') === 'UserPromptSubmit' &&
+      value(row, 'isSidechain') !== true && value(row, 'sessionId') === sessionId && text?.hash === expected && text.units === context.length &&
+      await singleContext(source, row, limits);
+    if (classified.kind === 'human') chain = classified.promptId === promptId ? [row] : [];
+    else if (chain.length) {
+      const previous = chain.at(-1), type = value(row, 'type');
+      if (value(row, 'sessionId') === sessionId && value(row, 'isSidechain') !== true &&
+          value(row, 'parentUuid') === value(previous, 'uuid') && typeof value(row, 'uuid') === 'string' &&
+          (type === 'attachment' || type === 'user' && value(row, 'isMeta') === true && value(row, 'turnCompanion') === true && value(row, 'promptId') === promptId) &&
+          chain.length < TRANSCRIPT_LIMITS.rows) chain.push(row);
+      else chain = [];
+    }
+    if (proof) {
+      if (matched) {
+        const first = matched[0];
+        return Object.freeze({ ...pending('TRANSCRIPT_BOUNDARY_AMBIGUOUS'), anchor: Object.freeze({ start: first.start, end: first.end, hash: first.hash, rowId: nativeId(value(first, 'uuid')) }) });
+      }
+      if (!chain.length) return pending('TRANSCRIPT_BOUNDARY_PENDING');
+      matched = [...chain];
+    }
+    offset = row.end;
+  }
+  if (!matched) return pending('TRANSCRIPT_BOUNDARY_PENDING');
+  await source.verify?.();
+  for (const row of matched) await verifyRow(source, row, { limits });
+  const first = matched[0];
+  return Object.freeze({ status: 'ready', anchor: Object.freeze({ start: first.start, end: first.end, hash: first.hash, rowId: nativeId(value(first, 'uuid')) }) });
 }
 
 function position(input) {
@@ -181,7 +233,7 @@ async function composite(active, segments, history, owned) {
 export async function resolveNativeHistory(active, { client, sessionId, mode = 'manual', startSource = 'startup', resolveSource,
   inheritedBoundary = null, limits: inputLimits = {} } = {}) {
   assertSource(active); nativeId(sessionId);
-  if (!['claude', 'codex'].includes(client) || !['manual', 'automatic'].includes(mode) || !['startup', 'resume', 'fork', 'clear', 'compact'].includes(startSource)) {
+  if (!['claude', 'codex'].includes(client) || !['manual', 'automatic'].includes(mode) || !['prompt', 'startup', 'resume', 'fork', 'clear', 'compact'].includes(startSource)) {
     transcriptError('HISTORY_CONTEXT_INVALID', 'Unsupported native history context');
   }
   const limits = transcriptLimits(inputLimits), owned = new Set(), seen = new Set();
@@ -284,7 +336,7 @@ function stableRowId(row) {
     (value(row, 'ordinal') !== undefined ? `ordinal:${value(row, 'ordinal')}` : null);
 }
 
-/** Relocate an inactive completed bookmark only at the same native record/hash.
+/** Relocate an inactive bookmark before or after the same native record/hash.
  * Removed anchors, active field cursors and unresolved stop boundaries retain the
  * original checkpoint and return pending. No hashes or run selections refresh.
  */
@@ -292,7 +344,8 @@ export async function reanchorNativeCheckpoint(source, input, { client, sessionI
   assertSource(source);
   const original = validateCheckpoint(input, { client, sessionId }), limits = transcriptLimits(inputLimits);
   if (original.offset === 0 && original.anchor === null && original.exchange === null) return Object.freeze({ status: 'ready', checkpoint: original });
-  if (original.cursor || original.boundary || original.scanOffset !== original.offset || original.offset !== original.anchor?.end ||
+  const beforeRow = !original.exchange && original.offset === original.anchor?.start;
+  if (original.cursor || original.boundary || original.scanOffset !== original.offset || (!beforeRow && original.offset !== original.anchor?.end) ||
       (original.exchange && !original.exchange.completed) || original.anchor?.rowId.startsWith('offset:')) return pending('HISTORY_REANCHOR_PENDING');
   let found = null, human = null, duplicates = false;
   for (let offset = 0; offset < source.size;) {
@@ -307,7 +360,8 @@ export async function reanchorNativeCheckpoint(source, input, { client, sessionI
   if (duplicates) return pending('HISTORY_ANCHOR_AMBIGUOUS');
   if (human && human.start > found.start) return pending('HISTORY_ANCHOR_MISSING');
   await source.verify?.(); await verifyRow(source, found, { limits });
-  const relocated = validateCheckpoint({ ...original, offset: found.end, scanOffset: found.end,
+  const offset = beforeRow ? found.start : found.end;
+  const relocated = validateCheckpoint({ ...original, offset, scanOffset: offset,
     anchor: { ...original.anchor, start: found.start, end: found.end }, exchange: original.exchange ? { ...original.exchange, start: human.start } : null }, { client, sessionId });
   return Object.freeze({ status: 'ready', checkpoint: relocated });
 }

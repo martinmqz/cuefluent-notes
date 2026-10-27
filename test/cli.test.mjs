@@ -532,3 +532,41 @@ test(`a live connector starts on an existing ${shape} store location, serves set
   } finally { await second.stop(); }
 });
 }
+
+
+test('prompt hooks without native prompt identity stay silent and create no store', async t => {
+  const f = await fixture(t);
+  for (const client of ['claude', 'codex']) {
+    const result = await f.run(['hook', client], JSON.stringify({ hook_event_name: 'UserPromptSubmit',
+      session_id: 'synthetic', cwd: f.cwd, transcript_path: null, prompt: 'Synthetic ordinary prompt.' }));
+    assert.deepEqual(result, { code: 0, stdout: '', stderr: '' });
+  }
+  await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });
+});
+
+
+test('Claude prompt hook emits only the durable enrollment proof, replays it for that prompt and stays silent otherwise', async t => {
+  const f = await fixture(t), configPath = path.join(f.root, 'setup.json');
+  await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
+    tracking: 'auto', destination: { kind: 'directory', path: f.notes } } }));
+  const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+  const { openStore, gateOptions } = await import('../src/storage/store.mjs');
+  const { tryAcquireExistingGate } = await import('../src/storage/gates.mjs');
+  const { readChat } = await import('../src/storage/chats.mjs');
+  const { buildClaudePromptContext } = await import('../src/client/history.mjs');
+  const store = await openStore(f.storeRoot), held = tryAcquireExistingGate(store.syncGate, gateOptions).acquired;
+  assert.ok(held); // No detached fixture collector is needed to verify hook output.
+  try {
+    const envelope = { hook_event_name: 'UserPromptSubmit', session_id: 'synthetic', cwd: f.cwd, transcript_path: null,
+      prompt_id: 'first', prompt: 'Synthetic input must not appear in hook context.' };
+    const first = await f.run(['hook', 'claude'], JSON.stringify(envelope));
+    assert.equal(first.code, 0); assert.equal(first.stderr, '');
+    const chat = await readChat(store, 'claude', 'synthetic');
+    assert.deepEqual(JSON.parse(first.stdout), { hookSpecificOutput: { hookEventName: 'UserPromptSubmit',
+      additionalContext: buildClaudePromptContext(chat.value.history.startPromptNonce) } });
+    assert.deepEqual(await f.run(['hook', 'claude'], JSON.stringify(envelope)), first);
+    assert.equal((await readChat(store, 'claude', 'synthetic')).hash, chat.hash);
+    assert.deepEqual(await f.run(['hook', 'claude'], JSON.stringify({ ...envelope, prompt_id: 'later' })), { code: 0, stdout: '', stderr: '' });
+    assert.equal((await readChat(store, 'claude', 'synthetic')).hash, chat.hash);
+  } finally { held.release(); }
+});
