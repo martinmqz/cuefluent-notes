@@ -12,7 +12,7 @@ const throwsCode = (action, code = 'SETTINGS_INVALID') => assert.throws(action, 
 test('fresh project defaults are independent and settings start empty', () => {
   assert.deepEqual(emptySettings(), { schemaVersion: 1, projects: [] });
   assert.deepEqual(project(), { id: 'work', root: '/projects/work', destination: { kind: 'directory', path: '/notes' },
-    tracking: 'manual', saving: 'review', activityLog: { enabled: true, timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone, path: '/notes/logs' } });
+    tracking: 'manual', saving: 'review', activityLog: { enabled: true, timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone, path: '/notes/logs' }, expandedMetadata: false });
   assert.equal(project({ tracking: 'auto' }).saving, 'review');
   assert.equal(project({ saving: 'auto' }).tracking, 'manual');
   assert.equal(project({ activityLog: { enabled: true, timezone: 'America/Los_Angeles' } }).tracking, 'manual');
@@ -37,7 +37,7 @@ test('settings snapshots detach from caller objects and freeze every nested obje
 });
 
 test('validate complete settings without silently adding creation defaults', () => {
-  for (const field of ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog']) {
+  for (const field of ['id', 'root', 'destination', 'tracking', 'saving', 'activityLog', 'expandedMetadata']) {
     const incomplete = structuredClone(project()); delete incomplete[field];
     throwsCode(() => validateSettings(settings(incomplete), posix));
   }
@@ -184,4 +184,16 @@ test('Windows roots and destinations reject ambiguous or reserved spellings', ()
   }
   throwsCode(() => project({ root: 'C:\\Work', destination: { kind: 'file', path: 'D:\\Notes\\CON.md' } }, windows));
   assert.equal(project({ root: 'C:\\', destination: { kind: 'file', path: 'D:\\Notes\\Work.MD' } }, windows).root, 'C:\\');
+});
+
+
+test('expanded metadata defaults only at creation and loaded settings require the explicit preference', () => {
+  assert.equal(project().expandedMetadata, false);
+  const optedIn = project({ expandedMetadata: true });
+  assert.equal(validateSettings(settings(optedIn), posix).projects[0].expandedMetadata, true);
+  const omitted = { ...optedIn }; delete omitted.expandedMetadata;
+  throwsCode(() => validateSettings(settings(omitted), posix));
+  assert.equal(createProject(omitted, posix).expandedMetadata, false);
+  assert.equal(project({ expandedMetadata: false }).expandedMetadata, false);
+  for (const expandedMetadata of [null, undefined, 0, 'false']) throwsCode(() => project({ expandedMetadata }));
 });

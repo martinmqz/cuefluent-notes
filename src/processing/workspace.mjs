@@ -182,8 +182,8 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
         proposed = proposed.slice(0, at) + edit.newText + proposed.slice(at + edit.oldText.length); decodeNote(proposed);
       }
     }
-    const bytes = original.bytes ? preserveMetadata(original.bytes, proposed, { usefulChange: input.usefulChange, updated: now, skillVersion }).bytes :
-      createGeneratedNote(proposed, { id: original.noteId, now, skillVersion });
+    const bytes = original.bytes ? preserveMetadata(original.bytes, proposed, { usefulChange: input.usefulChange, updated: now, skillVersion, expandedMetadata: project.expandedMetadata }).bytes :
+      createGeneratedNote(proposed, { id: original.noteId, now, skillVersion, expandedMetadata: project.expandedMetadata });
     if (bytes.length > limits.fileBytes) fail('NOTE_FILE_LIMIT', 'The complete proposed note exceeds its file profile.');
     if (!original.bytes && input.usefulChange === false) fail('WORKSPACE_ARGUMENT', 'A new note cannot be an unchanged outcome.');
     const unchanged = original.bytes !== null && bytes.equals(original.bytes);

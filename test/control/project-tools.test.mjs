@@ -15,6 +15,7 @@ import { interruptRemoval } from '../fixtures/exact-removal-worker.mjs';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { inspectMetadata } from '../../src/notes/index.mjs';
 import { createAnnualLog } from '../../src/logs/index.mjs';
 
 const skillVersion = '0.18.0', systemZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -385,4 +386,24 @@ test('completing a published interrupted setup is bound to the settings observed
   // A's own choices, re-read against the current settings, apply on top of B's.
   const applied = await f.setup({ id: 'demo', tracking: 'auto' });
   assert.equal(applied.project.tracking, 'auto'); assert.equal(applied.project.destination.path, newNotes.path);
+});
+
+
+test('setup defaults to compact, retains an expanded opt-in, and never reformats an existing annual log', async t => {
+  const f = await fixture(t), root = await f.folder('format');
+  const initial = await f.setup({ root, destination: f.destination('notes') });
+  assert.equal(initial.project.expandedMetadata, false);
+  const annual = path.join(initial.logs.path, `${initial.logs.years[0]}.md`), before = await fs.readFile(annual);
+  assert.equal(inspectMetadata(before).raw.trim().split('\n').length, 3);
+  const id = initial.project.id;
+  assert.equal((await f.setup({ id, expandedMetadata: true })).project.expandedMetadata, true);
+  assert.equal((await f.setup({ id, tracking: 'auto' })).project.expandedMetadata, true);
+  assert.equal((await f.setup({ id, expandedMetadata: false })).project.expandedMetadata, false);
+  assert.deepEqual(await fs.readFile(annual), before);
+  const settings = await f.settings();
+  for (const expandedMetadata of [null, 'false', 0]) await assert.rejects(f.setup({ id, expandedMetadata }), { code: 'SETUP_TOOL_ARGUMENT' });
+  assert.deepEqual(await f.settings(), settings);
+  const expanded = await f.setup({ root: await f.folder('expanded'), destination: f.destination('expanded-notes'), expandedMetadata: true });
+  const bytes = await fs.readFile(path.join(expanded.logs.path, `${expanded.logs.years[0]}.md`));
+  assert.ok(inspectMetadata(bytes).raw.trim().split('\n').length > 3);
 });

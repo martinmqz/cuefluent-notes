@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar } from 'yaml';
+import { isDeepStrictEqual } from 'node:util';
+import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar, visit as visitYaml } from 'yaml';
 import { fail } from '../core/errors.mjs';
 import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
-import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
+import { decodeNote, noteNewline, NOTE_PROFILE as P } from './profile.mjs';
 import { parseMarkdown } from './markdown.mjs';
 
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -225,9 +226,31 @@ export function noteContent(input) {
 }
 function quoted(value) { const scalar = new Scalar(value); scalar.type = Scalar.QUOTE_DOUBLE; return scalar; }
 
+function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOverflow = false) {
+  requireValue(typeof expandedMetadata === 'boolean');
+  const expected = validateMetadata(document.toJS({ maxAliasCount: 0 })), candidate = document.clone();
+  // Flow style must spell out blank sequence items and escape multiline strings.
+  // Preserve comments even when they need additional lines in compact output.
+  if (!expandedMetadata) visitYaml(candidate, { Scalar(_key, node) {
+    if (node.value === null) node.source = undefined;
+    if (typeof node.value === 'string' && /[\r\n]/.test(node.value)) node.type = Scalar.QUOTE_DOUBLE;
+  } });
+  const serialize = (value, collectionStyle) => {
+    const payload = value.toString({ lineWidth: 0, collectionStyle, flowCollectionPadding: false, doubleQuotedAsJSON: true });
+    return `<!-- cuefluent\n${payload}-->\n`.replace(/\n/g, newline);
+  };
+  let raw = serialize(candidate, expandedMetadata ? 'block' : 'flow');
+  // Escaping or indentation can exceed the fixed metadata limit in either
+  // format. A formatting preference must not prevent an otherwise valid edit.
+  if (preserveLayoutOnOverflow && Buffer.byteLength(raw) > P.metadataBytes) raw = serialize(document, 'any');
+  const rendered = inspectMetadata(raw);
+  requireValue(rendered.status === 'supported' && isDeepStrictEqual(rendered.value, expected));
+  return raw;
+}
+
 /** Existing metadata owns identity/descriptions. Agent-supplied replacements do
  * not overwrite it. Timestamp/version changes occur only for a useful body edit. */
-export function preserveMetadata(originalInput, proposedInput, { usefulChange, updated, skillVersion } = {}) {
+export function preserveMetadata(originalInput, proposedInput, { usefulChange, updated, skillVersion, expandedMetadata = false } = {}) {
   const original = decodeNote(originalInput), proposed = decodeNote(proposedInput);
   const before = inspectMetadata(original), after = inspectMetadata(proposed);
   const unchanged = () => ({ bytes: Buffer.from(original), changed: false, diagnostics: before.diagnostics });
@@ -237,7 +260,7 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
   if (oldBody === newBody) return unchanged();
   const prefix = before.raw === null ? '' : original.slice(0, before.start);
   let raw = before.raw ?? '';
-  if (before.status === 'supported' && (updated !== undefined || skillVersion !== undefined || before.value.generation?.content_hash !== undefined)) {
+  if (before.status === 'supported') {
     const matched = block.exec(raw), { document } = parseYaml(matched[2]);
     if (updated !== undefined) {
       requireValue(isNoteTimestamp(updated));
@@ -257,22 +280,19 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       const value = `sha256:${createHash('sha256').update(prefix + newBody).digest('hex')}`;
       document.getIn(['generation', 'content_hash'], true).value = value;
     }
-    validateMetadata(document.toJS({ maxAliasCount: 0 }));
-    const newline = raw.includes('\r\n') ? '\r\n' : '\n';
-    raw = `<!-- cuefluent\n${document.toString({ lineWidth: 0 })}-->\n`.replace(/\n/g, newline);
-    requireValue(Buffer.byteLength(raw) <= P.metadataBytes);
+    raw = renderMetadata(document, expandedMetadata, noteNewline(raw), true);
   }
   const bytes = Buffer.from(prefix + raw + newBody);
   return { bytes, changed: !bytes.equals(Buffer.from(original)), diagnostics: before.diagnostics };
 }
 
-export function createGeneratedNote(bodyInput, { id = randomUUID(), now, skillVersion, metadata = {} } = {}) {
+export function createGeneratedNote(bodyInput, { id = randomUUID(), now, skillVersion, metadata = {}, expandedMetadata = false } = {}) {
   const body = decodeNote(bodyInput);
   metadata = dataValue(metadata);
   requireValue(inspectMetadata(body).status === 'absent' && isNoteTimestamp(now));
   const value = validateMetadata({ ...metadata, schema_version: 1, id, created: now, updated: now, generation: { ...metadata.generation, skill_version: skillVersion } });
   const document = parseDocument(''); document.contents = document.createNode(value);
   document.set('created', quoted(now)); document.set('updated', quoted(now));
-  const result = Buffer.from(`<!-- cuefluent\n${document.toString({ lineWidth: 0 })}-->\n${body}`);
+  const result = Buffer.from(renderMetadata(document, expandedMetadata, noteNewline(body)) + body);
   requireValue(inspectMetadata(result).status === 'supported'); return result;
 }

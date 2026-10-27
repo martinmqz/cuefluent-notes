@@ -72,7 +72,8 @@ There is no linter, formatter, or type checker.
   command, or reading notes authorizes no saving, tracking, or processing.
 - A new project defaults to tracking `manual` and saving `review`. Activity
   logging defaults to on for a directory destination and stays off for a
-  single-file destination. The three settings are independent. Preserve
+  single-file destination. Metadata defaults to compact (`expandedMetadata: false`);
+  expanded YAML requires an explicit opt-in. These preferences are independent. Preserve
   explicit opt-outs and loaded settings. Tracking `auto` enrolls eligible existing
   and new native chats at their first prompt after it is enabled, excluding earlier
   history and exchanges already underway during setup. Claude forks with an unverified
@@ -100,7 +101,7 @@ There is no linter, formatter, or type checker.
   first binding and stable thereafter. One pending run per project. Validate
   whole settings documents and reject unsupported schema versions. Refuse
   changes that orphan work or redirect a pending run's destination or saving
-  mode. Pin logging preferences per run.
+  mode. Pin logging and metadata-format preferences per run.
 - Queued processing runs in a separate untracked session with only bounded
   note reads and private draft tools: no shell, network, tracking, or note-save
   capability, with hooks and unrelated plugins effectively disabled.

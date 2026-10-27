@@ -225,3 +225,23 @@ test('unsafe linked entries do not hide safe notes from a listing or grant read/
   await assert.rejects(workspace.read_note({ target: 'hard.md' }), { code: 'PATH_UNSAFE' });
   await assert.rejects(workspace.draft_note({ target: 'hard.md', content: body, summary: 'Must refuse' }), { code: 'PATH_UNSAFE' });
 });
+
+
+test('note workspaces apply the project format to new notes and useful updates', async t => {
+  for (const expandedMetadata of [false, true]) {
+    const f = await fixture(t), project = createProject({ ...f.project, expandedMetadata });
+    const workspace = await f.open({ project });
+    await workspace.draft_note({ target: 'new.md', content: body, summary: 'Add synthetic note.' });
+    const draft = (await finish(workspace)).drafts[0];
+    assert.equal(inspectMetadata(draft.bytes).raw.trim().split('\n').length > 3, expandedMetadata);
+    const original = createGeneratedNote(body, { now, skillVersion, expandedMetadata: !expandedMetadata });
+    await fs.writeFile(path.join(f.root, 'existing.md'), original);
+    const update = await f.open({ project });
+    await update.read_note({ target: 'existing.md' });
+    await update.draft_note({ target: 'existing.md', content: body.replace('original', 'updated'), summary: 'Update synthetic note.' });
+    const changed = (await finish(update)).drafts[0];
+    assert.equal(inspectMetadata(changed.bytes).raw.trim().split('\n').length > 3, expandedMetadata);
+    assert.equal(inspectMetadata(changed.bytes).value.id, inspectMetadata(original).value.id);
+    assert.deepEqual(await fs.readFile(path.join(f.root, 'existing.md')), original);
+  }
+});
