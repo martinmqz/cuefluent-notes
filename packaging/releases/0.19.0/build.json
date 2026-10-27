@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "version": "0.19.0",
+  "sourceLockSha256": "3b4d484cb80c95bb8930d67ebc7e81eda896bf9558c75063d53efe9518d3e7a0",
+  "packages": [
+    {
+      "client": "codex",
+      "path": "codex/cuefluent-notes",
+      "inventorySha256": "78a78433f6db8b2005fe74bef1a198c09c91bc2e69446b64f92f26d37e6aa427",
+      "archives": [
+        {
+          "path": "cuefluent-notes-0.19.0-codex.tar.gz",
+          "bytes": 1362280,
+          "sha256": "dba0de19af7490b3a9e228d483dc434ce69b28409b1e1305dbd0094213713dff"
+        },
+        {
+          "path": "cuefluent-notes-0.19.0-codex.zip",
+          "bytes": 5371891,
+          "sha256": "6bf53f672960deaa3c19a1fc742a9cee422f6231dd2946440a1633338f8db69a"
+        }
+      ]
+    },
+    {
+      "client": "claude",
+      "path": "claude/cuefluent-notes",
+      "inventorySha256": "1c4391406bad84b23efaf67ea136868214cd53bc875522d4e1dfc72d7a2994ac",
+      "archives": [
+        {
+          "path": "cuefluent-notes-0.19.0-claude.tar.gz",
+          "bytes": 1362161,
+          "sha256": "2fbcf81f75253b7d5c1cb772be17a65a8e6a89c7104351bd5e34c456195d5f5b"
+        },
+        {
+          "path": "cuefluent-notes-0.19.0-claude.zip",
+          "bytes": 5371944,
+          "sha256": "ed4e35f9a56416d6e1e0bc14bcf59d102f24b6acd976019bde5b7d516febf4d7"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "path": "cuefluent-notes-0.19.0-tools.tar.gz",
+      "bytes": 10269,
+      "sha256": "4ce18bd3059e2162b56d6972e55e2eaa2743982ffd54aafda7b04b31ff50e451"
+    },
+    {
+      "path": "cuefluent-notes-0.19.0-tools.zip",
+      "bytes": 37477,
+      "sha256": "ebccb25c6a3ddf7e0c2150fbe8008a4be6cd7cfa74612e42788c1c9b73441bd8"
+    }
+  ]
+}
