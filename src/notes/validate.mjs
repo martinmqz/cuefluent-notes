@@ -34,7 +34,7 @@ export function assertOrdinaryTarget(project, target, { platform = process.platf
     if (!relative || relative === '..' || relative.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative)) fail('NOTE_TARGET_OUTSIDE', 'The target is outside the configured notes directory.');
     if (relative.split(paths.sep)[0].toLowerCase() === 'logs') fail('NOTE_TARGET_RESERVED', 'The logs directory is reserved for writer-managed activity logs.');
   }
-  if (!/\.md$/i.test(target)) fail('NOTE_TARGET_INVALID', 'A note target must use the Markdown file extension.');
+  if (!/\.(?:md|markdown)$/i.test(target)) fail('NOTE_TARGET_INVALID', 'A note target must use the .md or .markdown file extension.');
   return target;
 }
 
@@ -192,9 +192,13 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
     if (old.status === 'invalid' && decodeNote(existing) !== source) issue('invalid-metadata-changed');
     if (old.status === 'supported') {
       if (metadata.status !== 'supported' || metadata.value.id !== old.value.id || metadata.value.created !== old.value.created) issue('metadata-identity-changed');
-      const retained = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['updated', 'generation'].includes(key)));
+      const retained = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['updated', 'generation', 'sources'].includes(key)));
       if (metadata.status === 'supported' && !sameData(retained(metadata.value), retained(old.value))) issue('metadata-descriptions-changed');
       if (metadata.status === 'supported') {
+        const previous = old.value.sources ?? [], current = metadata.value.sources ?? [];
+        const appended = current.length > previous.length && sameData(current.slice(0, previous.length), previous) &&
+          current.slice(previous.length).every(source => source.type === 'document');
+        if (!sameData(old.value.sources, metadata.value.sources) && !appended) issue('metadata-sources-changed');
         const unfamiliar = value => Object.fromEntries(Object.entries(value.generation ?? {}).filter(([key]) => !['skill_version', 'content_hash'].includes(key)));
         if (!sameData(unfamiliar(old.value), unfamiliar(metadata.value))) issue('metadata-generation-changed');
       }

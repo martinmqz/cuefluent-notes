@@ -18,7 +18,7 @@ const pathRule = description => ({ type: 'string', minLength: 1, maxLength: SETT
 export const PROJECT_TOOLS = freezeData([
   definition('cuefluent_setup', 'Set up or change one Cuefluent Notes project: its project root, note destination, tracking, saving, activity logging and metadata formatting. ' +
     'Call cuefluent_projects first, and agree every choice with the user before calling; installation, hook trust, discussing setup or reading notes is not consent. ' +
-    'A new project needs root (the absolute project folder) and destination ({ kind: "directory" | "file", path }, absolute; a file is a Markdown .md file). ' +
+    'A new project needs root (the absolute project folder) and destination ({ kind: "directory" | "file", path }, absolute; a file is a Markdown .md or .markdown file). ' +
     'Without id, a new project takes an id derived from the root folder name. For a new project, omitted tracking is manual, saving is review, and activityLog is on with the system timezone for a directory destination and off for a file destination. expandedMetadata defaults to false (compact metadata); set true only when the user asks for expanded YAML. ' +
     'An existing project is selected by id or by its exact root, and only the supplied fields change; omitted fields keep their current values, including a logging opt-out and an established timezone. ' +
     'activityLog is { enabled, timezone? }, and a timezone needs enabled true. A pending run pins its destination and saving mode, and a project with retained chats or work cannot move to another root. ' +
@@ -26,7 +26,7 @@ export const PROJECT_TOOLS = freezeData([
     schema({
       id: { type: 'string', pattern: ID_PATTERN, description: 'Existing project id to change, or the id for a new project. Omit to derive it from the root folder name.' },
       root: pathRule('Absolute, normalized project root. Selects an existing project by exact match; required for a new project.'),
-      destination: { ...schema({ kind: { type: 'string', enum: ['directory', 'file'] }, path: pathRule('Absolute, normalized notes folder, or an absolute .md file for kind file.') }),
+      destination: { ...schema({ kind: { type: 'string', enum: ['directory', 'file'] }, path: pathRule('Absolute, normalized notes folder, or an absolute .md or .markdown file for kind file.') }),
         description: 'The note destination. Required for a new project.' },
       tracking: { type: 'string', enum: ['manual', 'auto'], description: 'Auto enrolls existing and new chats from their next prompt after enabling it; earlier history is excluded and explicit untrack opt-outs remain.' },
       saving: { type: 'string', enum: ['review', 'auto'] },

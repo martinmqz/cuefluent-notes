@@ -16,6 +16,21 @@ test('plain notes and generated notes have visible H2 bodies', () => {
   assert.equal(validateNote('## Existing plain section\n\nBody.').valid, true);
 });
 
+test('existing note validation permits only additive document sources while retaining all prior source data', () => {
+  const body = '# Topic\n\n## Answer\nUseful content.\n';
+  const options = { id: 'source-note', now: '2026-10-22T01:00:00Z', skillVersion: '0.20.0' };
+  const first = { type: 'document', ref: 'Existing design', description: 'Retain this explanation' };
+  const second = { type: 'document', ref: 'Existing meeting' }, addition = { type: 'document', ref: 'New supplied source' };
+  const existing = createGeneratedNote(body, { ...options, metadata: { sources: [first, second], custom: 'keep' } });
+  const candidate = (sources, custom = 'keep') => createGeneratedNote(body, { ...options, metadata: { sources, custom } });
+  assert.equal(validateNote(candidate([first, second, addition]), { existing }).valid, true);
+  for (const sources of [[first], [second, first], [{ ...first, description: 'Changed' }, second],
+    [first, second, { type: 'session', client: 'codex', session_id: 'invented', unit_id: 'unit', revision: 'a'.repeat(64) }]]) {
+    assert.equal(has(validateNote(candidate(sources), { existing }), 'metadata-sources-changed'), true);
+  }
+  assert.equal(has(validateNote(candidate([first, second, addition], 'changed'), { existing }), 'metadata-descriptions-changed'), true);
+});
+
 test('aliases must be single-line, nonempty and first in the section', () => {
   assert.equal(validateNote('# Topic\n\n## Answer\n\n<!-- aliases: first, second -->\n\nBody.').valid, true);
   for (const text of [

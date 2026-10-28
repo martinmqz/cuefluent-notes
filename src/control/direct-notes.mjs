@@ -6,7 +6,7 @@ import { hashBytes, writeJSON } from '../storage/files.mjs';
 import { readSettings, withProject } from '../storage/store.mjs';
 import { ownDirectAttempt } from '../storage/attempts.mjs';
 import { openNoteWorkspace, NOTE_WORKSPACE_TOOLS } from '../processing/workspace.mjs';
-import { NOTE_PROFILE, decodeNote } from '../notes/index.mjs';
+import { NOTE_PROFILE, decodeNote, validateDocumentSources } from '../notes/index.mjs';
 import { fields, freezeData, CONTROL_LIMITS } from '../client/control-server.mjs';
 import { readRunSnapshot } from './status.mjs';
 import { readPendingSetup } from './setup.mjs';
@@ -30,8 +30,9 @@ const target = workspaceSchema('read_note').target;
 const expectedHash = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 const revision = { type: 'string', pattern: '^[a-f0-9]{64}$', description: 'The revision returned by the review the user decided on. A changed draft set is refused.' };
 const content = { type: 'string', minLength: 1, maxLength: DIRECT_NOTE_BYTES,
-  description: 'Complete Markdown note content composed by the calling assistant. Maximum 64 KiB in UTF-8. Preserve useful existing content when updating; the writer retains existing metadata.' };
+  description: 'Complete visible Markdown subject content composed by the calling assistant. Keep source references and citation locators out of the body; supply them separately with sources. Maximum 64 KiB in UTF-8. Preserve useful existing content when updating; the writer retains existing metadata.' };
 const summary = workspaceSchema('draft_note').summary;
+const sources = workspaceSchema('draft_note').sources;
 const definition = (name, description, inputSchema, readOnlyHint = false) => ({ name, description, inputSchema,
   annotations: { readOnlyHint, idempotentHint: true, openWorldHint: false } });
 const REVIEW_FLOW = 'In review mode, show the returned content-only preview (a temporary Markdown file opened in the client, or rendered inline), name the destination, ask the user to choose from the returned choices, then relay the answer with cuefluent_save_note or cuefluent_skip_note and the returned revision. Auto mode saves immediately.';
@@ -44,9 +45,9 @@ export const DIRECT_NOTE_TOOLS = freezeData([
   definition('cuefluent_read_note', 'Read an existing note and return its exact whole-file hash. A note within 64 KiB comes back whole in one call; a larger note, or one whose escaped projection is too large for one result, comes back in bounded UTF-8 ranges: follow next with start and pass the returned hash as expectedHash, and a changed note is refused. Does not create private state, enroll a chat, or process a queue.',
     schema({ projectId, ...workspaceSchema('read_note'), expectedHash }, ['projectId', 'target']), true),
   definition('cuefluent_create_note', `Create one new note from complete Markdown content you prepared for an explicit user request. Check for suitable existing notes first; use cuefluent_read_note and cuefluent_update_note to amend one. Use user-authorized context, supplied material, or task results. No tracked chat or queued input is needed. Supply a fresh UUID requestId for each request and reuse it with identical arguments on retries. ${REVIEW_FLOW} The target must be absent. Content must have a topic H1 and useful H2 sections, without Cuefluent metadata.`,
-    schema({ projectId, requestId: runId, target, content, summary })),
+    schema({ projectId, requestId: runId, target, content, summary, sources }, ['projectId', 'requestId', 'target', 'content', 'summary'])),
   definition('cuefluent_update_note', `Update an existing note from complete reconciled Markdown prepared for an explicit user request. Read the note with cuefluent_read_note first and pass the exact whole-file hash it returned as expectedHash; a changed original is refused. Originals larger than 64 KiB are refused; never shorten them to fit. Preserve useful existing content, aliases and facts; the writer retains metadata. A changed or missing original is a conflict, never a new note or a forced overwrite. Supply a fresh UUID requestId; reuse identical arguments on retries. ${REVIEW_FLOW} No tracking, transcript read or queue processing is needed.`,
-    schema({ projectId, requestId: runId, target, expectedHash, content, summary })),
+    schema({ projectId, requestId: runId, target, expectedHash, content, summary, sources }, ['projectId', 'requestId', 'target', 'expectedHash', 'content', 'summary'])),
   definition('cuefluent_review_note', 'Read the content-only preview of a pending direct or queued draft set, or the latest outcome, by projectId and runId. Returns the immutable revision a decision must cite, the destination of every draft, the exact choices to offer, and bounded pages: follow next.draft and next.start until next is null, concatenating pieces of one draft in order. Show the complete set before asking. Cuefluent metadata and search-alias comments are omitted from previews; hash identifies the complete private draft used for saving. No model, source synchronization, or save is started.',
     schema({ projectId, runId, draft: { type: 'integer', minimum: 0, maximum: 1023 }, start: { type: 'integer', minimum: 0, maximum: NOTE_PROFILE.fileBytes } }, ['projectId', 'runId']), true),
   definition('cuefluent_save_note', 'Publish the exact reviewed draft set after the user chose Save in this chat, or retry its interrupted save. Pass the projectId, runId and revision from the review; a changed revision is refused. A direct draft saves in this call; a queued set starts its save and status reports progress. Never call this without the user\'s decision or to bypass review mode.',
@@ -63,6 +64,7 @@ function argumentsFor(name, input) {
   const result = fields(input, required, Object.keys(properties).filter(key => !required.includes(key)), invalid);
   for (const [key, value] of Object.entries(result)) {
     const rule = properties[key];
+    if (key === 'sources') { result.sources = validateDocumentSources(value); continue; }
     // Content over the byte cap is a size refusal whatever its character count,
     // so its guidance says to preserve the note rather than to fix the arguments.
     if (key === 'content' && typeof value === 'string' && Buffer.byteLength(value) > DIRECT_NOTE_BYTES) fail('DIRECT_NOTE_CONTENT_LIMIT', 'The submitted content exceeds the direct note size limit.');
@@ -89,7 +91,7 @@ async function manifestFor(project, input, { skillVersion }) {
     if (!original.exists || original.hash !== input.expectedHash) fail('DIRECT_NOTE_CONFLICT', 'The existing note changed or disappeared after inspection. Re-read it and reconcile the requested update.');
     if (original.totalBytes > DIRECT_NOTE_BYTES) fail('DIRECT_NOTE_UPDATE_LIMIT', 'The existing note exceeds the complete-content update bound. It cannot be shortened to fit.');
   }
-  await workspace.draft_note({ target: input.target, content: input.content, summary: input.summary });
+  await workspace.draft_note({ target: input.target, content: input.content, summary: input.summary, ...(input.sources?.length ? { sources: input.sources } : {}) });
   await workspace.finish_drafting({ outcome: 'drafted' });
   const manifest = await workspace.manifest();
   if (manifest.drafts.some(draft => draft.bytes.length > DIRECT_DRAFT_BYTES)) fail('DIRECT_NOTE_DRAFT_LIMIT', 'The complete direct note exceeds the bounded review size.');
@@ -99,6 +101,7 @@ async function manifestFor(project, input, { skillVersion }) {
 async function create(store, input, options) {
   // Keep the create identity stable for installed pending runs and retries.
   const payload = [input.target, input.content, input.summary];
+  if (input.sources?.length) payload.push(['sources', input.sources]);
   const requestHash = hashBytes(JSON.stringify(input.expectedHash === undefined ? payload : ['update', ...payload, input.expectedHash]));
   const read = context => snapshot(store, context).then(value => ({ ...value, project: context.project }));
   const initial = await withProject(store, input.projectId, read);

@@ -13,7 +13,7 @@ the returned `next` offset and pass the first `hash` as `expectedHash` on every
 later range, so a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than
 read inconsistently.
 
-`cuefluent_create_note(projectId, requestId, target, content, summary)` requires an
+`cuefluent_create_note(projectId, requestId, target, content, summary, sources?)` requires an
 absent target. `cuefluent_update_note` takes the same fields plus the exact
 inspected `expectedHash` and requires the existing target; a changed or missing
 original is a conflict, and an original above 64 KiB is refused before a draft is
@@ -21,10 +21,15 @@ reserved (`DIRECT_NOTE_UPDATE_LIMIT`). Each request creates or updates one file
 from up to 64 KiB of submitted UTF-8 content; the complete private draft with its
 retained metadata is limited to 128 KiB. New notes receive identity and
 timestamps; updates keep theirs. The writer enforces the configured destination.
+Optional `sources` contains known document descriptors for hidden metadata,
+separate from the substantive body; see [source metadata](notes.md#source-metadata).
+The same argument is available to queued `draft_note`. Source additions preserve
+existing descriptions and are bound to the complete retained draft and review
+revision, even though the content-only preview omits metadata.
 
 `requestId` is a fresh UUID per request. The same id with identical arguments
 replays the retained draft or the latest completed outcome after a lost response;
-the same id with different content is refused (`DIRECT_NOTE_REQUEST_CHANGED`), so a
+the same id with different content or sources is refused (`DIRECT_NOTE_REQUEST_CHANGED`), so a
 revised draft needs the user's Discard and a fresh id. Only the latest completed
 result is retained: after an intervening run, a retry can meet a target conflict
 and must read the existing note instead of assuming the earlier save failed.

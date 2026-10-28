@@ -67,7 +67,7 @@ function destination(value, paths) {
   record(value, ['kind', 'path'], ['kind', 'path'], 'destination');
   if (!['directory', 'file'].includes(value.kind)) invalid('destination.kind must be directory or file');
   const target = canonicalPath(value.path, paths, 'destination.path');
-  if (value.kind === 'file' && paths.extname(target).toLowerCase() !== '.md') invalid('A file destination must name a Markdown .md file');
+  if (value.kind === 'file' && !['.md', '.markdown'].includes(paths.extname(target).toLowerCase())) invalid('A file destination must name a Markdown .md or .markdown file');
   return Object.freeze({ kind: value.kind, path: target });
 }
 

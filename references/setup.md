@@ -78,7 +78,7 @@ change; never delete private state to force setup.
   and repeat with the intended choices.
 - `SETTINGS_INVALID`, `PATH_*`, `PROJECT_ROOT_NONCANONICAL`: a path or preference
   is not valid, such as a non-canonical or missing path, a file destination that is
-  not a `.md` file, or logging on a file destination.
+  not a `.md` or `.markdown` file (case-insensitive), or logging on a file destination.
 - `PRIVATE_LOCATION_OVERLAP`, `PRIVATE_LOCATION_REPOSITORY`: the private store
   would overlap a project root or notes destination, or sit inside a repository.
 - `LOG_*`: existing `logs/` content that is not a valid series is preserved and

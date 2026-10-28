@@ -78,6 +78,27 @@ export function noteSourceIdentity(source) {
   return JSON.stringify(identity);
 }
 
+function appendSources(existing, additions) {
+  const sources = [...existing], identities = new Map(existing.map(source => [noteSourceIdentity(source), source]));
+  for (const source of additions) {
+    const identity = noteSourceIdentity(source), prior = identities.get(identity);
+    if (prior) {
+      if (!isDeepStrictEqual(prior, source)) fail('NOTE_SOURCE_CONFLICT', 'A source identity already has different descriptive metadata. Preserve it and reconcile the source descriptions.');
+    } else { sources.push(source); identities.set(identity, source); }
+  }
+  requireValue(sources.length <= P.metadataItems);
+  return sources;
+}
+
+/** Assistant-provided provenance is bounded descriptive document data, never
+ * native session authority or replacement of writer-owned note metadata. */
+export function validateDocumentSources(input) {
+  const sources = dataValue({ sources: input }).sources;
+  requireValue(Array.isArray(sources));
+  for (const source of sources) { requireValue(plain(source) && source.type === 'document'); noteSourceIdentity(source); }
+  return Object.freeze(appendSources([], sources));
+}
+
 export function validateMetadata(input) {
   const value = dataValue(input);
   requireValue(value.schema_version === 1 && typeof value.id === 'string' && idPattern.test(value.id));
@@ -249,19 +270,31 @@ function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOve
 }
 
 /** Existing metadata owns identity/descriptions. Agent-supplied replacements do
- * not overwrite it. Timestamp/version changes occur only for a useful body edit. */
-export function preserveMetadata(originalInput, proposedInput, { usefulChange, updated, skillVersion, expandedMetadata = false } = {}) {
+ * not overwrite it; explicit document sources append without losing information. */
+export function preserveMetadata(originalInput, proposedInput, { usefulChange, updated, skillVersion, expandedMetadata = false, sources = [] } = {}) {
   const original = decodeNote(originalInput), proposed = decodeNote(proposedInput);
   const before = inspectMetadata(original), after = inspectMetadata(proposed);
+  const additions = validateDocumentSources(sources);
+  if (additions.length && before.status !== 'supported') {
+    if (before.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be repaired by a note update.');
+    fail('NOTE_SOURCES_UNSUPPORTED', 'New sources require existing supported Cuefluent metadata. Preserve this note without enriching or replacing its metadata.');
+  }
+  const merged = additions.length ? appendSources(before.value.sources ?? [], additions) : null;
+  const sourcesChanged = merged !== null && !isDeepStrictEqual(merged, before.value.sources ?? []);
+  requireValue(!sourcesChanged || usefulChange !== false);
   const unchanged = () => ({ bytes: Buffer.from(original), changed: false, diagnostics: before.diagnostics });
-  if (original === proposed || usefulChange === false) return unchanged();
+  if (!sourcesChanged && (original === proposed || usefulChange === false)) return unchanged();
   if (before.status === 'invalid' || after.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be repaired by a note update.');
   const oldBody = withoutMetadata(original, before), newBody = withoutMetadata(proposed, after);
-  if (oldBody === newBody) return unchanged();
+  if (oldBody === newBody && !sourcesChanged) return unchanged();
   const prefix = before.raw === null ? '' : original.slice(0, before.start);
   let raw = before.raw ?? '';
   if (before.status === 'supported') {
     const matched = block.exec(raw), { document } = parseYaml(matched[2]);
+    if (sourcesChanged) {
+      if (!document.has('sources')) document.set('sources', document.createNode([]));
+      for (const source of merged.slice(before.value.sources?.length ?? 0)) document.get('sources', true).add(document.createNode(source));
+    }
     if (updated !== undefined) {
       requireValue(isNoteTimestamp(updated));
       const current = document.get('updated', true);
@@ -275,7 +308,7 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       if (isScalar(current)) current.value = skillVersion;
       else document.setIn(['generation', 'skill_version'], skillVersion);
     }
-    if (before.value.generation?.content_hash !== undefined) {
+    if (oldBody !== newBody && before.value.generation?.content_hash !== undefined) {
       // The optional digest covers the exact note bytes outside its metadata block.
       const value = `sha256:${createHash('sha256').update(prefix + newBody).digest('hex')}`;
       document.getIn(['generation', 'content_hash'], true).value = value;
