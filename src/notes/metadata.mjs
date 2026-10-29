@@ -310,7 +310,7 @@ export function noteContent(input) {
 }
 function quoted(value) { const scalar = new Scalar(value); scalar.type = Scalar.QUOTE_DOUBLE; return scalar; }
 function quoteSourceStrings(node) {
-  visitYaml(node, { Scalar(key, value) { if (key !== 'key' && typeof value.value === 'string') value.type = Scalar.QUOTE_DOUBLE; } });
+  visitYaml(node, { Scalar(_key, value) { if (typeof value.value === 'string') value.type = Scalar.QUOTE_DOUBLE; } });
   return node;
 }
 
@@ -364,7 +364,8 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       const sequence = document.get('sources', true);
       for (const [index, fields] of changes.amendments) {
         const node = sequence.items[index];
-        for (const [key, value] of Object.entries(fields)) node.set(key, quoteSourceStrings(document.createNode(value)));
+        const additions = quoteSourceStrings(document.createNode(fields));
+        for (const pair of additions.items) node.add(pair);
       }
       // A sequence-end comment belongs with the original source set, not a
       // newly appended source. Keep it before the first addition.

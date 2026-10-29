@@ -67,12 +67,15 @@ test('direct review creates one preview from supplied context without enrollment
   assert.equal(status.counts.chats, 0); assert.equal(status.counts.queued, 0);
   assert.equal(status.run.scope.kind, 'direct'); assert.equal(status.run.selected, 0);
   assert.deepEqual(await f.create(), draft); assert.deepEqual(await f.call('review'), draft);
+  assert.deepEqual(await f.create({ sources: [] }), draft);
+  await assert.rejects(f.create({ sources: [{ type: 'document', ref: 'Added after drafting' }] }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
   const saved = await f.call('save'); assert.equal(saved.state, 'saved'); assert.equal(saved.result.counts.saved, 1);
   assert.equal(saved.result.counts.handled, 0);
   assert.deepEqual(await fs.readFile(saved.result.paths[0]), retained);
   assert.equal(hashBytes(retained), draft.drafts[0].hash);
   const written = await fs.stat(saved.result.paths[0]);
   assert.deepEqual(await f.create(), saved); assert.deepEqual(await f.call('save'), saved);
+  assert.deepEqual(await f.create({ sources: [] }), saved);
   assert.equal((await fs.stat(saved.result.paths[0])).mtimeMs, written.mtimeMs);
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
   assert.deepEqual(await readSettings(f.store), before);
@@ -444,7 +447,8 @@ test('completed request IDs only replay the exact saved or skipped payload', asy
     const completed = saving === 'auto' ? created : await f.call('skip');
     assert.match(completed.result.requestHash, /^[a-f0-9]{64}$/);
     assert.deepEqual(await f.create(), completed);
-    for (const change of [{ content: content + '\nDifferent.\n' }, { target: 'another.md' }, { target: '../outside.md' }, { target: 'logs/2026.md' }, { content: 'No topic heading' }]) {
+    assert.deepEqual(await f.create({ sources: [] }), completed);
+    for (const change of [{ sources: [{ type: 'document', ref: 'Added after completion' }] }, { content: content + '\nDifferent.\n' }, { target: 'another.md' }, { target: '../outside.md' }, { target: 'logs/2026.md' }, { content: 'No topic heading' }]) {
       await assert.rejects(f.create(change), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
     }
     await assert.rejects(f.tools.call('cuefluent_update_note', { ...f.request, expectedHash: hashBytes(content) }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
@@ -558,7 +562,7 @@ test('a Codex call without turn metadata reads and updates a note with its hash 
 
 test('auto-mode direct crash recovery publishes retained bytes while review-mode save first restores an unapproved preview', async t => {
   const f = await fixture(t, { saving: 'auto' });
-  const run = createRun(f.project, [], { id: f.request.requestId, scope: { kind: 'direct', requestHash: hashBytes(JSON.stringify([f.request.target, content, f.request.summary])) } });
+  const run = createRun(f.project, [], { id: f.request.requestId, scope: { kind: 'direct', requestHash: hashBytes('synthetic-crash-recovery-request') } });
   const workspace = await openNoteWorkspace({ project: f.project, runId: run.id, skillVersion: '0.16.0' });
   await workspace.draft_note({ target: f.request.target, content, summary: f.request.summary });
   await workspace.finish_drafting({ outcome: 'drafted' }); const manifest = await workspace.manifest();

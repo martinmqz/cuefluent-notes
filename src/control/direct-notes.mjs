@@ -102,10 +102,9 @@ async function manifestFor(project, input, { skillVersion }) {
 }
 
 async function create(store, input, options) {
-  // Keep the create identity stable for installed pending runs and retries.
-  const payload = [input.target, input.content, input.summary];
-  if (input.sources?.length) payload.push(['sources', serializeSources(input.sources)]);
-  const requestHash = hashBytes(JSON.stringify(input.expectedHash === undefined ? payload : ['update', ...payload, input.expectedHash]));
+  const payload = [input.expectedHash === undefined ? 'create' : 'update', input.target, input.content,
+    input.summary, input.expectedHash ?? null, serializeSources(input.sources ?? [])];
+  const requestHash = hashBytes(JSON.stringify(payload));
   const read = context => snapshot(store, context).then(value => ({ ...value, project: context.project }));
   const initial = await withProject(store, input.projectId, read);
   if (initial.run && initial.run.id !== input.requestId) return busy(initial.run);

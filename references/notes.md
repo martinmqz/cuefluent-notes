@@ -106,6 +106,9 @@ any string or control characters in those identity fields,
 and no native-session fields (`client`, `session_id`, `unit_id`, `revision`,
 `raw_ref`). Length limits count UTF-16 code units. Paraphrase a transcript range
 with an en dash instead of copying a WebVTT comment delimiter.
+The writer quotes newly supplied source keys and string values, including nested
+fields, so YAML 1.1 readers retain names such as `no`, `on` and `yes` as distinct
+strings. Existing metadata formatting is preserved.
 
 A descriptive reference records what was supplied; it promises no retrievable
 file or URL. Use only known values, not invented capture IDs, session identities

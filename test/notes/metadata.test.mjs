@@ -150,6 +150,35 @@ test('added source strings round-trip trailing newlines and ambiguous scalars in
   }
 });
 
+test('new source keys retain distinct spellings across YAML versions on creation, append and amendment', () => {
+  const fields = { no: 'first', on: 'second', yes: 'third', nested: { no: 'fourth', on: 'fifth', yes: 'sixth' },
+    records: [{ no: 'seventh', on: 'eighth', yes: 'ninth' }] };
+  const source = { type: 'document', ref: 'Synthetic source', ...fields };
+  const inspect = (bytes, expected) => {
+    const raw = inspectMetadata(bytes).raw;
+    const payload = raw.replace(/^<!-- cuefluent(?:\r\n|\r|\n)/, '').replace(/(?:\r\n|\r|\n)-->(?:\r\n|\r|\n)?$/, '');
+    for (const version of ['1.1', '1.2']) {
+      const document = parseDocument(payload, { version });
+      assert.deepEqual(document.errors, []);
+      assert.deepEqual(document.toJS().sources, expected);
+    }
+  };
+  for (const expandedMetadata of [false, true]) {
+    inspect(createGeneratedNote(body, { ...options, expandedMetadata, metadata: { sources: [source] } }), [source]);
+    const prior = { type: 'document', ref: 'Earlier synthetic source' };
+    const original = createGeneratedNote(body, { ...options, expandedMetadata, metadata: { sources: [prior] } });
+    inspect(preserveMetadata(original, body, { sources: [source], expandedMetadata }).bytes, [prior, source]);
+    const amendable = metadata("schema_version: 1\nid: stable\nsources:\n  - type: document\n    ref: 'Synthetic source' # Preserve reference comment\n    'retained': unchanged # Preserve value comment");
+    const amended = preserveMetadata(amendable, body, { sources: [source], expandedMetadata }).bytes;
+    inspect(amended, [{ type: 'document', ref: source.ref, retained: 'unchanged', ...fields }]);
+    const retained = metadataDocument(amended).getIn(['sources', 0], true);
+    assert.equal(retained.items.find(pair => pair.key.value === 'retained').key.type, 'QUOTE_SINGLE');
+    assert.equal(retained.get('ref', true).type, 'QUOTE_SINGLE');
+    assert.match(amended.toString(), /Preserve reference comment/);
+    assert.match(amended.toString(), /Preserve value comment/);
+  }
+});
+
 test('appending sources keeps trailing comments with the original source set and preserves original quote styles', () => {
   const original = metadata("schema_version: 1\nid: stable\nsources:\n  - type: document\n    ref: 'Existing source'\n  # About the existing source");
   for (const expandedMetadata of [false, true]) {
