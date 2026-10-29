@@ -53,6 +53,50 @@ test('new note drafts stay private, receive fresh metadata, retain existing pare
   await assert.rejects(workspace.draft_note({ target: 'other.md', content: body, summary: 'Other' }), { code: 'WORKSPACE_FINISHED' });
 });
 
+test('workspace document sources stay in private metadata for new notes and source-only updates', async t => {
+  const f = await fixture(t), sources = [{ type: 'document', ref: 'Synthetic meeting', locator: '00:48–04:58' }];
+  const workspace = await f.open();
+  await workspace.draft_note({ target: 'new.md', content: body, summary: 'Record meeting', sources });
+  const created = (await finish(workspace)).drafts[0];
+  assert.deepEqual(inspectMetadata(created.bytes).value.sources, sources); assert.ok(created.bytes.toString().endsWith(body));
+  assert.equal(created.hash, hash(created.bytes)); assert.deepEqual(await fs.readdir(f.root), []);
+  await fs.writeFile(path.join(f.root, 'existing.md'), created.bytes);
+  const update = await f.open(); await update.read_note({ target: 'existing.md' });
+  const addition = { type: 'document', ref: 'Synthetic design', locator: 'Badge proposal' };
+  const receipt = await update.draft_note({ target: 'existing.md', content: body, summary: 'Retain inspected design source', sources: [addition] });
+  assert.equal(receipt.changed, true);
+  const revised = (await finish(update)).drafts[0];
+  assert.equal(revised.expectedHash, created.hash); assert.notEqual(revised.hash, created.hash);
+  assert.deepEqual(inspectMetadata(revised.bytes).value.sources, [...sources, addition]);
+  assert.ok((await fs.readFile(path.join(f.root, 'existing.md'))).equals(created.bytes));
+});
+
+test('workspace refuses invalid or unsupported source additions without dropping them or admitting a draft', async t => {
+  const f = await fixture(t), workspace = await f.open(), source = { type: 'document', ref: 'Synthetic source' };
+  const request = { target: 'new.md', content: body, summary: 'Record meeting' };
+  for (const sources of [null, [{ type: 'session', client: 'codex', session_id: 'invented', unit_id: 'invented', revision: 'a'.repeat(64) }]]) {
+    await assert.rejects(workspace.draft_note({ ...request, sources }), { code: 'NOTE_SOURCE_ARGUMENT' });
+  }
+  await fs.writeFile(path.join(f.root, 'plain.md'), body); await workspace.read_note({ target: 'plain.md' });
+  await assert.rejects(workspace.draft_note({ ...request, target: 'plain.md', sources: [source] }), { code: 'NOTE_SOURCES_UNSUPPORTED' });
+  await workspace.finish_drafting({ outcome: 'nothing-useful' }); assert.deepEqual((await workspace.manifest()).drafts, []);
+  assert.equal(await fs.readFile(path.join(f.root, 'plain.md'), 'utf8'), body);
+});
+
+test('repeated source submissions use the cumulative budget without replacing the last accepted draft on refusal', async t => {
+  const f = await fixture(t), workspace = await f.open({ limits: { draftBytes: 2048 } });
+  const sources = [{ type: 'document', ref: 'Synthetic', description: 'x'.repeat(800) }];
+  const request = { target: 'new.md', content: body, summary: 'Keep useful content', sources };
+  const first = await workspace.draft_note(request);
+  const second = await workspace.draft_note({ ...request, content: body.replace('original', 'revised') });
+  await assert.rejects(workspace.draft_note(request), { code: 'WORKSPACE_DRAFT_LIMIT' });
+  const draft = (await finish(workspace)).drafts[0];
+  assert.notEqual(first.hash, second.hash); assert.equal(draft.hash, second.hash);
+  assert.deepEqual(inspectMetadata(draft.bytes).value.sources, sources);
+  assert.ok(draft.bytes.toString().endsWith(body.replace('original', 'revised')));
+  assert.deepEqual(await fs.readdir(f.root), []);
+});
+
 test('read versions and expected hashes remain pinned after manual file changes and model drafts', async t => {
   const f = await fixture(t), file = path.join(f.root, 'existing.md'); await fs.writeFile(file, body);
   const workspace = await f.open(), first = await workspace.read_note({ target: 'existing.md' });

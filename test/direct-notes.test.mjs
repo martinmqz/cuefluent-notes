@@ -67,15 +67,77 @@ test('direct review creates one preview from supplied context without enrollment
   assert.equal(status.counts.chats, 0); assert.equal(status.counts.queued, 0);
   assert.equal(status.run.scope.kind, 'direct'); assert.equal(status.run.selected, 0);
   assert.deepEqual(await f.create(), draft); assert.deepEqual(await f.call('review'), draft);
+  assert.deepEqual(await f.create({ sources: [] }), draft);
+  await assert.rejects(f.create({ sources: [{ type: 'document', ref: 'Added after drafting' }] }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
   const saved = await f.call('save'); assert.equal(saved.state, 'saved'); assert.equal(saved.result.counts.saved, 1);
   assert.equal(saved.result.counts.handled, 0);
   assert.deepEqual(await fs.readFile(saved.result.paths[0]), retained);
   assert.equal(hashBytes(retained), draft.drafts[0].hash);
   const written = await fs.stat(saved.result.paths[0]);
   assert.deepEqual(await f.create(), saved); assert.deepEqual(await f.call('save'), saved);
+  assert.deepEqual(await f.create({ sources: [] }), saved);
   assert.equal((await fs.stat(saved.result.paths[0])).mtimeMs, written.mtimeMs);
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
   assert.deepEqual(await readSettings(f.store), before);
+});
+
+test('direct document sources are hidden from previews, saved exactly, and bound to pending and completed retries', async t => {
+  const f = await fixture(t), sources = [{ type: 'document', ref: 'Synthetic meeting', locator: '00:48–04:58' }];
+  const preview = await f.create({ sources });
+  assert.equal(preview.drafts[0].content, content);
+  const { run } = await inspectAttempt(f.store, 'demo');
+  const bytes = await readDraftArtifact(f.store.pin, run.artifacts, run.drafts[0].id);
+  assert.deepEqual(inspectMetadata(bytes).value.sources, sources);
+  assert.equal(preview.drafts[0].hash, hashBytes(bytes));
+  assert.deepEqual(await f.create({ sources }), preview);
+  assert.deepEqual(await f.create({ sources: [{ locator: sources[0].locator, ref: sources[0].ref, type: 'document' }] }), preview);
+  const changed = [{ ...sources[0], locator: '05:23–07:35' }];
+  await assert.rejects(f.create({ sources: changed }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
+  await assert.rejects(f.create(), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
+  const saved = await f.call('save');
+  assert.ok((await fs.readFile(saved.result.paths[0])).equals(bytes));
+  assert.deepEqual(await f.create({ sources }), saved);
+  assert.deepEqual(await f.create({ sources: [{ ref: sources[0].ref, locator: sources[0].locator, type: 'document' }] }), saved);
+  await assert.rejects(f.create({ sources: changed }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
+});
+
+test('direct source replay preserves numeric distinctions in descriptive data', async t => {
+  const f = await fixture(t), source = { type: 'document', ref: 'Synthetic', offset: -0 };
+  await f.create({ sources: [source] });
+  await assert.rejects(f.create({ sources: [{ ...source, offset: 0 }] }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
+  await f.call('skip');
+});
+
+test('direct source-only updates retain original metadata and reject conflicting descriptions before reserving a run', async t => {
+  const f = await fixture(t, { saving: 'auto' }), source = { type: 'document', ref: 'Synthetic meeting', description: 'Original account' };
+  const saved = await f.create({ sources: [source] }), target = saved.result.paths[0], original = await fs.readFile(target);
+  const addition = { type: 'document', ref: 'Synthetic design', locator: 'Agreed scope' };
+  const update = { ...f.request, requestId: randomUUID(), expectedHash: hashBytes(original), sources: [addition] };
+  const outcome = await f.tools.call('cuefluent_update_note', update), revised = await fs.readFile(target);
+  assert.equal(outcome.state, 'saved'); assert.equal(outcome.result.counts.saved, 1);
+  assert.ok(revised.toString().endsWith(content));
+  assert.deepEqual(inspectMetadata(revised).value.sources, [source, addition]);
+  assert.equal(inspectMetadata(revised).value.id, inspectMetadata(original).value.id);
+  await assert.rejects(f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: hashBytes(revised), sources: [{ ...source, description: 'Different account' }] }), { code: 'NOTE_SOURCE_CONFLICT' });
+  assert.equal((await readProjectStatus(f.store, 'demo')).run, null); assert.ok((await fs.readFile(target)).equals(revised));
+  const written = await fs.stat(target);
+  const unchanged = await f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: hashBytes(revised) });
+  assert.equal(unchanged.result.counts.saved, 0); assert.ok((await fs.readFile(target)).equals(revised));
+  assert.equal((await fs.stat(target)).mtimeMs, written.mtimeMs);
+});
+
+test('invalid document sources and additions to plain notes never create pending work or replace note bytes', async t => {
+  const f = await fixture(t), source = { type: 'document', ref: 'Synthetic source' };
+  for (const sources of [null, {}, [{ type: 'session', client: 'codex', session_id: 'invented', unit_id: 'invented', revision: 'a'.repeat(64) }], [{ ...source, ref: 'x'.repeat(2049) }]]) {
+    await assert.rejects(f.create({ sources }), { code: 'NOTE_SOURCE_ARGUMENT' });
+    assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
+  }
+  const target = path.join(f.notes, 'plain.md'); await fs.writeFile(target, content);
+  await assert.rejects(f.tools.call('cuefluent_update_note', { ...f.request, target: 'plain.md', expectedHash: hashBytes(content), sources: [source] }), { code: 'NOTE_SOURCES_UNSUPPORTED' });
+  assert.equal((await readProjectStatus(f.store, 'demo')).run, null); assert.equal(await fs.readFile(target, 'utf8'), content);
+  const draft = await f.create({ sources: [] });
+  assert.deepEqual(await f.create(), draft, 'an empty list has the same request identity as omitted sources');
+  await f.call('skip');
 });
 
 test('approval previews omit internal aliases while preserving Markdown, Unicode, newlines and literal code examples', async t => {
@@ -309,6 +371,30 @@ test('a note within the cap is read whole with its hash; an update needs only th
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
 });
 
+for (const saving of ['auto', 'review']) {
+  test(`direct ${saving} updates preserve large hidden metadata while bounding the complete body`, async t => {
+    const f = await fixture(t, { saving });
+    const body = content + '\n' + 'Preserve each useful paragraph.\n'.repeat(1900);
+    const sources = Array.from({ length: 80 }, (_, i) => ({ type: 'document', ref: `Synthetic source ${i} ${'x'.repeat(100)}` }));
+    assert.ok(Buffer.byteLength(body) < DIRECT_NOTE_BYTES);
+    await f.create({ content: body, sources });
+    if (saving === 'review') await f.call('save');
+    const target = path.join(f.notes, f.request.target), original = await fs.readFile(target);
+    assert.ok(original.length > DIRECT_NOTE_BYTES);
+    const changed = body.replace('small', 'focused');
+    const result = await f.tools.call('cuefluent_update_note', { ...f.request, requestId: randomUUID(), expectedHash: hashBytes(original), content: changed });
+    if (saving === 'review') {
+      assert.ok((await fs.readFile(target)).equals(original));
+      await f.tools.call('cuefluent_save_note', { projectId: 'demo', runId: result.runId, revision: result.revision });
+    }
+    const revised = await fs.readFile(target);
+    assert.ok(revised.toString().endsWith(changed));
+    assert.deepEqual(inspectMetadata(revised).value.sources, inspectMetadata(original).value.sources);
+    assert.equal(inspectMetadata(revised).value.id, inspectMetadata(original).value.id);
+    assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
+  });
+}
+
 test('whole reads honor the exact byte cap and fall back to ranges when the escaped projection would exceed one result', async t => {
   const f = await fixture(t, { saving: 'auto' }), target = path.join(f.notes, 'bound.md');
   const prefix = '# Boundary\n\n## Content\n', line = '界'.repeat(50) + '\n';
@@ -361,7 +447,8 @@ test('completed request IDs only replay the exact saved or skipped payload', asy
     const completed = saving === 'auto' ? created : await f.call('skip');
     assert.match(completed.result.requestHash, /^[a-f0-9]{64}$/);
     assert.deepEqual(await f.create(), completed);
-    for (const change of [{ content: content + '\nDifferent.\n' }, { target: 'another.md' }, { target: '../outside.md' }, { target: 'logs/2026.md' }, { content: 'No topic heading' }]) {
+    assert.deepEqual(await f.create({ sources: [] }), completed);
+    for (const change of [{ sources: [{ type: 'document', ref: 'Added after completion' }] }, { content: content + '\nDifferent.\n' }, { target: 'another.md' }, { target: '../outside.md' }, { target: 'logs/2026.md' }, { content: 'No topic heading' }]) {
       await assert.rejects(f.create(change), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
     }
     await assert.rejects(f.tools.call('cuefluent_update_note', { ...f.request, expectedHash: hashBytes(content) }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
@@ -475,7 +562,7 @@ test('a Codex call without turn metadata reads and updates a note with its hash 
 
 test('auto-mode direct crash recovery publishes retained bytes while review-mode save first restores an unapproved preview', async t => {
   const f = await fixture(t, { saving: 'auto' });
-  const run = createRun(f.project, [], { id: f.request.requestId, scope: { kind: 'direct', requestHash: hashBytes(JSON.stringify([f.request.target, content, f.request.summary])) } });
+  const run = createRun(f.project, [], { id: f.request.requestId, scope: { kind: 'direct', requestHash: hashBytes('synthetic-crash-recovery-request') } });
   const workspace = await openNoteWorkspace({ project: f.project, runId: run.id, skillVersion: '0.16.0' });
   await workspace.draft_note({ target: f.request.target, content, summary: f.request.summary });
   await workspace.finish_drafting({ outcome: 'drafted' }); const manifest = await workspace.manifest();

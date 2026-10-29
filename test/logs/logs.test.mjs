@@ -97,6 +97,19 @@ test('untrusted fields remain one inert line with an encoded relative current-fi
   }
 });
 
+test('activity entries and target queries use the ordinary Markdown filename contract', () => {
+  const empty = create();
+  for (const target of ['topic.md', 'meetings/topic.MD', 'topic.markdown', 'meetings/topic.MARKDOWN', '.hidden.md']) {
+    const bytes = append(empty, 1, { target });
+    assert.equal(queryLogEntries(bytes, { ...options, target }).entries[0].target, target);
+  }
+  for (const target of ['.md', '.markdown', 'meetings/.MD', 'meetings/.MARKDOWN', 'topic.marKdown', 'topic.ｍｄ']) {
+    assert.throws(() => append(empty, 1, { target }), { code: 'LOG_ARGUMENT' });
+    assert.throws(() => queryLogEntries(empty, { ...options, target }), { code: 'LOG_ARGUMENT' });
+  }
+  assert.equal(inspectAnnualLog(empty, options).entryCount, 0);
+});
+
 test('code examples never acknowledge an event, and active malformed/duplicate markers fail without repair', () => {
   const base = create().toString(), marker = `<!-- note-log-entry event=${eventId(1)} project=synthetic -->`;
   const examples = base + `\n\x60\x60\x60text\n${marker}\n\x60\x60\x60\n\nInline \x60${marker}\x60.\n`;

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
+import { isMarkdownPath } from '../core/note-path.mjs';
 import { createGeneratedNote, decodeNote, noteNewline, inspectMetadata, isLogEntryMarker, isNoteTimestamp, validateNote } from '../notes/index.mjs';
 import { inlineText, parseMarkdown } from '../notes/markdown.mjs';
 
@@ -32,7 +33,7 @@ export function logDiagnostic(error) {
 function noteTarget(value) {
   requireLog(safeText(value, 2048) && !/[\\:]/.test(value), 'LOG_ARGUMENT');
   const parts = value.split('/');
-  requireLog(parts.every(part => part && part !== '.' && part !== '..') && parts[0].toLowerCase() !== 'logs' && /\.(?:md|markdown)$/i.test(parts.at(-1)), 'LOG_ARGUMENT');
+  requireLog(parts.every(part => part && part !== '.' && part !== '..') && parts[0].toLowerCase() !== 'logs' && isMarkdownPath(parts.at(-1)), 'LOG_ARGUMENT');
   return value;
 }
 

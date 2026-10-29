@@ -1,7 +1,8 @@
 import path from 'node:path';
+import { isMarkdownPath } from '../core/note-path.mjs';
 import { fail } from '../core/errors.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
-import { inspectMetadata, lineStarts, noteContent } from './metadata.mjs';
+import { inspectMetadata, isSourceAppend, lineStarts, noteContent } from './metadata.mjs';
 import { decodeEntities, headingSlug, inlineText, normalizedText, parseMarkdown } from './markdown.mjs';
 
 const safeTags = new Set('p br strong em del s code pre blockquote ul ol li hr table thead tbody tfoot tr th td a img h1 h2 h3 h4 h5 h6 div span sup sub kbd mark'.split(' '));
@@ -34,7 +35,7 @@ export function assertOrdinaryTarget(project, target, { platform = process.platf
     if (!relative || relative === '..' || relative.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative)) fail('NOTE_TARGET_OUTSIDE', 'The target is outside the configured notes directory.');
     if (relative.split(paths.sep)[0].toLowerCase() === 'logs') fail('NOTE_TARGET_RESERVED', 'The logs directory is reserved for writer-managed activity logs.');
   }
-  if (!/\.md$/i.test(target)) fail('NOTE_TARGET_INVALID', 'A note target must use the Markdown file extension.');
+  if (!isMarkdownPath(target, paths)) fail('NOTE_TARGET_INVALID', 'A note target must use the .md or .markdown file extension.');
   return target;
 }
 
@@ -192,9 +193,10 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
     if (old.status === 'invalid' && decodeNote(existing) !== source) issue('invalid-metadata-changed');
     if (old.status === 'supported') {
       if (metadata.status !== 'supported' || metadata.value.id !== old.value.id || metadata.value.created !== old.value.created) issue('metadata-identity-changed');
-      const retained = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['updated', 'generation'].includes(key)));
+      const retained = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['updated', 'generation', 'sources'].includes(key)));
       if (metadata.status === 'supported' && !sameData(retained(metadata.value), retained(old.value))) issue('metadata-descriptions-changed');
       if (metadata.status === 'supported') {
+        if (!isSourceAppend(old.value.sources ?? [], metadata.value.sources ?? [])) issue('metadata-sources-changed');
         const unfamiliar = value => Object.fromEntries(Object.entries(value.generation ?? {}).filter(([key]) => !['skill_version', 'content_hash'].includes(key)));
         if (!sameData(unfamiliar(old.value), unfamiliar(metadata.value))) issue('metadata-generation-changed');
       }

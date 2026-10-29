@@ -32,27 +32,30 @@ function timezone(value) {
 }
 
 /** Clone only bounded inert data, rejecting accessors, aliases and unsafe keys. */
-function dataValue(input) {
+function dataValue(input, canonical = false, capacityCode = 'NOTE_METADATA_INVALID') {
   let nodes = 0;
+  const capacity = condition => { if (!condition) fail(capacityCode, 'The metadata exceeds its supported structural capacity. Preserve the input and existing note.'); };
   function visit(value, depth) {
-    requireValue(++nodes <= P.metadataNodes && depth <= P.metadataDepth);
+    capacity(++nodes <= P.metadataNodes && depth <= P.metadataDepth);
     if (value === null || typeof value === 'boolean') return value;
     if (typeof value === 'number') { requireValue(Number.isFinite(value)); return value; }
     if (typeof value === 'string') {
-      requireValue(value.length <= P.metadataString && !/(?![\t\n\r])[\p{Cc}\p{Cs}]/u.test(value) && !/<!--|-->|--!>/.test(value));
+      capacity(value.length <= P.metadataString);
+      requireValue(!/(?![\t\n\r])[\p{Cc}\p{Cs}]/u.test(value) && !/<!--|-->|--!>/.test(value));
+      if (canonical) requireValue(!/[\uFFFE\uFFFF]/u.test(value));
       return value;
     }
     requireValue(Array.isArray(value) ? Object.getPrototypeOf(value) === Array.prototype : plain(value));
     const descriptors = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(descriptors);
     if (Array.isArray(value)) {
-      requireValue(value.length <= P.metadataItems && keys.length === value.length + 1);
+      capacity(value.length <= P.metadataItems); requireValue(keys.length === value.length + 1);
       return Object.freeze(Array.from({ length: value.length }, (_, index) => {
         const descriptor = descriptors[index]; requireValue(descriptor && descriptor.enumerable && Object.hasOwn(descriptor, 'value'));
         return visit(descriptor.value, depth + 1);
       }));
     }
-    requireValue(keys.length <= P.metadataItems && keys.every(key => typeof key === 'string' && keyAllowed(key)));
-    return Object.freeze(Object.fromEntries(keys.map(key => {
+    capacity(keys.length <= P.metadataItems); requireValue(keys.every(key => typeof key === 'string' && keyAllowed(key)));
+    return Object.freeze(Object.fromEntries((canonical ? keys.sort() : keys).map(key => {
       const descriptor = descriptors[key]; requireValue(descriptor.enumerable && Object.hasOwn(descriptor, 'value'));
       visit(key, depth + 1); return [key, visit(descriptor.value, depth + 1)];
     })));
@@ -62,7 +65,9 @@ function dataValue(input) {
 
 /** Provenance describes a source; it never grants access to that source. */
 export function noteSourceIdentity(source) {
-  source = dataValue(source);
+  return sourceIdentity(dataValue(source));
+}
+function sourceIdentity(source) {
   let identity;
   if (source.type === 'session') {
     requireValue(['claude', 'codex'].includes(source.client) && typeof source.session_id === 'string' && idPattern.test(source.session_id) && typeof source.unit_id === 'string' && idPattern.test(source.unit_id) && typeof source.revision === 'string' && /^[a-f0-9]{64}$/.test(source.revision));
@@ -78,8 +83,87 @@ export function noteSourceIdentity(source) {
   return JSON.stringify(identity);
 }
 
-export function validateMetadata(input) {
-  const value = dataValue(input);
+const nativeSourceKeys = new Set(['client', 'session_id', 'unit_id', 'revision', 'raw_ref']);
+const checkedSources = new WeakSet();
+function sourceFields(existing, supplied) {
+  const fields = {};
+  for (const [key, value] of Object.entries(supplied)) {
+    if (Object.hasOwn(existing, key)) {
+      if (!isDeepStrictEqual(existing[key], value)) fail('NOTE_SOURCE_CONFLICT', 'A source identity already has different descriptive metadata. Preserve it and reconcile the source descriptions.');
+    } else fields[key] = value;
+  }
+  return fields;
+}
+function sourceChanges(existing, supplied) {
+  const additions = [], amendments = new Map();
+  const identities = new Map(existing.map((value, index) => [sourceIdentity(value), { value, index }]));
+  for (const source of supplied) {
+    const identity = sourceIdentity(source), prior = identities.get(identity);
+    if (prior) {
+      const fields = sourceFields(prior.value, source);
+      if (!Object.keys(fields).length) continue;
+      if (Object.keys(prior.value).length + Object.keys(fields).length > P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'The combined source descriptor exceeds its field limit. Preserve the existing source and supplied data.');
+      prior.value = Object.freeze(Object.fromEntries(Object.entries({ ...prior.value, ...fields }).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)));
+      if (prior.index < existing.length) amendments.set(prior.index, { ...amendments.get(prior.index), ...fields });
+      else additions[prior.index - existing.length] = prior.value;
+    } else {
+      if (existing.length + additions.length === P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'The note source limit is reached. Preserve the existing note and supplied sources; do not prune provenance or split the note to fit.');
+      identities.set(identity, { value: source, index: existing.length + additions.length }); additions.push(source);
+    }
+  }
+  return { additions, amendments };
+}
+
+/** Shared writer/validator policy: retain source order, identities and all old
+ * values, admitting only document additions and nonconflicting descriptive keys. */
+export function isSourceAppend(previous, current) {
+  try {
+    if (!Array.isArray(previous) || !Array.isArray(current) || current.length < previous.length || current.length > P.metadataItems) return false;
+    for (let index = 0; index < previous.length; index++) {
+      const before = previous[index], after = current[index];
+      if (sourceIdentity(before) !== sourceIdentity(after)) return false;
+      const extra = sourceFields(before, after);
+      if (Object.keys(before).some(key => !Object.hasOwn(after, key))) return false;
+      if (before.type !== 'document' && Object.keys(extra).length) return false;
+      if (Object.keys(extra).some(key => nativeSourceKeys.has(key))) return false;
+      if (Object.keys(extra).length) {
+        const identity = Object.fromEntries(['type', 'ref', 'locator', 'version', 'source_hash'].filter(key => Object.hasOwn(after, key)).map(key => [key, after[key]]));
+        validateDocumentSources([{ ...identity, ...extra }]);
+      }
+    }
+    const added = current.slice(previous.length);
+    return validateDocumentSources(added).length === added.length;
+  } catch { return false; }
+}
+
+/** Assistant-provided provenance is bounded descriptive document data, never
+ * native session authority or replacement of writer-owned note metadata. */
+export function validateDocumentSources(input) {
+  if (checkedSources.has(input)) return input;
+  if (Array.isArray(input) && input.length > P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'Too many supplied sources. Preserve the input and use the supported source bound.');
+  try {
+    const sources = dataValue({ sources: input }, true).sources;
+    requireValue(Array.isArray(sources));
+    for (const source of sources) requireValue(plain(source) && source.type === 'document' && !Object.keys(source).some(key => nativeSourceKeys.has(key)));
+    const result = Object.freeze(sourceChanges([], sources).additions);
+    checkedSources.add(result); return result;
+  } catch (error) {
+    if (error.code === 'NOTE_METADATA_INVALID') fail('NOTE_SOURCE_ARGUMENT', 'Invalid supplied source descriptor. Use bounded document fields without native session identities, control characters, surrounding whitespace or comment delimiters.');
+    throw error;
+  }
+}
+
+/** Stable JSON for already-validated source data. Preserve signed zero as well
+ * as object-key independence for request identity and exact metadata previews. */
+export function serializeSources(value) {
+  if (Object.is(value, -0)) return '-0';
+  if (Array.isArray(value)) return `[${value.map(serializeSources).join(',')}]`;
+  if (plain(value)) return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${serializeSources(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+export function validateMetadata(input, capacityCode = 'NOTE_METADATA_INVALID') {
+  const value = dataValue(input, false, capacityCode);
   requireValue(value.schema_version === 1 && typeof value.id === 'string' && idPattern.test(value.id));
   const optional = (record, key, check) => { if (Object.hasOwn(record, key)) requireValue(check(record[key])); };
   optional(value, 'type', item => typeof item === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(item));
@@ -90,7 +174,7 @@ export function validateMetadata(input) {
     for (const key of ['topics', 'entities']) optional(value.context, key, list => Array.isArray(list) && list.every(item => text(item)) && new Set(list).size === list.length);
   }
   if (Object.hasOwn(value, 'sources')) {
-    requireValue(Array.isArray(value.sources)); const identities = value.sources.map(noteSourceIdentity);
+    requireValue(Array.isArray(value.sources)); const identities = value.sources.map(sourceIdentity);
     requireValue(new Set(identities).size === identities.length);
   }
   if (Object.hasOwn(value, 'series')) {
@@ -225,10 +309,14 @@ export function noteContent(input) {
   return (inspection.raw === null ? '' : source.slice(0, inspection.start)) + withoutMetadata(source, inspection);
 }
 function quoted(value) { const scalar = new Scalar(value); scalar.type = Scalar.QUOTE_DOUBLE; return scalar; }
+function quoteSourceStrings(node) {
+  visitYaml(node, { Scalar(_key, value) { if (typeof value.value === 'string') value.type = Scalar.QUOTE_DOUBLE; } });
+  return node;
+}
 
-function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOverflow = false) {
+function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOverflow = false, sourceUpdate = false) {
   requireValue(typeof expandedMetadata === 'boolean');
-  const expected = validateMetadata(document.toJS({ maxAliasCount: 0 })), candidate = document.clone();
+  const expected = validateMetadata(document.toJS({ maxAliasCount: 0 }), sourceUpdate ? 'NOTE_SOURCE_LIMIT' : 'NOTE_METADATA_INVALID'), candidate = document.clone();
   // Flow style must spell out blank sequence items and escape multiline strings.
   // Preserve comments even when they need additional lines in compact output.
   if (!expandedMetadata) visitYaml(candidate, { Scalar(_key, node) {
@@ -243,25 +331,50 @@ function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOve
   // Escaping or indentation can exceed the fixed metadata limit in either
   // format. A formatting preference must not prevent an otherwise valid edit.
   if (preserveLayoutOnOverflow && Buffer.byteLength(raw) > P.metadataBytes) raw = serialize(document, 'any');
+  if (sourceUpdate && Buffer.byteLength(raw) > P.metadataBytes) fail('NOTE_SOURCE_LIMIT', 'The resulting source metadata exceeds its byte limit. Preserve the note and supplied sources; do not truncate metadata to fit.');
   const rendered = inspectMetadata(raw);
   requireValue(rendered.status === 'supported' && isDeepStrictEqual(rendered.value, expected));
   return raw;
 }
 
 /** Existing metadata owns identity/descriptions. Agent-supplied replacements do
- * not overwrite it. Timestamp/version changes occur only for a useful body edit. */
-export function preserveMetadata(originalInput, proposedInput, { usefulChange, updated, skillVersion, expandedMetadata = false } = {}) {
+ * not overwrite it; explicit document sources append without losing information. */
+export function preserveMetadata(originalInput, proposedInput, { usefulChange, updated, skillVersion, expandedMetadata = false, sources = [] } = {}) {
   const original = decodeNote(originalInput), proposed = decodeNote(proposedInput);
   const before = inspectMetadata(original), after = inspectMetadata(proposed);
+  const additions = validateDocumentSources(sources);
+  if (additions.length && before.status !== 'supported') {
+    if (before.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be repaired by a note update.');
+    fail('NOTE_SOURCES_UNSUPPORTED', 'New sources require existing supported Cuefluent metadata. Preserve this note without enriching or replacing its metadata.');
+  }
+  const changes = additions.length ? sourceChanges(before.value.sources ?? [], additions) : { additions: [], amendments: new Map() };
+  const sourcesChanged = changes.additions.length > 0 || changes.amendments.size > 0;
+  if (sourcesChanged && usefulChange === false) fail('NOTE_SOURCE_ARGUMENT', 'New source metadata is a change; do not declare a source addition unchanged.');
   const unchanged = () => ({ bytes: Buffer.from(original), changed: false, diagnostics: before.diagnostics });
-  if (original === proposed || usefulChange === false) return unchanged();
+  if (!sourcesChanged && (original === proposed || usefulChange === false)) return unchanged();
   if (before.status === 'invalid' || after.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be repaired by a note update.');
   const oldBody = withoutMetadata(original, before), newBody = withoutMetadata(proposed, after);
-  if (oldBody === newBody) return unchanged();
+  if (oldBody === newBody && !sourcesChanged) return unchanged();
   const prefix = before.raw === null ? '' : original.slice(0, before.start);
   let raw = before.raw ?? '';
   if (before.status === 'supported') {
     const matched = block.exec(raw), { document } = parseYaml(matched[2]);
+    if (sourcesChanged) {
+      if (!document.has('sources')) document.set('sources', document.createNode([]));
+      const sequence = document.get('sources', true);
+      for (const [index, fields] of changes.amendments) {
+        const node = sequence.items[index];
+        const additions = quoteSourceStrings(document.createNode(fields));
+        for (const pair of additions.items) node.add(pair);
+      }
+      // A sequence-end comment belongs with the original source set, not a
+      // newly appended source. Keep it before the first addition.
+      for (const source of changes.additions) {
+        const node = quoteSourceStrings(document.createNode(source));
+        if (sequence.comment) { node.commentBefore = sequence.comment; sequence.comment = null; }
+        sequence.add(node);
+      }
+    }
     if (updated !== undefined) {
       requireValue(isNoteTimestamp(updated));
       const current = document.get('updated', true);
@@ -275,12 +388,12 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       if (isScalar(current)) current.value = skillVersion;
       else document.setIn(['generation', 'skill_version'], skillVersion);
     }
-    if (before.value.generation?.content_hash !== undefined) {
+    if (oldBody !== newBody && before.value.generation?.content_hash !== undefined) {
       // The optional digest covers the exact note bytes outside its metadata block.
       const value = `sha256:${createHash('sha256').update(prefix + newBody).digest('hex')}`;
       document.getIn(['generation', 'content_hash'], true).value = value;
     }
-    raw = renderMetadata(document, expandedMetadata, noteNewline(raw), true);
+    raw = renderMetadata(document, expandedMetadata, noteNewline(raw), true, sourcesChanged);
   }
   const bytes = Buffer.from(prefix + raw + newBody);
   return { bytes, changed: !bytes.equals(Buffer.from(original)), diagnostics: before.diagnostics };
@@ -290,9 +403,10 @@ export function createGeneratedNote(bodyInput, { id = randomUUID(), now, skillVe
   const body = decodeNote(bodyInput);
   metadata = dataValue(metadata);
   requireValue(inspectMetadata(body).status === 'absent' && isNoteTimestamp(now));
-  const value = validateMetadata({ ...metadata, schema_version: 1, id, created: now, updated: now, generation: { ...metadata.generation, skill_version: skillVersion } });
+  const value = validateMetadata({ ...metadata, schema_version: 1, id, created: now, updated: now, generation: { ...metadata.generation, skill_version: skillVersion } }, metadata.sources?.length ? 'NOTE_SOURCE_LIMIT' : 'NOTE_METADATA_INVALID');
   const document = parseDocument(''); document.contents = document.createNode(value);
   document.set('created', quoted(now)); document.set('updated', quoted(now));
-  const result = Buffer.from(renderMetadata(document, expandedMetadata, noteNewline(body)) + body);
+  if (document.has('sources')) quoteSourceStrings(document.get('sources', true));
+  const result = Buffer.from(renderMetadata(document, expandedMetadata, noteNewline(body), false, Boolean(value.sources?.length)) + body);
   requireValue(inspectMetadata(result).status === 'supported'); return result;
 }

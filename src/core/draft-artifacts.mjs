@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isMarkdownPath } from './note-path.mjs';
 import { fail } from './errors.mjs';
 import { validateNoteBinding } from './note-binding.mjs';
 import { MAX_NOTE_BYTES } from './note-publication.mjs';
@@ -47,7 +48,7 @@ export function validateDraftArtifactManifest(input, { platform = process.platfo
     const value = descriptors[index].value;
     data(value, ['id', 'target', 'expectedHash', 'hash', 'summary', 'heading', 'byteLength', 'binding']);
     if (!uuid(value.id) || value.id === input.runId || typeof value.target !== 'string' || value.target.length > 4096 || !paths.isAbsolute(value.target) || paths.normalize(value.target) !== value.target ||
-        /[\u0000-\u001f\u007f]/.test(value.target) || !/\.(?:md|markdown)$/i.test(value.target) || (value.expectedHash !== null && !hash(value.expectedHash)) || !hash(value.hash) ||
+        /[\u0000-\u001f\u007f]/.test(value.target) || !isMarkdownPath(value.target, paths) || (value.expectedHash !== null && !hash(value.expectedHash)) || !hash(value.hash) ||
         !Number.isSafeInteger(value.byteLength) || value.byteLength < 1 || value.byteLength > DRAFT_ARTIFACT_LIMITS.fileBytes) invalid('Invalid exact draft descriptor.');
     const parts = platform === 'win32' ? value.target.slice(3).split('\\') : value.target.slice(1).split('/');
     if ((platform === 'win32' && !/^[A-Za-z]:\\/.test(value.target)) || parts.some(part => !part || part === '.' || part === '..' ||

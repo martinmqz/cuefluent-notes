@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isMarkdownPath } from './note-path.mjs';
 import { fail } from './errors.mjs';
 
 export const MAX_NOTE_BYTES = 10 * 1024 * 1024;
@@ -41,7 +42,7 @@ export function validateNotePublication(input, { platform = process.platform } =
       typeof input.hash !== 'string' || !HASH.test(input.hash) ||
       !Number.isSafeInteger(input.bytes) || input.bytes < 0 || input.bytes > MAX_NOTE_BYTES) invalid('Invalid publication identity, hash, or size.');
   const root = boundedPath(input.root, paths);
-  if (typeof input.relative !== 'string' || input.relative.length > 4096 || !/\.(?:md|markdown)$/i.test(input.relative)) invalid('The publication target must be a bounded Markdown path.');
+  if (typeof input.relative !== 'string' || input.relative.length > 4096 || !isMarkdownPath(input.relative, path.posix)) invalid('The publication target must be a bounded Markdown path.');
   if (!input.relative || /[\u0000-\u001f\u007f\\]/.test(input.relative) || input.relative.split('/').some(part => !part || part === '.' || part === '..' || /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part))) invalid('Use a portable relative publication path.');
   const target = paths.join(root, ...input.relative.split('/'));
   if (!Array.isArray(input.parent) || !input.parent.length || input.parent.length > 128 ||

@@ -178,6 +178,12 @@ There is no linter, formatter, or type checker.
   metadata. Leave unsupported metadata exactly unchanged and report malformed
   metadata instead of repairing it. The schema-1 note format is independent of
   the plugin version.
+- Newly authored visible bodies contain substantive content only. Keep source
+  references, citation offsets and note-production details in hidden metadata;
+  supplied document sources use the separate `sources` argument. Preserve
+  meaningful attribution, occurrence dates, decisions and uncertainty in prose.
+  Search aliases remain hidden section comments. Do not silently relocate existing
+  user-written references or add private paths to portable notes.
 - Honor explicit file destinations and update a matching existing note in
   place. Otherwise route new notes by purpose to `meetings/`, `tasks/`,
   `knowledge-base/`, `decisions/`, or the notes root. `logs/` is reserved from

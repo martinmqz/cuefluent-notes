@@ -23,6 +23,7 @@
   "src/core/entry-contract.mjs",
   "src/core/errors.mjs",
   "src/core/note-binding.mjs",
+  "src/core/note-path.mjs",
   "src/core/note-publication.mjs",
   "src/core/result.mjs",
   "src/core/run.mjs",
