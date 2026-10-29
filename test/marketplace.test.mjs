@@ -15,6 +15,7 @@ const published = {
     '0.18.0': '8a3ab7cf0c034df52aa9e239ce37a2304b7616c12d7203861f1a66dabdda4072',
     '0.19.0': 'c0b69002aa48de4fe94b9ad84ec7c225ec8ec4fa337ea6098ee4086a7c58d1f9',
     '0.20.0': '3f162ead72f7ca0f4f0a3a26a8db02e01eb0060ce58cf9d7e51a2cc3dcbaa72d',
+    '0.21.0': 'ef628520c17aac21a9063976f598b70428e8964a8125e34ca72ec8618f804151',
   },
   historical: { version: '0.15.1', sha256: 'fb68d21426e23546ec272a6969e8084bd21e4189dcfb22dfdb10a85d7bbd13a4' },
 };

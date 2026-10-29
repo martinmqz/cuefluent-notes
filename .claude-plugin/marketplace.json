@@ -6,7 +6,7 @@
     {
       "name": "cuefluent-notes",
       "description": "Create or update Markdown notes from supplied content, or explicitly process tracked Claude and Codex chats.",
-      "source": "./claude/0.20.0/cuefluent-notes",
+      "source": "./claude/0.21.0/cuefluent-notes",
       "category": "productivity",
       "license": "SUL-1.0"
     }
