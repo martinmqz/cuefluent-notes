@@ -16,7 +16,7 @@ read inconsistently.
 `cuefluent_create_note(projectId, requestId, target, content, summary, sources?)` requires an
 absent target. `cuefluent_update_note` takes the same fields plus the exact
 inspected `expectedHash` and requires the existing target; a changed or missing
-original is a conflict, and an original above 64 KiB is refused before a draft is
+original is a conflict, and an original with a body above 64 KiB or a total size above 128 KiB is refused before a draft is
 reserved (`DIRECT_NOTE_UPDATE_LIMIT`). Each request creates or updates one file
 from up to 64 KiB of submitted UTF-8 content; the complete private draft with its
 retained metadata is limited to 128 KiB. New notes receive identity and
@@ -25,7 +25,11 @@ Optional `sources` contains known document descriptors for hidden metadata,
 separate from the substantive body; see [source metadata](notes.md#source-metadata).
 The same argument is available to queued `draft_note`. Source additions preserve
 existing descriptions and are bound to the complete retained draft and review
-revision, even though the content-only preview omits metadata.
+revision, while the Markdown preview omits metadata. Review returns paged `sourceContent`
+separately; show it alongside the body before approval. Source object key order
+does not change a direct request's identity. Each queued draft revision starts
+from the original and must resubmit its intended sources; repeated source bytes
+count toward the cumulative 128 KiB submission budget.
 
 `requestId` is a fresh UUID per request. The same id with identical arguments
 replays the retained draft or the latest completed outcome after a lost response;

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isMarkdownPath } from './note-path.mjs';
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 export const SETTINGS_LIMITS = Object.freeze({ projects: 1024, pathBytes: 32768, idLength: 128, timezoneLength: 128 });
@@ -67,7 +68,7 @@ function destination(value, paths) {
   record(value, ['kind', 'path'], ['kind', 'path'], 'destination');
   if (!['directory', 'file'].includes(value.kind)) invalid('destination.kind must be directory or file');
   const target = canonicalPath(value.path, paths, 'destination.path');
-  if (value.kind === 'file' && !['.md', '.markdown'].includes(paths.extname(target).toLowerCase())) invalid('A file destination must name a Markdown .md or .markdown file');
+  if (value.kind === 'file' && !isMarkdownPath(target, paths)) invalid('A file destination must name a Markdown .md or .markdown file');
   return Object.freeze({ kind: value.kind, path: target });
 }
 

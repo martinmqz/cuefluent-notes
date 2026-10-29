@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { NOTE_PROFILE } from '../../src/notes/profile.mjs';
-import { createGeneratedNote } from '../../src/notes/metadata.mjs';
+import { createGeneratedNote, preserveMetadata } from '../../src/notes/metadata.mjs';
 import { assertOrdinaryTarget, isLogEntryMarker, validateNote } from '../../src/notes/validate.mjs';
 
 const marker = '<!-- note-log-entry event=12345678-1234-4123-8123-123456789abc project=synthetic -->';
@@ -24,11 +24,18 @@ test('existing note validation permits only additive document sources while reta
   const existing = createGeneratedNote(body, { ...options, metadata: { sources: [first, second], custom: 'keep' } });
   const candidate = (sources, custom = 'keep') => createGeneratedNote(body, { ...options, metadata: { sources, custom } });
   assert.equal(validateNote(candidate([first, second, addition]), { existing }).valid, true);
+  assert.equal(validateNote(candidate([{ ...first, category: 'reference' }, second]), { existing }).valid, true);
+  const recited = preserveMetadata(existing, body.replace('Useful content.', 'Corrected useful content.'), { sources: [{ type: first.type, ref: first.ref }] }).bytes;
+  assert.equal(validateNote(recited, { existing }).valid, true);
   for (const sources of [[first], [second, first], [{ ...first, description: 'Changed' }, second],
+    [{ type: first.type, ref: first.ref }, second], [{ ...first, raw_ref: 'Invented native reference' }, second],
     [first, second, { type: 'session', client: 'codex', session_id: 'invented', unit_id: 'unit', revision: 'a'.repeat(64) }]]) {
     assert.equal(has(validateNote(candidate(sources), { existing }), 'metadata-sources-changed'), true);
   }
   assert.equal(has(validateNote(candidate([first, second, addition], 'changed'), { existing }), 'metadata-descriptions-changed'), true);
+  const signedZero = '<!-- cuefluent\nschema_version: 1\nid: source-note\nsources:\n  - type: document\n    ref: Existing design\n    offset: -0\n-->\n' + body;
+  assert.equal(validateNote(signedZero, { existing: signedZero }).valid, true);
+  assert.equal(has(validateNote(signedZero.replace('offset: -0', 'offset: 0'), { existing: signedZero }), 'metadata-sources-changed'), true);
 });
 
 test('aliases must be single-line, nonempty and first in the section', () => {

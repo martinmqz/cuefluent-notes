@@ -4,6 +4,7 @@ import { inspectDraftArtifacts } from '../storage/draft-artifacts.mjs';
 import { withProject } from '../storage/store.mjs';
 import { ownDirectAttempt, launchOwnedAttempt } from '../storage/attempts.mjs';
 import { reviewNoteContent } from '../notes/validate.mjs';
+import { inspectMetadata, serializeSources } from '../notes/metadata.mjs';
 import { readPrivateDraft } from '../processing/save.mjs';
 import { runProcessingWork } from '../processing/worker.mjs';
 import { readRunSnapshot } from './status.mjs';
@@ -59,19 +60,21 @@ export function locateRun({ run, latest, active }, runId) {
   return active ? { result: { state: 'running', projectId: run.projectId, runId: run.id, started: false } } : { run };
 }
 
-function pageEntry(run, draft, index, content, start, end) {
+function pageEntry(run, draft, index, content, start, end, part = 'content') {
+  const piece = content.subarray(start, end).toString('utf8');
   return { index, target: draft.target, summary: draft.summary, heading: draft.heading, expectedHash: draft.expectedHash, hash: draft.hash,
     saved: run.saved.some(item => item.draftId === draft.id),
-    totalBytes: content.length, start, end, next: end < content.length ? end : null, content: content.subarray(start, end).toString('utf8') };
+    totalBytes: content.length, start, end, next: end < content.length ? end : null,
+    ...(part === 'sources' ? { part, sourceScope: 'all-proposed', sourceContent: piece, content: '' } : { content: piece }) };
 }
 
 /** Largest UTF-8 boundary so the serialized piece fits the remaining budget. */
-function fitPiece(run, draft, index, content, start, available) {
+function fitPiece(run, draft, index, content, start, available, part) {
   let end = Math.min(content.length, start + available);
   for (let attempt = 0; attempt < 64 && end > start; attempt++) {
     while (end > start && continuation(content, end)) end--;
     if (end === start) break;
-    const size = serialized(pageEntry(run, draft, index, content, start, end));
+    const size = serialized(pageEntry(run, draft, index, content, start, end, part));
     if (size <= available) return end;
     const next = start + Math.floor((end - start) * available / size);
     end = Math.min(end - 1, Math.max(start, next));
@@ -79,11 +82,13 @@ function fitPiece(run, draft, index, content, start, available) {
   fail('CONTROL_RESPONSE_LIMIT', 'The draft preview cannot be split into a bounded page.');
 }
 
-/** Content-only previews of a pending direct or queued draft set, in bounded
- * pages, with the immutable revision every decision must cite. Read-only: no
- * model, synchronization or save is started. */
-export async function reviewRun(store, { projectId, runId, draft: first = 0, start: offset = 0 }) {
+/** Content-only Markdown and separately identified proposed source metadata, in
+ * bounded pages with the immutable revision every decision must cite. Source JSON
+ * is never part of the temporary Markdown approval file. Read-only: no model,
+ * synchronization or save is started. */
+export async function reviewRun(store, { projectId, runId, draft: first = 0, start: offset = 0, part: firstPart = 'content' }) {
   if (![first, offset].every(value => Number.isSafeInteger(value) && value >= 0)) invalid('A review page position is a nonnegative draft index and byte offset.');
+  if (!['content', 'sources'].includes(firstPart)) invalid('A review page part is content or sources.');
   return withProject(store, projectId, async context => {
     const located = locateRun(await readRunSnapshot(store, context), runId);
     if (located.result) return located.result;
@@ -92,23 +97,31 @@ export async function reviewRun(store, { projectId, runId, draft: first = 0, sta
       revision: runRevision(run), draftCount: run.drafts.length, savedCount: run.saved.length, choices: decisionChoices(run, { retained: await retainedComplete(store, run) }), drafts: [], next: null,
       warnings: run.warnings.slice(0, PAGE_WARNINGS), warningsTruncated: run.warnings.length > PAGE_WARNINGS };
     if (!['review', 'saving'].includes(run.phase)) {
-      if (first !== 0 || offset !== 0) invalid('This run has no reviewable draft page at that position.');
+      if (first !== 0 || offset !== 0 || firstPart !== 'content') invalid('This run has no reviewable draft page at that position.');
       return page;
     }
     if (first >= run.drafts.length) invalid('The requested draft index is beyond this draft set.');
     // Measure with the largest possible continuation marker and one separator
     // per entry, so the finished page never exceeds the budget it was built to.
-    let size = serialized({ ...page, next: { draft: 1023, start: 10 * 1024 * 1024 } }) + 1;
-    for (let index = first; index < run.drafts.length; index++) {
+    let size = serialized({ ...page, next: { draft: 1023, start: 10 * 1024 * 1024, part: 'sources' } }) + 1;
+    drafts: for (let index = first; index < run.drafts.length; index++) {
       const draft = run.drafts[index];
-      const content = Buffer.from(reviewNoteContent(await readPrivateDraft(store, context.directory, run, draft)), 'utf8');
-      if ((offset && offset >= content.length) || continuation(content, offset)) invalid('The requested preview offset is not a UTF-8 boundary inside this draft.');
-      const whole = pageEntry(run, draft, index, content, offset, content.length), wholeSize = serialized(whole) + 1;
-      if (size + wholeSize <= REVIEW_PAGE_BYTES) { page.drafts.push(whole); size += wholeSize; offset = 0; continue; }
-      if (page.drafts.length) { page.next = { draft: index, start: offset }; break; }
-      const end = fitPiece(run, draft, index, content, offset, REVIEW_PAGE_BYTES - size - 1);
-      page.drafts.push(pageEntry(run, draft, index, content, offset, end));
-      page.next = { draft: index, start: end }; break;
+      const bytes = await readPrivateDraft(store, context.directory, run, draft), metadata = inspectMetadata(bytes);
+      const sources = metadata.status === 'supported' ? metadata.value.sources ?? [] : [];
+      const parts = [{ part: 'content', content: Buffer.from(reviewNoteContent(bytes), 'utf8') }];
+      if (sources.length) parts.push({ part: 'sources', content: Buffer.from(serializeSources(sources), 'utf8') });
+      const firstPiece = index === first && firstPart === 'sources' ? 1 : 0;
+      if (firstPiece >= parts.length) invalid('This draft has no source metadata to review.');
+      for (const { part, content } of parts.slice(firstPiece)) {
+        if ((offset && offset >= content.length) || continuation(content, offset)) invalid('The requested preview offset is not a UTF-8 boundary inside this draft part.');
+        const cursor = start => ({ draft: index, start, ...(part === 'sources' ? { part } : {}) });
+        const whole = pageEntry(run, draft, index, content, offset, content.length, part), wholeSize = serialized(whole) + 1;
+        if (size + wholeSize <= REVIEW_PAGE_BYTES) { page.drafts.push(whole); size += wholeSize; offset = 0; continue; }
+        if (page.drafts.length) { page.next = cursor(offset); break drafts; }
+        const end = fitPiece(run, draft, index, content, offset, REVIEW_PAGE_BYTES - size - 1, part);
+        page.drafts.push(pageEntry(run, draft, index, content, offset, end, part));
+        page.next = cursor(end); break drafts;
+      }
     }
     return page;
   });

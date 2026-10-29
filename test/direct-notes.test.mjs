@@ -87,13 +87,22 @@ test('direct document sources are hidden from previews, saved exactly, and bound
   assert.deepEqual(inspectMetadata(bytes).value.sources, sources);
   assert.equal(preview.drafts[0].hash, hashBytes(bytes));
   assert.deepEqual(await f.create({ sources }), preview);
+  assert.deepEqual(await f.create({ sources: [{ locator: sources[0].locator, ref: sources[0].ref, type: 'document' }] }), preview);
   const changed = [{ ...sources[0], locator: '05:23–07:35' }];
   await assert.rejects(f.create({ sources: changed }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
   await assert.rejects(f.create(), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
   const saved = await f.call('save');
   assert.ok((await fs.readFile(saved.result.paths[0])).equals(bytes));
   assert.deepEqual(await f.create({ sources }), saved);
+  assert.deepEqual(await f.create({ sources: [{ ref: sources[0].ref, locator: sources[0].locator, type: 'document' }] }), saved);
   await assert.rejects(f.create({ sources: changed }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
+});
+
+test('direct source replay preserves numeric distinctions in descriptive data', async t => {
+  const f = await fixture(t), source = { type: 'document', ref: 'Synthetic', offset: -0 };
+  await f.create({ sources: [source] });
+  await assert.rejects(f.create({ sources: [{ ...source, offset: 0 }] }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
+  await f.call('skip');
 });
 
 test('direct source-only updates retain original metadata and reject conflicting descriptions before reserving a run', async t => {
@@ -117,7 +126,7 @@ test('direct source-only updates retain original metadata and reject conflicting
 test('invalid document sources and additions to plain notes never create pending work or replace note bytes', async t => {
   const f = await fixture(t), source = { type: 'document', ref: 'Synthetic source' };
   for (const sources of [null, {}, [{ type: 'session', client: 'codex', session_id: 'invented', unit_id: 'invented', revision: 'a'.repeat(64) }], [{ ...source, ref: 'x'.repeat(2049) }]]) {
-    await assert.rejects(f.create({ sources }), { code: 'NOTE_METADATA_INVALID' });
+    await assert.rejects(f.create({ sources }), { code: 'NOTE_SOURCE_ARGUMENT' });
     assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
   }
   const target = path.join(f.notes, 'plain.md'); await fs.writeFile(target, content);
@@ -358,6 +367,30 @@ test('a note within the cap is read whole with its hash; an update needs only th
   assert.equal(await fs.readFile(target, 'utf8'), large);
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
 });
+
+for (const saving of ['auto', 'review']) {
+  test(`direct ${saving} updates preserve large hidden metadata while bounding the complete body`, async t => {
+    const f = await fixture(t, { saving });
+    const body = content + '\n' + 'Preserve each useful paragraph.\n'.repeat(1900);
+    const sources = Array.from({ length: 80 }, (_, i) => ({ type: 'document', ref: `Synthetic source ${i} ${'x'.repeat(100)}` }));
+    assert.ok(Buffer.byteLength(body) < DIRECT_NOTE_BYTES);
+    await f.create({ content: body, sources });
+    if (saving === 'review') await f.call('save');
+    const target = path.join(f.notes, f.request.target), original = await fs.readFile(target);
+    assert.ok(original.length > DIRECT_NOTE_BYTES);
+    const changed = body.replace('small', 'focused');
+    const result = await f.tools.call('cuefluent_update_note', { ...f.request, requestId: randomUUID(), expectedHash: hashBytes(original), content: changed });
+    if (saving === 'review') {
+      assert.ok((await fs.readFile(target)).equals(original));
+      await f.tools.call('cuefluent_save_note', { projectId: 'demo', runId: result.runId, revision: result.revision });
+    }
+    const revised = await fs.readFile(target);
+    assert.ok(revised.toString().endsWith(changed));
+    assert.deepEqual(inspectMetadata(revised).value.sources, inspectMetadata(original).value.sources);
+    assert.equal(inspectMetadata(revised).value.id, inspectMetadata(original).value.id);
+    assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
+  });
+}
 
 test('whole reads honor the exact byte cap and fall back to ranges when the escaped projection would exceed one result', async t => {
   const f = await fixture(t, { saving: 'auto' }), target = path.join(f.notes, 'bound.md');

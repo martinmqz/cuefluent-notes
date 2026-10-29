@@ -23,7 +23,7 @@ import { prepareProcessing } from '../src/processing/prepare.mjs';
 import { runProcessingWork } from '../src/processing/worker.mjs';
 import { openNoteWorkspace } from '../src/processing/workspace.mjs';
 import { persistDraftManifest } from '../src/processing/draft.mjs';
-import { createGeneratedNote } from '../src/notes/index.mjs';
+import { createGeneratedNote, inspectMetadata } from '../src/notes/index.mjs';
 import { reviewNoteContent } from '../src/notes/validate.mjs';
 import { withoutFfiNotice } from './fixtures/runtime-stderr.mjs';
 
@@ -139,7 +139,7 @@ async function fixture(t, { saving = 'review' } = {}) {
       for (const spec of specs) {
         const target = file(spec.target), label = path.basename(spec.target, '.md');
         const summary = spec.summary ?? `Record ${label}.`, heading = spec.heading ?? null;
-        if (spec.size === undefined) { await workspace.draft_note({ target, content: spec.content, summary, heading }); continue; }
+        if (spec.size === undefined) { await workspace.draft_note({ target, content: spec.content, summary, heading, ...(spec.sources ? { sources: spec.sources } : {}) }); continue; }
         await workspace.read_note({ target, maxBytes: 4 });
         await workspace.draft_note({ target, summary, heading, edits: [{ oldText: `Unique marker for ${label}.`, newText: `Revised marker for ${label}.${'p'.repeat(spec.pad ?? 0)}` }] });
       }
@@ -187,10 +187,78 @@ async function fixture(t, { saving = 'review' } = {}) {
 
   const tools = createDirectNoteTools({ store, client: 'codex', skillVersion: SKILL_VERSION,
     launchProcessing: () => assert.fail('A direct run never starts a separate worker.') });
-  const direct = (target, content) => tools.call('cuefluent_create_note', { projectId: PROJECT, requestId: randomUUID(), target, content, summary: 'Synthetic summary.' });
+  const direct = (target, content, sources) => tools.call('cuefluent_create_note', { projectId: PROJECT, requestId: randomUUID(), target, content, summary: 'Synthetic summary.', ...(sources ? { sources } : {}) });
   const decide = (runId, revision, action) => decideRun(store, { projectId: PROJECT, runId, revision, action }, { client: 'codex', skillVersion: SKILL_VERSION });
-  return { notes, store, file, current, queue, own, prepare, queued, pages, retained, previewsOf, workers, launchWorker, read, direct, decide };
+  return { notes, store, file, current, queue, own, prepare, queued, pages, retained, previewsOf, workers, launchWorker, read, direct, decide, tools };
 }
+
+test('source-only direct updates show all proposed source descriptors separately from the unchanged Markdown', async t => {
+  const f = await fixture(t), oldSource = { type: 'document', ref: 'Existing synthetic report', locator: 'Prior conclusion' };
+  const addition = { type: 'document', ref: 'New synthetic report', locator: 'Updated conclusion' }, target = f.file('source-note.md');
+  const original = createGeneratedNote(RETRY.content, { id: 'source-note', now: CREATED_AT, skillVersion: SKILL_VERSION, metadata: { sources: [oldSource] } });
+  await fs.writeFile(target, original);
+  const page = await f.tools.call('cuefluent_update_note', { projectId: PROJECT, requestId: randomUUID(), target, expectedHash: hashBytes(original),
+    content: RETRY.content, summary: 'Add the supplied report source.', sources: [addition] });
+  assert.equal(page.state, 'review'); assert.equal(page.next, null); assert.equal(page.draftCount, 1);
+  const [body, sources] = page.drafts;
+  assert.equal(body.content, RETRY.content); assert.equal(body.part, undefined);
+  assert.equal(sources.part, 'sources'); assert.equal(sources.sourceScope, 'all-proposed'); assert.equal(sources.content, '');
+  assert.deepEqual(JSON.parse(sources.sourceContent), [oldSource, addition]);
+  assert.equal(body.hash, sources.hash); assert.notEqual(body.hash, body.expectedHash);
+  assert.ok((await fs.readFile(target)).equals(original));
+  const run = await f.current(), retained = await f.retained(run, 0);
+  assert.deepEqual(inspectMetadata(retained.bytes).value.sources, JSON.parse(sources.sourceContent));
+  const saved = await f.decide(run.id, page.revision, 'save'); assert.equal(saved.state, 'saved');
+  assert.ok((await fs.readFile(target)).equals(retained.bytes));
+});
+
+test('source review paginates escaped Unicode metadata for direct and queued drafts without leaking it into Markdown', async t => {
+  const sources = Array.from({ length: 24 }, (_, index) => ({ type: 'document', ref: `Synthetic ${index} ${'"\\界𝄞'.repeat(140)}` }));
+  for (const kind of ['direct', 'queued']) {
+    const f = await fixture(t);
+    const run = kind === 'direct'
+      ? (await f.direct('source-note.md', RETRY.content, sources), await f.current())
+      : (await f.queued([{ target: 'source-note.md', content: RETRY.content, sources }, { target: 'following.md', content: RETRY.content }])).run;
+    const walked = await f.pages(run), entries = walked.flatMap(page => page.drafts);
+    assert.equal(entries.filter(entry => !entry.part && entry.index === 0).map(entry => entry.content).join(''), RETRY.content);
+    if (kind === 'queued') assert.equal(entries.filter(entry => entry.index === 1).map(entry => entry.content).join(''), RETRY.content);
+    const sourcePieces = entries.filter(entry => entry.part === 'sources');
+    assert.ok(sourcePieces.length > 1, 'source metadata must exercise its own pagination');
+    let offset = 0;
+    for (const piece of sourcePieces) {
+      assert.equal(piece.content, ''); assert.equal(piece.sourceScope, 'all-proposed');
+      assert.equal(piece.start, offset); assert.equal(piece.end - piece.start, Buffer.byteLength(piece.sourceContent));
+      assert.ok(!piece.sourceContent.includes('\uFFFD')); offset = piece.end;
+      assert.equal(piece.next, piece.end === piece.totalBytes ? null : piece.end);
+    }
+    assert.deepEqual(JSON.parse(sourcePieces.map(piece => piece.sourceContent).join('')), sources);
+    for (const page of walked) { assert.ok(serialized(page) <= PAGE); assert.equal(page.revision, runRevision(run)); }
+    const sourceCursor = walked.map(page => page.next).find(cursor => cursor?.part === 'sources');
+    assert.ok(sourceCursor);
+    const resumed = await f.tools.call('cuefluent_review_note', { projectId: PROJECT, runId: run.id, ...sourceCursor });
+    assert.deepEqual(resumed, await reviewRun(f.store, { projectId: PROJECT, runId: run.id, ...sourceCursor }));
+    const json = Buffer.from(sourcePieces.map(piece => piece.sourceContent).join('')), continuation = json.findIndex(byte => (byte & 0xc0) === 0x80);
+    await assert.rejects(reviewRun(f.store, { projectId: PROJECT, runId: run.id, part: 'sources', start: continuation }), { code: 'REVIEW_ARGUMENT' });
+    await assert.rejects(reviewRun(f.store, { projectId: PROJECT, runId: run.id, part: 'sources', start: json.length }), { code: 'REVIEW_ARGUMENT' });
+    assert.deepEqual(await fs.readdir(f.notes), []); assert.equal((await f.current()).phase, 'review');
+  }
+});
+
+test('source paging rejects nonexistent parts and sources without changing a pending draft', async t => {
+  const f = await fixture(t), page = await f.direct('plain-source.md', RETRY.content), before = await f.current();
+  for (const part of ['sources', 'invented']) {
+    await assert.rejects(reviewRun(f.store, { projectId: PROJECT, runId: page.runId, part }), { code: 'REVIEW_ARGUMENT' });
+  }
+  assert.deepEqual(await f.current(), before); assert.deepEqual(await fs.readdir(f.notes), []);
+});
+
+test('source review retains signed zero in a proposed descriptor', async t => {
+  const f = await fixture(t), page = await f.direct('numeric-source.md', RETRY.content,
+    [{ type: 'document', ref: 'Synthetic numeric report', reading: -0 }]);
+  const source = page.drafts.find(entry => entry.part === 'sources');
+  assert.ok(source); assert.ok(Object.is(JSON.parse(source.sourceContent)[0].reading, -0));
+  assert.equal(page.drafts[0].content, RETRY.content);
+});
 
 test('queued review pages fill up to the byte budget with whole drafts; following next visits every draft once, in order', async t => {
   const f = await fixture(t);

@@ -5,11 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createProject, validateSettings } from '../src/core/settings.mjs';
+import { validateDraftArtifactManifest } from '../src/core/draft-artifacts.mjs';
+import { validateNotePublication } from '../src/core/note-publication.mjs';
 import { assertOrdinaryTarget } from '../src/notes/validate.mjs';
 import { inspectMetadata } from '../src/notes/metadata.mjs';
 import { openNoteWorkspace } from '../src/processing/workspace.mjs';
 import { initializeStore } from '../src/storage/store.mjs';
 import { createDirectNoteTools } from '../src/control/direct-notes.mjs';
+import { readProjectStatus } from '../src/control/status.mjs';
 
 const content = '# Synthetic design review\n\n## Decision\nKeep the original note in place.\n';
 
@@ -38,8 +41,31 @@ test('Markdown extension settings round-trip on both path platforms without wide
       const directory = createProject({ id: 'extensions', root, destination: { kind: 'directory', path: notes } }, { platform });
       assert.throws(() => assertOrdinaryTarget(directory, paths.join(notes, 'logs', `2026.${extension}`), { platform }), { code: 'NOTE_TARGET_RESERVED' });
     }
-    for (const filename of ['selected.txt', 'selected.markdown.tmp', 'selected.markdownx', '.markdown']) {
+    for (const filename of ['selected.txt', 'selected.markdown.tmp', 'selected.markdownx', '.md', '.markdown', 'selected.marKdown']) {
       assert.throws(() => createProject({ id: 'extensions', root, destination: { kind: 'file', path: paths.join(notes, filename) } }, { platform }), { code: 'SETTINGS_INVALID' });
+      const directory = createProject({ id: 'extensions', root, destination: { kind: 'directory', path: notes } }, { platform });
+      assert.throws(() => assertOrdinaryTarget(directory, paths.join(notes, filename), { platform }), { code: 'NOTE_TARGET_INVALID' });
+    }
+  }
+});
+
+test('draft artifacts and publication apply the same filename contract on both path platforms', () => {
+  for (const platform of ['posix', 'win32']) {
+    const paths = platform === 'win32' ? path.win32 : path.posix;
+    const root = platform === 'win32' ? 'C:\\notes' : '/notes';
+    const parent = [paths.parse(root).root, root].map((name, index) => ({ path: name, device: '1', inode: String(index + 1) }));
+    const runId = randomUUID(), id = randomUUID(), hash = 'a'.repeat(64);
+    const artifact = filename => ({ runId, outcome: 'drafted', drafts: [{ id, target: paths.join(root, filename), expectedHash: null, hash,
+      summary: 'Synthetic note', heading: null, byteLength: 1, binding: { root, parent } }] });
+    const publication = relative => ({ schema: 1, runId, draftId: id, root, relative, parent, expectedHash: null, hash, bytes: 1,
+      original: null, stage: null, capture: null });
+    for (const filename of ['selected.md', 'selected.MARKDOWN', '.hidden.md']) {
+      assert.equal(validateDraftArtifactManifest(artifact(filename), { platform }).drafts[0].target, paths.join(root, filename));
+      assert.equal(validateNotePublication(publication(filename), { platform }).relative, filename);
+    }
+    for (const filename of ['.md', '.MD', '.markdown', '.MARKDOWN', 'selected.marKdown']) {
+      assert.throws(() => validateDraftArtifactManifest(artifact(filename), { platform }), { code: 'DRAFT_ARTIFACT_INVALID' });
+      assert.throws(() => validateNotePublication(publication(filename), { platform }), { code: 'NOTE_PUBLICATION_INVALID' });
     }
   }
 });
@@ -47,7 +73,7 @@ test('Markdown extension settings round-trip on both path platforms without wide
 test('paginated note discovery includes both Markdown extensions and keeps reserved logs hidden', async t => {
   const f = await fixture(t);
   const filenames = ['a.md', 'b.MD', 'c.markdown', 'd.MARKDOWN'];
-  for (const filename of [...filenames, 'ignored.markdown.tmp', 'ignored.markdownx', 'ignored.txt']) await fs.writeFile(path.join(f.notes, filename), content);
+  for (const filename of [...filenames, 'ignored.markdown.tmp', 'ignored.markdownx', 'ignored.txt', '.md', '.markdown', 'ignored.marKdown']) await fs.writeFile(path.join(f.notes, filename), content);
   await fs.mkdir(path.join(f.notes, 'logs')); await fs.writeFile(path.join(f.notes, 'logs', '2026.markdown'), content);
   const workspace = await openNoteWorkspace({ project: f.project, runId: randomUUID(), skillVersion: '0.20.0' });
   const found = []; let cursor;
@@ -60,6 +86,21 @@ test('paginated note discovery includes both Markdown extensions and keeps reser
   for (const filename of filenames) assert.equal((await workspace.read_note({ target: filename })).content, content);
   await assert.rejects(workspace.read_note({ target: 'logs/2026.markdown' }), { code: 'NOTE_TARGET_RESERVED' });
   await assert.rejects(workspace.draft_note({ target: 'logs/new.MARKDOWN', content, summary: 'Forbidden ordinary log' }), { code: 'NOTE_TARGET_RESERVED' });
+});
+
+test('dotfile and confusable extension refusals never reserve a direct run', async t => {
+  const f = await fixture(t), store = await initializeStore(path.join(f.root, 'private'), { schemaVersion: 1, projects: [f.project] });
+  const tools = createDirectNoteTools({ store, client: 'codex', skillVersion: '0.21.0' });
+  await fs.mkdir(path.join(f.notes, 'meetings'));
+  for (const target of ['.md', '.markdown', 'meetings/.md', 'meetings/.markdown', 'selected.marKdown']) {
+    await assert.rejects(tools.call('cuefluent_create_note', { projectId: f.project.id, requestId: randomUUID(), target, content,
+      summary: 'Invalid note target' }), { code: 'NOTE_TARGET_INVALID' });
+    assert.equal((await readProjectStatus(store, f.project.id)).run, null);
+  }
+  const created = await tools.call('cuefluent_create_note', { projectId: f.project.id, requestId: randomUUID(), target: 'selected.MARKDOWN', content,
+    summary: 'Valid note after refusals' });
+  assert.equal(created.state, 'saved');
+  assert.deepEqual(await fs.readdir(path.join(f.notes, 'meetings')), []);
 });
 
 for (const fileDestination of [false, true]) {
