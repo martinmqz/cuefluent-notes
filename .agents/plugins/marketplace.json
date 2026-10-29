@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "cuefluent-notes",
-      "source": { "source": "local", "path": "./plugins/0.20.0/cuefluent-notes" },
+      "source": { "source": "local", "path": "./plugins/0.21.0/cuefluent-notes" },
       "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
       "category": "Productivity"
     }
