@@ -327,6 +327,17 @@ async function snapshot(file, { links = 1, missing = false } = {}) {
   } finally { await handle.close(); }
 }
 
+async function pinPublicationParent(pin, intent) {
+  if (!pin || pin.private !== false || pin.root !== intent.root) invalid('Use the exact pinned public note root.');
+  const parent = await inspectParent(pin, intent.relative);
+  if (JSON.stringify(parent.chain) !== JSON.stringify(intent.parent)) fail('PATH_CHANGED', 'The current note parent differs from its retained publication binding.');
+  // Persisted identities intentionally omit boot-local device numbers. Pin every
+  // current parent for this operation, including mounts beneath the note root.
+  // Keep the original root and intent; the existing directory checks now fence
+  // the full live chain through staging, publication and cleanup.
+  return Object.freeze({ ...pin, chain: parent.chain });
+}
+
 async function location(pin, intent) {
   if (!pin || pin.private !== false || pin.root !== intent.root) invalid('Use the exact pinned public note root.');
   await assertDirectory(pin);
@@ -411,6 +422,7 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   const draft = exactBytes(bytes, hash);
   if (draft.length > maxBytes) fail('NOTE_LIMIT_EXCEEDED', 'The note exceeds its supported size profile.');
   const parent = await inspectParent(pin, relative);
+  pin = Object.freeze({ ...pin, chain: parent.chain });
   if (expectedParentChain !== undefined) {
     const bound = validateNotePublication({ schema: 1, runId, draftId, root: pin.root, relative, parent: expectedParentChain,
       expectedHash: null, hash, bytes: draft.length, original: null, stage: null, capture: null });
@@ -590,6 +602,7 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   if (typeof beforePublish !== 'function') invalid('Publication fencing requires a trusted callback.');
   let intent = validateNotePublication(input);
   const draft = exactBytes(bytes, intent.hash, intent.bytes);
+  pin = await pinPublicationParent(pin, intent);
   let current = await mutationOutcome(pin, intent);
   if (current.status === 'existing') return Object.freeze({ draftId: intent.draftId, target: current.target, hash: intent.hash, changed: false });
   if (['applied', 'metadata-pending'].includes(current.status)) { await beforePublish(); return finish(pin, intent, current); }
@@ -696,6 +709,7 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
  */
 export async function discardNoteStage(pin, input, { persistIntent } = {}) {
   let intent = validateNotePublication(input);
+  pin = await pinPublicationParent(pin, intent);
   const current = await mutationOutcome(pin, intent);
   if (!intent.stage) {
     const empty = await lstatOrNull(current.stage);
@@ -719,6 +733,7 @@ export async function discardNoteStage(pin, input, { persistIntent } = {}) {
  * A backup is preserved and reported if ordinary recovery could not reconcile it. */
 export async function discardRecordedNoteStage(pin, input, { persistIntent } = {}) {
   let intent = validateNotePublication(input);
+  pin = await pinPublicationParent(pin, intent);
   if (intent.capture) await restoreCapturedConflict(pin, intent);
   const names = await location(pin, intent), stage = await lstatOrNull(names.stage);
   if (stage) {

@@ -1,3 +1,4 @@
+import { isFilesystemDevice, identityDataKeys } from '../core/filesystem-identity.mjs';
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -29,7 +30,7 @@ function shape(value, required, optional = [], code = 'QUEUE_METADATA_INVALID') 
       ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail(code, 'Queue metadata must be a plain data object.');
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const allowed = new Set([...required, ...optional]);
-  if (Reflect.ownKeys(descriptors).some(name => !allowed.has(name) || !Object.hasOwn(descriptors[name], 'value') || !descriptors[name].enumerable) ||
+  if (identityDataKeys(descriptors).some(name => !allowed.has(name) || !Object.hasOwn(descriptors[name], 'value') || !descriptors[name].enumerable) ||
       required.some(name => !Object.hasOwn(descriptors, name))) {
     fail(code, 'Queue metadata contains missing, unsupported, or non-data properties.');
   }
@@ -699,7 +700,7 @@ async function removalState(queue) {
   for (const [name, expected] of [['root', queue.root], ['parts', path.join(queue.root, 'parts')], ['links', path.join(queue.root, 'links')]]) {
     const saved = value[name];
     shape(saved, ['path', 'device', 'inode']);
-    if (saved.path !== expected || typeof saved.device !== 'string' || !/^[0-9]+$/.test(saved.device) || typeof saved.inode !== 'string' || !/^[1-9][0-9]*$/.test(saved.inode)) fail('QUEUE_INTENT_INVALID', 'Queue removal identity is invalid.');
+    if (saved.path !== expected || !isFilesystemDevice(saved.device) || typeof saved.inode !== 'string' || !/^[1-9][0-9]*$/.test(saved.inode)) fail('QUEUE_INTENT_INVALID', 'Queue removal identity is invalid.');
   }
   if (value.queueId !== initialState(queue).queueId || value.root.device !== queue.chain.at(-1).device || value.root.inode !== queue.chain.at(-1).inode) fail('QUEUE_CONFLICT', 'The empty queue was replaced during removal.');
   const retained = await metadata(queue, 'state.json', true);

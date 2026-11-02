@@ -1,3 +1,4 @@
+import { sameGateIdentity } from './gates.mjs';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fail } from '../core/errors.mjs';
@@ -198,7 +199,7 @@ export async function ownAttempt(store, projectId, { runId, attemptId, workerGat
   try {
     await withProject(store, projectId, context => {
       const expected = context.gates.workerGate;
-      if (workerGate && ['path', 'id', 'device', 'inode'].some(key => workerGate[key] !== expected[key])) fail('ATTEMPT_GATE_CHANGED', 'The worker gate differs from its launch binding.');
+      if (workerGate && !sameGateIdentity(workerGate, expected)) fail('ATTEMPT_GATE_CHANGED', 'The worker gate differs from its launch binding.');
       const acquired = tryAcquireExistingGate(expected, gateOptions);
       if (acquired.busy) fail('ATTEMPT_ACTIVE', 'A worker already owns this project.');
       gate = acquired.acquired;

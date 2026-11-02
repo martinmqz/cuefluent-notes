@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fail } from '../core/errors.mjs';
+import { LIVE_DEVICE } from '../core/filesystem-identity.mjs';
 import { readPathStat } from './stat.mjs';
 import { assertLocalFilesystem, assertPrivateAccess, establishWindowsPrivacy } from './platform.mjs';
 
@@ -11,12 +12,17 @@ export function fileIdentity(stat) {
   if (typeof stat?.dev !== 'bigint' || typeof stat?.ino !== 'bigint') {
     fail('STAT_EXACT_REQUIRED', 'Filesystem identity comparisons require exact bigint observations.');
   }
-  return Object.freeze({ device: String(stat.dev), inode: String(stat.ino) });
+  if (process.platform === 'darwin' && stat.volume !== null && !/^(?!0{32}$)[a-f0-9]{32}$/.test(stat.volume ?? '')) {
+    fail('FILESYSTEM_IDENTITY_UNVERIFIED', 'The filesystem volume identity could not be verified.');
+  }
+  return Object.freeze({ device: process.platform === 'darwin' && stat.volume !== null ? `volume:${stat.volume}` : String(stat.dev),
+    inode: String(stat.ino), [LIVE_DEVICE]: String(stat.dev) });
 }
 
 export function sameIdentity(stat, expected) {
   const actual = fileIdentity(stat);
-  return actual.device === expected.device && actual.inode === expected.inode;
+  return actual.device === expected.device && actual.inode === expected.inode &&
+    (expected[LIVE_DEVICE] === undefined || actual[LIVE_DEVICE] === expected[LIVE_DEVICE]);
 }
 
 export function assertAbsolute(file) {

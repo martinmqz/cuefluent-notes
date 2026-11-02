@@ -73,7 +73,29 @@ Opt-outs and verified positions survive queue removal. Data arriving after a
 selection is not consumed by that run. Cleanup never deletes notes or native
 transcripts. Process-owned gates release when their worker dies; owner death is
 never inferred from PID reuse or elapsed time, and gate files are never deleted or
-relocated. Cleanup acknowledgments must match the current run (`RUN_INVALID`,
+relocated. On macOS filesystems that report a volume UUID, retained file
+identities bind that UUID and inode: gates, transcripts, draft artifacts,
+directory pins, setup journals,
+queue identities and publication recovery retain the same identity when a reboot
+renumbers the mount-time device. Live operations also pin the current device
+until they finish. A different gate volume or inode is `GATE_REPLACED`; a volume
+identity that cannot be read is `GATE_IDENTITY_UNVERIFIED` for gates or
+`FILESYSTEM_IDENTITY_UNVERIFIED` for other files. Preserve the store and
+investigate these errors; never recreate locks or save around failed coordination.
+A public note destination need not be on a local disk. When macOS explicitly
+reports that a filesystem has no volume UUID, public files keep native device
+and inode checks. This supports that capability profile without treating an I/O,
+permission or malformed response as a missing capability. Private gates still
+require a UUID, and private stores remain limited to supported local filesystems.
+A previously recorded UUID never silently changes to a device-number identity.
+Live SMB, NFS and FUSE shares have not been verified by the synthetic capability
+checks; the writer still refuses any filesystem operation or metadata it cannot
+verify.
+Linux, Windows and macOS filesystems without UUIDs retain native device and inode
+identities. Reboot or remount recovery where those identities change is not
+established; preserve affected
+state and report the diagnostic instead of replacing its recorded identities.
+Cleanup acknowledgments must match the current run (`RUN_INVALID`,
 `QUEUE_CURSOR_MISMATCH` otherwise); finish pending work before changing packages.
 A note save and its log entry are separate writes: a log failure never blocks
 cleanup, retry details stay in the current run, and unconfirmed entries are

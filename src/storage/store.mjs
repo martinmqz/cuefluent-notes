@@ -11,15 +11,15 @@ import {
   createPrivateDirectory, inspectAncestors, inspectParent, lstatOrNull, pinDirectory,
 } from './paths.mjs';
 import { readJSON, readSnapshot, writeJSON, jsonBytes, reclaimAtomicStages } from './files.mjs';
-import { assertGatePlacement, initializeGate, inspectExistingGate, probeGate, withShortGate } from './gates.mjs';
+import { GATE_FIELDS, sameGateIdentity, isGateIdentity, assertGatePlacement, initializeGate, inspectExistingGate, probeGate, withShortGate } from './gates.mjs';
 
 const LAYOUT = 'store/layout.json';
-const STORE_SCHEMA = 2;
+const STORE_SCHEMA = 3;
 const SETTINGS = 'config/settings.json';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const projectKey = id => createHash('sha256').update(id).digest('hex');
 export const gateOptions = Object.freeze({ guardPath: (file, { stat }) => assertPrivateAccess(file, stat), initializePath: establishWindowsPrivacy });
-const sameGate = (left, right) => ['path', 'id', 'device', 'inode'].every(key => left[key] === right[key]);
+const sameGate = sameGateIdentity;
 
 function object(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
@@ -27,9 +27,8 @@ function object(value, keys) {
 }
 
 function checkGate(value, expectedPath, id) {
-  if (!object(value, ['path', 'id', 'device', 'inode']) || value.path !== expectedPath || value.id !== id ||
-      typeof value.device !== 'string' || !/^\d+$/.test(value.device) ||
-      typeof value.inode !== 'string' || !/^[1-9]\d*$/.test(value.inode)) {
+  if (!object(value, GATE_FIELDS) || value.path !== expectedPath || value.id !== id ||
+      !isGateIdentity(value)) {
     fail('STORE_LAYOUT_INVALID', 'A private gate descriptor does not match this store.');
   }
 }
@@ -190,13 +189,13 @@ const GATE_PUBLICATION = /^\.(settings|writer|sync)\.sqlite\.([a-f0-9]{8}-[a-f0-
 // Initial stages carry enough context to reconstruct even an empty/torn write.
 // Their UUID remains the layout ID; a generic temporary name proves no ownership.
 const INITIAL_STAGE = /^\.(layout|settings)\.json\.initialize\.([a-f0-9]{64})\.([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.tmp$/;
-const initialGate = ({ path, id, device, inode }) => ({ path, id, device, inode });
+const initialGate = gate => Object.fromEntries(GATE_FIELDS.map(key => [key, gate[key]]));
 const initialLayout = (store, id) => ({ schemaVersion: STORE_SCHEMA, id, settingsGate: initialGate(store.settingsGate),
   writerGate: initialGate(store.writerGate), syncGate: initialGate(store.syncGate), projects: {} });
 
 async function bindInitialStage(store, target, id) {
   const parent = await inspectParent(store.pin, target);
-  const gates = [store.settingsGate, store.writerGate, store.syncGate].map(gate => [gate.path, gate.id, gate.device, gate.inode]);
+  const gates = [store.settingsGate, store.writerGate, store.syncGate].map(gate => GATE_FIELDS.map(key => gate[key]));
   const binding = createHash('sha256').update(JSON.stringify([
     'store-initialization', STORE_SCHEMA, store.pin.chain.at(-1), parent.chain.at(-1), target, gates, id,
   ])).digest('hex');

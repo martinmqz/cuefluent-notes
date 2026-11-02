@@ -1,3 +1,4 @@
+import { isFilesystemDevice, isFilesystemInode } from '../core/filesystem-identity.mjs';
 import { spawn as nativeSpawn } from 'node:child_process';
 import { executablePath } from './executable.mjs';
 import { packageVersion } from '../core/version.mjs';
@@ -36,7 +37,7 @@ function absolute(value, nullable = false) {
 
 function identity(input) {
   const device = own(input, 'device'), inode = own(input, 'inode');
-  if (typeof device !== 'string' || typeof inode !== 'string' || !/^(?:0|[1-9][0-9]{0,39})$/.test(device) || !/^(?:0|[1-9][0-9]{0,39})$/.test(inode)) invalid('Previous native sources require exact physical identities.');
+  if (!isFilesystemDevice(device) || !isFilesystemInode(inode)) invalid('Previous native sources require exact physical identities.');
   return Object.freeze({ device, inode });
 }
 

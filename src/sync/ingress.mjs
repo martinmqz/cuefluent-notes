@@ -1,3 +1,4 @@
+import { sameIdentity } from '../storage/paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -195,7 +196,7 @@ async function appendSourceVersion(chat) {
   const stat = await lstatOrNull(chat.source.path);
   if (!stat) return null;
   assertRegularFile(chat.source.path, stat);
-  if (chat.source.identity && (String(stat.dev) !== chat.source.identity.device || String(stat.ino) !== chat.source.identity.inode)) return null;
+  if (chat.source.identity && !sameIdentity(stat, chat.source.identity)) return null;
   return JSON.stringify([chat.source.path, String(stat.dev), String(stat.ino), stat.size, String(stat.mtimeNs), String(stat.ctimeNs)]);
 }
 
