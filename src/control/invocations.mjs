@@ -9,7 +9,7 @@ import { chatKey, readChat } from '../storage/chats.mjs';
 import { gateOptions, withProject, withSelectedProject } from '../storage/store.mjs';
 import { createPrivateDirectory, assertDirectory, lstatOrNull } from '../storage/paths.mjs';
 import { readJSON, writeJSON } from '../storage/files.mjs';
-import { initializeGate, inspectExistingGate, probeGate, tryAcquireExistingGate } from '../storage/gates.mjs';
+import { isGateIdentity, initializeGate, inspectExistingGate, probeGate, tryAcquireExistingGate } from '../storage/gates.mjs';
 import { readProjectStatus } from './status.mjs';
 
 const MAX_BYTES = 512 * 1024;
@@ -38,15 +38,15 @@ function binding(input) {
 }
 function validate(store, key, value) {
   keys(value, ['schemaVersion', 'projectId', 'binding', 'token', 'gate', 'phase', 'result', 'blockedPromptId']);
-  if (value.schemaVersion !== 1 || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.projectId) || !/^[A-Za-z0-9_-]{43}$/.test(value.token) ||
+  if (value.schemaVersion !== 2 || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.projectId) || !/^[A-Za-z0-9_-]{43}$/.test(value.token) ||
       !['pending', 'executing', 'finished'].includes(value.phase) || (value.phase === 'finished') !== (value.result !== null)) invalid();
   keys(value.binding, ['client', 'sessionId', 'promptId', 'action', 'cwd', 'sourcePath', 'commandNonce', 'clientContract']);
   const bound = binding(value.binding);
   if (value.blockedPromptId !== null) { nativeId(value.blockedPromptId); if (value.blockedPromptId === bound.promptId) invalid(); }
   if (chatKey(bound.client, bound.sessionId) !== key) invalid();
   const gate = value.gate;
-  keys(gate, ['path', 'id', 'device', 'inode']);
-  if (gate.path !== path.join(store.root, `store/invocations/${key}.sqlite`) || gate.id !== `command:${key}` || !/^\d+$/.test(gate.device) || !/^[1-9]\d*$/.test(gate.inode)) invalid();
+  keys(gate, ['path', 'id', 'device', 'inode', 'volume']);
+  if (gate.path !== path.join(store.root, `store/invocations/${key}.sqlite`) || gate.id !== `command:${key}` || !isGateIdentity(gate)) invalid();
   if (value.result !== null && (!value.result || typeof value.result !== 'object' || Array.isArray(value.result) || typeof value.result.state !== 'string')) invalid();
   return { ...value, binding: bound };
 }
@@ -107,7 +107,7 @@ export async function claimInvocation(store, input) {
     }
     const token = randomBytes(32).toString('base64url');
     const selected = checked.client === 'claude' && checked.commandNonce === null ? { ...checked, commandNonce: encode(key, token) } : checked;
-    const value = validate(store, key, { schemaVersion: 1, projectId: context.project.id, binding: selected,
+    const value = validate(store, key, { schemaVersion: 2, projectId: context.project.id, binding: selected,
       token, gate, phase: 'pending', result: null, blockedPromptId: null });
     await writeJSON(store.pin, relative(key), value, { expectedHash: current?.hash ?? null, maxBytes: MAX_BYTES });
     return value;

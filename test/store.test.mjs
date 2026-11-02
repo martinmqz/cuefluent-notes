@@ -8,7 +8,7 @@ import { createProject, emptySettings } from '../src/core/settings.mjs';
 import { describeFailure } from '../src/diagnostics.mjs';
 import { initializeStore, openStore, readSettings, updateSettings, withProject, gateOptions } from '../src/storage/store.mjs';
 import { createPrivateDirectory } from '../src/storage/paths.mjs';
-import { tryAcquireExistingGate } from '../src/storage/gates.mjs';
+import { probeGate, tryAcquireExistingGate } from '../src/storage/gates.mjs';
 import { interruptRemoval } from './fixtures/exact-removal-worker.mjs';
 import { readSnapshot, writeJSON } from '../src/storage/files.mjs';
 
@@ -214,10 +214,10 @@ test('root replacement and restoration cannot hide retained work during acquisit
 });
 
 test('a layout arriving after an absent observation cannot authorize gate creation', async t => {
-  for (const schemaVersion of [1, 2, 3]) {
+  for (const schemaVersion of [2, 3, 4]) {
     const f = await fixture(t); await createPrivateDirectory(path.join(f.privateRoot, 'store'));
     const file = path.join(f.privateRoot, 'store/layout.json'), lstat = fs.lstat;
-    const gate = id => ({ path: path.join(f.privateRoot, `store/locks/${id}.sqlite`), id, device: '1', inode: '2' });
+    const gate = id => ({ path: path.join(f.privateRoot, `store/locks/${id}.sqlite`), id, device: '1', inode: '2', volume: process.platform === 'darwin' ? '1'.repeat(32) : null });
     const layout = { schemaVersion, id: '11111111-1111-1111-1111-111111111111', settingsGate: gate('settings'), writerGate: gate('writer'), syncGate: gate('sync'), projects: {} };
     let injected = false;
     const injection = t.mock.method(fs, 'lstat', async (...args) => {
@@ -230,7 +230,7 @@ test('a layout arriving after an absent observation cannot authorize gate creati
         throw error;
       }
     });
-    try { await assert.rejects(initializeStore(f.privateRoot), { code: schemaVersion === 2 ? 'STORE_INCOMPLETE' : 'STORE_SCHEMA_UNSUPPORTED' }); }
+    try { await assert.rejects(initializeStore(f.privateRoot), { code: schemaVersion === 3 ? 'STORE_INCOMPLETE' : 'STORE_SCHEMA_UNSUPPORTED' }); }
     finally { injection.mock.restore(); }
     assert.equal(injected, true);
     assert.deepEqual(await fs.readdir(f.privateRoot), ['store']);
@@ -240,7 +240,7 @@ test('a layout arriving after an absent observation cannot authorize gate creati
 });
 
 test('unsupported store schemas refuse before inspecting retained run or queue data', async t => {
-  for (const schemaVersion of [1, 3]) {
+  for (const schemaVersion of [1, 2, 4]) {
     const f = await fixture(t), store = await initializeStore(f.privateRoot, f.settings);
     const retained = await withProject(store, 'demo', async ({ directory }) => {
       const files = [`${directory}/run.json`, 'store/chats/retained.queue'];
@@ -251,7 +251,7 @@ test('unsupported store schemas refuse before inspecting retained run or queue d
     });
     const layoutFile = path.join(store.root, 'store/layout.json');
     const layout = JSON.parse(await fs.readFile(layoutFile, 'utf8'));
-    assert.equal(layout.schemaVersion, 2);
+    assert.equal(layout.schemaVersion, 3);
     await fs.writeFile(layoutFile, JSON.stringify({ ...layout, schemaVersion }) + '\n');
     const files = [...retained, 'store/layout.json', 'config/settings.json', 'store/locks/settings.sqlite', 'store/locks/writer.sqlite', 'store/locks/sync.sqlite'];
     const before = await snapshots(store.root, files);
@@ -462,4 +462,26 @@ test('a corrupt layout missing a prototype-named project reports the layout erro
   const layout = JSON.parse(await fs.readFile(filename, 'utf8')); delete layout.projects.constructor;
   await fs.writeFile(filename, JSON.stringify(layout));
   await assert.rejects(withProject(store, 'constructor', () => assert.fail('Missing project gates were accepted.')), { code: 'STORE_LAYOUT_INVALID' });
+});
+
+
+test('macOS opens and uses persisted gates after device renumbering without rewriting layout or retained work', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await fixture(t), original = await initializeStore(f.privateRoot, f.settings);
+  await withProject(original, 'demo', async ({ directory }) => {
+    await writeJSON(original.pin, `${directory}/synthetic-retained.json`, { retained: 'queue and draft placeholder' }, { expectedHash: null });
+  });
+  const layoutPath = path.join(original.root, 'store/layout.json');
+  const layout = JSON.parse(await fs.readFile(layoutPath, 'utf8'));
+  const gates = [layout.settingsGate, layout.writerGate, layout.syncGate,
+    ...Object.values(layout.projects).flatMap(project => [project.stateGate, project.workerGate])];
+  assert.equal(gates.length, 5);
+  for (const gate of gates) gate.device = String(BigInt(gate.device) + 1n);
+  await fs.writeFile(layoutPath, JSON.stringify(layout) + '\n');
+  const files = (await fs.readdir(original.root, { recursive: true })).filter(file => file.endsWith('.json'));
+  const before = await snapshots(original.root, files);
+  const reopened = await openStore(original.root);
+  assert.deepEqual((await readSettings(reopened)).value, f.settings);
+  await withProject(reopened, 'demo', async context => { assert.equal(context.project.id, 'demo'); });
+  for (const gate of gates) assert.deepEqual(probeGate(gate, gateOptions), { available: true });
+  assert.deepEqual(await snapshots(original.root, files), before);
 });

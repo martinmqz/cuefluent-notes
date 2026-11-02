@@ -73,7 +73,14 @@ Opt-outs and verified positions survive queue removal. Data arriving after a
 selection is not consumed by that run. Cleanup never deletes notes or native
 transcripts. Process-owned gates release when their worker dies; owner death is
 never inferred from PID reuse or elapsed time, and gate files are never deleted or
-relocated. Cleanup acknowledgments must match the current run (`RUN_INVALID`,
+relocated. On macOS, gates bind the filesystem volume UUID and inode across
+restarts, so a changed mount-time device number alone does not replace a gate.
+Acquisition still pins the current device and inode until release. A different
+volume or inode is `GATE_REPLACED`; an unavailable volume identity is
+`GATE_IDENTITY_UNVERIFIED`. Preserve the store and investigate either error;
+never recreate locks or save around a failed gate. This gate check does not
+establish recovery of every retained transcript or interrupted publication after
+a reboot. Cleanup acknowledgments must match the current run (`RUN_INVALID`,
 `QUEUE_CURSOR_MISMATCH` otherwise); finish pending work before changing packages.
 A note save and its log entry are separate writes: a log failure never blocks
 cleanup, retry details stay in the current run, and unconfirmed entries are

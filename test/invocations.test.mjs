@@ -142,3 +142,26 @@ test('polling rereads a result published between status inspection and idle gate
   try { assert.equal((await readInvocation(f.store, claim.ticket)).state, 'tracked'); assert.equal(raced, true); }
   finally { fs.lstat = original; release(); await work; }
 });
+
+
+test('macOS retained command gates accept device renumbering and reject a different volume', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await fixture(t), first = await claimInvocation(f.store, f.binding);
+  const directory = path.join(f.store.root, 'store/invocations');
+  const name = (await fs.readdir(directory)).find(file => file.endsWith('.json'));
+  const file = path.join(directory, name), saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  saved.gate.device = String(BigInt(saved.gate.device) + 1n);
+  await fs.writeFile(file, JSON.stringify(saved) + '\n');
+  const before = await fs.readFile(file, 'utf8');
+  assert.equal((await readInvocation(f.store, first.ticket)).state, 'interrupted');
+  assert.equal(await fs.readFile(file, 'utf8'), before);
+  let executions = 0;
+  const execute = async () => { executions++; return { state: 'tracked' }; };
+  assert.equal((await runClaimedInvocation(f.store, first.ticket, { execute })).state, 'tracked');
+  assert.equal((await runClaimedInvocation(f.store, first.ticket, { execute })).state, 'tracked');
+  assert.equal(executions, 1);
+  const changed = JSON.parse(await fs.readFile(file, 'utf8'));
+  changed.gate.volume = changed.gate.volume === '1'.repeat(32) ? '2'.repeat(32) : '1'.repeat(32);
+  await fs.writeFile(file, JSON.stringify(changed) + '\n');
+  await assert.rejects(claimInvocation(f.store, { ...f.binding, promptId: 'later' }), { code: 'GATE_REPLACED' });
+  assert.equal(executions, 1);
+});

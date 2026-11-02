@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { supportsNode, NODE_REQUIREMENT } from '../core/runtime.mjs';
 import { assertMacosPrivateAccess } from './macos-acl.mjs';
 import { normalizeFilesystemId } from './stat.mjs';
+import { readMacosVolumeUuid } from './macos-volume.mjs';
 
 const MAX_GATE_BYTES = 64 * 1024;
 const MARKER_SQL = 'CREATE TABLE gate_marker (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), id TEXT NOT NULL, stage TEXT NOT NULL)';
@@ -72,6 +73,12 @@ function privateEntry(stat, path, isParent, guardPath) {
   }
 }
 
+function volumeIdentity(path, stat) {
+  if (process.platform !== 'darwin') return null;
+  try { return readMacosVolumeUuid(path, stat); }
+  catch (cause) { fail('GATE_IDENTITY_UNVERIFIED', 'The gate filesystem volume identity could not be verified.', cause); }
+}
+
 function inspect(path, { guardPath, missing = false } = {}, allowedLinks = 1n) {
   gatePath(path);
   const root = parse(path).root;
@@ -107,24 +114,43 @@ function inspect(path, { guardPath, missing = false } = {}, allowedLinks = 1n) {
     if (error instanceof GateError) throw error;
     fail('GATE_STORAGE_ERROR', `Cannot inspect gate path: ${current}`, error);
   }
-  return Object.freeze({ path, device: String(normalizeFilesystemId(stat.dev)), inode: String(normalizeFilesystemId(stat.ino)) });
+  return Object.freeze({ path, device: String(normalizeFilesystemId(stat.dev)), inode: String(normalizeFilesystemId(stat.ino)), volume: volumeIdentity(path, stat) });
+}
+
+/** Shared shape check for layout and command gate records; performs no I/O. */
+export function isGateIdentity(value) {
+  return typeof value?.device === 'string' && /^\d+$/.test(value.device) &&
+    typeof value.inode === 'string' && /^[1-9]\d*$/.test(value.inode) &&
+    (process.platform === 'darwin' ? typeof value.volume === 'string' && /^[a-f0-9]{32}$/.test(value.volume) && !/^0+$/.test(value.volume) : value.volume === null);
 }
 
 function descriptor(value) {
   if (!value || typeof value !== 'object') fail('GATE_INVALID_DESCRIPTOR', 'A verified gate descriptor is required.');
   gatePath(value.path);
   gateId(value.id);
-  if (typeof value.device !== 'string' || typeof value.inode !== 'string' || !/^\d+$/.test(value.device) || !/^\d+$/.test(value.inode) || value.inode === '0') {
-    fail('GATE_INVALID_DESCRIPTOR', 'A gate descriptor needs a nonzero inode and device identity.');
+  if (!isGateIdentity(value)) {
+    fail('GATE_INVALID_DESCRIPTOR', 'A gate descriptor needs a nonzero inode, device identity and platform volume identity.');
   }
   return value;
 }
 
 function verify(expected, options, allowedLinks = 1n) {
   const actual = inspect(expected.path, options, allowedLinks);
-  if (actual.device !== expected.device || actual.inode !== expected.inode) {
+  if (actual.device !== expected.device || actual.inode !== expected.inode || actual.volume !== expected.volume) {
     fail('GATE_REPLACED', `Gate file identity changed: ${expected.path}`);
   }
+}
+
+// Admit a durable descriptor using volume UUID + inode on macOS. Once admitted,
+// pin the current device too: every check and registry entry during this operation
+// uses the live identity. Never rewrite layout metadata merely to acquire a gate.
+function admit(value, options) {
+  const expected = descriptor(value), actual = inspect(expected.path, options);
+  if (actual.inode !== expected.inode || actual.volume !== expected.volume ||
+      (process.platform !== 'darwin' && actual.device !== expected.device)) {
+    fail('GATE_REPLACED', `Gate file or volume identity changed: ${expected.path}`);
+  }
+  return Object.freeze({ ...actual, id: expected.id });
 }
 
 function rejectSidecars(path) {
@@ -245,7 +271,7 @@ export function initializeGate(path, id, options = {}) {
     try {
       fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
       const stat = fstatSync(fd, { bigint: true });
-      identity = Object.freeze({ path: temporary, id, device: String(normalizeFilesystemId(stat.dev)), inode: String(normalizeFilesystemId(stat.ino)) });
+      identity = Object.freeze({ path: temporary, id, device: String(normalizeFilesystemId(stat.dev)), inode: String(normalizeFilesystemId(stat.ino)), volume: volumeIdentity(temporary, stat) });
     } finally { if (fd !== undefined) closeSync(fd); }
     if (options.initializePath) {
       // A Windows elevated token can make a newly created inode owned by the
@@ -356,7 +382,7 @@ export function inspectExistingGate(path, id, options = {}) {
   const expectedIdentity = options.expectedIdentity === undefined ? null : Object.freeze({ ...descriptor(options.expectedIdentity) });
   const links = recoverPublication || publicationStage !== undefined ? 2n : 1n;
   const identity = Object.freeze({ ...inspect(path, options, links), id });
-  if (expectedIdentity && ['path', 'id', 'device', 'inode'].some(key => identity[key] !== expectedIdentity[key])) {
+  if (expectedIdentity && ['path', 'id', 'device', 'inode', 'volume'].some(key => identity[key] !== expectedIdentity[key])) {
     fail('GATE_REPLACED', 'The gate differs from its previously inspected identity.');
   }
   rejectSidecars(path);
@@ -388,8 +414,7 @@ export function inspectExistingGate(path, id, options = {}) {
 /** One no-create attempt; only SQLite's numeric BUSY primary code is contention. */
 export function tryAcquireExistingGate(value, options = {}) {
   runtime();
-  const identity = Object.freeze({ ...descriptor(value) });
-  verify(identity, options);
+  const identity = admit(value, options);
   rejectSidecars(identity.path);
   if (!reserve(identity)) return { busy: true };
   let db;
