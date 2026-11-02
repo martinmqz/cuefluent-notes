@@ -879,8 +879,7 @@ gateTest('setup recovery wraps native staging-cleanup failures in a storage code
 macGateTest('durable descriptors omit native device numbers and preserve ownership after fresh admission', async t => {
   const directory = setup(t), current = initializeGate(join(directory, 'reboot.sqlite'), 'reboot');
   const previousBoot = Object.freeze({ ...current, [LIVE_DEVICE]: String(BigInt(current[LIVE_DEVICE]) + 1n) });
-  const recorded = JSON.stringify(previousBoot);
-  const persisted = JSON.parse(recorded);
+  const persisted = JSON.parse(JSON.stringify(previousBoot));
   assert.equal(persisted.device, current.device);
   assert.match(persisted.device, /^volume:[a-f0-9]{32}$/);
   assert.equal(persisted[LIVE_DEVICE], undefined);
@@ -903,7 +902,6 @@ macGateTest('durable descriptors omit native device numbers and preserve ownersh
   assert.deepEqual(probeGate(previousBoot), { available: true });
   const after = lstatSync(current.path, { bigint: true });
   for (const field of ['dev', 'ino', 'nlink', 'size', 'mtimeNs']) assert.equal(after[field], before[field]);
-  assert.equal(JSON.stringify(previousBoot), recorded);
   assert.deepEqual(readdirSync(directory), ['reboot.sqlite']);
 });
 

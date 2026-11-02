@@ -12,10 +12,10 @@ export function fileIdentity(stat) {
   if (typeof stat?.dev !== 'bigint' || typeof stat?.ino !== 'bigint') {
     fail('STAT_EXACT_REQUIRED', 'Filesystem identity comparisons require exact bigint observations.');
   }
-  if (process.platform === 'darwin' && !/^(?!0{32}$)[a-f0-9]{32}$/.test(stat.volume ?? '')) {
+  if (process.platform === 'darwin' && stat.volume !== null && !/^(?!0{32}$)[a-f0-9]{32}$/.test(stat.volume ?? '')) {
     fail('FILESYSTEM_IDENTITY_UNVERIFIED', 'The filesystem volume identity could not be verified.');
   }
-  return Object.freeze({ device: process.platform === 'darwin' ? `volume:${stat.volume}` : String(stat.dev),
+  return Object.freeze({ device: process.platform === 'darwin' && stat.volume !== null ? `volume:${stat.volume}` : String(stat.dev),
     inode: String(stat.ino), [LIVE_DEVICE]: String(stat.dev) });
 }
 

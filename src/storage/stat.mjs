@@ -19,7 +19,7 @@ export function normalizeFilesystemId(value) {
 }
 
 /** Normalize one bigint observation without ever rounding identities or times. */
-export function normalizeStat(raw, { volume = null } = {}) {
+export function normalizeStat(raw, { volume } = {}) {
   const value = { volume };
   for (const field of EXACT_FIELDS) {
     if (typeof raw?.[field] !== 'bigint') fail('STAT_EXACT_REQUIRED', 'Storage observations require bigint identities and nanosecond timestamps.');
@@ -47,10 +47,10 @@ export function normalizeStat(raw, { volume = null } = {}) {
 
 export async function readPathStat(file) {
   const raw = await fs.lstat(file, { bigint: true });
-  return normalizeStat(raw, { volume: process.platform === 'darwin' && !raw.isSymbolicLink() ? readMacosVolumeUuid(file, raw) : null });
+  return normalizeStat(raw, { volume: process.platform === 'darwin' && !raw.isSymbolicLink() ? readMacosVolumeUuid(file, raw, { required: false }) : null });
 }
 
 export async function readHandleStat(handle) {
   const raw = await handle.stat({ bigint: true });
-  return normalizeStat(raw, { volume: process.platform === 'darwin' ? readMacosVolumeUuidFromFd(handle.fd, raw) : null });
+  return normalizeStat(raw, { volume: process.platform === 'darwin' ? readMacosVolumeUuidFromFd(handle.fd, raw, { required: false }) : null });
 }

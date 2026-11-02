@@ -7,7 +7,7 @@ import { readMacosAttributes } from './macos-native.mjs';
 // the lookup without opening or closing any additional descriptor.
 const ATTRIBUTES = Buffer.alloc(24);
 ATTRIBUTES.writeUInt16LE(5, 0); // ATTR_BIT_MAP_COUNT
-ATTRIBUTES.writeUInt32LE(0x00000002, 4); // ATTR_CMN_DEVID
+ATTRIBUTES.writeUInt32LE(0x80000002, 4); // ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_DEVID
 ATTRIBUTES.writeUInt32LE(0x80040000, 8); // ATTR_VOL_INFO | ATTR_VOL_UUID
 // APFS volume groups can project a shared st_dev for separate physical volumes.
 const FILE_ATTRIBUTES = Buffer.alloc(24);
@@ -28,8 +28,14 @@ function attributes(target, request, size, options = 0) {
   return output;
 }
 
-function read(target, stat, inspect) {
-  const output = attributes(target, ATTRIBUTES, 24), device = output.readUInt32LE(4);
+function read(target, stat, inspect, required) {
+  // PACK_INVAL_ATTRS gives unsupported UUIDs a fixed placeholder and an absent
+  // returned bit. Only that explicit capability result permits native-device
+  // identity for generic files; syscall errors and malformed identities do not.
+  const output = attributes(target, ATTRIBUTES, 44, 0x08); // FSOPT_PACK_INVAL_ATTRS
+  if (output.readUInt32LE(4) !== 0x80000002 || ![0, 0x00040000].includes(output.readUInt32LE(8)) ||
+      [12, 16, 20].some(offset => output.readUInt32LE(offset) !== 0)) unverified();
+  const device = output.readUInt32LE(24);
   if (BigInt(device) !== stat.dev) {
     // Tie the physical volume back to this exact projected device/inode; do not
     // treat any mismatch as a volume-group exception without this observation.
@@ -39,17 +45,21 @@ function read(target, stat, inspect) {
   }
   const current = inspect();
   if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino) changed();
-  const uuid = output.subarray(8);
+  if (output.readUInt32LE(8) === 0) {
+    if (required === false) return null;
+    unverified();
+  }
+  const uuid = output.subarray(28);
   if (uuid.every(byte => byte === 0)) unverified();
   return uuid.toString('hex');
 }
 
 /** Fresh lookup for an already inspected path; never opens a file descriptor. */
-export function readMacosVolumeUuid(file, stat) {
-  return read(file, stat, () => lstatSync(file, { bigint: true }));
+export function readMacosVolumeUuid(file, stat, { required = true } = {}) {
+  return read(file, stat, () => lstatSync(file, { bigint: true }), required);
 }
 
 /** Use the caller's open descriptor, including after a rename or unlink. */
-export function readMacosVolumeUuidFromFd(fd, stat) {
-  return read(fd, stat, () => fstatSync(fd, { bigint: true }));
+export function readMacosVolumeUuidFromFd(fd, stat, { required = true } = {}) {
+  return read(fd, stat, () => fstatSync(fd, { bigint: true }), required);
 }

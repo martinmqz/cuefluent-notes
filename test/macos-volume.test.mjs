@@ -53,7 +53,7 @@ macTest('native volume lookup binds the UUID to the device in the same observati
   const { file } = fixture(t), identity = stat(file), api = macosNative(), original = api.getattrlist;
   t.mock.method(api, 'getattrlist', (...args) => {
     const result = original(...args);
-    args[2].writeUInt32LE(Number(identity.dev + 1n), 4);
+    if (args[1].readUInt32LE(8)) args[2].writeUInt32LE(Number(identity.dev + 1n), 24);
     return result;
   });
   assert.throws(() => readMacosVolumeUuid(file, identity), { code: 'PATH_CHANGED' });
@@ -63,7 +63,7 @@ macTest('native volume failures and post-lookup removal retain their distinct ca
   const { file } = fixture(t), identity = stat(file), api = macosNative(), original = api.getattrlist;
   const call = t.mock.method(api, 'getattrlist', (...args) => {
     const result = original(...args);
-    args[2].fill(0, 8);
+    args[2].fill(0, 28);
     return result;
   });
   assert.throws(() => readMacosVolumeUuid(file, identity), error =>
@@ -132,7 +132,7 @@ macTest('volume-group projection preserves signed high-bit inode observations', 
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   t.mock.method(api, 'getattrlist', (target, attributes, output, ...rest) => {
     const result = native(target, attributes, output, ...rest);
-    if (attributes.readUInt32LE(8)) output.writeUInt32LE(Number(observed.dev + 1n), 4);
+    if (attributes.readUInt32LE(8)) output.writeUInt32LE(Number(observed.dev + 1n), 24);
     else {
       output.writeBigUInt64LE(BigInt.asUintN(64, inode), 8);
       output.writeUInt32LE(Number(observed.dev + 1n), 16);
@@ -140,4 +140,58 @@ macTest('volume-group projection preserves signed high-bit inode observations', 
     return result;
   });
   assert.equal(readMacosVolumeUuid(file, signed), expected);
+});
+
+
+macTest('unsupported volume UUID is distinct from unavailable verification for paths and descriptors', () => {
+  // devfs is a read-only capability probe, not an emulation of an SMB/NFS share.
+  const file = '/dev', identity = stat(file), fd = openSync(file, 'r');
+  try {
+    assert.equal(readMacosVolumeUuid(file, identity, { required: false }), null);
+    assert.equal(readMacosVolumeUuidFromFd(fd, fstatSync(fd, { bigint: true }), { required: false }), null);
+    assert.throws(() => readMacosVolumeUuid(file, identity), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
+    assert.throws(() => readMacosVolumeUuidFromFd(fd, identity), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
+    assert.throws(() => readMacosVolumeUuid(file, { ...identity, ino: identity.ino + 1n }, { required: false }), { code: 'PATH_CHANGED' });
+    assert.throws(() => readMacosVolumeUuidFromFd(fd, { ...identity, ino: identity.ino + 1n }, { required: false }), { code: 'PATH_CHANGED' });
+  } finally { closeSync(fd); }
+});
+
+macTest('optional UUID lookup never treats missing paths, native errors or malformed returned data as unsupported', t => {
+  const { file } = fixture(t), identity = stat(file), api = macosNative(), original = api.getattrlist;
+  const call = t.mock.method(api, 'getattrlist', (...args) => original(...args));
+  const errno = t.mock.method(api, 'errno', () => 5);
+  for (const [number, code] of [[5, 'EIO'], [13, 'EACCES'], [22, 'EINVAL'], [45, 'ENOTSUP']]) {
+    call.mock.mockImplementation(() => -1); errno.mock.mockImplementation(() => number);
+    assert.throws(() => readMacosVolumeUuid(file, identity, { required: false }), error =>
+      error.code === 'FILESYSTEM_IDENTITY_UNVERIFIED' && error.cause.code === code);
+  }
+  for (const alter of [
+    output => output.fill(0, 28), // UUID reported present but null.
+    output => output.writeUInt32LE(0, 4), // Required returned DEVID absent.
+    output => output.writeUInt32LE(40, 0), // Truncated native payload.
+    output => output.writeUInt32LE(1, 12), // Unrequested directory attributes.
+  ]) {
+    call.mock.mockImplementation((...args) => { const result = original(...args); alter(args[2]); return result; });
+    assert.throws(() => readMacosVolumeUuid(file, identity, { required: false }), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
+  }
+  call.mock.mockImplementation((...args) => original(...args));
+  errno.mock.restore();
+  unlinkSync(file);
+  assert.throws(() => readMacosVolumeUuid(file, identity, { required: false }), { code: 'ENOENT' });
+});
+
+
+macTest('optional descriptor UUID lookup keeps native failure and returned-data guards', t => {
+  const { file } = fixture(t), fd = openSync(file, 'r'); t.after(() => closeSync(fd));
+  const identity = fstatSync(fd, { bigint: true }), api = macosNative(), original = api.fgetattrlist;
+  const call = t.mock.method(api, 'fgetattrlist', (...args) => original(...args));
+  const errno = t.mock.method(api, 'errno', () => 5);
+  call.mock.mockImplementation(() => -1);
+  assert.throws(() => readMacosVolumeUuidFromFd(fd, identity, { required: false }), error =>
+    error.code === 'FILESYSTEM_IDENTITY_UNVERIFIED' && error.cause.code === 'EIO');
+  errno.mock.restore();
+  for (const alter of [output => output.fill(0, 28), output => output.writeUInt32LE(0, 4)]) {
+    call.mock.mockImplementation((...args) => { const result = original(...args); alter(args[2]); return result; });
+    assert.throws(() => readMacosVolumeUuidFromFd(fd, identity, { required: false }), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
+  }
 });

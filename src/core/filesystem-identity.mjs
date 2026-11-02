@@ -1,5 +1,6 @@
-// Durable device identity is a macOS volume UUID or the native device number
-// on other platforms. Never put a macOS boot-local st_dev in persisted state.
+// Durable device identity uses a macOS volume UUID when the filesystem reports
+// one. Filesystems explicitly lacking UUIDs and other platforms use the native
+// device number; they do not claim recovery across device renumbering.
 export const LIVE_DEVICE = Symbol('live filesystem device');
 export const isFilesystemDevice = value => typeof value === 'string' &&
   (/^(?:0|[1-9][0-9]{0,39})$/.test(value) || /^volume:(?!0{32}$)[a-f0-9]{32}$/.test(value));
