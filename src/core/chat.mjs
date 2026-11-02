@@ -1,3 +1,4 @@
+import { isFilesystemDevice, isFilesystemInode, identityDataKeys } from './filesystem-identity.mjs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fail } from './errors.mjs';
@@ -6,7 +7,7 @@ import { nativeId, validateCheckpoint } from '../transcript/checkpoint.mjs';
 
 function object(input, keys) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) fail('CHAT_INVALID', 'Chat metadata must use plain objects.');
-  const fields = Object.getOwnPropertyDescriptors(input), names = Reflect.ownKeys(fields);
+  const fields = Object.getOwnPropertyDescriptors(input), names = identityDataKeys(fields);
   if (names.length !== keys.length || names.some(key => typeof key !== 'string' || !keys.includes(key) || !Object.hasOwn(fields[key], 'value') || !fields[key].enumerable)) {
     fail('CHAT_INVALID', 'Chat metadata contains unsupported or missing fields.');
   }
@@ -56,16 +57,14 @@ function source(input) {
   if (input.path.length > 32768) fail('CHAT_INVALID', 'The source path is too long.');
   if (input.identity === null) return Object.freeze({ path: input.path, identity: null });
   object(input.identity, ['device', 'inode']);
-  for (const value of Object.values(input.identity)) {
-    if (typeof value !== 'string' || !/^(0|[1-9][0-9]{0,39})$/.test(value)) fail('CHAT_INVALID', 'Source identity must use exact integer strings.');
-  }
+  if (!isFilesystemDevice(input.identity.device) || !isFilesystemInode(input.identity.inode)) fail('CHAT_INVALID', 'Source identity must use a filesystem identity and exact inode.');
   return Object.freeze({ path: input.path, identity: Object.freeze({ ...input.identity }) });
 }
 
 export function validateHistorySources(input, { client } = {}) {
   if (!Array.isArray(input) || input.length > 32 || (client !== 'codex' && input.length)) fail('CHAT_HISTORY_INVALID', 'Historical source capabilities exceed the native profile.');
   const descriptors = Object.getOwnPropertyDescriptors(input);
-  if (Reflect.ownKeys(descriptors).length !== input.length + 1 || Array.from({ length: input.length }, (_, index) => descriptors[index]).some(item => !item || !Object.hasOwn(item, 'value') || !item.enumerable)) fail('CHAT_HISTORY_INVALID', 'Historical source capabilities require dense inert lists.');
+  if (identityDataKeys(descriptors).length !== input.length + 1 || Array.from({ length: input.length }, (_, index) => descriptors[index]).some(item => !item || !Object.hasOwn(item, 'value') || !item.enumerable)) fail('CHAT_HISTORY_INVALID', 'Historical source capabilities require dense inert lists.');
   const seen = new Set();
   return Object.freeze(input.map(item => {
     object(item, ['sessionId', 'source', 'before', 'hash']); nativeId(item.sessionId);

@@ -88,7 +88,8 @@ macTest('macOS native ACL lookup refuses missing, replaced and symbolic-link pat
   await fs.writeFile(file, '', { mode: 0o600 });
   const before = await fs.lstat(file, { bigint: true });
   await fs.rename(file, `${file}.previous`);
-  assert.throws(() => assertPrivateAccess(file, before), { code: 'PRIVATE_ACCESS_UNVERIFIED' });
+  assert.throws(() => assertPrivateAccess(file, before), error =>
+    error.code === 'PRIVATE_ACCESS_UNVERIFIED' && error.cause.code === 'ENOENT');
   await fs.writeFile(file, '', { mode: 0o600 });
   assert.throws(() => assertPrivateAccess(file, before), { code: 'PRIVATE_ACCESS_UNVERIFIED' });
   const link = path.join(root, 'link'); await fs.symlink(file, link);

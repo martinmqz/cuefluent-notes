@@ -1,6 +1,6 @@
-import { createRequire } from 'node:module';
 import { isAbsolute } from 'node:path';
 import { fail } from '../core/errors.mjs';
+import { macosNative, readMacosAttributes } from './macos-native.mjs';
 
 // Public Darwin ABI: sys/attr.h (getattrlist) and sys/kauth.h (kauth_filesec).
 // Both supported macOS Node architectures use little-endian fields and 4-byte
@@ -11,21 +11,9 @@ ATTRIBUTES.writeUInt16LE(5, 0); // ATTR_BIT_MAP_COUNT
 ATTRIBUTES.writeUInt32LE(0x0242800a, 4); // DEVID, OBJTYPE, OWNERID, ACCESSMASK, EXTENDED_SECURITY, FILEID
 const FIXED_BYTES = 36, ACL_HEADER_BYTES = 44, ACE_BYTES = 24, MAX_ENTRIES = 128;
 const MAX_BYTES = FIXED_BYTES + ACL_HEADER_BYTES + ACE_BYTES * MAX_ENTRIES;
-const require = createRequire(import.meta.url);
-let library;
 
 function unverified(cause) {
   fail('PRIVATE_ACCESS_UNVERIFIED', 'macOS private storage permissions could not be verified.', cause);
-}
-
-function native() {
-  // Cache bindings only. Every permission decision reads current filesystem
-  // metadata; disabled/unavailable FFI is a refusal, not a mode-only fallback.
-  if (!library) library = require('node:ffi').dlopen('/usr/lib/libSystem.B.dylib', {
-    getattrlist: { arguments: ['string', 'buffer', 'buffer', 'uint64', 'uint32'], return: 'int32' },
-    mbr_uid_to_uuid: { arguments: ['uint32', 'buffer'], return: 'int32' },
-  });
-  return library.functions;
 }
 
 /** Fresh read-only ACL admission for an already inspected private path. */
@@ -35,9 +23,8 @@ export function assertMacosPrivateAccess(file, stat) {
       !stat || !['bigint', 'number'].includes(typeof stat.dev) || !['bigint', 'number'].includes(typeof stat.ino)) unverified();
   let api, output;
   try {
-    api = native(); output = Buffer.alloc(MAX_BYTES);
-    // FSOPT_NOFOLLOW. A failed lookup is distinct from a successful empty ACL.
-    if (api.getattrlist(file, ATTRIBUTES, output, BigInt(output.length), 1) !== 0) unverified();
+    api = macosNative(); output = Buffer.alloc(MAX_BYTES);
+    readMacosAttributes(file, ATTRIBUTES, output);
   } catch (cause) { unverified(cause); }
   const size = output.readUInt32LE(0);
   if (size < FIXED_BYTES || size > output.length) unverified();
@@ -62,8 +49,10 @@ export function assertMacosPrivateAccess(file, stat) {
     if (tag === 2 || output.readUInt32LE(offset + 20) === 0) continue;
     if (!user) {
       user = Buffer.alloc(16);
-      try { if (api.mbr_uid_to_uuid(process.getuid(), user) !== 0 || user.every(byte => byte === 0)) unverified(); }
+      let result;
+      try { result = api.mbr_uid_to_uuid(process.getuid(), user); }
       catch (cause) { unverified(cause); }
+      if (result !== 0 || user.every(byte => byte === 0)) unverified();
     }
     // Include inheritance-only grants: they can expose newly created children.
     // Do not try to cancel grants against ordered deny entries or group members.

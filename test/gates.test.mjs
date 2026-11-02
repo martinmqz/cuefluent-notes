@@ -9,7 +9,7 @@ import { Worker } from 'node:worker_threads';
 import { Database } from 'node:sqlite';
 import test from 'node:test';
 import * as gates from '../src/storage/gates.mjs';
-import { readMacosVolumeUuid } from '../src/storage/macos-volume.mjs';
+import { LIVE_DEVICE } from '../src/storage/stat.mjs';
 import nativeFs from 'node:fs';
 import { registerHooks, syncBuiltinESMExports } from 'node:module';
 import { assertPrivateAccess, establishWindowsPrivacy } from '../src/storage/platform.mjs';
@@ -31,6 +31,22 @@ const inspectExistingGate = (file, id, options) => gates.inspectExistingGate(fil
 const probeGate = (identity, options) => gates.probeGate(identity, profile(options));
 const tryAcquireExistingGate = (identity, options) => gates.tryAcquireExistingGate(identity, profile(options));
 const withShortGate = (identity, options, fn) => gates.withShortGate(identity, profile(options), fn);
+
+async function observedGates(name, sources) {
+  const moduleUrl = new URL(`../src/storage/gates.mjs?${name}`, import.meta.url).href;
+  const modules = new Map(), observers = {};
+  for (const [specifier, source] of Object.entries(sources)) {
+    const url = `data:text/javascript,${encodeURIComponent(source)}`;
+    modules.set(specifier, url);
+    observers[specifier] = await import(url);
+  }
+  const hook = registerHooks({ resolve(specifier, context, nextResolve) {
+    if (context.parentURL === moduleUrl && modules.has(specifier)) return { url: modules.get(specifier), shortCircuit: true };
+    return nextResolve(specifier, context);
+  } });
+  try { return { gates: await import(moduleUrl), observers }; }
+  finally { hook.deregister(); }
+}
 
 function setup(t) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'cuefluent-gates-')));
@@ -93,6 +109,7 @@ async function externalProbe(identity) {
 }
 
 const gateTest = (name, fn) => test(name, { timeout: windows ? 30_000 : 10_000 }, fn);
+const macGateTest = (name, fn) => test(name, { skip: process.platform !== 'darwin', timeout: 15_000 }, fn);
 
 test('gate operations enforce the supported Node range before inspecting paths', () => {
   const original = Object.getOwnPropertyDescriptor(process.versions, 'node');
@@ -256,6 +273,25 @@ gateTest('noncrash initialization failure cleans only its own unpublished stage'
   assert.deepEqual(probeGate(initializeGate(path, 'retry')), { available: true });
 });
 
+macGateTest('a failed first volume observation removes its exclusive stage and permits retry', async t => {
+  const directory = setup(t), file = join(directory, 'gate.sqlite');
+  const volumeUrl = new URL('../src/storage/macos-volume.mjs', import.meta.url).href;
+  const { gates: observed, observers } = await observedGates('stage-volume-failure', {
+    './macos-volume.mjs': `
+      import { readMacosVolumeUuid as read } from ${JSON.stringify(volumeUrl)};
+      export let failures = 0;
+      export function readMacosVolumeUuid(file, stat) {
+        if (file.endsWith('.tmp') && failures++ === 0) throw Object.assign(new Error('synthetic EIO'), { code: 'EIO' });
+        return read(file, stat);
+      }
+    `,
+  });
+  assert.throws(() => observed.initializeGate(file, 'retry'), { code: 'GATE_IDENTITY_UNVERIFIED' });
+  assert.equal(observers['./macos-volume.mjs'].failures, 1);
+  assert.deepEqual(readdirSync(directory), []);
+  assert.deepEqual(observed.probeGate(observed.initializeGate(file, 'retry')), { available: true });
+});
+
 gateTest('a killed unpublished initialization never burns the final gate pathname', async t => {
   const directory = setup(t);
   const path = join(directory, 'gate.sqlite');
@@ -275,13 +311,26 @@ gateTest('explicit setup reconciles only the exact initialized two-link publicat
   await crashInitialization(t, path, 'published');
   const stat = lstatSync(path, { bigint: true });
   assert.equal(stat.nlink, 2n);
-  const expected = { path, id: 'crash-test', device: String(stat.dev), inode: String(stat.ino), volume: process.platform === 'darwin' ? readMacosVolumeUuid(path, stat) : null };
+  const expected = gates.gateIdentity(path, stat, 'crash-test');
   assert.throws(() => probeGate(expected), { code: 'GATE_UNSAFE_PATH' });
   assert.throws(() => initializeGate(path, expected.id), { code: 'GATE_EXISTS' });
   assert.deepEqual(inspectExistingGate(path, expected.id), expected);
   assert.equal(lstatSync(path).nlink, 1);
   assert.deepEqual(readdirSync(directory), ['gate.sqlite']);
   assert.deepEqual(probeGate(expected), { available: true });
+});
+
+gateTest('explicit publication recovery tolerates a competing unlink during stage inspection', async t => {
+  const directory = setup(t), filename = join(directory, 'gate.sqlite');
+  await crashInitialization(t, filename, 'published');
+  const stage = join(directory, readdirSync(directory).find(name => name !== 'gate.sqlite'));
+  let removed = false;
+  const identity = inspectExistingGate(filename, 'crash-test', { guardPath(file, { kind }) {
+    if (!removed && file === stage && kind === 'file') { removed = true; nativeFs.unlinkSync(stage); }
+  } });
+  assert.ok(removed, 'the second publication recovery reaches the staging link');
+  assert.deepEqual(readdirSync(directory), ['gate.sqlite']);
+  assert.deepEqual(probeGate(identity), { available: true });
 });
 
 gateTest('inspection without publication recovery preserves stages and never flushes parents', async t => {
@@ -449,7 +498,7 @@ gateTest('initialized gate keeps its identity, bytes, and directory unchanged th
   const path = join(directory, 'gate #%.sqlite');
   const identity = initializeGate(path, 'project:test-1');
   assert.equal(identity.path, path);
-  assert.equal(identity.device, String(lstatSync(path, { bigint: true }).dev));
+  assert.equal(identity[LIVE_DEVICE], String(lstatSync(path, { bigint: true }).dev));
   assert.equal(identity.inode, String(lstatSync(path, { bigint: true }).ino));
   const before = readFileSync(path);
   assert.deepEqual(probeGate(identity), { available: true });
@@ -555,7 +604,7 @@ gateTest('holder death releases ownership without deleting or repairing the gate
 
 gateTest('missing probes and acquisition create no files or directories', (t) => {
   const directory = setup(t);
-  const identity = { path: join(directory, 'missing.sqlite'), id: 'missing', device: '1', inode: '1', volume: process.platform === 'darwin' ? '1'.repeat(32) : null };
+  const identity = { path: join(directory, 'missing.sqlite'), id: 'missing', device: process.platform === 'darwin' ? `volume:${'1'.repeat(32)}` : '1', inode: '1' };
   assert.throws(() => probeGate(identity), { code: 'GATE_STORAGE_ERROR' });
   assert.throws(() => tryAcquireExistingGate(identity), { code: 'GATE_STORAGE_ERROR' });
   assert.deepEqual(readdirSync(directory), []);
@@ -564,13 +613,40 @@ gateTest('missing probes and acquisition create no files or directories', (t) =>
   assert.equal(existsSync(join(directory, 'absent')), false);
 });
 
-gateTest('a gate disappearing after inspection is not recreated by SQLite', (t) => {
+gateTest('a gate disappearing at the SQLite open is not recreated', async t => {
   const directory = setup(t);
   const identity = initializeGate(join(directory, 'gate.sqlite'), 'disappears');
-  assert.throws(() => probeGate(identity, { guardPath(path, { kind }) {
-    if (kind === 'file') rmSync(path);
-  } }), { code: process.platform === 'darwin' ? 'GATE_IDENTITY_UNVERIFIED' : 'GATE_STORAGE_ERROR' });
-  assert.deepEqual(readdirSync(directory), []);
+  const { gates: observed, observers } = await observedGates('missing-at-sqlite', {
+    'node:sqlite': `
+      import { Database as NativeDatabase } from 'node:sqlite';
+      import { rmSync } from 'node:fs';
+      export let opens = 0;
+      export class Database extends NativeDatabase {
+        constructor(...args) { opens++; rmSync(${JSON.stringify(identity.path)}); super(...args); }
+      }
+    `,
+  });
+  assert.throws(() => observed.probeGate(identity, profile()), { code: 'GATE_STORAGE_ERROR' });
+  assert.equal(observers['node:sqlite'].opens, 1, 'the operation must reach the SQLite constructor');
+  assert.deepEqual(readdirSync(directory), [], 'SQLite mode=rw must leave the vanished gate absent');
+});
+
+macGateTest('a gate lost or replaced during the volume observation keeps the correct failure', t => {
+  const directory = setup(t);
+  for (const operation of ['remove', 'replace']) {
+    const path = join(directory, `${operation}.sqlite`), identity = initializeGate(path, operation);
+    const replacement = operation === 'replace' ? initializeGate(join(directory, 'replacement.sqlite'), operation) : null;
+    let changed = false;
+    assert.throws(() => probeGate(identity, { guardPath(file, { kind }) {
+      if (kind !== 'file' || changed) return;
+      changed = true;
+      renameSync(file, join(directory, `${operation}-retained.sqlite`));
+      if (replacement) renameSync(replacement.path, file);
+    } }), { code: operation === 'remove' ? 'GATE_STORAGE_ERROR' : 'GATE_REPLACED' });
+    assert.ok(changed);
+    assert.equal(existsSync(path), operation === 'replace');
+    assert.ok(existsSync(join(directory, `${operation}-retained.sqlite`)));
+  }
 });
 
 gateTest('unexpected sidecars are preserved and rejected before SQLite recovery', (t) => {
@@ -800,11 +876,15 @@ gateTest('setup recovery wraps native staging-cleanup failures in a storage code
   assert.deepEqual(probeGate(inspectExistingGate(filename, 'crash-test')), { available: true });
 });
 
-const macGateTest = (name, fn) => test(name, { skip: process.platform !== 'darwin', timeout: 15_000 }, fn);
-
-macGateTest('a persisted pre-reboot device number admits the same volume and inode without rewriting the gate', async t => {
+macGateTest('durable descriptors omit native device numbers and preserve ownership after fresh admission', async t => {
   const directory = setup(t), current = initializeGate(join(directory, 'reboot.sqlite'), 'reboot');
-  const previousBoot = Object.freeze({ ...current, device: String(BigInt(current.device) + 1n) });
+  const previousBoot = Object.freeze({ ...current, [LIVE_DEVICE]: String(BigInt(current[LIVE_DEVICE]) + 1n) });
+  const recorded = JSON.stringify(previousBoot);
+  const persisted = JSON.parse(recorded);
+  assert.equal(persisted.device, current.device);
+  assert.match(persisted.device, /^volume:[a-f0-9]{32}$/);
+  assert.equal(persisted[LIVE_DEVICE], undefined);
+  assert.deepEqual(probeGate(persisted), { available: true });
   const before = lstatSync(current.path, { bigint: true });
   assert.deepEqual(probeGate(previousBoot), { available: true });
   const owner = tryAcquireExistingGate(previousBoot).acquired;
@@ -823,19 +903,19 @@ macGateTest('a persisted pre-reboot device number admits the same volume and ino
   assert.deepEqual(probeGate(previousBoot), { available: true });
   const after = lstatSync(current.path, { bigint: true });
   for (const field of ['dev', 'ino', 'nlink', 'size', 'mtimeNs']) assert.equal(after[field], before[field]);
-  assert.equal(previousBoot.device, String(BigInt(current.device) + 1n));
+  assert.equal(JSON.stringify(previousBoot), recorded);
   assert.deepEqual(readdirSync(directory), ['reboot.sqlite']);
 });
 
 macGateTest('reboot admission rejects a different volume, inode or missing durable identity', t => {
   const directory = setup(t), current = initializeGate(join(directory, 'gate.sqlite'), 'reboot');
-  const stale = { ...current, device: String(BigInt(current.device) + 1n) };
+  const stale = JSON.parse(JSON.stringify(current));
   for (const changed of [
-    { ...stale, volume: current.volume === '1'.repeat(32) ? '2'.repeat(32) : '1'.repeat(32) },
+    { ...stale, device: current.device === `volume:${'1'.repeat(32)}` ? `volume:${'2'.repeat(32)}` : `volume:${'1'.repeat(32)}` },
     { ...stale, inode: String(BigInt(current.inode) + 1n) },
   ]) assert.throws(() => probeGate(changed), { code: 'GATE_REPLACED' });
-  for (const volume of [undefined, null, '', '0'.repeat(32), 'invalid']) {
-    assert.throws(() => probeGate({ ...stale, volume }), { code: 'GATE_INVALID_DESCRIPTOR' });
+  for (const device of [undefined, null, '', `volume:${'0'.repeat(32)}`, 'invalid', current[LIVE_DEVICE]]) {
+    assert.throws(() => probeGate({ ...stale, device }), { code: 'GATE_INVALID_DESCRIPTOR' });
   }
   // Even a valid same-ID replacement database cannot be adopted at this path.
   renameSync(current.path, join(directory, 'retained.sqlite'));
@@ -844,9 +924,27 @@ macGateTest('reboot admission rejects a different volume, inode or missing durab
   assert.equal(existsSync(join(directory, 'retained.sqlite')), true);
 });
 
-macGateTest('the live device remains pinned from acquisition through release', t => {
+macGateTest('the live device remains pinned from acquisition through release', async t => {
   const directory = setup(t), current = initializeGate(join(directory, 'gate.sqlite'), 'live-device');
-  const owner = tryAcquireExistingGate({ ...current, device: String(BigInt(current.device) + 1n) }).acquired;
+  const aclUrl = new URL('../src/storage/macos-acl.mjs', import.meta.url).href;
+  const { gates: observed, observers } = await observedGates('live-device', {
+    './macos-acl.mjs': `
+      import { assertMacosPrivateAccess as verify } from ${JSON.stringify(aclUrl)};
+      import fs from 'node:fs';
+      const inspect = fs.lstatSync;
+      export let verified = 0;
+      export function assertMacosPrivateAccess(file) { verify(file, inspect(file, { bigint: true })); verified++; }
+    `,
+    // Keep this test at the gate verifier boundary: the native volume helper
+    // independently refuses a changed dev and must not mask a missing live pin.
+    './macos-volume.mjs': `
+      export let observations = 0;
+      export function readMacosVolumeUuid() { observations++; return ${JSON.stringify(current.device.slice('volume:'.length))}; }
+    `,
+  });
+  const owner = observed.tryAcquireExistingGate(JSON.parse(JSON.stringify(current))).acquired;
+  const verified = observers['./macos-acl.mjs'].verified;
+  const observations = observers['./macos-volume.mjs'].observations;
   const original = nativeFs.lstatSync;
   const mock = t.mock.method(nativeFs, 'lstatSync', (...args) => {
     const stat = original(...args);
@@ -854,7 +952,11 @@ macGateTest('the live device remains pinned from acquisition through release', t
     return stat;
   });
   syncBuiltinESMExports();
-  try { assert.throws(() => owner.release(), error => error instanceof AggregateError && error.errors.some(item => ['GATE_REPLACED', 'GATE_UNSAFE_PATH', 'GATE_IDENTITY_UNVERIFIED'].includes(item.code))); }
-  finally { mock.mock.restore(); syncBuiltinESMExports(); }
+  try {
+    assert.throws(() => owner.release(), error => error instanceof AggregateError &&
+      error.errors.length === 1 && error.errors[0].code === 'GATE_REPLACED');
+    assert.ok(observers['./macos-acl.mjs'].verified > verified, 'privacy verification succeeds before checking the pinned device');
+    assert.ok(observers['./macos-volume.mjs'].observations > observations, 'volume observation succeeds before checking the pinned device');
+  } finally { mock.mock.restore(); syncBuiltinESMExports(); }
   assert.deepEqual(probeGate(current), { available: true });
 });

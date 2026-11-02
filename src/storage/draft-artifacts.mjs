@@ -1,3 +1,4 @@
+import { isFilesystemDevice, isFilesystemInode, identityDataKeys } from '../core/filesystem-identity.mjs';
 import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -19,7 +20,7 @@ const finalName = id => `${id}.draft`;
 
 function fields(input, keys) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) invalid('Artifact journal records must be plain data.');
-  const descriptors = Object.getOwnPropertyDescriptors(input), actual = Reflect.ownKeys(descriptors);
+  const descriptors = Object.getOwnPropertyDescriptors(input), actual = identityDataKeys(descriptors);
   if (actual.length !== keys.length || keys.some(key => !descriptors[key]?.enumerable || !Object.hasOwn(descriptors[key], 'value')) || actual.some(key => typeof key !== 'string' || !keys.includes(key))) invalid('Unsupported artifact journal fields.');
 }
 
@@ -85,7 +86,7 @@ async function load(pin, input) {
       fields(event, ['type', 'id', 'device', 'inode']);
       const entry = state.entries.get(event.id);
       if (!entry || entry.status !== 'unowned' || !['writing', 'discard'].includes(state.phase) ||
-          typeof event.device !== 'string' || typeof event.inode !== 'string' || !/^(?:0|[1-9][0-9]{0,39})$/.test(event.device) || !/^(?:0|[1-9][0-9]{0,39})$/.test(event.inode)) invalid('Invalid artifact ownership transition.');
+          !isFilesystemDevice(event.device) || !isFilesystemInode(event.inode)) invalid('Invalid artifact ownership transition.');
       entry.identity = { device: event.device, inode: event.inode }; entry.status = 'owned';
     } else if (event.type === 'complete') {
       fields(event, ['type', 'id']); const entry = state.entries.get(event.id);

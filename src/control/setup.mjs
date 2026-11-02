@@ -1,3 +1,4 @@
+import { isFilesystemDevice, isFilesystemInode } from '../core/filesystem-identity.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -27,7 +28,7 @@ function chainValue(value, root) {
   let last;
   return Object.freeze(value.map((item, index) => {
     requireSetup(item && equal(Object.keys(item).sort(), ['device', 'inode', 'path']) && typeof item.path === 'string' && !/[\u0000-\u001f\u007f]/.test(item.path) && path.isAbsolute(item.path) &&
-      path.normalize(item.path) === item.path && typeof item.device === 'string' && /^\d{1,30}$/.test(item.device) && typeof item.inode === 'string' && /^\d{1,30}$/.test(item.inode));
+      path.normalize(item.path) === item.path && isFilesystemDevice(item.device) && isFilesystemInode(item.inode));
     requireSetup(index === 0 ? item.path === path.parse(root).root : path.dirname(item.path) === last);
     const relative = path.relative(item.path, root); requireSetup(relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
     last = item.path; return Object.freeze({ path: item.path, device: item.device, inode: item.inode });

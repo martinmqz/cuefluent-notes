@@ -144,13 +144,12 @@ test('polling rereads a result published between status inspection and idle gate
 });
 
 
-test('macOS retained command gates accept device renumbering and reject a different volume', { skip: process.platform !== 'darwin' }, async t => {
+test('macOS retained command gates resume without rewriting identity and reject a different volume', { skip: process.platform !== 'darwin' }, async t => {
   const f = await fixture(t), first = await claimInvocation(f.store, f.binding);
   const directory = path.join(f.store.root, 'store/invocations');
   const name = (await fs.readdir(directory)).find(file => file.endsWith('.json'));
   const file = path.join(directory, name), saved = JSON.parse(await fs.readFile(file, 'utf8'));
-  saved.gate.device = String(BigInt(saved.gate.device) + 1n);
-  await fs.writeFile(file, JSON.stringify(saved) + '\n');
+  assert.match(saved.gate.device, /^volume:[a-f0-9]{32}$/);
   const before = await fs.readFile(file, 'utf8');
   assert.equal((await readInvocation(f.store, first.ticket)).state, 'interrupted');
   assert.equal(await fs.readFile(file, 'utf8'), before);
@@ -160,7 +159,7 @@ test('macOS retained command gates accept device renumbering and reject a differ
   assert.equal((await runClaimedInvocation(f.store, first.ticket, { execute })).state, 'tracked');
   assert.equal(executions, 1);
   const changed = JSON.parse(await fs.readFile(file, 'utf8'));
-  changed.gate.volume = changed.gate.volume === '1'.repeat(32) ? '2'.repeat(32) : '1'.repeat(32);
+  changed.gate.device = changed.gate.device === `volume:${'1'.repeat(32)}` ? `volume:${'2'.repeat(32)}` : `volume:${'1'.repeat(32)}`;
   await fs.writeFile(file, JSON.stringify(changed) + '\n');
   await assert.rejects(claimInvocation(f.store, { ...f.binding, promptId: 'later' }), { code: 'GATE_REPLACED' });
   assert.equal(executions, 1);

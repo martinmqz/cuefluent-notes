@@ -3,11 +3,18 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { normalizeStat, readHandleStat, readPathStat } from '../src/storage/stat.mjs';
+import { normalizeStat as normalize, readHandleStat, readPathStat } from '../src/storage/stat.mjs';
 import { assertChain, createPrivateDirectory, fileIdentity, inspectAncestors, sameIdentity } from '../src/storage/paths.mjs';
 import { readSnapshot } from '../src/storage/files.mjs';
 import { establishWindowsPrivacy } from '../src/storage/platform.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
+
+const normalizeStat = raw => normalize(raw, { volume: process.platform === 'darwin' ? '1'.repeat(32) : null });
+function linuxObservation(t) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...descriptor, value: 'linux' });
+  t.after(() => Object.defineProperty(process, 'platform', descriptor));
+}
 
 function rawStat(overrides = {}) {
   return {
@@ -41,7 +48,7 @@ test('device and inode IDs beyond Number precision cannot alias', () => {
   assert.equal(Number(first.ino), Number(changedInode.ino));
   assert.equal(Number(first.dev), Number(changedDevice.dev));
   const identity = fileIdentity(first);
-  assert.deepEqual(identity, { device: '18446744073709551614', inode: '9007199254740992' });
+  assert.deepEqual(JSON.parse(JSON.stringify(identity)), { device: process.platform === 'darwin' ? `volume:${'1'.repeat(32)}` : '18446744073709551614', inode: '9007199254740992' });
   assert.equal(sameIdentity(first, identity), true);
   assert.equal(sameIdentity(changedInode, identity), false);
   assert.equal(sameIdentity(changedDevice, identity), false);
@@ -90,6 +97,7 @@ test('filesystem IDs outside signed or unsigned 64-bit range cannot wrap into an
 });
 
 test('ancestor inspection accepts signed overlayfs inode IDs and still detects replacement', async (t) => {
+  linuxObservation(t);
   const directory = path.resolve('synthetic', 'store');
   let inode = -9_223_372_036_854_775_425n;
   t.mock.method(fs, 'lstat', async (_file, options) => {
@@ -126,7 +134,8 @@ test('unrepresentable numeric fields and Number Stats fail closed', () => {
   assert.throws(() => normalizeStat(rawStat({ mtimeNs: undefined })), { code: 'STAT_EXACT_REQUIRED' });
 });
 
-test('each read helper requests exactly one bigint observation', async (t) => {
+test('non-macOS read helpers request exactly one bigint observation', async (t) => {
+  linuxObservation(t);
   const raw = rawStat({ ino: -9_223_372_036_854_775_425n });
   const calls = [];
   t.mock.method(fs, 'lstat', async (file, options) => { calls.push({ file, options }); return raw; });

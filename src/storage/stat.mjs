@@ -1,4 +1,6 @@
 import fs from 'node:fs/promises';
+import { readMacosVolumeUuid, readMacosVolumeUuidFromFd } from './macos-volume.mjs';
+export { LIVE_DEVICE } from '../core/filesystem-identity.mjs';
 import { fail } from '../core/errors.mjs';
 
 const NUMBER_FIELDS = ['size', 'mode', 'uid', 'gid', 'nlink'];
@@ -17,8 +19,8 @@ export function normalizeFilesystemId(value) {
 }
 
 /** Normalize one bigint observation without ever rounding identities or times. */
-export function normalizeStat(raw) {
-  const value = {};
+export function normalizeStat(raw, { volume = null } = {}) {
+  const value = { volume };
   for (const field of EXACT_FIELDS) {
     if (typeof raw?.[field] !== 'bigint') fail('STAT_EXACT_REQUIRED', 'Storage observations require bigint identities and nanosecond timestamps.');
     value[field] = raw[field];
@@ -44,9 +46,11 @@ export function normalizeStat(raw) {
 }
 
 export async function readPathStat(file) {
-  return normalizeStat(await fs.lstat(file, { bigint: true }));
+  const raw = await fs.lstat(file, { bigint: true });
+  return normalizeStat(raw, { volume: process.platform === 'darwin' && !raw.isSymbolicLink() ? readMacosVolumeUuid(file, raw) : null });
 }
 
 export async function readHandleStat(handle) {
-  return normalizeStat(await handle.stat({ bigint: true }));
+  const raw = await handle.stat({ bigint: true });
+  return normalizeStat(raw, { volume: process.platform === 'darwin' ? readMacosVolumeUuidFromFd(handle.fd, raw) : null });
 }

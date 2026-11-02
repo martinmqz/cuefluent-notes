@@ -1,3 +1,4 @@
+import { identityDataKeys } from '../core/filesystem-identity.mjs';
 import path from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
@@ -9,7 +10,7 @@ import { chatKey, readChat } from '../storage/chats.mjs';
 import { gateOptions, withProject, withSelectedProject } from '../storage/store.mjs';
 import { createPrivateDirectory, assertDirectory, lstatOrNull } from '../storage/paths.mjs';
 import { readJSON, writeJSON } from '../storage/files.mjs';
-import { isGateIdentity, initializeGate, inspectExistingGate, probeGate, tryAcquireExistingGate } from '../storage/gates.mjs';
+import { GATE_FIELDS, isGateIdentity, initializeGate, inspectExistingGate, probeGate, tryAcquireExistingGate } from '../storage/gates.mjs';
 import { readProjectStatus } from './status.mjs';
 
 const MAX_BYTES = 512 * 1024;
@@ -20,7 +21,7 @@ function invalid() { fail('INVOCATION_INVALID', 'The current invocation metadata
 function keys(value, names) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid();
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Reflect.ownKeys(descriptors).length !== names.length || names.some(name => !Object.hasOwn(descriptors, name) || !Object.hasOwn(descriptors[name], 'value'))) invalid();
+  if (identityDataKeys(descriptors).length !== names.length || names.some(name => !Object.hasOwn(descriptors, name) || !Object.hasOwn(descriptors[name], 'value'))) invalid();
 }
 function binding(input) {
   const value = { client: input?.client, sessionId: input?.sessionId, promptId: input?.promptId,
@@ -45,7 +46,7 @@ function validate(store, key, value) {
   if (value.blockedPromptId !== null) { nativeId(value.blockedPromptId); if (value.blockedPromptId === bound.promptId) invalid(); }
   if (chatKey(bound.client, bound.sessionId) !== key) invalid();
   const gate = value.gate;
-  keys(gate, ['path', 'id', 'device', 'inode', 'volume']);
+  keys(gate, GATE_FIELDS);
   if (gate.path !== path.join(store.root, `store/invocations/${key}.sqlite`) || gate.id !== `command:${key}` || !isGateIdentity(gate)) invalid();
   if (value.result !== null && (!value.result || typeof value.result !== 'object' || Array.isArray(value.result) || typeof value.result.state !== 'string')) invalid();
   return { ...value, binding: bound };

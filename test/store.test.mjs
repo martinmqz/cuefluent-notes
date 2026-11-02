@@ -97,7 +97,7 @@ test('setup tolerates sibling entry churn during fresh and interrupted initializ
     finally { injection.mock.restore(); }
     assert.ok(churn > 0, 'fixture must change the parent while its store is inspected');
     assert.deepEqual((await readSettings(store)).value, f.settings);
-    if (gates) assert.deepEqual([store.settingsGate, store.writerGate, store.syncGate], gates);
+    if (gates) assert.deepEqual(JSON.parse(JSON.stringify([store.settingsGate, store.writerGate, store.syncGate])), JSON.parse(JSON.stringify(gates)));
     assert.deepEqual(await snapshots(f.root, ['retained-sibling.txt']), before);
   });
 });
@@ -217,7 +217,7 @@ test('a layout arriving after an absent observation cannot authorize gate creati
   for (const schemaVersion of [2, 3, 4]) {
     const f = await fixture(t); await createPrivateDirectory(path.join(f.privateRoot, 'store'));
     const file = path.join(f.privateRoot, 'store/layout.json'), lstat = fs.lstat;
-    const gate = id => ({ path: path.join(f.privateRoot, `store/locks/${id}.sqlite`), id, device: '1', inode: '2', volume: process.platform === 'darwin' ? '1'.repeat(32) : null });
+    const gate = id => ({ path: path.join(f.privateRoot, `store/locks/${id}.sqlite`), id, device: process.platform === 'darwin' ? `volume:${'1'.repeat(32)}` : '1', inode: '2' });
     const layout = { schemaVersion, id: '11111111-1111-1111-1111-111111111111', settingsGate: gate('settings'), writerGate: gate('writer'), syncGate: gate('sync'), projects: {} };
     let injected = false;
     const injection = t.mock.method(fs, 'lstat', async (...args) => {
@@ -434,7 +434,7 @@ test('long worker ownership does not block a short project mutation', async t =>
 
 test('setup persists one independent sync gate and its lifetime does not block processing ownership or short mutations', async t => {
   const f = await fixture(t), store = await initializeStore(f.privateRoot, f.settings), reopened = await openStore(f.privateRoot);
-  assert.deepEqual(reopened.syncGate, store.syncGate);
+  assert.deepEqual(reopened.syncGate, JSON.parse(JSON.stringify(store.syncGate)));
   const steward = tryAcquireExistingGate(store.syncGate, gateOptions).acquired;
   assert(steward); assert.equal(tryAcquireExistingGate(store.syncGate, gateOptions).busy, true);
   try {
@@ -465,7 +465,7 @@ test('a corrupt layout missing a prototype-named project reports the layout erro
 });
 
 
-test('macOS opens and uses persisted gates after device renumbering without rewriting layout or retained work', { skip: process.platform !== 'darwin' }, async t => {
+test('macOS opens persisted volume-bound gates without rewriting layout or retained work', { skip: process.platform !== 'darwin' }, async t => {
   const f = await fixture(t), original = await initializeStore(f.privateRoot, f.settings);
   await withProject(original, 'demo', async ({ directory }) => {
     await writeJSON(original.pin, `${directory}/synthetic-retained.json`, { retained: 'queue and draft placeholder' }, { expectedHash: null });
@@ -475,8 +475,7 @@ test('macOS opens and uses persisted gates after device renumbering without rewr
   const gates = [layout.settingsGate, layout.writerGate, layout.syncGate,
     ...Object.values(layout.projects).flatMap(project => [project.stateGate, project.workerGate])];
   assert.equal(gates.length, 5);
-  for (const gate of gates) gate.device = String(BigInt(gate.device) + 1n);
-  await fs.writeFile(layoutPath, JSON.stringify(layout) + '\n');
+  for (const gate of gates) assert.match(gate.device, /^volume:[a-f0-9]{32}$/);
   const files = (await fs.readdir(original.root, { recursive: true })).filter(file => file.endsWith('.json'));
   const before = await snapshots(original.root, files);
   const reopened = await openStore(original.root);

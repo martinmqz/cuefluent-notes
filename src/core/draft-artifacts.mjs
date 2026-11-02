@@ -1,3 +1,4 @@
+import { isFilesystemDevice, isFilesystemInode, identityDataKeys } from './filesystem-identity.mjs';
 import path from 'node:path';
 import { isMarkdownPath } from './note-path.mjs';
 import { fail } from './errors.mjs';
@@ -7,7 +8,6 @@ import { MAX_NOTE_BYTES } from './note-publication.mjs';
 export const DRAFT_ARTIFACT_LIMITS = Object.freeze({ drafts: 64, manifestBytes: 2 * 1024 * 1024, journalBytes: 4 * 1024 * 1024, fileBytes: MAX_NOTE_BYTES });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
-const ID = /^(?:0|[1-9][0-9]{0,39})$/;
 const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const invalid = message => fail('DRAFT_ARTIFACT_INVALID', message);
 const uuid = value => typeof value === 'string' && UUID.test(value);
@@ -15,14 +15,14 @@ const hash = value => typeof value === 'string' && HASH.test(value);
 
 function data(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid('Artifact metadata must be plain data.');
-  const descriptors = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(descriptors);
+  const descriptors = Object.getOwnPropertyDescriptors(value), keys = identityDataKeys(descriptors);
   if (keys.length !== fields.length || fields.some(key => !descriptors[key]?.enumerable || !Object.hasOwn(descriptors[key], 'value')) ||
       keys.some(key => typeof key !== 'string' || !fields.includes(key))) invalid('Artifact metadata must contain exactly its supported data fields.');
 }
 
 function identity(value) {
   data(value, ['device', 'inode']);
-  if (typeof value.device !== 'string' || !ID.test(value.device) || typeof value.inode !== 'string' || !ID.test(value.inode)) invalid('Artifact files require exact filesystem identities.');
+  if (!isFilesystemDevice(value.device) || !isFilesystemInode(value.inode)) invalid('Artifact files require exact filesystem identities.');
   return Object.freeze({ device: value.device, inode: value.inode });
 }
 
@@ -41,7 +41,7 @@ export function validateDraftArtifactManifest(input, { platform = process.platfo
   data(input, ['runId', 'outcome', 'drafts']);
   if (!uuid(input.runId) || !['drafted', 'nothing-useful'].includes(input.outcome) || !Array.isArray(input.drafts) || input.drafts.length > DRAFT_ARTIFACT_LIMITS.drafts) invalid('Invalid bounded draft manifest.');
   const descriptors = Object.getOwnPropertyDescriptors(input.drafts);
-  if (Reflect.ownKeys(descriptors).length !== input.drafts.length + 1 || (input.outcome === 'drafted') !== (input.drafts.length > 0)) invalid('The completed draft outcome must match its exact set.');
+  if (identityDataKeys(descriptors).length !== input.drafts.length + 1 || (input.outcome === 'drafted') !== (input.drafts.length > 0)) invalid('The completed draft outcome must match its exact set.');
   const paths = platform === 'win32' ? path.win32 : path.posix, ids = new Set(), targets = new Set(), drafts = [];
   for (let index = 0; index < input.drafts.length; index++) {
     if (!descriptors[index]?.enumerable || !Object.hasOwn(descriptors[index], 'value')) invalid('Drafts must be a dense data array.');

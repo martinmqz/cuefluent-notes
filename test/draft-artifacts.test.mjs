@@ -23,7 +23,7 @@ async function fixture(t, count = 2) {
     drafts.push({ id: randomUUID(), target: path.join(notes, relative), expectedHash: null, hash: hashBytes(bytes), summary: `Summary ${index}`, heading: null,
       byteLength: bytes.length, binding: { root: notes, parent: parent.chain } });
   }
-  const manifest = { runId, outcome: count ? 'drafted' : 'nothing-useful', drafts }, relative = `runs/${runId}`;
+  const manifest = JSON.parse(JSON.stringify({ runId, outcome: count ? 'drafted' : 'nothing-useful', drafts })), relative = `runs/${runId}`;
   const config = path.join(root, 'config.json'), pointerFile = path.join(root, 'pointer.json');
   await fs.writeFile(config, JSON.stringify({ manifest, bodies: bodies.map(bytes => bytes.toString('base64')), relative }), { mode: 0o600 });
   return { root, pin, notes, manifest, relative, bodies, config, pointerFile };

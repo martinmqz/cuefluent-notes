@@ -1,3 +1,4 @@
+import { isFilesystemDevice, isFilesystemInode, identityDataKeys } from './filesystem-identity.mjs';
 import path from 'node:path';
 import { isMarkdownPath } from './note-path.mjs';
 import { fail } from './errors.mjs';
@@ -5,20 +6,19 @@ import { fail } from './errors.mjs';
 export const MAX_NOTE_BYTES = 10 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
-const ID = /^(?:0|[1-9][0-9]{0,39})$/;
 const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const invalid = message => fail('NOTE_PUBLICATION_INVALID', message);
 
 function data(value, fields, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid(`${label} must be a plain data object.`);
-  const descriptors = Object.getOwnPropertyDescriptors(value), keys = Reflect.ownKeys(descriptors);
+  const descriptors = Object.getOwnPropertyDescriptors(value), keys = identityDataKeys(descriptors);
   if (keys.length !== fields.length || fields.some(key => !Object.hasOwn(descriptors, key)) || keys.some(key =>
     typeof key !== 'string' || !fields.includes(key) || !Object.hasOwn(descriptors[key], 'value') || !descriptors[key].enumerable)) invalid(`${label} must contain exactly its supported data fields.`);
 }
 
 function identity(value) {
   data(value, ['device', 'inode'], 'File identity');
-  if (typeof value.device !== 'string' || !ID.test(value.device) || typeof value.inode !== 'string' || !ID.test(value.inode)) invalid('Invalid exact file identity.');
+  if (!isFilesystemDevice(value.device) || !isFilesystemInode(value.inode)) invalid('Invalid exact file identity.');
   return Object.freeze({ device: value.device, inode: value.inode });
 }
 

@@ -201,7 +201,7 @@ test('every failure code raised in the source resolves to a table entry or the g
   const runtime = new Set(['ENOENT', 'EACCES', 'EPERM', 'ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_UNKNOWN_BUILTIN_MODULE']);
   for (const code of GUIDED_CODES) assert.ok(raised.has(code) || runtime.has(code), `${code} is in the guidance table but nothing raises it`);
   const entries = new Set(GUIDED_CODES.map(code => describeFailure({ code }).message));
-  assert.ok(entries.size <= 26, `the guidance table has ${entries.size} entries`);
+  assert.ok(entries.size <= 25, `the guidance table has ${entries.size} entries`);
   for (const code of GUIDED_CODES) assert.notEqual(describeFailure({ code }).recovery, generic.recovery, code);
   // Internal codes resolve to the generic entry without a per-code sentence.
   assert.equal(describeFailure({ code: 'RUN_MISSING' }).recovery, generic.recovery);
