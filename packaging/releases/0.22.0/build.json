@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "version": "0.22.0",
+  "sourceLockSha256": "5edd8bd8541f8d6c6655a67409549df398073606bf9556e8b11542599fede10f",
+  "packages": [
+    {
+      "client": "codex",
+      "path": "codex/cuefluent-notes",
+      "inventorySha256": "217bf993fc612e706ecb732aa5f4b50b42a531cf22f1dc17922d5ac2c6b7740b",
+      "archives": [
+        {
+          "path": "cuefluent-notes-0.22.0-codex.tar.gz",
+          "bytes": 1378983,
+          "sha256": "99ef080bbf582e9256151f3a9a24a3d9ca0d548ea966f9178d15717330a91a33"
+        },
+        {
+          "path": "cuefluent-notes-0.22.0-codex.zip",
+          "bytes": 5429092,
+          "sha256": "f6c9b544f9c1127513de959b6d2474fd07c5001852979b0e7430392a69def0ab"
+        }
+      ]
+    },
+    {
+      "client": "claude",
+      "path": "claude/cuefluent-notes",
+      "inventorySha256": "d4646f47453d253742b2a24b2ca85faba5914c636842baa9668007866785ab59",
+      "archives": [
+        {
+          "path": "cuefluent-notes-0.22.0-claude.tar.gz",
+          "bytes": 1378837,
+          "sha256": "8145d5ebeb20a762a26b378e270434007349a27165789f2d9b2a76ff347d9d49"
+        },
+        {
+          "path": "cuefluent-notes-0.22.0-claude.zip",
+          "bytes": 5429069,
+          "sha256": "a123fec5a02216445b3ce8e71fc4a6202d2cf749d719235b800ba700f4259696"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "path": "cuefluent-notes-0.22.0-tools.tar.gz",
+      "bytes": 10269,
+      "sha256": "4ce18bd3059e2162b56d6972e55e2eaa2743982ffd54aafda7b04b31ff50e451"
+    },
+    {
+      "path": "cuefluent-notes-0.22.0-tools.zip",
+      "bytes": 37477,
+      "sha256": "ebccb25c6a3ddf7e0c2150fbe8008a4be6cd7cfa74612e42788c1c9b73441bd8"
+    }
+  ]
+}
