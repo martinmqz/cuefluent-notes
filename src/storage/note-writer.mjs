@@ -251,6 +251,9 @@ async function metadataEvidence(file) {
     if (names.length > 128 || names.some(name => name.length > 1024 || /[\u0000-\u001f\u007f]/.test(name))) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
     const attrs = []; let total = 0;
     for (const name of names) {
+      // macOS assigns provenance to each inode and can change it during copying.
+      // Leave that OS-owned attribute alone; it is not preservable note metadata.
+      if (name === 'com.apple.provenance') continue;
       const value = (await command('/usr/bin/xattr', ['-px', name, file])).toString('ascii').replace(/\s/g, '').toLowerCase();
       if (!/^(?:[0-9a-f]{2})*$/.test(value) || (total += value.length / 2) > METADATA_BYTES) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
       attrs.push([name, value]);

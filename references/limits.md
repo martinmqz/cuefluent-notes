@@ -165,6 +165,10 @@ before replacement and refuse a newly arrived file. An interrupted save can
 briefly leave the original only in that directory; retry or `skip` restores or
 completes it without overwriting a newer note, and conflicting recovery files are
 preserved. Staging names end in `.tmp` and are never discovered as notes.
+On macOS, the OS-managed `com.apple.provenance` attribute may differ between the
+original and staged file. It is left to macOS and excluded from metadata equality;
+Cuefluent does not remove it. Content, file identities, permissions, ACLs, flags
+and all other extended attributes, including quarantine, remain checked.
 
 ## Output profile
 
