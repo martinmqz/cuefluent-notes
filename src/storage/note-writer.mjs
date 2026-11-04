@@ -11,6 +11,7 @@ import { readHandleStat, readPathStat } from './stat.mjs';
 import { MAX_NOTE_BYTES, validateNotePublication } from '../core/note-publication.mjs';
 export { MAX_NOTE_BYTES, validateNotePublication } from '../core/note-publication.mjs';
 const METADATA_BYTES = 256 * 1024;
+const METADATA_ATTRIBUTES = 128;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const execute = promisify(execFile);
 const HASH = /^[0-9a-f]{64}$/;
@@ -228,7 +229,7 @@ async function linuxInventory(file) {
 // xattr prints one newline-terminated name per record, without escaping names.
 // Reject ambiguous records before excluding the one OS-owned attribute. A forged
 // multi-line name cannot masquerade as ignored provenance or duplicate a real name.
-async function macosAttributeNames(file) {
+async function macosAttributeNames(file, maxCount = METADATA_ATTRIBUTES) {
   const output = await command('/usr/bin/xattr', [file]);
   const text = output.toString('utf8');
   if (!Buffer.from(text).equals(output) || (text && !text.endsWith('\n'))) fail('NOTE_METADATA_UNSUPPORTED', 'The note extended-attribute names could not be verified.');
@@ -236,7 +237,7 @@ async function macosAttributeNames(file) {
   if (new Set(listed).size !== listed.length || listed.some(name => !name || name.length > 1024 || /[\u0000-\u001f\u007f]/.test(name))) fail('NOTE_METADATA_UNSUPPORTED', 'The note extended-attribute names could not be verified.');
   // macOS assigns this attribute per inode; neither compare nor modify it.
   const names = listed.filter(name => name !== 'com.apple.provenance').sort();
-  if (names.length > 128) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
+  if (names.length > maxCount) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
   return names;
 }
 
@@ -312,16 +313,28 @@ async function cloneOriginal(source, stage, expectedMetadata) {
   if (process.platform === 'darwin') {
     const inspected = await metadataEvidence(source);
     if (inspected.hash !== expectedMetadata) conflict('The original metadata changed before staging.');
+    // A newly inherited or retained ACL can block cp's attribute writes. Remove
+    // it only from our stage; a retained completed draft was checked before this.
+    await command('/bin/chmod', ['-N', stage]);
     await command('/bin/cp', ['-p', source, stage]);
-    // cp may transform quarantine. Restore exact inspected values only where the
-    // copy differs, avoiding huge argv values for unchanged resource forks.
+    // cp may install the original's denying ACL. Restore attributes before
+    // reinstating the exact ordered ACL on the finished stage.
+    await command('/bin/chmod', ['-N', stage]);
+    // cp may transform quarantine or retain quarantine assigned when the stage
+    // was created. Match the original's attribute set before restoring values.
+    const expected = new Map(inspected.macos.attrs);
+    // Bound this temporary union separately: creation-time additions must be
+    // removed before charging the preserved source's count and value-byte limits.
+    for (const name of await macosAttributeNames(stage, 2 * METADATA_ATTRIBUTES)) {
+      if (!expected.has(name)) await command('/usr/bin/xattr', ['-d', '--', name, stage]);
+    }
     const copied = new Map(await macosAttributes(stage));
-    for (const [name, value] of inspected.macos.attrs) {
+    // Avoid huge argv values for unchanged resource forks.
+    for (const [name, value] of expected) {
       if (copied.get(name) !== value) await command('/usr/bin/xattr', ['-wx', '--', name, value, stage]);
     }
     // cp retains the new inode's inherited ACL rather than the source's. Rebuild
     // its exact ordered entries, including inherited status, on our own stage.
-    await command('/bin/chmod', ['-N', stage]);
     for (const [index, line] of inspected.macos.acl.entries()) {
       const match = /^\s+([0-9]+): ((?:user|group):.+?)( inherited)? (allow|deny) (.+)$/.exec(line);
       if (!match || Number(match[1]) !== index) fail('NOTE_METADATA_UNSUPPORTED', 'The note ACL cannot be preserved exactly.');
@@ -676,6 +689,11 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   const staged = await snapshot(current.stage);
   if (!sameIdentity(staged.stat, intent.stage) || !(draft.subarray(0, staged.bytes.length).equals(staged.bytes) ||
       (original && original.bytes.subarray(0, staged.bytes.length).equals(staged.bytes)))) conflict('The staged content is not an exact draft or original prefix.');
+  // A retained exact draft must not erase a later metadata edit by cloning again.
+  // Retained zero-byte drafts are ambiguous, so a mismatch also stays a conflict;
+  // newly created empty stages and partial drafts still enter normal preparation.
+  if (process.platform === 'darwin' && input.stage && original && staged.hash === intent.hash &&
+      await metadata(current.stage) !== intent.original.metadata) conflict('The completed stage metadata changed before retry.');
   // A cloned read-only source must remain read-only when published. Open the
   // owned stage while writable, then clone metadata and write through that fd.
   if (process.platform !== 'win32') {

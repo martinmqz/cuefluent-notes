@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import * as child from 'node:child_process';
 import { promisify } from 'node:util';
 import { mock } from 'node:test';
+import { readMacosAttribute, readMacosAcl } from '../support/macos-note-metadata.mjs';
 
 const root = await fs.realpath(process.argv[2]);
 const scenario = process.argv[3];
@@ -17,11 +18,6 @@ const after = Buffer.from('# Synthetic update\n\nPublish these exact reviewed by
 const attribute = 'com.cuefluent.synthetic';
 const quarantine = 'com.apple.quarantine';
 const provenance = 'com.apple.provenance';
-const readAttr = async (name, file = target) => {
-  const names = (await execute('/usr/bin/xattr', [file])).stdout.split('\n');
-  return names.includes(name) ? (await execute('/usr/bin/xattr', ['-px', name, file])).stdout.replace(/\s/g, '').toLowerCase() : null;
-};
-const readAcl = async () => (await execute('/bin/ls', ['-lde', target])).stdout.split('\n').slice(1).join('\n');
 
 try {
   await fs.writeFile(target, before);
@@ -63,7 +59,7 @@ try {
   });
   let journal = intent;
   const persistIntent = value => { journal = value; };
-  const initial = { attribute: await readAttr(attribute), acl: await readAcl() };
+  const initial = { attribute: await readMacosAttribute(target, attribute), acl: await readMacosAcl(target) };
 
   if (['save', 'capture', 'recover', 'absent'].includes(scenario)) {
     if (['capture', 'recover'].includes(scenario)) {
@@ -86,8 +82,8 @@ try {
     assert.equal(receipt.changed, true);
     assert.deepEqual(await fs.readFile(target), after);
     assert.equal((await fs.stat(target)).mode & 0o7777, 0o640);
-    assert.equal(await readAttr(attribute), initial.attribute);
-    assert.equal(await readAcl(), initial.acl);
+    assert.equal(await readMacosAttribute(target, attribute), initial.attribute);
+    assert.equal(await readMacosAcl(target), initial.acl);
     assert.deepEqual(await fs.readdir(root), ['note.md']);
     assert.deepEqual(observed, new Set(['original', 'stage']));
   } else {
@@ -100,7 +96,7 @@ try {
         const stage = path.join(root, stages[0]);
         const name = scenario === 'stage-xattr' ? attribute : quarantine;
         await execute('/usr/bin/xattr', ['-wx', name, '11223344', stage]);
-        mutation = { stage, name, value: await readAttr(name, stage) };
+        mutation = { stage, name, value: await readMacosAttribute(stage, name) };
         assert.equal(mutation.value, '11223344');
         return;
       }
@@ -109,7 +105,7 @@ try {
       else if (scenario === 'quarantine') await execute('/usr/bin/xattr', ['-w', quarantine, '0083;69000001;ConcurrentEdit;', target]);
       else if (scenario === 'acl') await execute('/bin/chmod', ['+a', `user:${os.userInfo().username} allow write`, target]);
       mutation = { bytes: await fs.readFile(target), mode: (await fs.stat(target)).mode & 0o7777,
-        attribute: await readAttr(attribute), quarantine: await readAttr(quarantine), acl: await readAcl() };
+        attribute: await readMacosAttribute(target, attribute), quarantine: await readMacosAttribute(target, quarantine), acl: await readMacosAcl(target) };
     };
     await assert.rejects(publishNotePublication(pin, intent, after, { persistIntent, beforePublish }), error => {
       assert.equal(error.code, 'NOTE_PUBLICATION_CONFLICT');
@@ -118,19 +114,19 @@ try {
     });
     assert.ok(mutation, 'The concurrent mutation must happen before the refusal.');
     if (scenario.startsWith('stage-')) {
-      assert.equal(await readAttr(mutation.name, mutation.stage), mutation.value);
+      assert.equal(await readMacosAttribute(mutation.stage, mutation.name), mutation.value);
       assert.deepEqual(await fs.readFile(target), before);
       assert.equal((await fs.stat(target, { bigint: true })).ino, originalInode);
-      assert.equal(await readAttr(attribute), initial.attribute);
-      assert.equal(await readAttr(quarantine), null);
-      assert.equal(await readAcl(), initial.acl);
+      assert.equal(await readMacosAttribute(target, attribute), initial.attribute);
+      assert.equal(await readMacosAttribute(target, quarantine), null);
+      assert.equal(await readMacosAcl(target), initial.acl);
     } else {
       assert.deepEqual(await fs.readFile(target), mutation.bytes);
       assert.equal((await fs.stat(target, { bigint: true })).ino, originalInode);
       assert.equal((await fs.stat(target)).mode & 0o7777, mutation.mode);
-      assert.equal(await readAttr(attribute), mutation.attribute);
-      assert.equal(await readAttr(quarantine), mutation.quarantine);
-      assert.equal(await readAcl(), mutation.acl);
+      assert.equal(await readMacosAttribute(target, attribute), mutation.attribute);
+      assert.equal(await readMacosAttribute(target, quarantine), mutation.quarantine);
+      assert.equal(await readMacosAcl(target), mutation.acl);
       assert.deepEqual(await fs.readFile(target), before);
     }
   }

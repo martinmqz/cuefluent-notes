@@ -9,13 +9,12 @@ import { promisify } from 'node:util';
 import { pinDirectory } from '../src/storage/paths.mjs';
 import { hashBytes } from '../src/storage/files.mjs';
 import { prepareNotePublication, publishNotePublication } from '../src/storage/note-writer.mjs';
+import { readMacosAcl as acl, readMacosAttribute as attribute } from './support/macos-note-metadata.mjs';
 
 const execute = promisify(execFile);
 const before = Buffer.from('# Native metadata fixture\n\nOriginal synthetic content.\n');
 const after = Buffer.from('# Native metadata fixture\n\nExact synthetic update.\n');
 const macTest = (name, fn) => test(name, { skip: process.platform !== 'darwin', timeout: 30_000 }, fn);
-const acl = async file => (await execute('/bin/ls', ['-lde', file])).stdout.split('\n').slice(1).join('\n');
-const attribute = async (file, name) => (await execute('/usr/bin/xattr', ['-px', '--', name, file], { maxBuffer: 1024 * 1024 })).stdout.replace(/\s/g, '').toLowerCase();
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cue-native-note-metadata-'));
@@ -32,12 +31,29 @@ async function fixture(t) {
   return { root, notes, target, pin, prepare };
 }
 
-async function save(f) {
+async function save(f, options = {}) {
   const intent = await f.prepare();
-  const result = await publishNotePublication(f.pin, intent, after, { persistIntent: async () => {} });
+  const result = await publishNotePublication(f.pin, intent, after, { persistIntent: async () => {}, ...options });
   assert.equal(result.changed, true);
   assert.deepEqual(await fs.readFile(f.target), after);
   assert.deepEqual(await fs.readdir(f.notes), ['note.md']);
+}
+
+async function saveWithCreationAttribute(f, name = 'com.apple.quarantine') {
+  let tagged = false;
+  await save(f, {
+    persistIntent: async intent => {
+      if (tagged) return;
+      const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+      assert.deepEqual(await fs.readFile(stage), Buffer.alloc(0));
+      // Model an app tagging the just-created inode, before native cloning.
+      // This is not an edit after the completed-stage publication fence.
+      await execute('/usr/bin/xattr', ['-w', name, '0083;69000001;SyntheticHost;', stage]);
+      tagged = true;
+    },
+  });
+  assert.equal(tagged, true);
+  assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
 }
 
 macTest('macOS updates retain the exact original quarantine bytes', async t => {
@@ -47,6 +63,90 @@ macTest('macOS updates retain the exact original quarantine bytes', async t => {
   assert.ok(original.length > 0);
   await save(f);
   assert.equal(await attribute(f.target, name), original);
+});
+
+macTest('macOS restores quarantine before reinstating an owner writeextattr deny ACL', async t => {
+  const f = await fixture(t), name = 'com.apple.quarantine';
+  await execute('/usr/bin/xattr', ['-w', name, '0083;69000001;Safari;', f.target]);
+  await execute('/bin/chmod', ['+a', `user:${os.userInfo().username} deny writeextattr`, f.target]);
+  const originalAttribute = await attribute(f.target, name), originalAcl = await acl(f.target);
+  assert.ok(originalAttribute?.length > 0);
+  assert.match(originalAcl, /deny writeextattr/);
+  try { await save(f); }
+  catch (error) {
+    assert.deepEqual(await fs.readFile(f.target), before);
+    assert.equal(await attribute(f.target, name), originalAttribute);
+    assert.equal(await acl(f.target), originalAcl);
+    throw error;
+  }
+  assert.equal(await attribute(f.target, name), originalAttribute);
+  assert.equal(await acl(f.target), originalAcl);
+});
+
+for (const name of ['com.apple.quarantine', 'com.cuefluent.stage-creation']) {
+  macTest(`macOS discards creation-time stage attribute ${name} absent from the original`, async t => {
+    const f = await fixture(t), retained = 'com.cuefluent.original';
+    await execute('/usr/bin/xattr', ['-wx', retained, '112233', f.target]);
+    assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
+    await saveWithCreationAttribute(f, name);
+    assert.equal(await attribute(f.target, retained), '112233');
+  });
+}
+
+macTest('macOS preserves a quarantine edit made after stage initialization as a conflict', async t => {
+  const f = await fixture(t), name = 'com.apple.quarantine', intent = await f.prepare();
+  const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+  let tagged = false, journal = intent;
+  const persistIntent = async value => { journal = value; };
+  await assert.rejects(publishNotePublication(f.pin, intent, after, {
+    persistIntent,
+    beforePublish: async () => {
+      if (tagged) return;
+      assert.deepEqual(await fs.readFile(stage), after);
+      await execute('/usr/bin/xattr', ['-wx', name, '112233', stage]);
+      tagged = true;
+    },
+  }), error => error.code === 'NOTE_PUBLICATION_CONFLICT' && /Staging did not preserve/.test(error.message));
+  assert.equal(tagged, true);
+  assert.deepEqual(await fs.readFile(f.target), before);
+  assert.deepEqual(await fs.readFile(stage), after);
+  assert.equal(await attribute(stage, name), '112233');
+  assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
+  assert.ok(journal.stage);
+  await assert.rejects(publishNotePublication(f.pin, journal, after, { persistIntent }),
+    error => error.code === 'NOTE_PUBLICATION_CONFLICT' && /completed stage metadata changed before retry/.test(error.message));
+  assert.deepEqual(await fs.readFile(f.target), before);
+  assert.deepEqual(await fs.readFile(stage), after);
+  assert.equal(await attribute(stage, name), '112233');
+  assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
+});
+
+macTest('macOS retries an unchanged completed quarantined stage with an owner deny ACL', async t => {
+  const f = await fixture(t), name = 'com.apple.quarantine';
+  await execute('/usr/bin/xattr', ['-w', name, '0083;69000001;Safari;', f.target]);
+  await execute('/bin/chmod', ['+a', `user:${os.userInfo().username} deny writeextattr`, f.target]);
+  const originalAttribute = await attribute(f.target, name), originalAcl = await acl(f.target);
+  assert.ok(originalAttribute?.length > 0);
+  assert.match(originalAcl, /deny writeextattr/);
+  const intent = await f.prepare(), interrupted = new Error('Synthetic interruption before publication');
+  const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+  let journal = intent;
+  const persistIntent = async value => { journal = value; };
+  await assert.rejects(publishNotePublication(f.pin, intent, after, {
+    persistIntent,
+    beforePublish: async () => { throw interrupted; },
+  }), error => error === interrupted);
+  assert.ok(journal.stage);
+  assert.deepEqual(await fs.readFile(f.target), before);
+  assert.deepEqual(await fs.readFile(stage), after);
+  assert.equal(await attribute(stage, name), originalAttribute);
+  assert.equal(await acl(stage), originalAcl);
+  const result = await publishNotePublication(f.pin, journal, after, { persistIntent });
+  assert.equal(result.changed, true);
+  assert.deepEqual(await fs.readFile(f.target), after);
+  assert.equal(await attribute(f.target, name), originalAttribute);
+  assert.equal(await acl(f.target), originalAcl);
+  assert.deepEqual(await fs.readdir(f.notes), ['note.md']);
 });
 
 macTest('macOS updates preserve a moved note inherited ACL and mixed entry order', async t => {
@@ -113,15 +213,16 @@ for (const name of ['com.apple.provenance\n', 'com.apple.provenance\ncom.apple.p
     }), { code: 'NOTE_METADATA_UNSUPPORTED' });
     assert.equal(changed, true);
     assert.deepEqual(await fs.readFile(f.target), before);
-    assert.equal(await attribute(f.target, name), '112233');
+    // A newline name cannot be located by xattr's line-delimited name listing.
+    assert.equal((await execute('/usr/bin/xattr', ['-px', '--', name, f.target])).stdout.replace(/\s/g, '').toLowerCase(), '112233');
     await assert.rejects(f.prepare(), { code: 'NOTE_METADATA_UNSUPPORTED' });
   });
 }
 
-macTest('macOS preserves a resource fork at the 256 KiB metadata bound', async t => {
+macTest('macOS preserves 256 KiB metadata when stage creation adds quarantine', async t => {
   const f = await fixture(t), bytes = Buffer.alloc(256 * 1024, 0xab);
   await fs.writeFile(`${f.target}/..namedfork/rsrc`, bytes);
-  await save(f);
+  await saveWithCreationAttribute(f);
   assert.deepEqual(await fs.readFile(`${f.target}/..namedfork/rsrc`), bytes);
 });
 
@@ -140,6 +241,13 @@ macTest('macOS provenance does not consume one of the 128 user attribute slots',
   const listed = (await execute('/usr/bin/xattr', [f.target])).stdout.split('\n');
   if (!listed.includes('com.apple.provenance')) { t.skip('This filesystem did not attach native provenance.'); return; }
   await save(f);
+  for (const name of names) assert.equal(await attribute(f.target, name), '01');
+});
+
+macTest('macOS preserves 128 attributes when stage creation adds quarantine', async t => {
+  const f = await fixture(t), names = Array.from({ length: 128 }, (_, i) => `com.cuefluent.fixture.${i}`);
+  for (const name of names) await execute('/usr/bin/xattr', ['-wx', name, '01', f.target]);
+  await saveWithCreationAttribute(f);
   for (const name of names) assert.equal(await attribute(f.target, name), '01');
 });
 
