@@ -313,14 +313,12 @@ async function cloneOriginal(source, stage, expectedMetadata) {
   if (process.platform === 'darwin') {
     const inspected = await metadataEvidence(source);
     if (inspected.hash !== expectedMetadata) conflict('The original metadata changed before staging.');
-    // A newly inherited or retained ACL can block cp's attribute writes. Remove
-    // it only from our stage; a retained completed draft was checked before this.
-    await command('/bin/chmod', ['-N', stage]);
     await command('/bin/cp', ['-p', source, stage]);
-    // cp may restore a read-only mode and denying ACL. Permit attribute writes
-    // only on the stage; its exact original mode and ACL are restored afterward.
+    // cp restores the source mode and ACL. Restrict ordinary access before
+    // clearing that ACL so the copied bytes cannot become readable to others.
+    // The exact original ACL and mode are restored before publication.
+    await command('/bin/chmod', ['600', stage]);
     await command('/bin/chmod', ['-N', stage]);
-    await command('/bin/chmod', ['u+w', stage]);
     // cp may transform quarantine or retain quarantine assigned when the stage
     // was created. Match the original's attribute set before restoring values.
     const expected = new Map(inspected.macos.attrs);
@@ -482,7 +480,11 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   if ((expectedHash === null && current) || (expectedHash !== null && (!current || current.hash !== expectedHash))) conflict('The note differs from the exact inspected original or absence.');
   if (current && expectedHash !== hash && process.platform === 'darwin' && process.geteuid() !== 0) {
     const groups = new Set([...process.getgroups(), process.getegid()]);
-    if (current.stat.uid !== process.geteuid() || !groups.has(current.stat.gid)) fail('NOTE_METADATA_UNSUPPORTED', 'The note owner or group cannot be preserved by this user; ask its owner to adjust ownership or group access before retrying.');
+    const directory = await readPathStat(path.dirname(parent.file));
+    if (!sameIdentity(directory, parent.chain.at(-1))) conflict('The note parent changed during metadata capability inspection.');
+    // macOS stages inherit the parent's group; matching it needs no chgrp even
+    // when the owner is not a member. Final metadata verification still applies.
+    if (current.stat.uid !== process.geteuid() || (!groups.has(current.stat.gid) && current.stat.gid !== directory.gid)) fail('NOTE_METADATA_UNSUPPORTED', 'The note owner or group cannot be preserved by this user; ask its owner to adjust ownership or group access before retrying.');
   }
   const original = current ? { ...current.identity, metadata: await metadata(parent.file) } : null;
   const intent = validateNotePublication({ schema: 1, runId, draftId, root: pin.root, relative, parent: parent.chain,
@@ -704,6 +706,9 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
         const observed = await readHandleStat(permissions); regular(observed);
         if (!sameIdentity(observed, intent.stage)) conflict('The staged inode changed before restoring writable permissions.');
         await permissions.chmod(0o600);
+        // An unfinished clone can retain an owner deny-write ACL. Clear it only
+        // after restricting mode, before reopening this exact stage for writing.
+        if (process.platform === 'darwin' && original) await command('/bin/chmod', ['-N', current.stage]);
       } finally { await permissions.close(); }
     }
     else if (original) await windows('writable', current.stage);

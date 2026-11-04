@@ -176,8 +176,11 @@ value survives replacement and does not clear or set this attribute explicitly.
 It is excluded from the preservation fingerprint and attribute limits. The writer
 preserves ordinary extended attributes, including quarantine, and the original
 ACL's explicit and inherited entries. When preparing an update, it reconciles
-attributes assigned to its new temporary file with the inspected original;
-changes detected after staging still refuse publication. A macOS update records
+attributes assigned to its new temporary file with the inspected original. It
+restricts the owned stage to owner-only mode before clearing its ACL during
+preparation, including a retry interrupted with a deny-write ACL still present;
+the original ACL and permissions are restored before publication. Changes detected
+after staging still refuse publication. A macOS update records
 its completed-stage checkpoint only after bytes, permissions and metadata are
 restored, verified and flushed. Before that checkpoint, a retry can finish
 interrupted preparation; afterward, it verifies and reuses the stage without
@@ -188,7 +191,8 @@ checked.
 The macOS attribute profile allows 128 ordinary attributes with a combined
 256 KiB value payload. Unsupported names and values are refused. A changed note
 whose owner or group cannot be reproduced by the current account is refused before
-staging. `NOTE_METADATA_UNSUPPORTED` means native metadata cannot be preserved or
+staging. A group inherited unchanged from the destination folder can be preserved
+without membership; the completed stage must still match the original metadata. `NOTE_METADATA_UNSUPPORTED` means native metadata cannot be preserved or
 verified: keep the note and pending draft, inspect filesystem capabilities,
 ownership, group membership and permissions, and resolve the cause before
 retrying. Do not strip attributes or ACLs to bypass the refusal.
