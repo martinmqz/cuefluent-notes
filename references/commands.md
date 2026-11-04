@@ -6,21 +6,22 @@
 mode. `cuefluent_list_notes(projectId, directory?, cursor?, limit?)` browses one
 directory with bounded pagination; it reads no content and grants no overwrite
 authority. `cuefluent_read_note(projectId, target, start?, maxBytes?, expectedHash?)`
-without `start` and `maxBytes` returns a note within 64 KiB whole, with its
-whole-file `hash`, when its serialized projection fits one 128 KiB result.
-Otherwise, and for larger notes, it returns UTF-8 ranges of at most 8 KiB: follow
-the returned `next` offset and pass the first `hash` as `expectedHash` on every
-later range, so a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than
-read inconsistently.
+without `start` and `maxBytes` returns the whole note with its whole-file `hash`
+when the serialized result fits 48 KiB. Otherwise it returns bounded UTF-8 ranges.
+`maxBytes` can request up to 48 KiB of note bytes, but every returned result,
+including JSON escaping and its other fields, must fit 48 KiB. Follow the returned
+`next` offset and pass the first `hash` as `expectedHash` on every later range, so
+a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than read inconsistently.
 
 `cuefluent_create_note(projectId, requestId, target, content, summary, sources?)` requires an
 absent target. `cuefluent_update_note` takes the same fields plus the exact
 inspected `expectedHash` and requires the existing target; a changed or missing
-original is a conflict, and an original with a body above 64 KiB or a total size above 128 KiB is refused before a draft is
-reserved (`DIRECT_NOTE_UPDATE_LIMIT`). Each request creates or updates one file
-from up to 64 KiB of submitted UTF-8 content; the complete private draft with its
-retained metadata is limited to 128 KiB. New notes receive identity and
-timestamps; updates keep theirs. The writer enforces the configured destination.
+original is a conflict, and an original with a body above 128 KiB or a total size
+above 192 KiB is refused before a draft is reserved (`DIRECT_NOTE_UPDATE_LIMIT`). Each request creates or updates one file
+from up to 128 KiB of submitted UTF-8 content; the complete private draft with its
+retained metadata is limited to 192 KiB. Each source line is limited to 64 KiB.
+Report a size refusal and ask how to proceed; do not shorten, split or create a separate note to bypass it. New notes
+receive identity and timestamps; updates keep theirs. The writer enforces the configured destination.
 Optional `sources` contains known document descriptors for hidden metadata,
 separate from the substantive body; see [source metadata](notes.md#source-metadata).
 The same argument is available to queued `draft_note`. Source additions preserve
@@ -29,7 +30,12 @@ revision, while the Markdown preview omits metadata. Review returns paged `sourc
 separately; show it alongside the body before approval. Source object key order
 does not change a direct request's identity. Each queued draft revision starts
 from the original and must resubmit its intended sources; repeated source bytes
-count toward the cumulative 128 KiB submission budget.
+count toward the cumulative 128 KiB submission budget. Queued reads use at most
+8 KiB per range within a cumulative 64 KiB response budget. Replacing an existing
+note with complete content requires reading the entire original; otherwise the
+queued drafter must use exact edits that preserve unread content. If the budget
+prevents an update, leave the run unfinished and report the limit; do not create
+a separate note to bypass it.
 
 `requestId` is a fresh UUID per request. The same id with identical arguments
 replays the retained draft or the latest completed outcome after a lost response;

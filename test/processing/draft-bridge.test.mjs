@@ -20,15 +20,18 @@ const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { prot
 const ready = { jsonrpc: '2.0', method: 'notifications/initialized' };
 
 test('draft protocol exposes exactly bounded draft tools, requires lifecycle, and sanitizes exceptions', async () => {
-  const protocol = draftProtocol(workspace(), definitions, { version: '0.16.0-dev.0' });
+  const handlers = workspace(); let trustedCalls = 0;
+  for (const name of ['original', 'draft', 'manifest']) handlers[name] = async () => { trustedCalls++; return {}; };
+  const protocol = draftProtocol(handlers, definitions, { version: '0.16.0-dev.0' });
   assert.equal((await protocol({ jsonrpc: '2.0', id: 0, method: 'tools/list' })).error.code, -32002);
   const initialized = await protocol(initialize); assert.equal(initialized.result.protocolVersion, '2025-11-25');
   assert.deepEqual(initialized.result.serverInfo, { name: 'cuefluent-drafts', version: '0.16.0-dev.0' });
   await protocol(ready);
   assert.deepEqual((await protocol({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).result.tools.map(x => x.name), DRAFT_TOOL_NAMES);
-  for (const name of ['manifest', 'constructor', '__proto__', 'write_file']) {
+  for (const name of ['original', 'draft', 'manifest', 'constructor', '__proto__', 'write_file']) {
     assert.equal((await protocol({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name } })).error.code, -32602);
   }
+  assert.equal(trustedCalls, 0);
   await protocol({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'finish_drafting', arguments: {} } });
   const failed = await protocol({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'draft_note', arguments: {} } });
   assert.equal(failed.result.isError, true);

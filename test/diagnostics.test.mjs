@@ -210,7 +210,7 @@ test('every failure code raised in the source resolves to a table entry or the g
   const runtime = new Set(['ENOENT', 'EACCES', 'EPERM', 'ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_UNKNOWN_BUILTIN_MODULE']);
   for (const code of GUIDED_CODES) assert.ok(raised.has(code) || runtime.has(code), `${code} is in the guidance table but nothing raises it`);
   const entries = new Set(GUIDED_CODES.map(code => describeFailure({ code }).message));
-  assert.ok(entries.size <= 26, `the guidance table has ${entries.size} entries`);
+  assert.ok(entries.size <= 27, `the guidance table has ${entries.size} entries`);
   for (const code of GUIDED_CODES) assert.notEqual(describeFailure({ code }).recovery, generic.recovery, code);
   // Internal codes resolve to the generic entry without a per-code sentence.
   assert.equal(describeFailure({ code: 'RUN_MISSING' }).recovery, generic.recovery);
@@ -246,4 +246,12 @@ test('diagnostic operations follow the same command identities as the entry gram
     assert.equal(parseEntryArguments([command, ...argumentsByCommand[command]], { platform: 'linux' }).command, command);
     assert.equal(describeFailure({}, { operation: command }).diagnostics.operation, command);
   }
+});
+
+
+test('incomplete queued reads require complete coverage or exact edits without bypassing limits', () => {
+  const result = describeFailure({ code: 'WORKSPACE_NOTE_INCOMPLETE' }, { stage: 'tool', toolName: 'draft_note' });
+  assert.match(result.message, /not read the complete note/);
+  assert.match(result.recovery, /Read every range/); assert.match(result.recovery, /exact edits/);
+  assert.match(result.recovery, /leave the run unfinished/); assert.match(result.recovery, /do not create a separate note/);
 });

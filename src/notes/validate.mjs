@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { isMarkdownPath } from '../core/note-path.mjs';
-import { fail } from '../core/errors.mjs';
+import { CuefluentError, fail } from '../core/errors.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
 import { inspectMetadata, isSourceAppend, lineStarts, noteContent } from './metadata.mjs';
 import { decodeEntities, headingSlug, inlineText, normalizedText, parseMarkdown } from './markdown.mjs';
@@ -15,8 +15,8 @@ export const isLogEntryMarker = value => typeof value === 'string' && logMarker.
 const aliasComment = /^ {0,3}<!--[ \t]*aliases:[ \t]*([^\r\n]*?)-->[ \t]*(?:\r?\n)?$/;
 
 /** Content-only approval view: literal examples of metadata remain visible. */
-export function reviewNoteContent(input) {
-  const body = noteContent(input), starts = lineStarts(body), { tokens } = parseMarkdown(body);
+export function reviewNoteContent(input, inspection) {
+  const body = noteContent(input, inspection), starts = lineStarts(body), { tokens } = parseMarkdown(body);
   const aliases = tokens.filter(token => token.type === 'html_block' && token.level === 0 && token.map && aliasComment.test(token.content));
   let content = body;
   for (const token of aliases.reverse()) content = content.slice(0, starts[token.map[0]]) + content.slice(starts[token.map[1]] ?? body.length);
@@ -288,8 +288,10 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
 export function assertValidNote(input, options) {
   const result = validateNote(input, options);
   if (!result.valid) {
-    const error = new Error('The note does not satisfy the supported output profile.');
-    error.code = 'NOTE_INVALID'; error.diagnostics = result.diagnostics; throw error;
+    const error = result.diagnostics.some(item => item.code === 'source-line-limit')
+      ? new CuefluentError('NOTE_LINE_LIMIT', 'A Markdown source line exceeds the supported byte limit.')
+      : new CuefluentError('NOTE_INVALID', 'The note does not satisfy the supported output profile.');
+    error.diagnostics = result.diagnostics; throw error;
   }
   return result;
 }

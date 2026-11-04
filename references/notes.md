@@ -8,12 +8,16 @@ context, supplied material or task results and submits it with
 existing note). Native transcripts, tracking and queued input are not involved.
 
 Use a suitable existing note before creating a new one: `cuefluent_list_notes`
-browses the destination and `cuefluent_read_note` returns a note within 64 KiB
-whole, or a larger one in bounded ranges, with its whole-file hash. Read the
-complete current note before proposing its replacement and pass that hash as
+browses the destination and `cuefluent_read_note` returns the whole note when its
+serialized result fits 48 KiB. Otherwise it returns bounded UTF-8 ranges with the
+whole-file hash. Read
+the complete current note before proposing its replacement and pass that hash as
 `expectedHash`; a changed original is refused, and an original with more than
-64 KiB outside its metadata block or 128 KiB total is refused unchanged. Updates stay at the same path. An explicit
-file destination authorizes only that file. New directory-routed notes go to
+128 KiB outside its metadata block or 192 KiB total is refused unchanged. Each
+source line must fit the 64 KiB line limit.
+A size refusal requires reporting the limit and asking the user how to proceed;
+never shorten, split or create a separate note to bypass it.
+Updates stay at the same path. An explicit file destination authorizes only that file. New directory-routed notes go to
 `meetings/`, `tasks/`, `knowledge-base/`, `decisions/` or the root by their
 dominant purpose. All of `logs/` is reserved for writer-managed activity logs.
 Notes may use `.md` or `.markdown` (ASCII case-insensitive); bare `.md` and

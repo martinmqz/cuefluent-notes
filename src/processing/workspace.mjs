@@ -27,9 +27,9 @@ const cursorSchema = schema({ sourceHash: { type: 'string', pattern: '^[a-f0-9]{
 export const NOTE_WORKSPACE_TOOLS = freeze([
   { name: 'list_notes', description: 'List one notes directory with bounded pagination. Listing does not read a note or authorize its replacement. The logs directory is reserved.',
     inputSchema: schema({ directory: { type: 'string', maxLength: 32768 }, cursor: { type: 'string', maxLength: 32768 }, limit: { type: 'integer', minimum: 1, maximum: WORKSPACE_LIMITS.listResults } }) },
-  { name: 'read_note', description: 'Read exact UTF-8 byte ranges from a pinned original note version. Repeated reads retain the same hash. Read an existing target before drafting. All returned note context shares a 64 KiB budget.',
+  { name: 'read_note', description: 'Read exact UTF-8 byte ranges from a pinned original note version. Repeated reads retain the same hash. Read an existing target before drafting; complete-content replacements require every byte to have been returned. All returned note context shares a 64 KiB budget.',
     inputSchema: schema({ target: targetSchema, start: { type: 'integer', minimum: 0, maximum: NOTE_PROFILE.fileBytes }, maxBytes: { type: 'integer', minimum: 1, maximum: WORKSPACE_LIMITS.readBytes } }, ['target']) },
-  { name: 'draft_note', description: 'Keep a complete proposed note privately. Supply complete visible subject content or sequential exact unique oldText/newText edits against the pinned original. Put source references and citation locators in the separate sources argument, not the body. Each call starts from the original, preserves metadata and aliases, and returns only a receipt. New targets must be absent. Every revision starts from the original, so resubmit every source intended for that candidate. All submitted fields, including repeated sources, count toward the cumulative 128 KiB budget.',
+  { name: 'draft_note', description: 'Keep a complete proposed note privately. Supply complete visible subject content only after reading the entire existing note, or sequential exact unique oldText/newText edits against the pinned original. Exact edits preserve unread sections. Put source references and citation locators in the separate sources argument, not the body. Each call starts from the original, preserves metadata and aliases, and returns only a receipt. New targets must be absent. Every revision starts from the original, so resubmit every source intended for that candidate. All submitted fields, including repeated sources, count toward the cumulative 128 KiB budget.',
     inputSchema: { ...schema({ target: targetSchema, content: { type: 'string', maxLength: WORKSPACE_LIMITS.draftBytes },
       edits: { type: 'array', minItems: 1, maxItems: WORKSPACE_LIMITS.edits, items: schema({ oldText: { type: 'string', minLength: 1, maxLength: WORKSPACE_LIMITS.draftBytes }, newText: { type: 'string', maxLength: WORKSPACE_LIMITS.draftBytes } }, ['oldText', 'newText']) },
       summary: { type: 'string', minLength: 1, maxLength: 1024 }, sources: sourcesSchema, heading: { type: ['string', 'null'], minLength: 1, maxLength: 512 }, usefulChange: { type: 'boolean' } }, ['target', 'summary']),
@@ -105,7 +105,7 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     if (absentOnly && await lstatOrNull(selected.file)) fail('WORKSPACE_NOTE_UNREAD', 'An unread target must remain absent.');
     if (absentOnly && snapshot) fail('WORKSPACE_NOTE_UNREAD', 'An unread target must remain absent.');
     if (snapshot) decodeNote(snapshot.bytes);
-    return { ...selected, bytes: snapshot?.bytes ?? null, hash: snapshot?.hash ?? null, noteId: randomUUID(), binding: freeze({ root, parent }) };
+    return { ...selected, bytes: snapshot?.bytes ?? null, hash: snapshot?.hash ?? null, readRanges: [], noteId: randomUUID(), binding: freeze({ root, parent }) };
   }
   function retain(snapshot, collection) {
     if (originals.size >= limits.targets) fail('WORKSPACE_TARGET_LIMIT', 'Too many note versions are retained in one workspace.');
@@ -123,8 +123,15 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     let end = Math.min(snapshot.bytes.length, start + maxBytes);
     while (end > start && continuation(snapshot.bytes, end)) end--;
     if (end === start && start !== snapshot.bytes.length) fail('WORKSPACE_RANGE_INVALID', 'The range cannot contain one complete UTF-8 character.');
-    return visible({ target: snapshot.file, exists: true, hash: snapshot.hash, totalBytes: snapshot.bytes.length, start, end,
+    const result = visible({ target: snapshot.file, exists: true, hash: snapshot.hash, totalBytes: snapshot.bytes.length, start, end,
       next: end < snapshot.bytes.length ? end : null, content: decodeNote(snapshot.bytes.subarray(start, end)) });
+    const ranges = [];
+    for (const range of [...snapshot.readRanges, [start, end]].sort((a, b) => a[0] - b[0])) {
+      const prior = ranges.at(-1);
+      if (prior && range[0] <= prior[1]) prior[1] = Math.max(prior[1], range[1]);
+      else ranges.push([...range]);
+    }
+    snapshot.readRanges = ranges; return result;
   }
   async function list_notes(input = {}) {
     object(input, ['directory', 'cursor', 'limit']); await active();
@@ -162,7 +169,7 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     await assertChain(chain); await assertDirectory(pin);
     return visible({ entries: candidates.slice(0, limit).map(({ target, kind }) => ({ target, kind })), nextCursor: candidates.length > limit ? candidates[limit - 1].relative : null });
   }
-  async function draft_note(input) {
+  async function draft_note(input, trusted = false) {
     object(input, ['target', 'content', 'edits', 'summary', 'sources', 'heading', 'usefulChange'], ['target', 'summary']); await active();
     const sources = validateDocumentSources(input.sources === undefined ? [] : input.sources);
     if (Object.hasOwn(input, 'content') === Object.hasOwn(input, 'edits') || (input.usefulChange !== undefined && typeof input.usefulChange !== 'boolean')) fail('WORKSPACE_ARGUMENT', 'Provide complete content or exact text edits.');
@@ -176,11 +183,15 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
         decodeNote(edit.oldText); decodeNote(edit.newText);
       }
     }
-    const submitted = Buffer.byteLength(JSON.stringify(input));
-    if (draftBytes + submitted > limits.draftBytes) fail('WORKSPACE_DRAFT_LIMIT', 'The cumulative submitted draft budget is exhausted.');
+    const submitted = trusted ? 0 : Buffer.byteLength(JSON.stringify(input));
+    if (!trusted && draftBytes + submitted > limits.draftBytes) fail('WORKSPACE_DRAFT_LIMIT', 'The cumulative submitted draft budget is exhausted.');
     const retained = originals.get(selected.key), original = retained ?? await inspect(selected, { absentOnly: true });
     if (!retained && originals.size >= limits.targets) fail('WORKSPACE_TARGET_LIMIT', 'Too many note versions are retained in one workspace.');
     await assertChain(original.binding.parent);
+    if (!trusted && original.bytes && Object.hasOwn(input, 'content') &&
+        (original.readRanges.length !== 1 || original.readRanges[0][0] !== 0 || original.readRanges[0][1] !== original.bytes.length)) {
+      fail('WORKSPACE_NOTE_INCOMPLETE', 'Read the complete original before replacing its content, or use exact edits that preserve unread sections.');
+    }
     let proposed = input.content;
     if (input.edits) {
       if (!original.bytes) fail('WORKSPACE_EDIT_BASE_MISSING', 'Exact edits require a previously read existing note.');
@@ -205,8 +216,10 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     if (!prior && drafts.size >= limits.drafts) fail('WORKSPACE_DRAFT_LIMIT', 'Too many draft targets are retained.');
     if (privateBytes - (prior?.bytes.length ?? 0) + bytes.length > limits.privateBytes) fail('WORKSPACE_PRIVATE_LIMIT', 'The complete private draft exceeds the workspace budget.');
     const draft = { id: prior?.id ?? randomUUID(), target: original.file, expectedHash: original.hash, hash: hashBytes(bytes), summary, heading, bytes: Buffer.from(bytes), binding: original.binding };
-    const receipt = visible({ id: draft.id, target: draft.target, hash: draft.hash, expectedHash: draft.expectedHash, bytes: draft.bytes.length, changed: draft.expectedHash !== draft.hash,
-      warnings: validation.diagnostics.filter(item => unchanged || item.severity === 'warning').map(item => item.code) });
+    const warnings = validation.diagnostics.filter(item => unchanged || item.severity === 'warning');
+    const result = { id: draft.id, target: draft.target, hash: draft.hash, expectedHash: draft.expectedHash, bytes: draft.bytes.length, changed: draft.expectedHash !== draft.hash,
+      warnings: [...new Set(warnings.map(item => item.code))], warningCount: warnings.length };
+    const receipt = trusted ? freeze(result) : visible(result);
     // No fallible operation follows admission: a rejected receipt never changes
     // the draft set or consumes its submitted/private budgets.
     if (!retained) originals.set(selected.key, original);
@@ -267,6 +280,9 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
   return Object.freeze({ list_notes: input => serial(() => list_notes(input)), read_note: input => serial(() => read_note(input)), draft_note: input => serial(() => draft_note(input)),
     read_activity_log: input => serial(() => read_activity_log(input)), finish_drafting: input => serial(() => finish_drafting(input)),
     original: input => serial(() => original(input)),
+    // Trusted direct tools bound their own input and output. This entry shares
+    // note validation and private retention without model context accounting.
+    draft: input => serial(() => draft_note(input, true)),
     manifest: () => serial(async () => {
       if (!finished) fail('WORKSPACE_NOT_FINISHED', 'An explicit successful drafting outcome is required.');
       return freeze({ runId, outcome: finished, drafts: finished === 'drafted' ? [...drafts.values()].map(draft => ({ ...draft, bytes: Buffer.from(draft.bytes) })) : [] });

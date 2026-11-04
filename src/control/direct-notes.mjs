@@ -10,16 +10,16 @@ import { NOTE_PROFILE, decodeNote, inspectMetadata, validateDocumentSources, ser
 import { fields, freezeData, CONTROL_LIMITS } from '../client/control-server.mjs';
 import { readRunSnapshot } from './status.mjs';
 import { readPendingSetup } from './setup.mjs';
-import { reviewRun, decideRun, completedOutcome } from './review.mjs';
+import { reviewRun, decideRun, completedOutcome, REVIEW_PAGE_BYTES } from './review.mjs';
 import { persistDraftManifest, recoverDrafts } from '../processing/draft.mjs';
 import { pinProcessingLogging } from '../processing/logging.mjs';
 import { runProcessingWork } from '../processing/worker.mjs';
 
-export const DIRECT_NOTE_BYTES = 64 * 1024;
-/** A whole-note read is returned in one result while its serialized projection
- * stays within this bound, well inside the control response limit; larger
- * projections and larger notes are read in bounded ranges. */
-export const DIRECT_READ_BYTES = Math.min(128 * 1024, CONTROL_LIMITS.responseBytes / 2);
+export const DIRECT_NOTE_BYTES = 128 * 1024;
+/** Direct reads share the review-page budget for requested UTF-8 bytes and
+ * serialized results. Response fields and JSON escaping can reduce the content
+ * returned; notes that do not fit whole are read in bounded ranges. */
+export const DIRECT_READ_BYTES = Math.min(REVIEW_PAGE_BYTES, CONTROL_LIMITS.responseBytes / 2);
 const DIRECT_DRAFT_BYTES = DIRECT_NOTE_BYTES + NOTE_PROFILE.metadataBytes;
 const UUID = '^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$';
 const schema = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
@@ -30,11 +30,12 @@ const target = workspaceSchema('read_note').target;
 const expectedHash = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 const revision = { type: 'string', pattern: '^[a-f0-9]{64}$', description: 'The revision returned by the review the user decided on. A changed draft set is refused.' };
 const content = { type: 'string', minLength: 1, maxLength: DIRECT_NOTE_BYTES,
-  description: 'Complete visible Markdown subject content composed by the calling assistant. Keep source references and citation locators out of the body; supply them separately with sources. Maximum 64 KiB in UTF-8. Preserve useful existing content when updating; the writer retains existing metadata.' };
+  description: 'Complete visible Markdown subject content composed by the calling assistant. Keep source references and citation locators out of the body; supply them separately with sources. Maximum 128 KiB in UTF-8, with each source line at most 64 KiB. Preserve useful existing content when updating; the writer retains existing metadata.' };
 const summary = workspaceSchema('draft_note').summary;
 const sources = workspaceSchema('draft_note').sources;
 const definition = (name, description, inputSchema, readOnlyHint = false) => ({ name, description, inputSchema,
   annotations: { readOnlyHint, idempotentHint: true, openWorldHint: false } });
+const SIZE_REFUSAL = 'On a size refusal, preserve the complete note and draft, report the limit and ask the user how to proceed. Do not shorten, split or create a separate note to bypass it.';
 const REVIEW_FLOW = 'In review mode, show the returned content-only preview (a temporary Markdown file opened in the client, or rendered inline), show all proposed sources separately alongside it (follow every review page), name the destination, ask the user to choose from the returned choices, then relay the answer with cuefluent_save_note or cuefluent_skip_note and the returned revision. Auto mode saves immediately.';
 
 export const DIRECT_NOTE_TOOLS = freezeData([
@@ -42,11 +43,11 @@ export const DIRECT_NOTE_TOOLS = freezeData([
     schema({ cursor: { type: 'integer', minimum: 0, maximum: 1024 } }, []), true),
   definition('cuefluent_list_notes', 'Browse one directory in a configured note destination with bounded pagination. Check for a suitable existing note before creating a duplicate. Listing does not read note contents or authorize replacement. Logs are reserved.',
     schema({ projectId, ...workspaceSchema('list_notes') }, ['projectId']), true),
-  definition('cuefluent_read_note', 'Read an existing note and return its exact whole-file hash. A note within 64 KiB comes back whole in one call; a larger note, or one whose escaped projection is too large for one result, comes back in bounded UTF-8 ranges: follow next with start and pass the returned hash as expectedHash, and a changed note is refused. Does not create private state, enroll a chat, or process a queue.',
-    schema({ projectId, ...workspaceSchema('read_note'), expectedHash }, ['projectId', 'target']), true),
-  definition('cuefluent_create_note', `Create one new note from complete Markdown content you prepared for an explicit user request. Check for suitable existing notes first; use cuefluent_read_note and cuefluent_update_note to amend one. Use user-authorized context, supplied material, or task results. No tracked chat or queued input is needed. Supply a fresh UUID requestId for each request and reuse it with identical arguments on retries. ${REVIEW_FLOW} The target must be absent. Content must have a topic H1 and useful H2 sections, without Cuefluent metadata.`,
+  definition('cuefluent_read_note', 'Read an existing note and return its exact whole-file hash. A note comes back whole when its serialized result fits 48 KiB; otherwise it comes back in bounded UTF-8 ranges. Follow next with start and pass the returned hash as expectedHash; a changed note is refused. Does not create private state, enroll a chat, or process a queue.',
+    schema({ projectId, ...workspaceSchema('read_note'), maxBytes: { type: 'integer', minimum: 1, maximum: DIRECT_READ_BYTES }, expectedHash }, ['projectId', 'target']), true),
+  definition('cuefluent_create_note', `Create one new note from complete Markdown content you prepared for an explicit user request. Check for suitable existing notes first; use cuefluent_read_note and cuefluent_update_note to amend one. Use user-authorized context, supplied material, or task results. No tracked chat or queued input is needed. Supply a fresh UUID requestId for each request and reuse it with identical arguments on retries. ${REVIEW_FLOW} ${SIZE_REFUSAL} The target must be absent. Content must have a topic H1 and useful H2 sections, without Cuefluent metadata.`,
     schema({ projectId, requestId: runId, target, content, summary, sources }, ['projectId', 'requestId', 'target', 'content', 'summary'])),
-  definition('cuefluent_update_note', `Update an existing note from complete reconciled Markdown prepared for an explicit user request. Read the note with cuefluent_read_note first and pass the exact whole-file hash it returned as expectedHash; a changed original is refused. Originals with more than 64 KiB outside the metadata block or more than 128 KiB total are refused; never shorten them to fit. Preserve useful existing content, aliases and facts; the writer retains metadata. A changed or missing original is a conflict, never a new note or a forced overwrite. Supply a fresh UUID requestId; reuse identical arguments on retries. ${REVIEW_FLOW} No tracking, transcript read or queue processing is needed.`,
+  definition('cuefluent_update_note', `Update an existing note from complete reconciled Markdown prepared for an explicit user request. Read the note with cuefluent_read_note first and pass the exact whole-file hash it returned as expectedHash; a changed original is refused. Originals with more than 128 KiB outside the metadata block or more than 192 KiB total are refused. ${SIZE_REFUSAL} Preserve useful existing content, aliases and facts; the writer retains metadata. A changed or missing original is a conflict, never a new note or a forced overwrite. Supply a fresh UUID requestId; reuse identical arguments on retries. ${REVIEW_FLOW} No tracking, transcript read or queue processing is needed.`,
     schema({ projectId, requestId: runId, target, expectedHash, content, summary, sources }, ['projectId', 'requestId', 'target', 'expectedHash', 'content', 'summary'])),
   definition('cuefluent_review_note', 'Read the content-only preview of a pending direct or queued draft set, or the latest outcome, by projectId and runId. Returns the immutable revision a decision must cite, the destination of every draft, the exact choices to offer, and bounded pages: follow next.draft, next.part and next.start until next is null. Concatenate content pieces for each draft into its Markdown preview; concatenate sourceContent pieces separately and show all proposed sources alongside the preview before asking. The Markdown preview omits Cuefluent metadata and search-alias comments; hash identifies the complete private draft used for saving. No model, source synchronization, or save is started.',
     schema({ projectId, runId, draft: { type: 'integer', minimum: 0, maximum: 1023 }, part: { type: 'string', enum: ['content', 'sources'] }, start: { type: 'integer', minimum: 0, maximum: NOTE_PROFILE.fileBytes } }, ['projectId', 'runId']), true),
@@ -81,6 +82,8 @@ const busy = run => ({ state: 'busy', projectId: run.projectId });
 const snapshot = readRunSnapshot;
 
 async function manifestFor(project, input, { skillVersion }) {
+  // Trusted direct drafting uses its content and complete-note caps; only the
+  // queued model tools spend the cumulative workspace submission/context budgets.
   const workspace = await openNoteWorkspace({ project, runId: input.requestId, skillVersion });
   if (input.expectedHash !== undefined) {
     // The snapshot retained here owns both the exact bytes and filesystem binding
@@ -90,11 +93,12 @@ async function manifestFor(project, input, { skillVersion }) {
     const original = await workspace.original({ target: input.target });
     if (!original.exists || original.hash !== input.expectedHash) fail('DIRECT_NOTE_CONFLICT', 'The existing note changed or disappeared after inspection. Re-read it and reconcile the requested update.');
     const metadata = inspectMetadata(original.bytes);
+    if (metadata.status === 'invalid') fail('NOTE_METADATA_INVALID', 'The existing note has malformed metadata.');
     const headerBytes = metadata.raw === null ? 0 : Buffer.byteLength(metadata.raw);
     if (original.totalBytes > DIRECT_DRAFT_BYTES || original.totalBytes - headerBytes > DIRECT_NOTE_BYTES)
       fail('DIRECT_NOTE_UPDATE_LIMIT', 'The existing note exceeds the complete-body or complete-draft update bound. It cannot be shortened to fit.');
   }
-  await workspace.draft_note({ target: input.target, content: input.content, summary: input.summary, ...(input.sources?.length ? { sources: input.sources } : {}) });
+  await workspace.draft({ target: input.target, content: input.content, summary: input.summary, ...(input.sources?.length ? { sources: input.sources } : {}) });
   await workspace.finish_drafting({ outcome: 'drafted' });
   const manifest = await workspace.manifest();
   if (manifest.drafts.some(draft => draft.bytes.length > DIRECT_DRAFT_BYTES)) fail('DIRECT_NOTE_DRAFT_LIMIT', 'The complete direct note exceeds the bounded review size.');
@@ -149,17 +153,24 @@ async function create(store, input, options) {
   return result.state === 'review' ? reviewRun(store, reference) : completedOutcome(result);
 }
 
-/** A whole note within the direct cap is one result when its serialized
- * projection fits; otherwise the read falls back to the processor's bounded
- * ranges, whose budgets stay as they are. */
-async function readWhole(workspace, target) {
+/** Read a fresh, hash-bound snapshot without charging a queued model budget. */
+async function readNote(workspace, { target, start = 0, maxBytes = DIRECT_READ_BYTES }, projectId) {
   const whole = await workspace.original({ target });
-  if (!whole.exists) return { target: whole.target, exists: false, hash: null, totalBytes: 0, start: 0, end: 0, next: null, content: '' };
-  if (whole.totalBytes <= DIRECT_NOTE_BYTES) {
-    const result = { target: whole.target, exists: true, hash: whole.hash, totalBytes: whole.totalBytes, start: 0, end: whole.totalBytes, next: null, content: decodeNote(whole.bytes) };
-    if (Buffer.byteLength(JSON.stringify(result)) <= DIRECT_READ_BYTES) return result;
+  const base = { state: whole.exists ? 'read' : 'absent', projectId, target: whole.target, exists: whole.exists, hash: whole.hash, totalBytes: whole.totalBytes };
+  if (!whole.exists) return { ...base, start: 0, end: 0, next: null, content: '' };
+  const continuation = offset => offset < whole.bytes.length && (whole.bytes[offset] & 0xc0) === 0x80;
+  if (start > whole.totalBytes || continuation(start)) fail('WORKSPACE_RANGE_INVALID', 'The requested byte offset is not a UTF-8 boundary.');
+  let end = Math.min(whole.totalBytes, start + maxBytes);
+  for (let attempt = 0; attempt < 64; attempt++) {
+    while (end > start && continuation(end)) end--;
+    if (end === start && start !== whole.totalBytes) fail('WORKSPACE_RANGE_INVALID', 'The range cannot contain one complete UTF-8 character.');
+    const result = { ...base, start, end, next: end < whole.totalBytes ? end : null, content: decodeNote(whole.bytes.subarray(start, end)) };
+    const size = Buffer.byteLength(JSON.stringify(result));
+    if (size <= DIRECT_READ_BYTES) return result;
+    if (end === start) break;
+    end = start + Math.min(end - start - 1, Math.floor((end - start) * DIRECT_READ_BYTES / size));
   }
-  return workspace.read_note({ target });
+  fail('CONTROL_RESPONSE_LIMIT', 'The note read cannot fit a bounded result.');
 }
 
 async function inspectNotes(store, name, input, skillVersion) {
@@ -168,7 +179,7 @@ async function inspectNotes(store, name, input, skillVersion) {
   const workspace = await openNoteWorkspace({ project, runId: randomUUID(), skillVersion });
   const { projectId: selected, expectedHash: inspectedHash, ...args } = input;
   const result = name === 'cuefluent_list_notes' ? await workspace.list_notes(args)
-    : args.start === undefined && args.maxBytes === undefined ? await readWhole(workspace, args.target) : await workspace.read_note(args);
+    : await readNote(workspace, args, selected);
   if (inspectedHash !== undefined && result.hash !== inspectedHash) fail('DIRECT_NOTE_CONFLICT', 'The note changed between inspected ranges. Restart the read and reconcile its current contents.');
   if ((await readSettings(store)).hash !== before.hash) fail('SETTINGS_CONFLICT', 'The configured note destination changed during inspection.');
   return { state: name === 'cuefluent_list_notes' ? 'listed' : result.exists ? 'read' : 'absent', projectId: selected, ...result };

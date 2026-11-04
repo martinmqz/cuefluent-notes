@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { openNoteWorkspace, NOTE_WORKSPACE_TOOLS } from '../../src/processing/workspace.mjs';
+import { openNoteWorkspace, NOTE_WORKSPACE_TOOLS, WORKSPACE_LIMITS } from '../../src/processing/workspace.mjs';
 import { createProject } from '../../src/core/settings.mjs';
 import { createGeneratedNote, inspectMetadata } from '../../src/notes/index.mjs';
 import { createAnnualLog, appendLogEntry, queryLogEntries } from '../../src/logs/index.mjs';
@@ -288,4 +288,78 @@ test('note workspaces apply the project format to new notes and useful updates',
     assert.equal(inspectMetadata(changed.bytes).value.id, inspectMetadata(original).value.id);
     assert.deepEqual(await fs.readFile(path.join(f.root, 'existing.md')), original);
   }
+});
+
+test('trusted drafting keeps note validation and private bounds without changing queued submission accounting', async t => {
+  const f = await fixture(t), request = { target: 'large.md', content: body + 'Useful synthetic paragraph.\n'.repeat(5000), summary: 'Keep the complete note' };
+  assert.ok(Buffer.byteLength(JSON.stringify(request)) > WORKSPACE_LIMITS.draftBytes);
+  const queued = await f.open();
+  await assert.rejects(queued.draft_note(request), { code: 'WORKSPACE_DRAFT_LIMIT' });
+  await queued.finish_drafting({ outcome: 'nothing-useful' }); assert.deepEqual((await queued.manifest()).drafts, []);
+  const direct = await f.open({ limits: { contextBytes: 100 } });
+  await direct.draft(request); assert.ok((await finish(direct)).drafts[0].bytes.toString().endsWith(request.content));
+  for (const key of ['draftBytes', 'contextBytes', 'readBytes']) {
+    await assert.rejects(f.open({ limits: { [key]: WORKSPACE_LIMITS[key] + 1 } }), { code: 'WORKSPACE_ARGUMENT' });
+  }
+  await assert.rejects((await f.open({ limits: { privateBytes: 100 } })).draft(request), { code: 'WORKSPACE_PRIVATE_LIMIT' });
+  await assert.rejects((await f.open({ limits: { fileBytes: 100 } })).draft(request), { code: 'NOTE_FILE_LIMIT' });
+  await assert.rejects((await f.open()).draft({ ...request, content: '# No answer sections\n' }), { code: 'NOTE_INVALID' });
+  assert.deepEqual(await fs.readdir(f.root), []);
+  assert(!NOTE_WORKSPACE_TOOLS.some(tool => ['original', 'draft', 'manifest'].includes(tool.name)));
+});
+
+test('HTML-heavy draft receipts deduplicate warnings without exhausting note context or dropping the complete draft', async t => {
+  const f = await fixture(t), workspace = await f.open();
+  const content = '# Editor shortcuts\n\n## Shortcuts\n\n| Action | Keys |\n| --- | --- |\n' +
+    Array.from({ length: 1500 }, (_, i) => `| Command ${i} | <kbd>Ctrl</kbd>+<kbd>N</kbd> |\n`).join('');
+  assert(Buffer.byteLength(content) > WORKSPACE_LIMITS.contextBytes);
+  const receipt = await workspace.draft_note({ target: 'shortcuts.md', content, summary: 'Keep the complete shortcut table' });
+  assert.deepEqual(receipt.warnings, ['raw-html']); assert.equal(receipt.warningCount, 6000);
+  assert(Buffer.byteLength(JSON.stringify(receipt)) < 1024);
+  assert((await finish(workspace)).drafts[0].bytes.toString().endsWith(content));
+  assert.deepEqual(await fs.readdir(f.root), []);
+});
+
+test('queued full replacements refuse unread sections while exact edits retain the complete large original', async t => {
+  const f = await fixture(t), original = body + 'Retained paragraph.\n'.repeat(5000) + '\n## Tail\n\nKeep this tail.\n';
+  const target = 'large.md'; await fs.writeFile(path.join(f.root, target), original);
+  const workspace = await f.open(), read = await workspace.read_note({ target });
+  assert(read.next); assert(Buffer.byteLength(original) > WORKSPACE_LIMITS.contextBytes);
+  const request = { target, content: read.content + '\nNew checkpoint.\n', summary: 'Update the checkpoint' };
+  await assert.rejects(workspace.draft_note(request), { code: 'WORKSPACE_NOTE_INCOMPLETE' });
+  await assert.rejects(workspace.finish_drafting({ outcome: 'drafted' }), { code: 'WORKSPACE_FINISH_CONFLICT' });
+  const receipt = await workspace.draft_note({ target, edits: [{ oldText: 'Useful original content.', newText: 'Useful updated content.' }], summary: 'Update only the inspected section' });
+  await assert.rejects(workspace.draft_note(request), { code: 'WORKSPACE_NOTE_INCOMPLETE' });
+  const draft = (await finish(workspace)).drafts[0];
+  assert.equal(draft.hash, receipt.hash); assert.equal(draft.expectedHash, hash(original));
+  assert.equal(draft.bytes.toString(), original.replace('Useful original content.', 'Useful updated content.'));
+  assert.equal(await fs.readFile(path.join(f.root, target), 'utf8'), original);
+});
+
+test('complete replacement coverage merges successful out-of-order overlapping ranges without counting gaps or duplicate reads', async t => {
+  const f = await fixture(t), target = 'ranges.md', original = body + 'Retained paragraph.\n'.repeat(800);
+  await fs.writeFile(path.join(f.root, target), original);
+  const workspace = await f.open(), request = { target, content: original.replace('original', 'revised'), summary: 'Keep all inspected sections' };
+  const tail = await workspace.read_note({ target, start: 12000 }); assert.equal(tail.next, null);
+  await workspace.read_note({ target, maxBytes: 8000 });
+  await workspace.read_note({ target, maxBytes: 8000 });
+  await assert.rejects(workspace.draft_note(request), { code: 'WORKSPACE_NOTE_INCOMPLETE' });
+  await workspace.read_note({ target, start: 7000, maxBytes: 6000 });
+  await workspace.draft_note(request);
+  const draft = (await finish(workspace)).drafts[0];
+  assert.equal(draft.expectedHash, hash(original)); assert.equal(draft.bytes.toString(), request.content);
+  assert.equal(await fs.readFile(path.join(f.root, target), 'utf8'), original);
+});
+
+test('refused range output and trusted snapshot inspection do not count as model read coverage', async t => {
+  const f = await fixture(t), target = 'existing.md'; await fs.writeFile(path.join(f.root, target), body);
+  const workspace = await f.open({ limits: { contextBytes: 400 } });
+  await workspace.read_note({ target, maxBytes: 10 });
+  await assert.rejects(workspace.read_note({ target }), { code: 'WORKSPACE_CONTEXT_LIMIT' });
+  const inspected = await workspace.original({ target }); assert.equal(inspected.hash, hash(body));
+  const request = { target, content: body.replace('original', 'updated'), summary: 'Preserve the complete note' };
+  await assert.rejects(workspace.draft_note(request), { code: 'WORKSPACE_NOTE_INCOMPLETE' });
+  await workspace.draft(request);
+  assert.equal((await finish(workspace)).drafts[0].bytes.toString(), request.content);
+  assert.equal(await fs.readFile(path.join(f.root, target), 'utf8'), body);
 });

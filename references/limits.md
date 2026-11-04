@@ -199,16 +199,22 @@ retrying. Do not strip attributes or ACLs to bypass the refusal.
 
 ## Output profile
 
-The supported Cuefluent Markdown profile limits a file to 10 MiB, body structure
-to 20,000 nodes per section and 100,000 per document, and metadata to a 64 KiB
-payload within a 2 MiB inspected source, with further bounds on nesting, lines and
-decoded content. The app's 256-document and 250,000-node corpus allowances apply
-across its library, so per-file validation cannot guarantee admission into a full
+The supported Cuefluent Markdown profile limits a file to 10 MiB, each source line
+to 64 KiB, body structure to 20,000 nodes per section and 100,000 per document, and
+metadata to a 64 KiB payload within a 2 MiB inspected source, with further bounds
+on nesting and decoded content. The app's 256-document and 250,000-node corpus
+allowances apply across its library, so per-file validation cannot guarantee admission into a full
 library; annual logs count toward them and appear in app search. Review pages are
 48 KiB of serialized JSON, sized for the output a host passes to its model from one
 tool result (Claude Code's default is 25,000 tokens). Direct submissions are
-64 KiB of content and 128 KiB of complete draft; a whole read fits one 128 KiB
-result and ranges are 8 KiB.
+128 KiB of content and 192 KiB of complete draft. Direct reads share the 48 KiB
+serialized-result budget with review pages: a note that fits arrives whole;
+otherwise it arrives in bounded UTF-8 ranges. A requested range can be up to
+48 KiB of note bytes, reduced as needed for the result including its other fields
+and JSON escaping. Queued processing has separate budgets: 8 KiB read ranges,
+64 KiB of cumulative tool responses and 128 KiB of cumulative draft submissions. A queued
+full-content replacement requires reading the whole original; exact edits can
+preserve unread content without resubmitting it.
 
 ## What is verified
 

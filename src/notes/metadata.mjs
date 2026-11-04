@@ -302,9 +302,10 @@ export function inspectMetadata(input) {
 function withoutMetadata(source, inspection) {
   return inspection.raw === null ? source : source.slice(inspection.end);
 }
-/** Visible authored content, retaining any prefix and exact newline style. */
-export function noteContent(input) {
-  const source = decodeNote(input), inspection = inspectMetadata(source);
+/** Visible authored content, retaining any prefix and exact newline style.
+ * A supplied inspection belongs to these exact input bytes. */
+export function noteContent(input, inspection = inspectMetadata(input)) {
+  const source = decodeNote(input);
   if (inspection.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be hidden in a review.');
   return (inspection.raw === null ? '' : source.slice(0, inspection.start)) + withoutMetadata(source, inspection);
 }
