@@ -11,6 +11,7 @@ import { hashBytes } from '../src/storage/files.mjs';
 import { MAX_NOTE_BYTES, validateNotePublication, prepareNotePublication, publishNotePublication,
   inspectPublicationOutcome, readPublicationSource, discardNoteStage, discardRecordedNoteStage } from '../src/storage/note-writer.mjs';
 import { validateNotePublication as validatePurePublication } from '../src/core/note-publication.mjs';
+import { readMacosAttribute, readMacosAcl } from './support/macos-note-metadata.mjs';
 
 const execute = promisify(execFile);
 const body = Buffer.from('# Synthetic note\n\nUpdated exact bytes.\n');
@@ -119,11 +120,12 @@ test('existing notes retain exact permissions, ACLs, and extended attributes', a
   const { notes, pin } = await fixture(t);
   const target = path.join(notes, "note with ' spaces.md"), before = Buffer.from('original\n');
   await fs.writeFile(target, before, { mode: 0o640 });
+  if (process.platform !== 'win32') await fs.chmod(target, 0o640);
   let acl;
   if (process.platform === 'darwin') {
     await execute('/usr/bin/xattr', ['-wx', 'com.cuefluent.synthetic', '00ff102030', target]);
     await execute('/bin/chmod', ['+a', `user:${os.userInfo().username} allow read`, target]);
-    acl = (await execute('/bin/ls', ['-lde', target])).stdout.split('\n').slice(1).join('\n');
+    acl = await readMacosAcl(target);
   } else if (process.platform === 'win32') {
     await fs.writeFile(`${target}:cuefluent-synthetic`, Buffer.from([0, 255, 16, 32, 48]));
   }
@@ -141,9 +143,9 @@ test('existing notes retain exact permissions, ACLs, and extended attributes', a
   assert.deepEqual(await fs.readFile(target), body);
   if (process.platform !== 'win32') assert.equal((await fs.stat(target)).mode & 0o7777, 0o640);
   if (process.platform === 'darwin') {
-    const value = (await execute('/usr/bin/xattr', ['-px', 'com.cuefluent.synthetic', target])).stdout.replace(/\s/g, '').toLowerCase();
+    const value = await readMacosAttribute(target, 'com.cuefluent.synthetic');
     assert.equal(value, '00ff102030');
-    assert.equal((await execute('/bin/ls', ['-lde', target])).stdout.split('\n').slice(1).join('\n'), acl);
+    assert.equal(await readMacosAcl(target), acl);
   } else if (process.platform === 'win32') {
     assert.deepEqual(await fs.readFile(`${target}:cuefluent-synthetic`), Buffer.from([0, 255, 16, 32, 48]));
   }

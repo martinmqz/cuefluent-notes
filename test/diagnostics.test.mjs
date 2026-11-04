@@ -130,6 +130,15 @@ test('path, placement, alias and size refusals name their situation rather than 
   assert.match(pending.recovery, /cuefluent_projects: its pendingSetup names the interrupted project/); assert.match(pending.recovery, /only that project's id or exact root/);
 });
 
+test('native metadata refusals require capability inspection instead of a fresh-content retry', () => {
+  const tool = describeFailure({ code: 'NOTE_METADATA_UNSUPPORTED' }, { stage: 'tool', toolName: 'cuefluent_save_note' });
+  const command = describeFailure({ code: 'NOTE_METADATA_UNSUPPORTED' }, { stage: 'command', operation: 'save' });
+  assert.equal(tool.message, command.message); assert.equal(tool.recovery, command.recovery);
+  assert.match(tool.message, /filesystem metadata/);
+  assert.match(tool.recovery, /group membership/); assert.match(tool.recovery, /Do not strip metadata/);
+  assert.doesNotMatch(tool.recovery, /cuefluent_read_note|fresh draft|expectedHash/);
+});
+
 test('a retained project is refused for its root without implying a pending run', () => {
   const retained = describeFailure({ code: 'SETTINGS_RETAINED_PROJECT' }, { stage: 'command', operation: 'setup' });
   assert.match(retained.message, /root cannot change/); assert.match(retained.recovery, /Keep the project's root/);
@@ -201,7 +210,7 @@ test('every failure code raised in the source resolves to a table entry or the g
   const runtime = new Set(['ENOENT', 'EACCES', 'EPERM', 'ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND', 'ERR_UNKNOWN_BUILTIN_MODULE']);
   for (const code of GUIDED_CODES) assert.ok(raised.has(code) || runtime.has(code), `${code} is in the guidance table but nothing raises it`);
   const entries = new Set(GUIDED_CODES.map(code => describeFailure({ code }).message));
-  assert.ok(entries.size <= 25, `the guidance table has ${entries.size} entries`);
+  assert.ok(entries.size <= 26, `the guidance table has ${entries.size} entries`);
   for (const code of GUIDED_CODES) assert.notEqual(describeFailure({ code }).recovery, generic.recovery, code);
   // Internal codes resolve to the generic entry without a per-code sentence.
   assert.equal(describeFailure({ code: 'RUN_MISSING' }).recovery, generic.recovery);

@@ -155,16 +155,47 @@ telemetry exporters and verifies the effective floor, including filesystem
 canaries, before source input is delivered; if the floor cannot be verified,
 processing fails without releasing input. Codex on Windows requires its explicit
 MXC sandbox, a compatible host and access to the requested model, with no weaker
-fallback. Windows public-file metadata preservation needs verifiable security
-metadata; missing privileges refuse the replacement rather than discard ACLs.
-macOS private storage checks native ACLs as well as owner and mode bits and
-returns `PRIVATE_ACCESS_UNVERIFIED` when `node:ffi` is unavailable.
+fallback. macOS private storage checks native ACLs as well as owner and mode bits
+and returns `PRIVATE_ACCESS_UNVERIFIED` when `node:ffi` is unavailable.
+
+## Note publication and filesystem metadata
+
+These rules apply to direct notes, queued processing and activity-log writes.
+Windows public-file metadata preservation needs verifiable security metadata;
+missing privileges refuse the replacement rather than discard ACLs.
 
 Existing-note saves capture the destination in a recorded recovery directory
 before replacement and refuse a newly arrived file. An interrupted save can
 briefly leave the original only in that directory; retry or `skip` restores or
 completes it without overwriting a newer note, and conflicting recovery files are
 preserved. Staging names end in `.tmp` and are never discovered as notes.
+
+On macOS, the replacement inode has OS-managed `com.apple.provenance` metadata
+that may differ from the original's. Cuefluent does not guarantee the original
+value survives replacement and does not clear or set this attribute explicitly.
+It is excluded from the preservation fingerprint and attribute limits. The writer
+preserves ordinary extended attributes, including quarantine, and the original
+ACL's explicit and inherited entries. When preparing an update, it reconciles
+attributes assigned to its new temporary file with the inspected original. It
+restricts the owned stage to owner-only mode before clearing its ACL during
+preparation, including a retry interrupted with a deny-write ACL still present;
+the original ACL and permissions are restored before publication. Changes detected
+after staging still refuse publication. A macOS update records
+its completed-stage checkpoint only after bytes, permissions and metadata are
+restored, verified and flushed. Before that checkpoint, a retry can finish
+interrupted preparation; afterward, it verifies and reuses the stage without
+preparing it again. The original note's attributes and ACL are never cleared to
+enable copying. Content, file identities, ownership, permissions and flags remain
+checked.
+
+The macOS attribute profile allows 128 ordinary attributes with a combined
+256 KiB value payload. Unsupported names and values are refused. A changed note
+whose owner or group cannot be reproduced by the current account is refused before
+staging. A group inherited unchanged from the destination folder can be preserved
+without membership; the completed stage must still match the original metadata. `NOTE_METADATA_UNSUPPORTED` means native metadata cannot be preserved or
+verified: keep the note and pending draft, inspect filesystem capabilities,
+ownership, group membership and permissions, and resolve the cause before
+retrying. Do not strip attributes or ACLs to bypass the refusal.
 
 ## Output profile
 

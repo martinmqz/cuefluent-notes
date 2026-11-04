@@ -11,6 +11,7 @@ import { readHandleStat, readPathStat } from './stat.mjs';
 import { MAX_NOTE_BYTES, validateNotePublication } from '../core/note-publication.mjs';
 export { MAX_NOTE_BYTES, validateNotePublication } from '../core/note-publication.mjs';
 const METADATA_BYTES = 256 * 1024;
+const METADATA_ATTRIBUTES = 128;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const execute = promisify(execFile);
 const HASH = /^[0-9a-f]{64}$/;
@@ -225,16 +226,40 @@ async function linuxInventory(file) {
   return linuxMetadata(archive);
 }
 
+// xattr prints one newline-terminated name per record, without escaping names.
+// Reject ambiguous records before excluding the one OS-owned attribute. A forged
+// multi-line name cannot masquerade as ignored provenance or duplicate a real name.
+async function macosAttributeNames(file, maxCount = METADATA_ATTRIBUTES) {
+  const output = await command('/usr/bin/xattr', [file]);
+  const text = output.toString('utf8');
+  if (!Buffer.from(text).equals(output) || (text && !text.endsWith('\n'))) fail('NOTE_METADATA_UNSUPPORTED', 'The note extended-attribute names could not be verified.');
+  const listed = text ? text.slice(0, -1).split('\n') : [];
+  if (new Set(listed).size !== listed.length || listed.some(name => !name || name.length > 1024 || /[\u0000-\u001f\u007f]/.test(name))) fail('NOTE_METADATA_UNSUPPORTED', 'The note extended-attribute names could not be verified.');
+  // macOS assigns this attribute per inode; neither compare nor modify it.
+  const names = listed.filter(name => name !== 'com.apple.provenance').sort();
+  if (names.length > maxCount) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
+  return names;
+}
+
+async function macosAttributes(file) {
+  const attrs = []; let total = 0;
+  for (const name of await macosAttributeNames(file)) {
+    // The native hex representation expands each byte to two digits plus spacing.
+    const value = (await command('/usr/bin/xattr', ['-px', '--', name, file], { maxBuffer: METADATA_BYTES * 4 + 64 })).toString('ascii').replace(/\s/g, '').toLowerCase();
+    if (!/^(?:[0-9a-f]{2})*$/.test(value) || (total += value.length / 2) > METADATA_BYTES) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
+    attrs.push([name, value]);
+  }
+  return attrs;
+}
+
 async function safeEmptyStage(file, stat) {
   regular(stat);
   if (stat.size !== 0 || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & ~0o666 & 0o7777) !== 0))) conflict('An unjournaled stage must have the empty-file owner and non-executable ordinary permissions.');
   if (process.platform === 'darwin') {
-    const attrs = (await command('/usr/bin/xattr', [file])).toString('utf8').split('\n').filter(Boolean);
+    const attrs = await macosAttributeNames(file);
     const acl = (await command('/bin/ls', ['-lde', file])).toString('utf8').split('\n').slice(1).filter(Boolean);
     const flags = (await command('/usr/bin/stat', ['-f', '%f', file])).toString('ascii').trim();
-    // macOS attaches provenance even to a newly created, empty Node file. It is
-    // not a permission grant; arbitrary user attributes remain a conflict.
-    if (attrs.some(name => name !== 'com.apple.provenance') || flags !== '0' || acl.some(line => !/^\s+[0-9]+: .* inherited /.test(line))) conflict('Unjournaled empty-stage metadata is not safe to adopt.');
+    if (attrs.length || flags !== '0' || acl.some(line => !/^\s+[0-9]+: .* inherited /.test(line))) conflict('Unjournaled empty-stage metadata is not safe to adopt.');
   } else if (process.platform === 'linux') {
     for (const [key, value] of await linuxInventory(file)) {
       if (key !== 'SCHILY.acl.access' || !/^user::[rwx-]{3},group::[rwx-]{3},other::[rwx-]{3}$/.test(Buffer.from(value, 'hex').toString('utf8'))) conflict('Unjournaled empty-stage metadata is not safe to adopt.');
@@ -247,14 +272,7 @@ async function metadataEvidence(file) {
   const before = await readPathStat(file), exact = fileIdentity(before);
   let extra;
   if (process.platform === 'darwin') {
-    const names = (await command('/usr/bin/xattr', [file])).toString('utf8').split('\n').filter(Boolean).sort();
-    if (names.length > 128 || names.some(name => name.length > 1024 || /[\u0000-\u001f\u007f]/.test(name))) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
-    const attrs = []; let total = 0;
-    for (const name of names) {
-      const value = (await command('/usr/bin/xattr', ['-px', name, file])).toString('ascii').replace(/\s/g, '').toLowerCase();
-      if (!/^(?:[0-9a-f]{2})*$/.test(value) || (total += value.length / 2) > METADATA_BYTES) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
-      attrs.push([name, value]);
-    }
+    const attrs = await macosAttributes(file);
     const acl = (await command('/bin/ls', ['-lde', file])).toString('utf8').split('\n').slice(1).filter(Boolean);
     if (acl.some(line => !/^\s+[0-9]+: /.test(line))) fail('NOTE_METADATA_UNSUPPORTED', 'The note ACL could not be verified.');
     const flags = (await command('/usr/bin/stat', ['-f', '%f', file])).toString('ascii').trim();
@@ -279,7 +297,7 @@ async function metadataEvidence(file) {
   // the ordinary metadata comparison or permission to change a public original.
   const withoutArchive = process.platform === 'win32' && (extra.attributes & 32)
     ? fingerprint({ ...value, extra: { ...extra, attributes: (extra.attributes & ~32) || 128 } }) : null;
-  return { hash: fingerprint(value), withoutArchive };
+  return { hash: fingerprint(value), withoutArchive, macos: process.platform === 'darwin' ? extra : null };
 }
 
 const metadata = async file => (await metadataEvidence(file)).hash;
@@ -291,8 +309,37 @@ async function publishedMetadata(file, intent) {
   conflict('The exact publication metadata changed beyond the native Archive transition.');
 }
 
-async function cloneOriginal(source, stage) {
-  if (process.platform === 'darwin') await command('/bin/cp', ['-p', source, stage]);
+async function cloneOriginal(source, stage, expectedMetadata) {
+  if (process.platform === 'darwin') {
+    const inspected = await metadataEvidence(source);
+    if (inspected.hash !== expectedMetadata) conflict('The original metadata changed before staging.');
+    await command('/bin/cp', ['-p', source, stage]);
+    // cp restores the source mode and ACL. Restrict ordinary access before
+    // clearing that ACL so the copied bytes cannot become readable to others.
+    // The exact original ACL and mode are restored before publication.
+    await command('/bin/chmod', ['600', stage]);
+    await command('/bin/chmod', ['-N', stage]);
+    // cp may transform quarantine or retain quarantine assigned when the stage
+    // was created. Match the original's attribute set before restoring values.
+    const expected = new Map(inspected.macos.attrs);
+    // Bound this temporary union separately: creation-time additions must be
+    // removed before charging the preserved source's count and value-byte limits.
+    for (const name of await macosAttributeNames(stage, 2 * METADATA_ATTRIBUTES)) {
+      if (!expected.has(name)) await command('/usr/bin/xattr', ['-d', '--', name, stage]);
+    }
+    const copied = new Map(await macosAttributes(stage));
+    // Avoid huge argv values for unchanged resource forks.
+    for (const [name, value] of expected) {
+      if (copied.get(name) !== value) await command('/usr/bin/xattr', ['-wx', '--', name, value, stage]);
+    }
+    // cp retains the new inode's inherited ACL rather than the source's. Rebuild
+    // its exact ordered entries, including inherited status, on our own stage.
+    for (const [index, line] of inspected.macos.acl.entries()) {
+      const match = /^\s+([0-9]+): ((?:user|group):.+?)( inherited)? (allow|deny) (.+)$/.exec(line);
+      if (!match || Number(match[1]) !== index) fail('NOTE_METADATA_UNSUPPORTED', 'The note ACL cannot be preserved exactly.');
+      await command('/bin/chmod', [match[3] ? '+ai#' : '+a#', String(index), `${match[2]} ${match[4]} ${match[5]}`, stage]);
+    }
+  }
   else if (process.platform === 'linux') await command('/bin/cp', ['--preserve=mode,ownership,timestamps,xattr', '--', source, stage]);
   else if (process.platform === 'win32') await windows('clone', source, stage);
   else fail('NOTE_METADATA_UNSUPPORTED', 'Native note metadata preservation is unavailable on this platform.');
@@ -431,6 +478,14 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   }
   const current = await snapshot(parent.file, { missing: true });
   if ((expectedHash === null && current) || (expectedHash !== null && (!current || current.hash !== expectedHash))) conflict('The note differs from the exact inspected original or absence.');
+  if (current && expectedHash !== hash && process.platform === 'darwin' && process.geteuid() !== 0) {
+    const groups = new Set([...process.getgroups(), process.getegid()]);
+    const directory = await readPathStat(path.dirname(parent.file));
+    if (!sameIdentity(directory, parent.chain.at(-1))) conflict('The note parent changed during metadata capability inspection.');
+    // macOS stages inherit the parent's group; matching it needs no chgrp even
+    // when the owner is not a member. Final metadata verification still applies.
+    if (current.stat.uid !== process.geteuid() || (!groups.has(current.stat.gid) && current.stat.gid !== directory.gid)) fail('NOTE_METADATA_UNSUPPORTED', 'The note owner or group cannot be preserved by this user; ask its owner to adjust ownership or group access before retrying.');
+  }
   const original = current ? { ...current.identity, metadata: await metadata(parent.file) } : null;
   const intent = validateNotePublication({ schema: 1, runId, draftId, root: pin.root, relative, parent: parent.chain,
     expectedHash, hash, bytes: draft.length, original, stage: null, capture: null });
@@ -637,44 +692,71 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   const staged = await snapshot(current.stage);
   if (!sameIdentity(staged.stat, intent.stage) || !(draft.subarray(0, staged.bytes.length).equals(staged.bytes) ||
       (original && original.bytes.subarray(0, staged.bytes.length).equals(staged.bytes)))) conflict('The staged content is not an exact draft or original prefix.');
-  // A cloned read-only source must remain read-only when published. Open the
-  // owned stage while writable, then clone metadata and write through that fd.
-  if (process.platform !== 'win32') {
-    const permissions = await fs.open(current.stage, constants.O_RDONLY | NO_FOLLOW);
+  // The capture identity is journaled only after stage preparation completes.
+  // Full draft bytes alone may still precede permission or metadata restoration.
+  const reuseStage = process.platform === 'darwin' && intent.capture !== null;
+  if (reuseStage && (staged.hash !== intent.hash || staged.bytes.length !== intent.bytes ||
+      await metadata(current.stage) !== intent.original.metadata)) conflict('The completed stage bytes or metadata changed before retry.');
+  if (!reuseStage) {
+    // A cloned read-only source must remain read-only when published. Open the
+    // owned stage while writable, then clone metadata and write through that fd.
+    if (process.platform !== 'win32') {
+      const permissions = await fs.open(current.stage, constants.O_RDONLY | NO_FOLLOW);
+      try {
+        const observed = await readHandleStat(permissions); regular(observed);
+        if (!sameIdentity(observed, intent.stage)) conflict('The staged inode changed before restoring writable permissions.');
+        await permissions.chmod(0o600);
+        // An unfinished clone can retain an owner deny-write ACL. Clear it only
+        // after restricting mode, before reopening this exact stage for writing.
+        if (process.platform === 'darwin' && original) await command('/bin/chmod', ['-N', current.stage]);
+      } finally { await permissions.close(); }
+    }
+    else if (original) await windows('writable', current.stage);
+    let handle;
+    try { handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW); }
+    catch (error) {
+      if (process.platform !== 'win32' || !original || error.code !== 'EACCES') throw error;
+      // Preserve a fresh inherited descriptor whenever it already permits writing.
+      // Grant access only to this exact owned stage if the native open needs it.
+      if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The staged inode changed before granting write access.');
+      await windows('grant-write', current.stage);
+      handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW);
+    }
     try {
-      const observed = await readHandleStat(permissions); regular(observed);
-      if (!sameIdentity(observed, intent.stage)) conflict('The staged inode changed before restoring writable permissions.');
-      await permissions.chmod(0o600);
-    } finally { await permissions.close(); }
+      if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The staged inode changed before writing.');
+      if (original) await cloneOriginal(source, current.stage, intent.original.metadata);
+      if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The native helper replaced the staged inode.');
+      await assertChain(intent.parent); await assertDirectory(pin);
+      if (original) await originalMatches(source, intent);
+      await handle.truncate(0); await handle.writeFile(draft);
+      if (process.platform !== 'win32') await handle.chmod(original ? original.stat.mode & 0o7777 : 0o666 & ~process.umask());
+      // Writing a Linux default stream can clear capability/set-id metadata.
+      if (original && process.platform === 'linux') await command('/bin/cp', ['--attributes-only', '--preserve=mode,ownership,xattr', '--', source, current.stage]);
+      await handle.sync();
+    } finally { await handle.close(); }
+    // Windows can set Archive when the last data-writing handle closes, even
+    // after SetFileAttributes cleared it. Restore the exact inspected attributes
+    // only after flushing and closing that handle; the full fingerprint below
+    // still verifies ACLs, audit rules, streams, EAs, and every attribute bit.
+    if (original && process.platform === 'win32') await windows('attributes', source, current.stage);
+  } else {
+    // Exact retained bytes may predate a failed flush. Make them durable without
+    // changing the stage before publishing its name, even for a read-only note.
+    const handle = await fs.open(current.stage, constants.O_RDONLY | NO_FOLLOW);
+    try {
+      if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The completed stage changed before durability was confirmed.');
+      await handle.sync();
+    } finally { await handle.close(); }
   }
-  else if (original) await windows('writable', current.stage);
-  let handle;
-  try { handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW); }
-  catch (error) {
-    if (process.platform !== 'win32' || !original || error.code !== 'EACCES') throw error;
-    // Preserve a fresh inherited descriptor whenever it already permits writing.
-    // Grant access only to this exact owned stage if the native open needs it.
-    if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The staged inode changed before granting write access.');
-    await windows('grant-write', current.stage);
-    handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW);
+  if (process.platform === 'darwin' && original && !intent.capture) {
+    // Persist this existing publication checkpoint before yielding to the fence.
+    // Until then, even exact draft bytes belong to unfinished preparation; after
+    // it, retries verify and reuse the stage without changing its metadata.
+    const complete = await snapshot(current.stage);
+    if (!sameIdentity(complete.stat, intent.stage) || complete.hash !== intent.hash ||
+        complete.bytes.length !== intent.bytes || await metadata(current.stage) !== intent.original.metadata) conflict('Staging did not preserve the exact bytes and original metadata.');
+    intent = await prepareCapture(pin, intent, current, persistIntent);
   }
-  try {
-    if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The staged inode changed before writing.');
-    if (original) await cloneOriginal(source, current.stage);
-    if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The native helper replaced the staged inode.');
-    await assertChain(intent.parent); await assertDirectory(pin);
-    if (original) await originalMatches(source, intent);
-    await handle.truncate(0); await handle.writeFile(draft);
-    if (process.platform !== 'win32') await handle.chmod(original ? original.stat.mode & 0o7777 : 0o666 & ~process.umask());
-    // Writing a Linux default stream can clear capability/set-id metadata.
-    if (original && process.platform === 'linux') await command('/bin/cp', ['--attributes-only', '--preserve=mode,ownership,xattr', '--', source, current.stage]);
-    await handle.sync();
-  } finally { await handle.close(); }
-  // Windows can set Archive when the last data-writing handle closes, even
-  // after SetFileAttributes cleared it. Restore the exact inspected attributes
-  // only after flushing and closing that handle; the full fingerprint below
-  // still verifies ACLs, audit rules, streams, EAs, and every attribute bit.
-  if (original && process.platform === 'win32') await windows('attributes', source, current.stage);
   // The fence may wait for short gates. Inspect every public expectation again
   // afterwards so a manual edit made during that wait remains a conflict.
   await beforePublish();

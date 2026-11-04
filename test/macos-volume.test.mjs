@@ -143,17 +143,29 @@ macTest('volume-group projection preserves signed high-bit inode observations', 
 });
 
 
-macTest('unsupported volume UUID is distinct from unavailable verification for paths and descriptors', () => {
-  // devfs is a read-only capability probe, not an emulation of an SMB/NFS share.
-  const file = '/dev', identity = stat(file), fd = openSync(file, 'r');
-  try {
-    assert.equal(readMacosVolumeUuid(file, identity, { required: false }), null);
-    assert.equal(readMacosVolumeUuidFromFd(fd, fstatSync(fd, { bigint: true }), { required: false }), null);
-    assert.throws(() => readMacosVolumeUuid(file, identity), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
-    assert.throws(() => readMacosVolumeUuidFromFd(fd, identity), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
-    assert.throws(() => readMacosVolumeUuid(file, { ...identity, ino: identity.ino + 1n }, { required: false }), { code: 'PATH_CHANGED' });
-    assert.throws(() => readMacosVolumeUuidFromFd(fd, { ...identity, ino: identity.ino + 1n }, { required: false }), { code: 'PATH_CHANGED' });
-  } finally { closeSync(fd); }
+macTest('an explicit unsupported UUID capability preserves required and identity guards for paths and descriptors', t => {
+  const { file } = fixture(t), identity = stat(file), fd = openSync(file, 'r');
+  t.after(() => closeSync(fd));
+  // devfs rejects this request with EINVAL on some macOS releases. Model only
+  // the explicit absent capability bit; keep the native device and file checks.
+  const api = macosNative();
+  for (const name of ['getattrlist', 'fgetattrlist']) {
+    const native = api[name];
+    t.mock.method(api, name, (...args) => {
+      const result = native(...args);
+      if (result === 0 && args[1].readUInt32LE(8)) {
+        args[2].writeUInt32LE(0, 8); // ATTR_VOL_UUID was not returned.
+        args[2].fill(0, 28); // PACK_INVAL_ATTRS reserves the absent UUID bytes.
+      }
+      return result;
+    });
+  }
+  assert.equal(readMacosVolumeUuid(file, identity, { required: false }), null);
+  assert.equal(readMacosVolumeUuidFromFd(fd, fstatSync(fd, { bigint: true }), { required: false }), null);
+  assert.throws(() => readMacosVolumeUuid(file, identity), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
+  assert.throws(() => readMacosVolumeUuidFromFd(fd, identity), { code: 'FILESYSTEM_IDENTITY_UNVERIFIED' });
+  assert.throws(() => readMacosVolumeUuid(file, { ...identity, ino: identity.ino + 1n }, { required: false }), { code: 'PATH_CHANGED' });
+  assert.throws(() => readMacosVolumeUuidFromFd(fd, { ...identity, ino: identity.ino + 1n }, { required: false }), { code: 'PATH_CHANGED' });
 });
 
 macTest('optional UUID lookup never treats missing paths, native errors or malformed returned data as unsupported', t => {
