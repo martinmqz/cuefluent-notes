@@ -177,9 +177,11 @@ It is excluded from the preservation fingerprint and attribute limits. The write
 preserves ordinary extended attributes, including quarantine, and the original
 ACL's explicit and inherited entries. When preparing an update, it reconciles
 attributes assigned to its new temporary file with the inspected original;
-changes detected after staging still refuse publication. The original note's
-attributes and ACL are never cleared to enable copying. Content, file identities,
-ownership, permissions and flags remain checked.
+changes detected after staging still refuse publication. A retry reuses a completed
+macOS update stage only after verifying its bytes and original metadata, without
+preparing it again. The original note's attributes and ACL are never cleared to
+enable copying. Content, file identities, ownership, permissions and flags remain
+checked.
 
 The macOS attribute profile allows 128 ordinary attributes with a combined
 256 KiB value payload. Unsupported names and values are refused. A changed note

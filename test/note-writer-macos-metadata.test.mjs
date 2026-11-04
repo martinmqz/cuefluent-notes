@@ -149,6 +149,77 @@ macTest('macOS retries an unchanged completed quarantined stage with an owner de
   assert.deepEqual(await fs.readdir(f.notes), ['note.md']);
 });
 
+for (const mode of [0o640, 0o440]) {
+  macTest(`macOS completed-stage retries leave mode ${mode.toString(8)} and metadata untouched across interruptions`, async t => {
+    const f = await fixture(t), name = 'com.apple.quarantine';
+    await execute('/usr/bin/xattr', ['-w', name, '0083;69000001;Safari;', f.target]);
+    await execute('/bin/chmod', ['+a', `user:${os.userInfo().username} deny writeextattr`, f.target]);
+    await fs.chmod(f.target, mode);
+    const intent = await f.prepare(), firstFence = new Error('First synthetic publication interruption');
+    const secondFence = new Error('Second synthetic publication interruption');
+    const mutatedStage = new Error('A completed stage was chmodded before the retry fence');
+    const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+    let journal = intent;
+    const persistIntent = async value => { journal = value; };
+    await assert.rejects(publishNotePublication(f.pin, intent, after, {
+      persistIntent, beforePublish: async () => { throw firstFence; },
+    }), error => error === firstFence);
+    assert.ok(journal.stage);
+    const inspectStage = async () => {
+      const bytes = await fs.readFile(stage), entries = await acl(stage), value = await attribute(stage, name);
+      const stat = await fs.stat(stage, { bigint: true });
+      return { bytes, entries, attribute: value, dev: stat.dev, ino: stat.ino, mode: stat.mode,
+        uid: stat.uid, gid: stat.gid, size: stat.size, mtime: stat.mtimeNs, ctime: stat.ctimeNs };
+    };
+    const completed = await inspectStage();
+    assert.deepEqual(completed.bytes, after);
+    assert.equal(completed.mode & 0o777n, BigInt(mode));
+    assert.ok(completed.attribute?.length > 0);
+    assert.match(completed.entries, /deny writeextattr/);
+    const nativeOpen = fs.open.bind(fs);
+    let chmodCalls = 0, syncCalls = 0, fences = 0;
+    const openMock = t.mock.method(fs, 'open', async (...args) => {
+      const handle = await nativeOpen(...args);
+      if (args[0] === stage) {
+        const chmod = handle.chmod.bind(handle), sync = handle.sync.bind(handle);
+        t.mock.method(handle, 'sync', async () => {
+          await sync();
+          syncCalls += 1;
+        });
+        t.mock.method(handle, 'chmod', async value => {
+          await chmod(value);
+          chmodCalls += 1;
+          throw mutatedStage;
+        });
+      }
+      return handle;
+    });
+    try {
+      await assert.rejects(publishNotePublication(f.pin, journal, after, {
+        persistIntent, beforePublish: async () => {
+          assert.equal(syncCalls, 1);
+          fences += 1;
+          throw secondFence;
+        },
+      }), error => error === secondFence);
+    } finally { openMock.mock.restore(); }
+    assert.equal(chmodCalls, 0);
+    assert.equal(syncCalls, 1);
+    assert.equal(fences, 1);
+    assert.deepEqual(await inspectStage(), completed);
+    assert.deepEqual(await fs.readFile(f.target), before);
+    const result = await publishNotePublication(f.pin, journal, after, { persistIntent });
+    assert.equal(result.changed, true);
+    assert.deepEqual(await fs.readFile(f.target), after);
+    const saved = await fs.stat(f.target, { bigint: true });
+    assert.equal(saved.ino, completed.ino);
+    assert.equal(saved.mode, completed.mode);
+    assert.equal(await attribute(f.target, name), completed.attribute);
+    assert.equal(await acl(f.target), completed.entries);
+    assert.deepEqual(await fs.readdir(f.notes), ['note.md']);
+  });
+}
+
 macTest('macOS updates preserve a moved note inherited ACL and mixed entry order', async t => {
   const f = await fixture(t), source = path.join(f.root, 'source');
   await fs.mkdir(source);

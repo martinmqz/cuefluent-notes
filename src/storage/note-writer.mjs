@@ -317,9 +317,10 @@ async function cloneOriginal(source, stage, expectedMetadata) {
     // it only from our stage; a retained completed draft was checked before this.
     await command('/bin/chmod', ['-N', stage]);
     await command('/bin/cp', ['-p', source, stage]);
-    // cp may install the original's denying ACL. Restore attributes before
-    // reinstating the exact ordered ACL on the finished stage.
+    // cp may restore a read-only mode and denying ACL. Permit attribute writes
+    // only on the stage; its exact original mode and ACL are restored afterward.
     await command('/bin/chmod', ['-N', stage]);
+    await command('/bin/chmod', ['u+w', stage]);
     // cp may transform quarantine or retain quarantine assigned when the stage
     // was created. Match the original's attribute set before restoring values.
     const expected = new Map(inspected.macos.attrs);
@@ -653,6 +654,7 @@ async function reconcileOriginalBackup(pin, intent, names, { restore = false } =
 export async function publishNotePublication(pin, input, bytes, { persistIntent, beforePublish = async () => {} } = {}) {
   if (typeof beforePublish !== 'function') invalid('Publication fencing requires a trusted callback.');
   let intent = validateNotePublication(input);
+  const retainedStage = intent.stage !== null;
   const draft = exactBytes(bytes, intent.hash, intent.bytes);
   pin = await pinPublicationParent(pin, intent);
   let current = await mutationOutcome(pin, intent);
@@ -689,49 +691,60 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   const staged = await snapshot(current.stage);
   if (!sameIdentity(staged.stat, intent.stage) || !(draft.subarray(0, staged.bytes.length).equals(staged.bytes) ||
       (original && original.bytes.subarray(0, staged.bytes.length).equals(staged.bytes)))) conflict('The staged content is not an exact draft or original prefix.');
-  // A retained exact draft must not erase a later metadata edit by cloning again.
-  // Retained zero-byte drafts are ambiguous, so a mismatch also stays a conflict;
-  // newly created empty stages and partial drafts still enter normal preparation.
-  if (process.platform === 'darwin' && input.stage && original && staged.hash === intent.hash &&
-      await metadata(current.stage) !== intent.original.metadata) conflict('The completed stage metadata changed before retry.');
-  // A cloned read-only source must remain read-only when published. Open the
-  // owned stage while writable, then clone metadata and write through that fd.
-  if (process.platform !== 'win32') {
-    const permissions = await fs.open(current.stage, constants.O_RDONLY | NO_FOLLOW);
+  // Reuse a verified completed stage without mutating it again: an interruption
+  // during re-preparation must not turn our own metadata changes into a conflict.
+  // Retained zero-byte drafts remain ambiguous, so mismatches still refuse.
+  const reuseStage = process.platform === 'darwin' && retainedStage && original !== null &&
+    staged.hash === intent.hash && staged.bytes.length === intent.bytes;
+  if (reuseStage && await metadata(current.stage) !== intent.original.metadata) conflict('The completed stage metadata changed before retry.');
+  if (!reuseStage) {
+    // A cloned read-only source must remain read-only when published. Open the
+    // owned stage while writable, then clone metadata and write through that fd.
+    if (process.platform !== 'win32') {
+      const permissions = await fs.open(current.stage, constants.O_RDONLY | NO_FOLLOW);
+      try {
+        const observed = await readHandleStat(permissions); regular(observed);
+        if (!sameIdentity(observed, intent.stage)) conflict('The staged inode changed before restoring writable permissions.');
+        await permissions.chmod(0o600);
+      } finally { await permissions.close(); }
+    }
+    else if (original) await windows('writable', current.stage);
+    let handle;
+    try { handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW); }
+    catch (error) {
+      if (process.platform !== 'win32' || !original || error.code !== 'EACCES') throw error;
+      // Preserve a fresh inherited descriptor whenever it already permits writing.
+      // Grant access only to this exact owned stage if the native open needs it.
+      if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The staged inode changed before granting write access.');
+      await windows('grant-write', current.stage);
+      handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW);
+    }
     try {
-      const observed = await readHandleStat(permissions); regular(observed);
-      if (!sameIdentity(observed, intent.stage)) conflict('The staged inode changed before restoring writable permissions.');
-      await permissions.chmod(0o600);
-    } finally { await permissions.close(); }
+      if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The staged inode changed before writing.');
+      if (original) await cloneOriginal(source, current.stage, intent.original.metadata);
+      if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The native helper replaced the staged inode.');
+      await assertChain(intent.parent); await assertDirectory(pin);
+      if (original) await originalMatches(source, intent);
+      await handle.truncate(0); await handle.writeFile(draft);
+      if (process.platform !== 'win32') await handle.chmod(original ? original.stat.mode & 0o7777 : 0o666 & ~process.umask());
+      // Writing a Linux default stream can clear capability/set-id metadata.
+      if (original && process.platform === 'linux') await command('/bin/cp', ['--attributes-only', '--preserve=mode,ownership,xattr', '--', source, current.stage]);
+      await handle.sync();
+    } finally { await handle.close(); }
+    // Windows can set Archive when the last data-writing handle closes, even
+    // after SetFileAttributes cleared it. Restore the exact inspected attributes
+    // only after flushing and closing that handle; the full fingerprint below
+    // still verifies ACLs, audit rules, streams, EAs, and every attribute bit.
+    if (original && process.platform === 'win32') await windows('attributes', source, current.stage);
+  } else {
+    // Exact retained bytes may predate a failed flush. Make them durable without
+    // changing the stage before publishing its name, even for a read-only note.
+    const handle = await fs.open(current.stage, constants.O_RDONLY | NO_FOLLOW);
+    try {
+      if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The completed stage changed before durability was confirmed.');
+      await handle.sync();
+    } finally { await handle.close(); }
   }
-  else if (original) await windows('writable', current.stage);
-  let handle;
-  try { handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW); }
-  catch (error) {
-    if (process.platform !== 'win32' || !original || error.code !== 'EACCES') throw error;
-    // Preserve a fresh inherited descriptor whenever it already permits writing.
-    // Grant access only to this exact owned stage if the native open needs it.
-    if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The staged inode changed before granting write access.');
-    await windows('grant-write', current.stage);
-    handle = await fs.open(current.stage, constants.O_RDWR | NO_FOLLOW);
-  }
-  try {
-    if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The staged inode changed before writing.');
-    if (original) await cloneOriginal(source, current.stage, intent.original.metadata);
-    if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The native helper replaced the staged inode.');
-    await assertChain(intent.parent); await assertDirectory(pin);
-    if (original) await originalMatches(source, intent);
-    await handle.truncate(0); await handle.writeFile(draft);
-    if (process.platform !== 'win32') await handle.chmod(original ? original.stat.mode & 0o7777 : 0o666 & ~process.umask());
-    // Writing a Linux default stream can clear capability/set-id metadata.
-    if (original && process.platform === 'linux') await command('/bin/cp', ['--attributes-only', '--preserve=mode,ownership,xattr', '--', source, current.stage]);
-    await handle.sync();
-  } finally { await handle.close(); }
-  // Windows can set Archive when the last data-writing handle closes, even
-  // after SetFileAttributes cleared it. Restore the exact inspected attributes
-  // only after flushing and closing that handle; the full fingerprint below
-  // still verifies ACLs, audit rules, streams, EAs, and every attribute bit.
-  if (original && process.platform === 'win32') await windows('attributes', source, current.stage);
   // The fence may wait for short gates. Inspect every public expectation again
   // afterwards so a manual edit made during that wait remains a conflict.
   await beforePublish();
