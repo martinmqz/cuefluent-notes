@@ -210,8 +210,9 @@ tool result (Claude Code's default is 25,000 tokens). Direct submissions are
 128 KiB of content and 192 KiB of complete draft. Direct reads share the 48 KiB
 serialized-result budget with review pages: a note that fits arrives whole;
 otherwise it arrives in bounded UTF-8 ranges. A requested range can be up to
-64 KiB of note bytes, reduced as needed for the result including JSON escaping. Queued processing has separate budgets: 8 KiB read ranges, 64 KiB of
-cumulative tool responses and 128 KiB of cumulative draft submissions. A queued
+48 KiB of note bytes, reduced as needed for the result including its other fields
+and JSON escaping. Queued processing has separate budgets: 8 KiB read ranges,
+64 KiB of cumulative tool responses and 128 KiB of cumulative draft submissions. A queued
 full-content replacement requires reading the whole original; exact edits can
 preserve unread content without resubmitting it.
 

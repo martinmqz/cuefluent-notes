@@ -8,7 +8,7 @@ directory with bounded pagination; it reads no content and grants no overwrite
 authority. `cuefluent_read_note(projectId, target, start?, maxBytes?, expectedHash?)`
 without `start` and `maxBytes` returns the whole note with its whole-file `hash`
 when the serialized result fits 48 KiB. Otherwise it returns bounded UTF-8 ranges.
-`maxBytes` can request up to 64 KiB of note bytes, but every returned result,
+`maxBytes` can request up to 48 KiB of note bytes, but every returned result,
 including JSON escaping and its other fields, must fit 48 KiB. Follow the returned
 `next` offset and pass the first `hash` as `expectedHash` on every later range, so
 a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than read inconsistently.

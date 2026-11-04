@@ -15,7 +15,7 @@ import { readDraftArtifact } from '../src/storage/draft-artifacts.mjs';
 import { ownDirectAttempt, withCurrentAttempt, inspectAttempt } from '../src/storage/attempts.mjs';
 import { setChatTracking, queueRelative } from '../src/storage/chats.mjs';
 import { appendQueueRecord, encodeQueueRecord, inspectQueue } from '../src/storage/queue.mjs';
-import { createDirectNoteTools, DIRECT_NOTE_BYTES, DIRECT_READ_BYTES, DIRECT_READ_RANGE_BYTES } from '../src/control/direct-notes.mjs';
+import { createDirectNoteTools, DIRECT_NOTE_BYTES, DIRECT_READ_BYTES } from '../src/control/direct-notes.mjs';
 import { createControlBridge, CONTROL_LIMITS } from '../src/client/control-server.mjs';
 import { readProjectStatus } from '../src/control/status.mjs';
 import { REVIEW_PAGE_BYTES } from '../src/control/review.mjs';
@@ -348,7 +348,7 @@ test('both MCP hosts execute project/list/read/update through the real response 
 test('a note within the cap is read whole with its hash; an update needs only that hash, and a larger original is refused unchanged', async t => {
   const f = await fixture(t, { saving: 'auto' }), target = path.join(f.notes, 'existing.md');
   const original = content + '\n' + 'Useful context with café and 界.\n'.repeat(900); await fs.writeFile(target, original);
-  assert.ok(Buffer.byteLength(original) > 8192 && Buffer.byteLength(original) < DIRECT_READ_RANGE_BYTES);
+  assert.ok(Buffer.byteLength(original) > 8192 && Buffer.byteLength(original) < DIRECT_READ_BYTES);
   const read = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
   assert.deepEqual([read.state, read.exists, read.start, read.end, read.next, read.totalBytes], ['read', true, 0, Buffer.byteLength(original), null, Buffer.byteLength(original)]);
   assert.equal(read.content, original); assert.equal(read.hash, hashBytes(original));
@@ -356,7 +356,7 @@ test('a note within the cap is read whole with its hash; an update needs only th
   const first = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: 16 });
   assert.equal(first.end, 16); assert.equal(first.next, 16); assert.equal(first.hash, read.hash);
   const second = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target, start: first.next, expectedHash: first.hash });
-  assert.equal(second.start, 16); assert.ok(second.end <= 16 + DIRECT_READ_RANGE_BYTES);
+  assert.equal(second.start, 16); assert.ok(second.end <= 16 + DIRECT_READ_BYTES);
   await assert.rejects(f.tools.call('cuefluent_read_note', { projectId: 'demo', target, start: 16 }), { code: 'DIRECT_NOTE_ARGUMENT' });
   // The exact hash alone authorizes the update.
   const update = { ...f.request, target, expectedHash: read.hash, content: original.replace('small', 'focused') };
@@ -366,7 +366,7 @@ test('a note within the cap is read whole with its hash; an update needs only th
   const large = `${content}\n${'Preserve this paragraph.\n'.repeat(6000)}`; await fs.writeFile(target, large);
   assert.ok(Buffer.byteLength(large) > DIRECT_NOTE_BYTES);
   const partial = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
-  assert.ok(partial.end > WORKSPACE_LIMITS.readBytes && partial.end <= DIRECT_READ_RANGE_BYTES); assert.equal(partial.next, partial.end);
+  assert.ok(partial.end > WORKSPACE_LIMITS.readBytes && partial.end <= DIRECT_READ_BYTES); assert.equal(partial.next, partial.end);
   assert.ok(Buffer.byteLength(JSON.stringify(partial)) <= DIRECT_READ_BYTES); assert.equal(partial.totalBytes, Buffer.byteLength(large));
   await assert.rejects(f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: partial.hash, content }), { code: 'DIRECT_NOTE_UPDATE_LIMIT' });
   assert.equal(await fs.readFile(target, 'utf8'), large);
@@ -418,7 +418,7 @@ test('whole reads keep their response bound and fall back to ranges for larger o
   assert.equal(over.totalBytes, Buffer.byteLength(body) + 1); assert.ok(Buffer.byteLength(JSON.stringify(over)) <= DIRECT_READ_BYTES);
   // Heavy JSON escaping: each control byte serializes as six bytes, so 24 KiB of them exceeds one result.
   const escaped = '# Escapes\n\n## Content\n' + '\u0001'.repeat(24 * 1024);
-  assert.ok(Buffer.byteLength(escaped) <= DIRECT_READ_RANGE_BYTES && Buffer.byteLength(JSON.stringify(escaped)) > DIRECT_READ_BYTES);
+  assert.ok(Buffer.byteLength(escaped) <= DIRECT_READ_BYTES && Buffer.byteLength(JSON.stringify(escaped)) > DIRECT_READ_BYTES);
   await fs.writeFile(target, escaped);
   const ranged = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
   assert.ok(ranged.end > 0 && ranged.end < Buffer.byteLength(escaped)); assert.equal(ranged.next, ranged.end);
@@ -437,7 +437,7 @@ test('whole reads keep their response bound and fall back to ranges for larger o
   // result passes the control response bound, and the frame carrying the escaped text
   // next to the structured content stays within half of the request frame bound.
   const dense = '# Dense\n\n## Content\n' + '\\"'.repeat(DIRECT_READ_BYTES / 4 - 168); await fs.writeFile(target, dense);
-  assert.ok(Buffer.byteLength(dense) <= DIRECT_READ_RANGE_BYTES && Buffer.byteLength(JSON.stringify(dense)) > DIRECT_READ_BYTES - 1024 && Buffer.byteLength(JSON.stringify(dense)) < DIRECT_READ_BYTES - 256);
+  assert.ok(Buffer.byteLength(dense) <= DIRECT_READ_BYTES && Buffer.byteLength(JSON.stringify(dense)) > DIRECT_READ_BYTES - 1024 && Buffer.byteLength(JSON.stringify(dense)) < DIRECT_READ_BYTES - 256);
   const native = await nativeTools(f);
   const response = await native.protocol({ jsonrpc: '2.0', id: 90, method: 'tools/call', params: { name: 'cuefluent_read_note', arguments: { projectId: 'demo', target } } });
   assert.equal(response.result.isError, false); assert.equal(response.result.structuredContent.next, null);
@@ -707,7 +707,7 @@ test('both MCP hosts preserve metadata edge cases through update review and exac
     const f = await fixture(t, { client, expandedMetadata: item.expandedMetadata }), native = await nativeTools(f, { client });
     const target = path.join(f.notes, `${item.name}.md`), original = Buffer.from(`<!-- cuefluent\n${item.payload}\n-->\n${content}`);
     const before = inspectMetadata(original);
-    assert.equal(before.status, 'supported'); assert.ok(original.length <= DIRECT_READ_RANGE_BYTES);
+    assert.equal(before.status, 'supported');
     await fs.writeFile(target, original);
     const read = await native.call('cuefluent_read_note', { projectId: 'demo', target });
     assert.equal(read.state, 'read'); assert.equal(read.hash, hashBytes(original));
@@ -861,12 +861,12 @@ test('direct ranges respect UTF-8 boundaries, requested sizes and exact original
   const f = await fixture(t), native = await nativeTools(f), target = path.join(f.notes, 'ranges.md');
   const body = '界'.repeat(DIRECT_NOTE_BYTES / 2); await fs.writeFile(target, body);
   const first = await native.call('cuefluent_read_note', { projectId: 'demo', target });
-  assert.ok(first.end > WORKSPACE_LIMITS.readBytes && first.end <= DIRECT_READ_RANGE_BYTES); assert.equal(first.end % 3, 0);
+  assert.ok(first.end > WORKSPACE_LIMITS.readBytes && first.end <= DIRECT_READ_BYTES); assert.equal(first.end % 3, 0);
   assert.ok(Buffer.byteLength(JSON.stringify(first)) <= DIRECT_READ_BYTES); assert.equal(first.content, '界'.repeat(first.end / 3));
   assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, start: 1, expectedHash: first.hash })).error, 'WORKSPACE_RANGE_INVALID');
   assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: 1 })).error, 'WORKSPACE_RANGE_INVALID');
-  assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: DIRECT_READ_RANGE_BYTES + 1 })).error, 'DIRECT_NOTE_ARGUMENT');
-  const explicit = await native.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: DIRECT_READ_RANGE_BYTES });
+  assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: DIRECT_READ_BYTES + 1 })).error, 'DIRECT_NOTE_ARGUMENT');
+  const explicit = await native.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: DIRECT_READ_BYTES });
   assert.equal(explicit.content, first.content);
   const eof = await native.call('cuefluent_read_note', { projectId: 'demo', target, start: Buffer.byteLength(body), expectedHash: first.hash });
   assert.equal(eof.content, ''); assert.equal(eof.next, null);
@@ -883,7 +883,7 @@ for (const client of ['claude', 'codex']) {
     for (const repeats of [4000, 12000]) {
       const body = '# Escaped note\n\n## Content\n' + line.repeat(repeats);
       const target = path.join(f.notes, `escaped-${repeats}.md`); await fs.writeFile(target, body);
-      assert.equal(Buffer.byteLength(body) <= DIRECT_READ_RANGE_BYTES, repeats === 4000);
+      assert.equal(Buffer.byteLength(body) <= DIRECT_READ_BYTES, repeats === 4000);
       assert.ok(Buffer.byteLength(JSON.stringify(body)) > REVIEW_PAGE_BYTES);
       let start = 0, assembled = '', finished = false;
       for (let page = 0; page < 64; page++) {
@@ -896,7 +896,7 @@ for (const client of ['claude', 'codex']) {
         assert.ok(Buffer.byteLength(response.result.content[0].text) <= REVIEW_PAGE_BYTES);
         assert.deepEqual(JSON.parse(response.result.content[0].text), result);
         assert.equal(result.hash, hashBytes(body)); assert.equal(result.start, start); assert.ok(result.end > start);
-        assert.ok(result.end - start <= DIRECT_READ_RANGE_BYTES); assembled += result.content;
+        assert.ok(result.end - start <= DIRECT_READ_BYTES); assembled += result.content;
         if (result.next === null) { finished = true; break; }
         assert.equal(result.next, result.end); start = result.next;
       }
