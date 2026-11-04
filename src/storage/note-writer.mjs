@@ -225,16 +225,40 @@ async function linuxInventory(file) {
   return linuxMetadata(archive);
 }
 
+// xattr prints one newline-terminated name per record, without escaping names.
+// Reject ambiguous records before excluding the one OS-owned attribute. A forged
+// multi-line name cannot masquerade as ignored provenance or duplicate a real name.
+async function macosAttributeNames(file) {
+  const output = await command('/usr/bin/xattr', [file]);
+  const text = output.toString('utf8');
+  if (!Buffer.from(text).equals(output) || (text && !text.endsWith('\n'))) fail('NOTE_METADATA_UNSUPPORTED', 'The note extended-attribute names could not be verified.');
+  const listed = text ? text.slice(0, -1).split('\n') : [];
+  if (new Set(listed).size !== listed.length || listed.some(name => !name || name.length > 1024 || /[\u0000-\u001f\u007f]/.test(name))) fail('NOTE_METADATA_UNSUPPORTED', 'The note extended-attribute names could not be verified.');
+  // macOS assigns this attribute per inode; neither compare nor modify it.
+  const names = listed.filter(name => name !== 'com.apple.provenance').sort();
+  if (names.length > 128) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
+  return names;
+}
+
+async function macosAttributes(file) {
+  const attrs = []; let total = 0;
+  for (const name of await macosAttributeNames(file)) {
+    // The native hex representation expands each byte to two digits plus spacing.
+    const value = (await command('/usr/bin/xattr', ['-px', '--', name, file], { maxBuffer: METADATA_BYTES * 4 + 64 })).toString('ascii').replace(/\s/g, '').toLowerCase();
+    if (!/^(?:[0-9a-f]{2})*$/.test(value) || (total += value.length / 2) > METADATA_BYTES) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
+    attrs.push([name, value]);
+  }
+  return attrs;
+}
+
 async function safeEmptyStage(file, stat) {
   regular(stat);
   if (stat.size !== 0 || (process.platform !== 'win32' && (stat.uid !== process.getuid() || (stat.mode & ~0o666 & 0o7777) !== 0))) conflict('An unjournaled stage must have the empty-file owner and non-executable ordinary permissions.');
   if (process.platform === 'darwin') {
-    const attrs = (await command('/usr/bin/xattr', [file])).toString('utf8').split('\n').filter(Boolean);
+    const attrs = await macosAttributeNames(file);
     const acl = (await command('/bin/ls', ['-lde', file])).toString('utf8').split('\n').slice(1).filter(Boolean);
     const flags = (await command('/usr/bin/stat', ['-f', '%f', file])).toString('ascii').trim();
-    // macOS attaches provenance even to a newly created, empty Node file. It is
-    // not a permission grant; arbitrary user attributes remain a conflict.
-    if (attrs.some(name => name !== 'com.apple.provenance') || flags !== '0' || acl.some(line => !/^\s+[0-9]+: .* inherited /.test(line))) conflict('Unjournaled empty-stage metadata is not safe to adopt.');
+    if (attrs.length || flags !== '0' || acl.some(line => !/^\s+[0-9]+: .* inherited /.test(line))) conflict('Unjournaled empty-stage metadata is not safe to adopt.');
   } else if (process.platform === 'linux') {
     for (const [key, value] of await linuxInventory(file)) {
       if (key !== 'SCHILY.acl.access' || !/^user::[rwx-]{3},group::[rwx-]{3},other::[rwx-]{3}$/.test(Buffer.from(value, 'hex').toString('utf8'))) conflict('Unjournaled empty-stage metadata is not safe to adopt.');
@@ -247,17 +271,7 @@ async function metadataEvidence(file) {
   const before = await readPathStat(file), exact = fileIdentity(before);
   let extra;
   if (process.platform === 'darwin') {
-    const names = (await command('/usr/bin/xattr', [file])).toString('utf8').split('\n').filter(Boolean).sort();
-    if (names.length > 128 || names.some(name => name.length > 1024 || /[\u0000-\u001f\u007f]/.test(name))) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
-    const attrs = []; let total = 0;
-    for (const name of names) {
-      // macOS assigns provenance to each inode and can change it during copying.
-      // Leave that OS-owned attribute alone; it is not preservable note metadata.
-      if (name === 'com.apple.provenance') continue;
-      const value = (await command('/usr/bin/xattr', ['-px', name, file])).toString('ascii').replace(/\s/g, '').toLowerCase();
-      if (!/^(?:[0-9a-f]{2})*$/.test(value) || (total += value.length / 2) > METADATA_BYTES) fail('NOTE_METADATA_UNSUPPORTED', 'Note extended attributes exceed the supported profile.');
-      attrs.push([name, value]);
-    }
+    const attrs = await macosAttributes(file);
     const acl = (await command('/bin/ls', ['-lde', file])).toString('utf8').split('\n').slice(1).filter(Boolean);
     if (acl.some(line => !/^\s+[0-9]+: /.test(line))) fail('NOTE_METADATA_UNSUPPORTED', 'The note ACL could not be verified.');
     const flags = (await command('/usr/bin/stat', ['-f', '%f', file])).toString('ascii').trim();
@@ -282,7 +296,7 @@ async function metadataEvidence(file) {
   // the ordinary metadata comparison or permission to change a public original.
   const withoutArchive = process.platform === 'win32' && (extra.attributes & 32)
     ? fingerprint({ ...value, extra: { ...extra, attributes: (extra.attributes & ~32) || 128 } }) : null;
-  return { hash: fingerprint(value), withoutArchive };
+  return { hash: fingerprint(value), withoutArchive, macos: process.platform === 'darwin' ? extra : null };
 }
 
 const metadata = async file => (await metadataEvidence(file)).hash;
@@ -294,8 +308,26 @@ async function publishedMetadata(file, intent) {
   conflict('The exact publication metadata changed beyond the native Archive transition.');
 }
 
-async function cloneOriginal(source, stage) {
-  if (process.platform === 'darwin') await command('/bin/cp', ['-p', source, stage]);
+async function cloneOriginal(source, stage, expectedMetadata) {
+  if (process.platform === 'darwin') {
+    const inspected = await metadataEvidence(source);
+    if (inspected.hash !== expectedMetadata) conflict('The original metadata changed before staging.');
+    await command('/bin/cp', ['-p', source, stage]);
+    // cp may transform quarantine. Restore exact inspected values only where the
+    // copy differs, avoiding huge argv values for unchanged resource forks.
+    const copied = new Map(await macosAttributes(stage));
+    for (const [name, value] of inspected.macos.attrs) {
+      if (copied.get(name) !== value) await command('/usr/bin/xattr', ['-wx', '--', name, value, stage]);
+    }
+    // cp retains the new inode's inherited ACL rather than the source's. Rebuild
+    // its exact ordered entries, including inherited status, on our own stage.
+    await command('/bin/chmod', ['-N', stage]);
+    for (const [index, line] of inspected.macos.acl.entries()) {
+      const match = /^\s+([0-9]+): ((?:user|group):.+?)( inherited)? (allow|deny) (.+)$/.exec(line);
+      if (!match || Number(match[1]) !== index) fail('NOTE_METADATA_UNSUPPORTED', 'The note ACL cannot be preserved exactly.');
+      await command('/bin/chmod', [match[3] ? '+ai#' : '+a#', String(index), `${match[2]} ${match[4]} ${match[5]}`, stage]);
+    }
+  }
   else if (process.platform === 'linux') await command('/bin/cp', ['--preserve=mode,ownership,timestamps,xattr', '--', source, stage]);
   else if (process.platform === 'win32') await windows('clone', source, stage);
   else fail('NOTE_METADATA_UNSUPPORTED', 'Native note metadata preservation is unavailable on this platform.');
@@ -434,6 +466,10 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   }
   const current = await snapshot(parent.file, { missing: true });
   if ((expectedHash === null && current) || (expectedHash !== null && (!current || current.hash !== expectedHash))) conflict('The note differs from the exact inspected original or absence.');
+  if (current && expectedHash !== hash && process.platform === 'darwin' && process.geteuid() !== 0) {
+    const groups = new Set([...process.getgroups(), process.getegid()]);
+    if (current.stat.uid !== process.geteuid() || !groups.has(current.stat.gid)) fail('NOTE_METADATA_UNSUPPORTED', 'The note owner or group cannot be preserved by this user; ask its owner to adjust ownership or group access before retrying.');
+  }
   const original = current ? { ...current.identity, metadata: await metadata(parent.file) } : null;
   const intent = validateNotePublication({ schema: 1, runId, draftId, root: pin.root, relative, parent: parent.chain,
     expectedHash, hash, bytes: draft.length, original, stage: null, capture: null });
@@ -663,7 +699,7 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   }
   try {
     if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The staged inode changed before writing.');
-    if (original) await cloneOriginal(source, current.stage);
+    if (original) await cloneOriginal(source, current.stage, intent.original.metadata);
     if (!sameIdentity(await readPathStat(current.stage), intent.stage)) conflict('The native helper replaced the staged inode.');
     await assertChain(intent.parent); await assertDirectory(pin);
     if (original) await originalMatches(source, intent);

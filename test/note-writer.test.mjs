@@ -119,6 +119,7 @@ test('existing notes retain exact permissions, ACLs, and extended attributes', a
   const { notes, pin } = await fixture(t);
   const target = path.join(notes, "note with ' spaces.md"), before = Buffer.from('original\n');
   await fs.writeFile(target, before, { mode: 0o640 });
+  if (process.platform !== 'win32') await fs.chmod(target, 0o640);
   let acl;
   if (process.platform === 'darwin') {
     await execute('/usr/bin/xattr', ['-wx', 'com.cuefluent.synthetic', '00ff102030', target]);
