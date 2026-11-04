@@ -91,12 +91,12 @@ a package enables neither tracking nor note processing.
 
 ## Marketplace snapshots
 
-The Codex and Claude catalogs select the released 0.22.0 packages at
-`plugins/0.22.0/cuefluent-notes/` and `claude/0.22.0/cuefluent-notes/`.
-`packaging/releases/0.22.0/build.json` is the unchanged build receipt from the
-[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.22.0).
+The Codex and Claude catalogs select the released 0.22.1 packages at
+`plugins/0.22.1/cuefluent-notes/` and `claude/0.22.1/cuefluent-notes/`.
+`packaging/releases/0.22.1/build.json` is the unchanged build receipt from the
+[published release](https://github.com/martinmqz/cuefluent-notes/releases/tag/v0.22.1).
 Its inventory hashes bind every catalog package file, including dependencies.
-The versioned 0.16.0, 0.17.0, 0.18.0, 0.19.0, 0.20.0 and 0.21.0 snapshots
+The versioned 0.16.0, 0.17.0, 0.18.0, 0.19.0, 0.20.0, 0.21.0 and 0.22.0 snapshots
 and receipts remain intact. The unversioned package folders and root
 `release.json` retain the 0.15.1 release.
 
@@ -112,11 +112,11 @@ The directory-wide `.gitattributes` rules preserve every release's bytes, while
 `.gitignore` excludes `plugins/` and `claude/` from ordinary source searches.
 New versions need no additional attribute or ignore rules. Plain `git add` can
 omit ignored bundled dependencies, so force-stage only the exact new package
-folders. For example, when adding the 0.22.0 release:
+folders. For example, when adding the 0.22.1 release:
 
 ```sh
-git add -f -- plugins/0.22.0/cuefluent-notes claude/0.22.0/cuefluent-notes
-git add -- .agents/plugins/marketplace.json .claude-plugin/marketplace.json packaging/releases/0.22.0/build.json test/marketplace.test.mjs
+git add -f -- plugins/0.22.1/cuefluent-notes claude/0.22.1/cuefluent-notes
+git add -- .agents/plugins/marketplace.json .claude-plugin/marketplace.json packaging/releases/0.22.1/build.json test/marketplace.test.mjs
 node --test test/marketplace.test.mjs
 ```
 
@@ -387,3 +387,8 @@ was requested. Pull requests still follow the repository's draft-PR policy.
   independently verified receipt pin, preserving all earlier snapshots and pins.
 - Publish verified releases directly unless a release draft is requested; keep
   the existing draft policy for pull requests.
+
+### 2026-11-04
+
+- Advance both catalogs to the verified 0.22.1 release snapshots and add its
+  independently verified receipt pin, preserving all earlier snapshots and pins.
