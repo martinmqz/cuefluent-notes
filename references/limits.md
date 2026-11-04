@@ -177,8 +177,10 @@ It is excluded from the preservation fingerprint and attribute limits. The write
 preserves ordinary extended attributes, including quarantine, and the original
 ACL's explicit and inherited entries. When preparing an update, it reconciles
 attributes assigned to its new temporary file with the inspected original;
-changes detected after staging still refuse publication. A retry reuses a completed
-macOS update stage only after verifying its bytes and original metadata, without
+changes detected after staging still refuse publication. A macOS update records
+its completed-stage checkpoint only after bytes, permissions and metadata are
+restored, verified and flushed. Before that checkpoint, a retry can finish
+interrupted preparation; afterward, it verifies and reuses the stage without
 preparing it again. The original note's attributes and ACL are never cleared to
 enable copying. Content, file identities, ownership, permissions and flags remain
 checked.

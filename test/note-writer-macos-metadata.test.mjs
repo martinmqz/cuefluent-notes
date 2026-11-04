@@ -25,8 +25,8 @@ async function fixture(t) {
   await fs.writeFile(target, before);
   await fs.chmod(target, 0o640);
   const pin = await pinDirectory(notes);
-  const prepare = () => prepareNotePublication(pin, 'note.md', after, {
-    runId: randomUUID(), draftId: randomUUID(), expectedHash: hashBytes(before), hash: hashBytes(after),
+  const prepare = (draft = after) => prepareNotePublication(pin, 'note.md', draft, {
+    runId: randomUUID(), draftId: randomUUID(), expectedHash: hashBytes(before), hash: hashBytes(draft),
   });
   return { root, notes, target, pin, prepare };
 }
@@ -93,33 +93,35 @@ for (const name of ['com.apple.quarantine', 'com.cuefluent.stage-creation']) {
   });
 }
 
-macTest('macOS preserves a quarantine edit made after stage initialization as a conflict', async t => {
-  const f = await fixture(t), name = 'com.apple.quarantine', intent = await f.prepare();
-  const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
-  let tagged = false, journal = intent;
-  const persistIntent = async value => { journal = value; };
-  await assert.rejects(publishNotePublication(f.pin, intent, after, {
-    persistIntent,
-    beforePublish: async () => {
-      if (tagged) return;
-      assert.deepEqual(await fs.readFile(stage), after);
-      await execute('/usr/bin/xattr', ['-wx', name, '112233', stage]);
-      tagged = true;
-    },
-  }), error => error.code === 'NOTE_PUBLICATION_CONFLICT' && /Staging did not preserve/.test(error.message));
-  assert.equal(tagged, true);
-  assert.deepEqual(await fs.readFile(f.target), before);
-  assert.deepEqual(await fs.readFile(stage), after);
-  assert.equal(await attribute(stage, name), '112233');
-  assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
-  assert.ok(journal.stage);
-  await assert.rejects(publishNotePublication(f.pin, journal, after, { persistIntent }),
-    error => error.code === 'NOTE_PUBLICATION_CONFLICT' && /completed stage metadata changed before retry/.test(error.message));
-  assert.deepEqual(await fs.readFile(f.target), before);
-  assert.deepEqual(await fs.readFile(stage), after);
-  assert.equal(await attribute(stage, name), '112233');
-  assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
-});
+for (const [label, draft] of [['nonempty', after], ['empty', Buffer.alloc(0)]]) {
+  macTest(`macOS preserves a quarantine edit made after ${label} stage initialization as a conflict`, async t => {
+    const f = await fixture(t), name = 'com.apple.quarantine', intent = await f.prepare(draft);
+    const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+    let tagged = false, journal = intent;
+    const persistIntent = async value => { journal = value; };
+    await assert.rejects(publishNotePublication(f.pin, intent, draft, {
+      persistIntent,
+      beforePublish: async () => {
+        if (tagged) return;
+        assert.deepEqual(await fs.readFile(stage), draft);
+        await execute('/usr/bin/xattr', ['-wx', name, '112233', stage]);
+        tagged = true;
+      },
+    }), { code: 'NOTE_PUBLICATION_CONFLICT' });
+    assert.equal(tagged, true);
+    assert.deepEqual(await fs.readFile(f.target), before);
+    assert.deepEqual(await fs.readFile(stage), draft);
+    assert.equal(await attribute(stage, name), '112233');
+    assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
+    assert.ok(journal.stage);
+    await assert.rejects(publishNotePublication(f.pin, journal, draft, { persistIntent }),
+      { code: 'NOTE_PUBLICATION_CONFLICT' });
+    assert.deepEqual(await fs.readFile(f.target), before);
+    assert.deepEqual(await fs.readFile(stage), draft);
+    assert.equal(await attribute(stage, name), '112233');
+    assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
+  });
+}
 
 macTest('macOS retries an unchanged completed quarantined stage with an owner deny ACL', async t => {
   const f = await fixture(t), name = 'com.apple.quarantine';
@@ -148,6 +150,104 @@ macTest('macOS retries an unchanged completed quarantined stage with an owner de
   assert.equal(await acl(f.target), originalAcl);
   assert.deepEqual(await fs.readdir(f.notes), ['note.md']);
 });
+
+for (const [label, draft, boundary, mode] of [
+  ['nonempty', after, 'write', 0o440],
+  ['empty', Buffer.alloc(0), 'write', 0o440],
+  ['empty', Buffer.alloc(0), 'intent', 0o440],
+  ['nonempty', after, 'write', 0o4640],
+  ['original-prefix', before.subarray(0, before.length - 1), 'write', 0o440],
+]) {
+  macTest(`macOS retries an initial ${label} stage with mode ${mode.toString(8)} interrupted after ${boundary}`, async t => {
+    const f = await fixture(t), name = 'com.apple.quarantine';
+    await execute('/usr/bin/xattr', ['-w', name, '0083;69000001;Safari;', f.target]);
+    await execute('/bin/chmod', ['+a', `user:${os.userInfo().username} deny writeextattr`, f.target]);
+    await fs.chmod(f.target, mode);
+    const originalAttribute = await attribute(f.target, name), originalAcl = await acl(f.target);
+    assert.ok(originalAttribute?.length > 0);
+    assert.match(originalAcl, /deny writeextattr/);
+    const intent = await f.prepare(draft), interrupted = new Error('Synthetic initial staging interruption');
+    const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+    let journal = intent, writes = 0;
+    const persistIntent = async value => { journal = value; };
+    const nativeOpen = fs.open.bind(fs);
+    const openMock = t.mock.method(fs, 'open', async (...args) => {
+      const handle = await nativeOpen(...args);
+      if (args[0] === stage && boundary === 'write') {
+        const write = handle.writeFile.bind(handle);
+        t.mock.method(handle, 'writeFile', async (...values) => {
+          // Full draft bytes do not prove that permissions were restored yet.
+          await write(...values);
+          writes += 1;
+          throw interrupted;
+        });
+      }
+      return handle;
+    });
+    try {
+      await assert.rejects(publishNotePublication(f.pin, intent, draft, {
+        persistIntent: async value => {
+          await persistIntent(value);
+          // An empty draft also matches the newly recorded, unprepared stage.
+          if (boundary === 'intent') throw interrupted;
+        },
+      }), error => error === interrupted);
+    } finally { openMock.mock.restore(); }
+    assert.equal(writes, boundary === 'write' ? 1 : 0);
+    assert.ok(journal.stage);
+    assert.deepEqual(await fs.readFile(stage), draft);
+    const staged = await fs.stat(stage, { bigint: true });
+    assert.deepEqual(await fs.readFile(f.target), before);
+    assert.equal((await fs.stat(f.target)).mode & 0o7777, mode);
+    assert.equal(await attribute(f.target, name), originalAttribute);
+    assert.equal(await acl(f.target), originalAcl);
+    const result = await publishNotePublication(f.pin, journal, draft, { persistIntent });
+    assert.equal(result.changed, true);
+    assert.deepEqual(await fs.readFile(f.target), draft);
+    const saved = await fs.stat(f.target, { bigint: true });
+    assert.equal(saved.dev, staged.dev);
+    assert.equal(saved.ino, staged.ino);
+    assert.equal(saved.mode & 0o7777n, BigInt(mode));
+    assert.equal(await attribute(f.target, name), originalAttribute);
+    assert.equal(await acl(f.target), originalAcl);
+    assert.deepEqual(await fs.readdir(f.notes), ['note.md']);
+  });
+}
+
+for (const [label, draft] of [['nonempty', after], ['empty', Buffer.alloc(0)]]) {
+  macTest(`macOS preserves ${label} stage metadata edits when recording completion is interrupted`, async t => {
+    const f = await fixture(t), name = 'com.apple.quarantine', intent = await f.prepare(draft);
+    const stage = path.join(f.notes, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`);
+    const interrupted = new Error('Synthetic interruption after persisting completed staging');
+    let journal = intent, completions = 0;
+    const persistIntent = async value => { journal = value; };
+    await assert.rejects(publishNotePublication(f.pin, intent, draft, {
+      persistIntent: async value => {
+        await persistIntent(value);
+        if (value.capture) {
+          // The journal replacement succeeded; its caller did not resume.
+          completions += 1;
+          throw interrupted;
+        }
+      },
+    }), error => error === interrupted);
+    assert.equal(completions, 1);
+    assert.ok(journal.capture);
+    assert.deepEqual(await fs.readFile(f.target), before);
+    assert.deepEqual(await fs.readFile(stage), draft);
+    const staged = await fs.stat(stage, { bigint: true });
+    const names = (await fs.readdir(f.notes)).sort();
+    await execute('/usr/bin/xattr', ['-wx', name, '112233', stage]);
+    await assert.rejects(publishNotePublication(f.pin, journal, draft, { persistIntent }),
+      { code: 'NOTE_PUBLICATION_CONFLICT' });
+    assert.deepEqual(await fs.readFile(f.target), before);
+    assert.deepEqual(await fs.readFile(stage), draft);
+    assert.equal((await fs.stat(stage, { bigint: true })).ino, staged.ino);
+    assert.equal(await attribute(stage, name), '112233');
+    assert.ok(!(await execute('/usr/bin/xattr', [f.target])).stdout.split('\n').includes(name));
+    assert.deepEqual((await fs.readdir(f.notes)).sort(), names);
+  });
+}
 
 for (const mode of [0o640, 0o440]) {
   macTest(`macOS completed-stage retries leave mode ${mode.toString(8)} and metadata untouched across interruptions`, async t => {

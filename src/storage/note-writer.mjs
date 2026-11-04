@@ -654,7 +654,6 @@ async function reconcileOriginalBackup(pin, intent, names, { restore = false } =
 export async function publishNotePublication(pin, input, bytes, { persistIntent, beforePublish = async () => {} } = {}) {
   if (typeof beforePublish !== 'function') invalid('Publication fencing requires a trusted callback.');
   let intent = validateNotePublication(input);
-  const retainedStage = intent.stage !== null;
   const draft = exactBytes(bytes, intent.hash, intent.bytes);
   pin = await pinPublicationParent(pin, intent);
   let current = await mutationOutcome(pin, intent);
@@ -691,12 +690,11 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
   const staged = await snapshot(current.stage);
   if (!sameIdentity(staged.stat, intent.stage) || !(draft.subarray(0, staged.bytes.length).equals(staged.bytes) ||
       (original && original.bytes.subarray(0, staged.bytes.length).equals(staged.bytes)))) conflict('The staged content is not an exact draft or original prefix.');
-  // Reuse a verified completed stage without mutating it again: an interruption
-  // during re-preparation must not turn our own metadata changes into a conflict.
-  // Retained zero-byte drafts remain ambiguous, so mismatches still refuse.
-  const reuseStage = process.platform === 'darwin' && retainedStage && original !== null &&
-    staged.hash === intent.hash && staged.bytes.length === intent.bytes;
-  if (reuseStage && await metadata(current.stage) !== intent.original.metadata) conflict('The completed stage metadata changed before retry.');
+  // The capture identity is journaled only after stage preparation completes.
+  // Full draft bytes alone may still precede permission or metadata restoration.
+  const reuseStage = process.platform === 'darwin' && intent.capture !== null;
+  if (reuseStage && (staged.hash !== intent.hash || staged.bytes.length !== intent.bytes ||
+      await metadata(current.stage) !== intent.original.metadata)) conflict('The completed stage bytes or metadata changed before retry.');
   if (!reuseStage) {
     // A cloned read-only source must remain read-only when published. Open the
     // owned stage while writable, then clone metadata and write through that fd.
@@ -744,6 +742,15 @@ export async function publishNotePublication(pin, input, bytes, { persistIntent,
       if (!sameIdentity(await readHandleStat(handle), intent.stage)) conflict('The completed stage changed before durability was confirmed.');
       await handle.sync();
     } finally { await handle.close(); }
+  }
+  if (process.platform === 'darwin' && original && !intent.capture) {
+    // Persist this existing publication checkpoint before yielding to the fence.
+    // Until then, even exact draft bytes belong to unfinished preparation; after
+    // it, retries verify and reuse the stage without changing its metadata.
+    const complete = await snapshot(current.stage);
+    if (!sameIdentity(complete.stat, intent.stage) || complete.hash !== intent.hash ||
+        complete.bytes.length !== intent.bytes || await metadata(current.stage) !== intent.original.metadata) conflict('Staging did not preserve the exact bytes and original metadata.');
+    intent = await prepareCapture(pin, intent, current, persistIntent);
   }
   // The fence may wait for short gates. Inspect every public expectation again
   // afterwards so a manual edit made during that wait remains a conflict.

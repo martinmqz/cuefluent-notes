@@ -91,9 +91,9 @@ try {
     const beforePublish = async () => {
       if (mutation) return;
       if (scenario.startsWith('stage-')) {
-        const stages = (await fs.readdir(root)).filter(name => name.endsWith('.tmp'));
+        const stages = (await fs.readdir(root, { withFileTypes: true })).filter(entry => entry.isFile() && entry.name.endsWith('.tmp'));
         assert.equal(stages.length, 1);
-        const stage = path.join(root, stages[0]);
+        const stage = path.join(root, stages[0].name);
         const name = scenario === 'stage-xattr' ? attribute : quarantine;
         await execute('/usr/bin/xattr', ['-wx', name, '11223344', stage]);
         mutation = { stage, name, value: await readMacosAttribute(stage, name) };
