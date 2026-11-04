@@ -64,7 +64,7 @@ const TABLE = [
     'Preserve the note and pending draft. Check filesystem capabilities, ownership, group membership, permissions, ACLs and extended-attribute limits before retrying. Do not strip metadata or save around the refusal; report this code and diagnostics if the cause is unclear.'],
   [['NOTE_SOURCE_LIMIT', 'NOTE_FILE_LIMIT', 'DIRECT_NOTE_CONTENT_LIMIT', 'DIRECT_NOTE_UPDATE_LIMIT', 'DIRECT_NOTE_DRAFT_LIMIT', 'CONTROL_RESPONSE_LIMIT'],
     'The note, draft or result exceeds a supported size limit.',
-    'Preserve the complete note, the submitted content and any retained draft, and report the limit. Do not shorten, split or strip metadata to fit it.'],
+    'Preserve the complete note, the submitted content and any retained draft, and report the limit. Ask how to proceed. Do not shorten, split, strip metadata or create a separate note to bypass the limit.'],
   [['DIRECT_NOTE_REQUEST_CHANGED', 'DIRECT_NOTE_CONTENT_REQUIRED', 'DIRECT_NOTE_RUN_REQUIRED'],
     'This request identity was used before with different arguments, or needs its original arguments and run.',
     'Reuse a requestId only with identical arguments. Inspect the retained draft or outcome with cuefluent_review_note and the original projectId and runId; to revise a pending draft, relay the user\'s Discard with cuefluent_skip_note and the reviewed revision first, then submit the revision with a fresh UUID.'],

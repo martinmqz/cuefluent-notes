@@ -19,9 +19,11 @@ Example: "Use Cuefluent to save the meeting details above as a note."
    mode. Ask when the destination is ambiguous. If nothing is configured, see Setup.
 2. Honor an explicit target. Otherwise call `cuefluent_list_notes` to find a
    suitable existing note, then read it with `cuefluent_read_note`: a note within
-   64 KiB arrives whole with its hash; a larger one arrives in ranges, so follow
-   `next` with that hash as `expectedHash`. Updates support up to 64 KiB outside
-   the metadata block and 128 KiB total; report larger originals unchanged.
+   64 KiB arrives whole with its hash when it fits one result; otherwise it
+   arrives in ranges. Follow `next` with that hash as `expectedHash`. Updates
+   support up to 128 KiB outside the metadata block and 192 KiB total; report larger originals unchanged.
+   A size refusal does not authorize shortening, splitting or creating another
+   note instead of updating the matching note. Ask the user how to proceed.
 3. Compose the complete Markdown: a topic H1, useful H2 sections, only what the user
    asked to save, no invented facts, sources or identifiers, and no Cuefluent
    metadata block. Follow [note authoring](references/notes.md#content-and-evidence):

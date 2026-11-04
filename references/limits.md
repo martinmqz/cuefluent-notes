@@ -207,7 +207,7 @@ across its library, so per-file validation cannot guarantee admission into a ful
 library; annual logs count toward them and appear in app search. Review pages are
 48 KiB of serialized JSON, sized for the output a host passes to its model from one
 tool result (Claude Code's default is 25,000 tokens). Direct submissions are
-64 KiB of content and 128 KiB of complete draft; a whole read fits one 128 KiB
+128 KiB of content and 192 KiB of complete draft; a whole read fits one 128 KiB
 result and ranges are 8 KiB.
 
 ## What is verified

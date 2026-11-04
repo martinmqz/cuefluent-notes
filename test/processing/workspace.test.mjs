@@ -289,3 +289,17 @@ test('note workspaces apply the project format to new notes and useful updates',
     assert.deepEqual(await fs.readFile(path.join(f.root, 'existing.md')), original);
   }
 });
+
+test('larger direct submission allowances leave default queued drafting and other workspace bounds intact', async t => {
+  const f = await fixture(t), request = { target: 'large.md', content: body + 'Useful synthetic paragraph.\n'.repeat(5000), summary: 'Keep the complete note' };
+  assert.ok(Buffer.byteLength(JSON.stringify(request)) > 128 * 1024);
+  const queued = await f.open();
+  await assert.rejects(queued.draft_note(request), { code: 'WORKSPACE_DRAFT_LIMIT' });
+  await queued.finish_drafting({ outcome: 'nothing-useful' }); assert.deepEqual((await queued.manifest()).drafts, []);
+  const direct = await f.open({ limits: { draftBytes: 1024 * 1024 } });
+  await direct.draft_note(request); assert.ok((await finish(direct)).drafts[0].bytes.toString().endsWith(request.content));
+  for (const limits of [{ draftBytes: 1024 * 1024 + 1 }, { contextBytes: 64 * 1024 + 1 }, { readBytes: 8193 }]) {
+    await assert.rejects(f.open({ limits }), { code: 'WORKSPACE_ARGUMENT' });
+  }
+  assert.deepEqual(await fs.readdir(f.root), []);
+});

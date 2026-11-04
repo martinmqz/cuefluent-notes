@@ -65,7 +65,9 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
   if (readActivityLog !== null && typeof readActivityLog !== 'function') fail('WORKSPACE_CONTEXT_INVALID', 'The activity-log reader must be a trusted capability.');
   object(inputLimits, Object.keys(WORKSPACE_LIMITS));
   const limits = { ...WORKSPACE_LIMITS };
-  for (const [key, value] of Object.entries(inputLimits)) limits[key] = integer(value, 1, limits[key]);
+  // A trusted direct-note caller can allow its larger serialized submission;
+  // queued work retains the defaults, and all other limits can only be lowered.
+  for (const [key, value] of Object.entries(inputLimits)) limits[key] = integer(value, 1, key === 'draftBytes' ? 1024 * 1024 : limits[key]);
   const root = project.destination.kind === 'file' ? path.dirname(project.destination.path) : project.destination.path;
   const pin = await pinDirectory(root), originals = new Map(), drafts = new Map(), spellings = new Map();
   // One terminal receipt remains available even after ordinary context is full.

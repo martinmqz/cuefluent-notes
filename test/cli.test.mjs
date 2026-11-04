@@ -452,15 +452,16 @@ test('both CLI MCP entrypoints save supplied context and return completion witho
     await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
       destination: { kind: 'directory', path: f.notes }, saving: 'auto' } }));
     assert.equal((await f.run(['setup', '--config', configPath])).code, 0);
-    // Escaping makes this valid note request larger than the former 64 KiB frame.
-    const content = '# Selected context\n\n## Details\n' + 'Use "the chosen detail".\n'.repeat(2600);
+    // A large escaped body crosses the old content and internal submission caps.
+    const content = '# Selected context\n\n## Details\n' + 'Use "the chosen detail".\n'.repeat(5100);
     const frames = [
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } } },
       { jsonrpc: '2.0', method: 'notifications/initialized' },
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'cuefluent_create_note', arguments: {
         projectId: 'demo', requestId: 'b37a7cde-a8a3-4b04-9d45-e288a67a8af2', target: 'context.md', content, summary: 'The requested details.' } } },
     ];
-    assert.ok(Buffer.byteLength(JSON.stringify(frames[2])) > 64 * 1024);
+    assert.ok(Buffer.byteLength(content) > 64 * 1024 && Buffer.byteLength(content) <= 128 * 1024);
+    assert.ok(Buffer.byteLength(JSON.stringify(frames[2])) > 128 * 1024);
     const result = await f.run(['mcp', client], frames.map(frame => JSON.stringify(frame)).join('\n') + '\n');
     assert.equal(result.code, 0, result.stderr);
     const reply = result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(item => item.id === 2);
