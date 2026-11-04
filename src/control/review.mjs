@@ -107,12 +107,13 @@ export async function reviewRun(store, { projectId, runId, draft: first = 0, sta
     drafts: for (let index = first; index < run.drafts.length; index++) {
       const draft = run.drafts[index];
       const bytes = await readPrivateDraft(store, context.directory, run, draft), metadata = inspectMetadata(bytes);
+      if (metadata.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be hidden in a review.');
       const sources = metadata.status === 'supported' ? metadata.value.sources ?? [] : [];
-      const parts = [{ part: 'content', content: Buffer.from(reviewNoteContent(bytes), 'utf8') }];
-      if (sources.length) parts.push({ part: 'sources', content: Buffer.from(serializeSources(sources), 'utf8') });
+      const parts = ['content', ...(sources.length ? ['sources'] : [])];
       const firstPiece = index === first && firstPart === 'sources' ? 1 : 0;
       if (firstPiece >= parts.length) invalid('This draft has no source metadata to review.');
-      for (const { part, content } of parts.slice(firstPiece)) {
+      for (const part of parts.slice(firstPiece)) {
+        const content = Buffer.from(part === 'sources' ? serializeSources(sources) : reviewNoteContent(bytes, metadata), 'utf8');
         if ((offset && offset >= content.length) || continuation(content, offset)) invalid('The requested preview offset is not a UTF-8 boundary inside this draft part.');
         const cursor = start => ({ draft: index, start, ...(part === 'sources' ? { part } : {}) });
         const whole = pageEntry(run, draft, index, content, offset, content.length, part), wholeSize = serialized(whole) + 1;

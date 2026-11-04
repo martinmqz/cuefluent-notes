@@ -20,7 +20,8 @@ Example: "Use Cuefluent to save the meeting details above as a note."
 2. Honor an explicit target. Otherwise call `cuefluent_list_notes` to find a
    suitable existing note, then read it with `cuefluent_read_note`: a note within
    64 KiB arrives whole with its hash when it fits one result; otherwise it
-   arrives in ranges. Follow `next` with that hash as `expectedHash`. Updates
+   arrives in UTF-8 ranges of up to 64 KiB, reduced when needed to fit one result.
+   Follow `next` with that hash as `expectedHash`. Updates
    support up to 128 KiB outside the metadata block and 192 KiB total; report larger originals unchanged.
    A size refusal does not authorize shortening, splitting or creating another
    note instead of updating the matching note. Ask the user how to proceed.
