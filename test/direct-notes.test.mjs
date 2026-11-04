@@ -366,7 +366,8 @@ test('a note within the cap is read whole with its hash; an update needs only th
   const large = `${content}\n${'Preserve this paragraph.\n'.repeat(6000)}`; await fs.writeFile(target, large);
   assert.ok(Buffer.byteLength(large) > DIRECT_NOTE_BYTES);
   const partial = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
-  assert.equal(partial.end, DIRECT_READ_RANGE_BYTES); assert.equal(partial.next, DIRECT_READ_RANGE_BYTES); assert.equal(partial.totalBytes, Buffer.byteLength(large));
+  assert.ok(partial.end > WORKSPACE_LIMITS.readBytes && partial.end <= DIRECT_READ_RANGE_BYTES); assert.equal(partial.next, partial.end);
+  assert.ok(Buffer.byteLength(JSON.stringify(partial)) <= DIRECT_READ_BYTES); assert.equal(partial.totalBytes, Buffer.byteLength(large));
   await assert.rejects(f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: partial.hash, content }), { code: 'DIRECT_NOTE_UPDATE_LIMIT' });
   assert.equal(await fs.readFile(target, 'utf8'), large);
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
@@ -400,18 +401,24 @@ for (const saving of ['auto', 'review']) {
 test('whole reads keep their response bound and fall back to ranges for larger or heavily escaped notes', async t => {
   const f = await fixture(t, { saving: 'auto' }), target = path.join(f.notes, 'bound.md');
   const prefix = '# Boundary\n\n## Content\n', line = '界'.repeat(50) + '\n';
-  const wholeBytes = DIRECT_READ_RANGE_BYTES;
+  const wholeBytes = DIRECT_READ_BYTES - 1024;
   let body = prefix + line.repeat(Math.floor((wholeBytes - Buffer.byteLength(prefix)) / Buffer.byteLength(line)));
   body += 'x'.repeat(wholeBytes - Buffer.byteLength(body));
   assert.equal(Buffer.byteLength(body), wholeBytes); await fs.writeFile(target, body);
-  const exact = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
+  let exact = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
   assert.equal(exact.next, null); assert.equal(exact.content, body); assert.equal(exact.end, wholeBytes);
+  body += 'x'.repeat(DIRECT_READ_BYTES - Buffer.byteLength(JSON.stringify(exact)));
+  await fs.writeFile(target, body);
+  exact = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
+  assert.equal(exact.next, null); assert.equal(exact.content, body);
+  assert.equal(Buffer.byteLength(JSON.stringify(exact)), DIRECT_READ_BYTES);
   await fs.writeFile(target, body + 'y');
   const over = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
-  assert.equal(over.end, wholeBytes); assert.equal(over.next, wholeBytes); assert.equal(over.totalBytes, wholeBytes + 1);
+  assert.ok(over.end > 0 && over.end < Buffer.byteLength(body) + 1); assert.equal(over.next, over.end);
+  assert.equal(over.totalBytes, Buffer.byteLength(body) + 1); assert.ok(Buffer.byteLength(JSON.stringify(over)) <= DIRECT_READ_BYTES);
   // Heavy JSON escaping: each control byte serializes as six bytes, so 24 KiB of them exceeds one result.
   const escaped = '# Escapes\n\n## Content\n' + '\u0001'.repeat(24 * 1024);
-  assert.ok(Buffer.byteLength(escaped) <= wholeBytes && Buffer.byteLength(JSON.stringify(escaped)) > DIRECT_READ_BYTES);
+  assert.ok(Buffer.byteLength(escaped) <= DIRECT_READ_RANGE_BYTES && Buffer.byteLength(JSON.stringify(escaped)) > DIRECT_READ_BYTES);
   await fs.writeFile(target, escaped);
   const ranged = await f.tools.call('cuefluent_read_note', { projectId: 'demo', target });
   assert.ok(ranged.end > 0 && ranged.end < Buffer.byteLength(escaped)); assert.equal(ranged.next, ranged.end);
@@ -429,8 +436,8 @@ test('whole reads keep their response bound and fall back to ranges for larger o
   // A near-limit projection returned whole crosses the real protocol frame: the
   // result passes the control response bound, and the frame carrying the escaped text
   // next to the structured content stays within half of the request frame bound.
-  const dense = '# Dense\n\n## Content\n' + '\\"'.repeat(32 * 1024 - 168); await fs.writeFile(target, dense);
-  assert.ok(Buffer.byteLength(dense) <= wholeBytes && Buffer.byteLength(JSON.stringify(dense)) > DIRECT_READ_BYTES - 1024 && Buffer.byteLength(JSON.stringify(dense)) < DIRECT_READ_BYTES - 256);
+  const dense = '# Dense\n\n## Content\n' + '\\"'.repeat(DIRECT_READ_BYTES / 4 - 168); await fs.writeFile(target, dense);
+  assert.ok(Buffer.byteLength(dense) <= DIRECT_READ_RANGE_BYTES && Buffer.byteLength(JSON.stringify(dense)) > DIRECT_READ_BYTES - 1024 && Buffer.byteLength(JSON.stringify(dense)) < DIRECT_READ_BYTES - 256);
   const native = await nativeTools(f);
   const response = await native.protocol({ jsonrpc: '2.0', id: 90, method: 'tools/call', params: { name: 'cuefluent_read_note', arguments: { projectId: 'demo', target } } });
   assert.equal(response.result.isError, false); assert.equal(response.result.structuredContent.next, null);
@@ -703,7 +710,14 @@ test('both MCP hosts preserve metadata edge cases through update review and exac
     assert.equal(before.status, 'supported'); assert.ok(original.length <= DIRECT_READ_RANGE_BYTES);
     await fs.writeFile(target, original);
     const read = await native.call('cuefluent_read_note', { projectId: 'demo', target });
-    assert.equal(read.state, 'read'); assert.equal(read.next, null); assert.equal(read.hash, hashBytes(original));
+    assert.equal(read.state, 'read'); assert.equal(read.hash, hashBytes(original));
+    let page = read, assembled = read.content;
+    for (let count = 1; page.next !== null && count < 64; count++) {
+      const start = page.next;
+      page = await native.call('cuefluent_read_note', { projectId: 'demo', target, start, expectedHash: read.hash });
+      assert.ok(page.end > start); assembled += page.content;
+    }
+    assert.equal(page.next, null); assert.equal(assembled, original.toString());
     const changed = content.replace('small', 'focused');
     const preview = await native.call('cuefluent_update_note', { ...f.request, target, expectedHash: read.hash, content: changed });
     assert.equal(preview.state, 'review'); assert.equal(preview.drafts[0].content, changed);
@@ -772,7 +786,7 @@ for (const saving of ['auto', 'review']) {
       assert.ok(Buffer.byteLength(JSON.stringify(read)) <= DIRECT_READ_BYTES); readContent += read.content;
     }
     assert.equal(read.next, null, 'Reads must reach a final range');
-    assert.ok(readPages <= 4, 'A complete large-note read needs at most four bounded calls');
+    assert.ok(readPages <= 6, 'A complete large-note read needs at most six bounded calls');
     assert.equal(readContent, original.toString());
     const updated = body.replace('small', 'brief');
     const update = { ...request, requestId: randomUUID(), content: updated, expectedHash };
@@ -847,7 +861,8 @@ test('direct ranges respect UTF-8 boundaries, requested sizes and exact original
   const f = await fixture(t), native = await nativeTools(f), target = path.join(f.notes, 'ranges.md');
   const body = '界'.repeat(DIRECT_NOTE_BYTES / 2); await fs.writeFile(target, body);
   const first = await native.call('cuefluent_read_note', { projectId: 'demo', target });
-  assert.equal(first.end, DIRECT_READ_RANGE_BYTES - 1); assert.equal(first.content, '界'.repeat(first.end / 3));
+  assert.ok(first.end > WORKSPACE_LIMITS.readBytes && first.end <= DIRECT_READ_RANGE_BYTES); assert.equal(first.end % 3, 0);
+  assert.ok(Buffer.byteLength(JSON.stringify(first)) <= DIRECT_READ_BYTES); assert.equal(first.content, '界'.repeat(first.end / 3));
   assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, start: 1, expectedHash: first.hash })).error, 'WORKSPACE_RANGE_INVALID');
   assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: 1 })).error, 'WORKSPACE_RANGE_INVALID');
   assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, maxBytes: DIRECT_READ_RANGE_BYTES + 1 })).error, 'DIRECT_NOTE_ARGUMENT');
@@ -859,3 +874,33 @@ test('direct ranges respect UTF-8 boundaries, requested sizes and exact original
   await fs.writeFile(target, body + 'Changed');
   assert.equal((await native.call('cuefluent_read_note', { projectId: 'demo', target, start: first.next, expectedHash: first.hash })).error, 'DIRECT_NOTE_CONFLICT');
 });
+
+
+for (const client of ['claude', 'codex']) {
+  test(`${client} read results fit the review-page budget for small and large escape-heavy notes`, async t => {
+    const f = await fixture(t, { client }), native = await nativeTools(f, { client });
+    const line = '"\\\u0001界\n';
+    for (const repeats of [4000, 12000]) {
+      const body = '# Escaped note\n\n## Content\n' + line.repeat(repeats);
+      const target = path.join(f.notes, `escaped-${repeats}.md`); await fs.writeFile(target, body);
+      assert.equal(Buffer.byteLength(body) <= DIRECT_READ_RANGE_BYTES, repeats === 4000);
+      assert.ok(Buffer.byteLength(JSON.stringify(body)) > REVIEW_PAGE_BYTES);
+      let start = 0, assembled = '', finished = false;
+      for (let page = 0; page < 64; page++) {
+        const response = await native.protocol({ jsonrpc: '2.0', id: 200 + page, method: 'tools/call', params: {
+          name: 'cuefluent_read_note', arguments: { projectId: 'demo', target, ...(page ? { start, expectedHash: hashBytes(body) } : {}) },
+        } });
+        assert.equal(response.result.isError, false);
+        const result = response.result.structuredContent;
+        assert.ok(Buffer.byteLength(JSON.stringify(result)) <= REVIEW_PAGE_BYTES, 'Read projection exceeds the shared host-facing page budget');
+        assert.ok(Buffer.byteLength(response.result.content[0].text) <= REVIEW_PAGE_BYTES);
+        assert.deepEqual(JSON.parse(response.result.content[0].text), result);
+        assert.equal(result.hash, hashBytes(body)); assert.equal(result.start, start); assert.ok(result.end > start);
+        assert.ok(result.end - start <= DIRECT_READ_RANGE_BYTES); assembled += result.content;
+        if (result.next === null) { finished = true; break; }
+        assert.equal(result.next, result.end); start = result.next;
+      }
+      assert.ok(finished, 'Read pages must terminate'); assert.equal(assembled, body);
+    }
+  });
+}

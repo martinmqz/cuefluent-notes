@@ -10,7 +10,7 @@ import { NOTE_PROFILE, decodeNote, inspectMetadata, validateDocumentSources, ser
 import { fields, freezeData, CONTROL_LIMITS } from '../client/control-server.mjs';
 import { readRunSnapshot } from './status.mjs';
 import { readPendingSetup } from './setup.mjs';
-import { reviewRun, decideRun, completedOutcome } from './review.mjs';
+import { reviewRun, decideRun, completedOutcome, REVIEW_PAGE_BYTES } from './review.mjs';
 import { persistDraftManifest, recoverDrafts } from '../processing/draft.mjs';
 import { pinProcessingLogging } from '../processing/logging.mjs';
 import { runProcessingWork } from '../processing/worker.mjs';
@@ -20,9 +20,9 @@ export const DIRECT_NOTE_BYTES = 128 * 1024;
 // would exceed the serialized result budget.
 export const DIRECT_READ_RANGE_BYTES = 64 * 1024;
 /** A whole-note read is returned in one result while its serialized projection
- * stays within this bound, well inside the control response limit; larger
- * projections and larger notes are read in bounded ranges. */
-export const DIRECT_READ_BYTES = Math.min(128 * 1024, CONTROL_LIMITS.responseBytes / 2);
+ * fits the same host-facing budget as a review page; larger projections
+ * and larger notes are read in bounded ranges. */
+export const DIRECT_READ_BYTES = Math.min(REVIEW_PAGE_BYTES, CONTROL_LIMITS.responseBytes / 2);
 const DIRECT_DRAFT_BYTES = DIRECT_NOTE_BYTES + NOTE_PROFILE.metadataBytes;
 const UUID = '^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$';
 const schema = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
@@ -46,7 +46,7 @@ export const DIRECT_NOTE_TOOLS = freezeData([
     schema({ cursor: { type: 'integer', minimum: 0, maximum: 1024 } }, []), true),
   definition('cuefluent_list_notes', 'Browse one directory in a configured note destination with bounded pagination. Check for a suitable existing note before creating a duplicate. Listing does not read note contents or authorize replacement. Logs are reserved.',
     schema({ projectId, ...workspaceSchema('list_notes') }, ['projectId']), true),
-  definition('cuefluent_read_note', 'Read an existing note and return its exact whole-file hash. A note within 64 KiB whose serialized projection fits one result comes back whole; otherwise follow UTF-8 ranges of up to 64 KiB, reduced to fit the 128 KiB result bound: follow next with start and pass the returned hash as expectedHash, and a changed note is refused. Does not create private state, enroll a chat, or process a queue.',
+  definition('cuefluent_read_note', 'Read an existing note and return its exact whole-file hash. A note comes back whole when its serialized result fits 48 KiB; otherwise it comes back in bounded UTF-8 ranges. Follow next with start and pass the returned hash as expectedHash; a changed note is refused. Does not create private state, enroll a chat, or process a queue.',
     schema({ projectId, ...workspaceSchema('read_note'), maxBytes: { type: 'integer', minimum: 1, maximum: DIRECT_READ_RANGE_BYTES }, expectedHash }, ['projectId', 'target']), true),
   definition('cuefluent_create_note', `Create one new note from complete Markdown content you prepared for an explicit user request. Check for suitable existing notes first; use cuefluent_read_note and cuefluent_update_note to amend one. Use user-authorized context, supplied material, or task results. No tracked chat or queued input is needed. Supply a fresh UUID requestId for each request and reuse it with identical arguments on retries. ${REVIEW_FLOW} ${SIZE_REFUSAL} The target must be absent. Content must have a topic H1 and useful H2 sections, without Cuefluent metadata.`,
     schema({ projectId, requestId: runId, target, content, summary, sources }, ['projectId', 'requestId', 'target', 'content', 'summary'])),

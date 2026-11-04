@@ -8,9 +8,9 @@ context, supplied material or task results and submits it with
 existing note). Native transcripts, tracking and queued input are not involved.
 
 Use a suitable existing note before creating a new one: `cuefluent_list_notes`
-browses the destination and `cuefluent_read_note` returns a note within 64 KiB
-whole when its serialized projection fits one result. Otherwise it returns UTF-8
-ranges of up to 64 KiB, reduced to fit the result, with its whole-file hash. Read
+browses the destination and `cuefluent_read_note` returns the whole note when its
+serialized result fits 48 KiB. Otherwise it returns bounded UTF-8 ranges with the
+whole-file hash. Read
 the complete current note before proposing its replacement and pass that hash as
 `expectedHash`; a changed original is refused, and an original with more than
 128 KiB outside its metadata block or 192 KiB total is refused unchanged. Each

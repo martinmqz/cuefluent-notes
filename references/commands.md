@@ -6,12 +6,12 @@
 mode. `cuefluent_list_notes(projectId, directory?, cursor?, limit?)` browses one
 directory with bounded pagination; it reads no content and grants no overwrite
 authority. `cuefluent_read_note(projectId, target, start?, maxBytes?, expectedHash?)`
-without `start` and `maxBytes` returns a note within 64 KiB whole, with its
-whole-file `hash`, when its serialized projection fits one 128 KiB result.
-Otherwise it returns UTF-8 ranges of at most 64 KiB, reduced when their serialized
-projection needs more space: follow the returned `next` offset and pass the first
-`hash` as `expectedHash` on every later range, so a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than
-read inconsistently.
+without `start` and `maxBytes` returns the whole note with its whole-file `hash`
+when the serialized result fits 48 KiB. Otherwise it returns bounded UTF-8 ranges.
+`maxBytes` can request up to 64 KiB of note bytes, but every returned result,
+including JSON escaping and its other fields, must fit 48 KiB. Follow the returned
+`next` offset and pass the first `hash` as `expectedHash` on every later range, so
+a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than read inconsistently.
 
 `cuefluent_create_note(projectId, requestId, target, content, summary, sources?)` requires an
 absent target. `cuefluent_update_note` takes the same fields plus the exact
