@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cuefluent_control": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/cli.mjs", "mcp", "claude"]
+    }
+  }
+}
