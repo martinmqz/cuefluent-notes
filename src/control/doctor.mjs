@@ -166,7 +166,9 @@ export async function checkNotes(store, input, { skillVersion, limits: lower = {
   }
   // Both bounds cover what was attempted, not what could be kept: a note that
   // cannot be read counts as a note, bytes that are not UTF-8 count as bytes, and
-  // a note that the remaining bytes cannot hold is not opened.
+  // a note that the remaining bytes cannot hold is not opened. One read escapes
+  // the byte bound: a note that changes while it is read counts as a note, but
+  // what was read of it, at most the bytes that remain, is not counted.
   const notes = []; let bytes = 0, attempts = 0;
   for (const file of targets) {
     if (attempts === limits.notes) { coverage.partial('note-limit'); break; }

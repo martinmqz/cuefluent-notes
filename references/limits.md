@@ -217,14 +217,17 @@ full-content replacement requires reading the whole original; exact edits can
 preserve unread content without resubmitting it. A note stores at most 128
 sources, and a newly supplied source locator is limited to 120 UTF-16 code units;
 see [source metadata](notes.md#source-metadata). A note check reads at most 1,024
-notes and 32 MiB, in at most 512 folders to a depth of 16, and reports anything
-beyond that as partial coverage. A file that cannot be read counts as a note,
-one that turns out not to be UTF-8 counts toward the bytes, and a note larger
-than the bytes that remain is not opened. Its pages share the 48 KiB budget, and
-it lists
-at most 20 items per finding with the remainder counted. Nothing is kept between
-pages: each one reads the notes again, so a long report costs one full read per
-page.
+notes in at most 512 folders to a depth of 16 and covers at most 32 MiB of them;
+anything beyond that is reported as partial coverage. A file that cannot be read
+counts as a note, one that turns out not to be UTF-8 counts toward the bytes, and
+a note larger than the bytes that remain is not opened. The 32 MiB counts notes
+that were read whole, so it is not a ceiling on the bytes read: a note that
+changes while it is read is discarded and makes coverage partial, and what was
+read of it is not counted. The ceiling on bytes read is 10 MiB, one note file,
+for each of the 1,024 notes. A check's pages share the 48 KiB budget, and it
+lists at most 20 items per finding with the remainder counted. Nothing is kept
+between pages: each one reads the notes again, so a long report costs one full
+read per page.
 
 ## What is verified
 
