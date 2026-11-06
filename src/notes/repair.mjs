@@ -90,9 +90,11 @@ function aliasComments(source) {
   return found;
 }
 const aliasValues = text => text.split(',').map(value => inlineText(value).trim());
-/** An alias is selected as the check identifies it: case, accents, width and
- * punctuation folded, so every spelling of it at a section is one alias. */
-const aliasKey = value => normalizedText(inlineText(value).trim());
+/** A stored alias as the check identifies it: its Markdown read as text, then
+ * case, accents, width and punctuation folded, so every spelling of it at a
+ * section is one alias. A requested alias is the text the check reported, so it
+ * is folded as it is and never read as Markdown again. */
+const aliasKey = segment => normalizedText(inlineText(segment).trim());
 
 function planSources(operations, sources) {
   const actions = new Map(); let hashes = false, sessions = false;
@@ -175,7 +177,7 @@ function repairAliases(source, operations) {
     const [, open, text, close] = comment.parts, lead = /^[ \t]*/.exec(text)[0], trail = /[ \t]*$/.exec(text.slice(lead.length))[0];
     let segments = text.slice(lead.length, text.length - trail.length).split(',');
     for (const operation of requested.filter(item => item.line === line)) {
-      const key = aliasKey(operation.alias), matches = segments.map((segment, index) => aliasKey(segment) === key ? index : -1).filter(index => index >= 0);
+      const key = normalizedText(operation.alias), matches = segments.map((segment, index) => aliasKey(segment) === key ? index : -1).filter(index => index >= 0);
       if (!matches.length) inapplicable('The section does not have that alias.');
       if (operation.op === 'replace-alias') {
         // An alias the section already has is removed, not written a second time.

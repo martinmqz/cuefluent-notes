@@ -275,9 +275,9 @@ a free-form header change.
 | `remove-alias` with `line` and `alias` | choice | Removes one alias from that section. A section left without aliases loses its alias comment. |
 
 Indexes and heading lines are those the check reported, and every operation of a
-request refers to the note as it was inspected. An alias is selected as the check
-identifies it, with case, accents, width and punctuation folded, so every spelling
-of it at that section is selected together. A mechanical operation that finds
+request refers to the note as it was inspected. Give an alias as the check reported
+it; it is selected as the check identifies it, with case, accents, width and
+punctuation folded, so every spelling of it at that section is selected together. A mechanical operation that finds
 nothing leaves the note `unchanged`, which is how a repaired note answers the same
 request again. An operation that names a source or an alias the note does not have
 is refused. A session source with a reference text, a descriptive field and an

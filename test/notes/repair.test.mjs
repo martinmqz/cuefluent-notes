@@ -108,6 +108,16 @@ test('an alias is selected as the check identifies it, so every spelling of it a
   assert.deepEqual(describeRepair(note, removed).aliases, [{ line: 7, before: ['ALPHA', 'Álpha', 'gamma'], after: ['gamma'] }]);
 });
 
+test('an alias is selected by the text the check reported, which is not parsed as Markdown a second time', () => {
+  const text = '# Topic\n\n## First\n<!-- aliases: \\[issue\\](tracker), [issue](tracker), R&amp;amp;D -->\nOne.\n';
+  const note = Buffer.from(text), reported = inspectNoteHealth(note).aliases.map(item => item.alias);
+  assert.deepEqual(reported, ['[issue](tracker)', 'issue', 'R&amp;D']);
+  assert.equal(constructRepair(note, [{ op: 'remove-alias', line: 3, alias: '[issue](tracker)' }]).bytes.toString(), text.replace('\\[issue\\](tracker), ', ''));
+  assert.equal(constructRepair(note, [{ op: 'remove-alias', line: 3, alias: 'issue' }]).bytes.toString(), text.replace(', [issue](tracker)', ''));
+  assert.equal(constructRepair(note, [{ op: 'remove-alias', line: 3, alias: 'R&amp;D' }]).bytes.toString(), text.replace(', R&amp;amp;D', ''));
+  refused('REPAIR_OPERATION_INVALID', () => constructRepair(note, [{ op: 'remove-alias', line: 3, alias: 'R&D' }]));
+});
+
 test('a note with carriage-return line endings takes an alias repair and keeps every ending', () => {
   for (const newline of ['\r', '\r\n', '\n']) {
     const note = handwritten(`schema_version: 1\nid: ${id}`, body, newline), expected = body.replace('<!-- aliases: alpha, beta , gamma -->', '<!-- aliases: alpha, gamma -->').replace(/\n/g, newline);
