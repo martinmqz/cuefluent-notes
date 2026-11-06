@@ -1,6 +1,6 @@
 ---
 name: cuefluent-notes
-description: Create or update Markdown notes from content the assistant prepares using user-authorized context, check existing notes for metadata and alias findings, or track Claude Code and Codex chats for later explicit processing. Use when the user asks Cuefluent to save supplied material, conversation details, or task results as a note, update an existing note, check notes, or manage tracked conversation.
+description: Create or update Markdown notes from content the assistant prepares using user-authorized context, check existing notes for metadata and alias findings and repair the selected ones, or track Claude Code and Codex chats for later explicit processing. Use when the user asks Cuefluent to save supplied material, conversation details, or task results as a note, update an existing note, check or repair notes, or manage tracked conversation.
 user-invocable: true
 argument-hint: "describe the note to create or update, or track | untrack | process | process project | save | skip | status"
 ---
@@ -89,6 +89,32 @@ A finding describes a note, not a defect: a shared alias or an older field may b
 intended, and partial coverage is never a whole-project count. Resolve a finding
 only when the user asks, and a `content-update` finding only through an ordinary
 note update.
+
+## Repair note metadata
+
+Examples: "Preview the selected metadata repairs without saving" and "Apply these
+previewed metadata repairs."
+
+A repair changes a note's header and its alias comments, never its visible content.
+Check first, then call `cuefluent_preview_repair` with the `projectId` and
+`repairs`: each selected note with its typed operations, using the source indexes
+and heading lines the check reported. A preview is read-only. Follow `next` with
+`cursor` until it is null and show the complete change list: every selected note
+as change, unchanged, refused or deferred, with the values before and after each
+change. A summary does not replace it. Mechanical removals may be grouped;
+removing a descriptive field, a source or an alias is a choice, so select only what
+the user decided.
+
+Apply a batch only when the user asks for exactly those repairs: call
+`cuefluent_repair_notes` with the preview's `proposal`, the same `repairs` and a
+fresh `requestId`. A check, a preview or an earlier approval authorizes nothing.
+The project's saving mode applies. Review mode returns the change list for the
+Save, Discard or Keep pending decision. Automatic mode saves at once, so say
+before applying that no later confirmation follows. One call is one batch: settle
+it before previewing the notes it deferred. Repaired notes keep their timestamps,
+and no activity is logged. [Repairing metadata](references/notes.md#repairing-metadata)
+lists the operations, the refusals and the bounds. Hidden comments are not
+repaired this way; they change through an ordinary note update.
 
 ## Tracked chats
 

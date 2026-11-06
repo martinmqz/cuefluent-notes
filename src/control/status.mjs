@@ -1,5 +1,5 @@
 import { fail } from '../core/errors.mjs';
-import { validateRun, everyNoteSaved } from '../core/run.mjs';
+import { validateRun, everyNoteSaved, runKind, isRepairRun } from '../core/run.mjs';
 import { validateResult } from '../core/result.mjs';
 import { withProject, gateOptions } from '../storage/store.mjs';
 import { probeGate } from '../storage/gates.mjs';
@@ -72,7 +72,7 @@ export async function readProjectStatus(store, projectId, { chat = null, invento
     settings: snapshot.settings, counts: Object.freeze(counts), warnings: Object.freeze(warnings), latest: snapshot.latest,
     // The revision a decision cites comes only from the review pages that show
     // the drafts, never from status.
-    run: run ? Object.freeze({ id: run.id, scope: run.scope, kind: run.scope.kind, phase: run.phase, active: snapshot.active,
+    run: run ? Object.freeze({ id: run.id, scope: run.scope, kind: runKind(run), phase: run.phase, active: snapshot.active,
       selected: run.selection.length, saved: run.saved.length,
       drafts: Object.freeze(run.drafts.map(item => Object.freeze({ target: item.target, summary: item.summary, heading: item.heading }))),
       savedPaths: Object.freeze(run.saved.map(item => item.target)), warnings: run.warnings,
@@ -92,7 +92,7 @@ const RECOVERY = Object.freeze({
   queued: kind => `Drafting stopped before the draft set was published. ${resume(kind)} to resume it with the same frozen input, or show it with cuefluent_review_note and relay Skip; keep input.`,
   saving: kind => `Saving stopped before every note was written; savedPaths lists the notes already saved. ${resume(kind)} for automatic saving, or relay Save with the reviewed revision, to finish it.`,
   directSaving: 'Saving stopped before every note was written; savedPaths lists the notes already saved. Relay Save with the reviewed revision through cuefluent_save_note to finish it.',
-  conflicted: direct => `A note changed after it was reviewed, so saving it again is refused; savedPaths lists the notes already saved. Relay ${direct ? 'Discard' : 'Skip draft; keep input'} to release the run, then read the current note and submit a fresh draft. Save succeeds only once the note is back to its reviewed original.`,
+  conflicted: (direct, repair) => `A note changed after it was reviewed, so saving it again is refused; savedPaths lists the notes already saved. Relay ${direct ? 'Discard' : 'Skip draft; keep input'} to release the run, then ${repair ? 'check the note and preview the repair again' : 'read the current note and submit a fresh draft'}. Save succeeds only once the note is back to its reviewed original.`,
   cleanup: 'Every note is saved and only cleanup remains. Show the run with cuefluent_review_note and relay Finish.',
 });
 function runRecovery(run, active) {
@@ -104,7 +104,7 @@ function runRecovery(run, active) {
     // A worker can stop after the last durable saved receipt and before the
     // cleanup transition; the review page then offers Finish, and so does status.
     if (everyNoteSaved(run)) return RECOVERY.cleanup;
-    if (run.warnings.some(warning => CONFLICT_WARNINGS.includes(warning))) return RECOVERY.conflicted(direct);
+    if (run.warnings.some(warning => CONFLICT_WARNINGS.includes(warning))) return RECOVERY.conflicted(direct, isRepairRun(run));
     return direct ? RECOVERY.directSaving : RECOVERY.saving(kind);
   }
   return RECOVERY.cleanup;

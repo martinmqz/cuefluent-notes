@@ -99,7 +99,7 @@ function sourceAdditions(existing, supplied) {
   for (const source of supplied) {
     const identity = sourceIdentity(source);
     if (identities.has(identity)) continue;
-    if (existing.length + additions.length === P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'The note source limit is reached. Preserve the existing note and supplied sources; do not prune provenance or split the note to fit.');
+    if (existing.length + additions.length === P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'The note source limit is reached. Preserve the existing note and supplied sources: a save never prunes provenance or splits the note to fit. Only a metadata repair the user asks for can consolidate or remove selected sources.');
     identities.add(identity); additions.push(source);
   }
   return additions;
@@ -308,6 +308,9 @@ function quoteSourceStrings(node) {
   return node;
 }
 
+/** The one YAML formatter. `any` keeps each collection in its own style. */
+const payloadText = (document, collectionStyle) => document.toString({ lineWidth: 0, collectionStyle, flowCollectionPadding: false, doubleQuotedAsJSON: true });
+
 function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOverflow = false, sourceUpdate = false) {
   requireValue(typeof expandedMetadata === 'boolean');
   const expected = validateMetadata(document.toJS({ maxAliasCount: 0 }), sourceUpdate ? 'NOTE_SOURCE_LIMIT' : 'NOTE_METADATA_INVALID'), candidate = document.clone();
@@ -318,17 +321,41 @@ function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOve
     if (typeof node.value === 'string' && /[\r\n]/.test(node.value)) node.type = Scalar.QUOTE_DOUBLE;
   } });
   const serialize = (value, collectionStyle) => {
-    const payload = value.toString({ lineWidth: 0, collectionStyle, flowCollectionPadding: false, doubleQuotedAsJSON: true });
-    return `<!-- cuefluent\n${payload}-->\n`.replace(/\n/g, newline);
+    return `<!-- cuefluent\n${payloadText(value, collectionStyle)}-->\n`.replace(/\n/g, newline);
   };
   let raw = serialize(candidate, expandedMetadata ? 'block' : 'flow');
   // Escaping or indentation can exceed the fixed metadata limit in either
   // format. A formatting preference must not prevent an otherwise valid edit.
   if (preserveLayoutOnOverflow && Buffer.byteLength(raw) > P.metadataBytes) raw = serialize(document, 'any');
-  if (sourceUpdate && Buffer.byteLength(raw) > P.metadataBytes) fail('NOTE_SOURCE_LIMIT', 'The resulting source metadata exceeds its byte limit. Preserve the note and supplied sources; do not truncate metadata to fit.');
+  if (sourceUpdate && Buffer.byteLength(raw) > P.metadataBytes) fail('NOTE_SOURCE_LIMIT', 'The resulting source metadata exceeds its byte limit. Preserve the note and supplied sources: a save never truncates metadata to fit. Only a metadata repair the user asks for can consolidate or remove selected sources.');
   const rendered = inspectMetadata(raw);
   requireValue(rendered.status === 'supported' && isDeepStrictEqual(rendered.value, expected));
   return raw;
+}
+
+const wrapper = /^( {0,3}<!-- cuefluent[ \t]*(?:\r\n|\r|\n))([\s\S]*?)((?:\r\n|\r|\n) {0,3}-->[ \t]*(?:\r\n|\r|\n)?)$/;
+function yamlComments(document) {
+  const found = [], note = node => { for (const key of ['commentBefore', 'comment']) if (typeof node?.[key] === 'string') found.push(node[key]); };
+  note(document); visitYaml(document, { Node(_key, node) { note(node); } });
+  return found.sort();
+}
+/** Rewrite a supported header after `edit` removed or replaced nodes of its
+ * parsed document. The wrapper lines, key order, each collection's own style and
+ * the style of every untouched scalar stay as they are; the project's formatting
+ * preference plays no part. `edit` receives the document and a factory for a
+ * source node, and returns the value the header must then hold. A result that
+ * does not read back as exactly that value, loses a YAML comment or outgrows the
+ * header limit is refused instead of being written in another layout. */
+export function editMetadata(raw, edit) {
+  const parts = wrapper.exec(raw); requireValue(parts);
+  const { document } = parseYaml(parts[2]), comments = yamlComments(document);
+  const expected = validateMetadata(edit(document, descriptor => quoteSourceStrings(document.createNode(descriptor))));
+  const refuse = () => fail('NOTE_REPAIR_LAYOUT', 'The header cannot hold this repair in its existing layout. Preserve the note unchanged.');
+  if (!isDeepStrictEqual(yamlComments(document), comments)) refuse();
+  const payload = payloadText(document, 'any').replace(/\n$/, '');
+  const next = parts[1] + payload.replace(/\n/g, noteNewline(raw)) + parts[3], rendered = inspectMetadata(next);
+  if (Buffer.byteLength(next) > P.metadataBytes || rendered.status !== 'supported' || rendered.raw !== next || !isDeepStrictEqual(rendered.value, expected)) refuse();
+  return next;
 }
 
 /** Existing metadata owns identity/descriptions. Agent-supplied replacements do

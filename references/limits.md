@@ -227,7 +227,10 @@ read of it is not counted. The ceiling on bytes read is 10 MiB, one note file,
 for each of the 1,024 notes. A check's pages share the 48 KiB budget, and it
 lists at most 20 items per finding with the remainder counted. Nothing is kept
 between pages: each one reads the notes again, so a long report costs one full
-read per page.
+read per page. A repair request selects at most 128 notes, each with at most 256
+operations, and forms one batch of at most 64 changed notes within the 64 MiB a
+run keeps privately; the notes after a full batch are deferred. A repair
+preview's pages share the 48 KiB budget, and each page builds the batch again.
 
 ## What is verified
 

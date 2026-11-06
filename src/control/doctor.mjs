@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
+import { runKind } from '../core/run.mjs';
 import { CHECK_CURSOR_PATTERN } from '../core/entry-contract.mjs';
 import { hashBytes } from '../storage/files.mjs';
 import { readSettings, withProject } from '../storage/store.mjs';
@@ -114,7 +115,7 @@ async function readNote(workspace, { file, target = file, requested = false, max
 async function runState(store, projectId) {
   try {
     const { run, active } = await withProject(store, projectId, context => readRunSnapshot(store, context));
-    return run ? { state: 'pending', kind: run.scope.kind, phase: run.phase, active } : { state: 'none' };
+    return run ? { state: 'pending', kind: runKind(run), phase: run.phase, active } : { state: 'none' };
   } catch (error) {
     if (typeof error?.code !== 'string' || !/^[A-Z][A-Z0-9_]{0,79}$/.test(error.code)) throw error;
     return error.code === 'GATE_BUSY' ? { state: 'busy' } : { state: 'unavailable', reason: error.code };

@@ -103,13 +103,22 @@ function selectionRecords(input, scope) {
 export function validateRunScope(input) {
   if (input?.kind === 'project') { record(input, ['kind'], 'scope'); return Object.freeze({ kind: 'project' }); }
   if (input?.kind === 'direct') {
-    record(input, ['kind', 'requestHash'], 'scope');
-    return Object.freeze({ kind: 'direct', requestHash: hash(input.requestHash, 'scope.requestHash') });
+    // A metadata repair is a direct run that names the proposal it applies. Only
+    // the repair tool builds such a scope; an ordinary note request has none.
+    const repair = Object.hasOwn(input, 'repair');
+    record(input, repair ? ['kind', 'requestHash', 'repair'] : ['kind', 'requestHash'], 'scope');
+    return Object.freeze({ kind: 'direct', requestHash: hash(input.requestHash, 'scope.requestHash'), ...(repair ? { repair: hash(input.repair, 'scope.repair') } : {}) });
   }
   record(input, ['kind', 'client', 'sessionId'], 'scope');
   if (input.kind !== 'chat' || !['claude', 'codex'].includes(input.client)) invalid('Run scope must select a project or a native chat');
   return Object.freeze({ kind: 'chat', client: input.client, sessionId: token(input.sessionId, 'scope.sessionId') });
 }
+
+/** A metadata repair changes headers and alias comments only. It is maintenance,
+ * not activity: its saved notes keep their timestamps and get no log entry. */
+export const isRepairRun = run => run.scope.kind === 'direct' && run.scope.repair !== undefined;
+/** How a run is named to its user: a repair is told apart from a note request. */
+export const runKind = run => isRepairRun(run) ? 'repair' : run.scope.kind;
 
 function draftDescriptors(input, project, platform) {
   const paths = pathsFor(platform), seenIds = new Set(), seenTargets = new Set();
@@ -161,7 +170,7 @@ function loggingBinding(input, project, platform) {
   return Object.freeze({ ...binding, seriesId, timezone: input.timezone });
 }
 
-function publicationState(input, { id, phase, drafts, saved, settings, platform }) {
+function publicationState(input, { id, phase, drafts, saved, settings, platform, repair }) {
   if (input === null) return null;
   record(input, ['note', 'event'], 'publication');
   const note = validateNotePublication(input.note, { platform }), paths = pathsFor(platform);
@@ -171,7 +180,7 @@ function publicationState(input, { id, phase, drafts, saved, settings, platform 
       note.hash !== draft.hash || note.bytes !== draft.byteLength || note.root !== draft.binding.root ||
       draft.binding.parent.some((item, index) => JSON.stringify(item) !== JSON.stringify(note.parent[index]))) invalid('Publication must match the exact unsaved draft and its original root binding');
   const event = input.event === null ? null : eventDescriptor(input.event);
-  if (event && (!settings.activityLog.enabled || draft.hash === draft.expectedHash)) invalid('Only an opted-in changed note has a pending log event');
+  if (event && (repair || !settings.activityLog.enabled || draft.hash === draft.expectedHash)) invalid('Only an opted-in changed note outside a metadata repair has a pending log event');
   return Object.freeze({ note, event });
 }
 
@@ -206,7 +215,8 @@ export function validateRun(input, { platform } = {}) {
   const warnings = Object.freeze(array(input.warnings, RUN_LIMITS.warnings, 'warnings').map(item => line(item, RUN_LIMITS.summaryLength, 'warning')));
   const cleanup = cleanupState(input.cleanup, id, input.phase, selection);
   const logging = loggingBinding(input.logging, project, platform);
-  const publication = publicationState(input.publication, { id, phase: input.phase, drafts, saved, settings: project, platform });
+  const repair = isRepairRun({ scope });
+  const publication = publicationState(input.publication, { id, phase: input.phase, drafts, saved, settings: project, platform, repair });
   const seenEvents = new Set(), eventDrafts = new Set();
   const logEvents = Object.freeze(array(input.logEvents, RUN_LIMITS.drafts, 'logEvents').map(item => {
     record(item, ['draftId', 'id', 'savedAt', 'confirmed', 'failure'], 'saved log event');
@@ -226,6 +236,7 @@ export function validateRun(input, { platform } = {}) {
         note.root !== logging.root || !/^logs\/[1-9][0-9]{3}\.md$/.test(note.relative) || JSON.stringify(note.parent) !== JSON.stringify(logging.parent)) invalid('A log publication must match this run\'s pinned annual series and unconfirmed saved event');
     logPublication = Object.freeze({ eventId, note });
   }
+  if (repair && (logging || logEvents.length || logPublication)) invalid('A metadata repair pins no log series and records no log event');
   const artifacts = input.artifacts === null ? null : validateDraftArtifactPointer(input.artifacts);
   if (artifacts && (artifacts.runId !== id || artifacts.relative !== `store/projects/${createHash('sha256').update(project.id).digest('hex')}/drafts/${id}`)) invalid('Artifact intent must identify this project and run\'s exact private draft directory');
   return Object.freeze({ schemaVersion: RUN_SCHEMA_VERSION, id, projectId: project.id, settings: project, scope, selection, attempt,
@@ -321,7 +332,7 @@ export function markNoteSaved(run, attemptId, draftId, { changed, event = null, 
   if (typeof changed !== 'boolean' || (draft.expectedHash === draft.hash && changed)) invalid('The saved change outcome must match the draft');
   if (checked.saved.some(item => item.draftId === draftId)) return checked;
   const savedEvent = event ?? checked.publication?.event ?? null;
-  if (changed && checked.settings.activityLog.enabled && !savedEvent) invalid('A changed opted-in note needs its durable original log event');
+  if (changed && checked.settings.activityLog.enabled && !isRepairRun(checked) && !savedEvent) invalid('A changed opted-in note needs its durable original log event');
   const logEvents = savedEvent && changed ? [...checked.logEvents, { draftId, ...eventDescriptor(savedEvent), confirmed: false, failure: null }] : checked.logEvents;
   return validateRun({ ...checked, saved: [...checked.saved, { draftId, target: draft.target, hash: draft.hash, changed }], logEvents,
     publication: checked.publication?.note.draftId === draftId ? null : checked.publication }, options);

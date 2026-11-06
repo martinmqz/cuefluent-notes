@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
-import { setNotePublication, markNoteSaved, completeSaving } from '../core/run.mjs';
+import { setNotePublication, markNoteSaved, completeSaving, isRepairRun } from '../core/run.mjs';
 import { withAttemptWriter } from '../storage/attempts.mjs';
 import { readSnapshot, syncDirectory, hashBytes } from '../storage/files.mjs';
 import { assertChain, pinDirectory, inspectAncestors, fileIdentity, lstatOrNull } from '../storage/paths.mjs';
@@ -69,7 +69,8 @@ export async function saveRunNotes(store, owner, { readDraft = readPrivateDraft,
       if (!run.publication) {
         const note = await prepareNotePublication(pin, relative, bytes, { runId: run.id, draftId: draft.id,
           expectedHash: draft.expectedHash, hash: draft.hash, expectedParentChain: parent });
-        const event = run.settings.activityLog.enabled && draft.expectedHash !== draft.hash ? { id: randomUUID(), savedAt: new Date().toISOString() } : null;
+        // A metadata repair is no activity: it leaves no log event to flush.
+        const event = run.settings.activityLog.enabled && !isRepairRun(run) && draft.expectedHash !== draft.hash ? { id: randomUUID(), savedAt: new Date().toISOString() } : null;
         await persist(setNotePublication(run, owner.attemptId, note, { event }));
       } else if (run.publication.event) {
         const outcome = await inspectPublicationOutcome(pin, run.publication.note);

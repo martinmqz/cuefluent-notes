@@ -29,9 +29,9 @@ const TABLE = [
   [['PROJECT_UNCONFIGURED'],
     'The project is not configured.',
     'Call cuefluent_projects and use the exact projectId of the intended destination. Set up a project only when that destination is not configured.'],
-  [['SETTINGS_CONFLICT', 'EXPECTED_HASH_REQUIRED', 'DIRECT_NOTE_CONFLICT', 'WORKSPACE_NOTE_UNREAD', 'WORKSPACE_LIST_CHANGED', 'NOTE_PUBLICATION_CONFLICT', 'DRAFT_CHANGED', 'PATH_CHANGED'],
-    'The settings, note or directory changed after they were inspected or reviewed, or the inspected hash is missing.',
-    'Read the current state again: cuefluent_projects for settings, cuefluent_read_note for a note, keeping the hash it returns as expectedHash, and reconcile the request with it before retrying. Restart a note check without its cursor. For a reviewed draft set, relay Discard or Skip to release it, then submit a fresh draft; notes already saved stay. Never replace a hash to force an older proposal; creation requires an absent target.'],
+  [['SETTINGS_CONFLICT', 'EXPECTED_HASH_REQUIRED', 'DIRECT_NOTE_CONFLICT', 'WORKSPACE_NOTE_UNREAD', 'WORKSPACE_LIST_CHANGED', 'NOTE_PUBLICATION_CONFLICT', 'DRAFT_CHANGED', 'PATH_CHANGED', 'REPAIR_PROPOSAL_CHANGED', 'REPAIR_TARGET_REFUSED'],
+    'The settings, note or directory changed after they were inspected or reviewed, the inspected hash is missing, or a previewed repair no longer stands.',
+    'Read the current state again: cuefluent_projects for settings, cuefluent_read_note for a note, keeping the hash it returns as expectedHash, and reconcile the request with it before retrying. Restart a note check without its cursor. Preview a metadata repair again, correct or leave out any note it lists as refused, show the new change list and cite the new proposal with a fresh requestId. For a reviewed draft set, relay Discard or Skip to release it, then submit a fresh draft; notes already saved stay. Never replace a hash to force an older proposal; creation requires an absent target.'],
   [['PATH_MISSING', 'PATH_INVALID', 'PATH_UNSAFE'],
     'A path is missing, escapes its destination, or is not a plain file or directory.',
     'Use absolute normalized paths inside the configured destination, or an existing project root for setup, with no parent segments or symbolic links. A read creates nothing, and a missing original never authorizes a replacement; preserve existing files and pending work.'],
@@ -53,7 +53,7 @@ const TABLE = [
   [['ATTEMPT_ACTIVE', 'STORE_SETUP_BUSY'],
     'Another Cuefluent operation is working on this project or store.',
     'Wait briefly for it to finish, then read status and retry the same request if it is still wanted. Do not start a second worker, clear state or choose another store.'],
-  [['NOTE_SOURCE_ARGUMENT', 'COMMAND_INVALID', 'ENTRY_ARGUMENT_INVALID', 'CONTROL_ARGUMENT_INVALID', 'DIRECT_NOTE_ARGUMENT', 'WORKSPACE_ARGUMENT', 'WORKSPACE_RANGE_INVALID', 'REVIEW_ARGUMENT', 'NATIVE_COMMAND_MISMATCH'],
+  [['NOTE_SOURCE_ARGUMENT', 'COMMAND_INVALID', 'ENTRY_ARGUMENT_INVALID', 'CONTROL_ARGUMENT_INVALID', 'DIRECT_NOTE_ARGUMENT', 'WORKSPACE_ARGUMENT', 'WORKSPACE_RANGE_INVALID', 'REVIEW_ARGUMENT', 'REPAIR_ARGUMENT', 'NATIVE_COMMAND_MISMATCH'],
     'The request does not match the supported arguments or the current chat command.',
     'Nothing was changed. Use only the advertised tool schema, or exactly one typed action: track, untrack, process, process project, save, skip or status; to save supplied content, use the direct note tools. Never supply chat identities, transcript paths or transport metadata; a note read restarts from its start and follows the returned next offsets.'],
   [['NOTE_INVALID', 'NOTE_TARGET_INVALID', 'NOTE_TARGET_OUTSIDE', 'NOTE_TARGET_RESERVED', 'NOTE_METADATA_INVALID', 'NOTE_UTF8_INVALID', 'NOTE_ALIASES_CHANGED', 'NOTE_COMMENT_ADDED', 'NOTE_SOURCE_FIELD', 'NOTE_SOURCE_REFERENCE', 'NOTE_SOURCE_LOCATOR', 'NOTE_SOURCES_UNSUPPORTED', 'WORKSPACE_TARGET_ALIAS'],
@@ -64,11 +64,11 @@ const TABLE = [
     'Preserve the note and pending draft. Check filesystem capabilities, ownership, group membership, permissions, ACLs and extended-attribute limits before retrying. Do not strip metadata or save around the refusal; report this code and diagnostics if the cause is unclear.'],
   [['NOTE_LINE_LIMIT', 'NOTE_SOURCE_LIMIT', 'NOTE_FILE_LIMIT', 'DIRECT_NOTE_CONTENT_LIMIT', 'DIRECT_NOTE_UPDATE_LIMIT', 'DIRECT_NOTE_DRAFT_LIMIT', 'CONTROL_RESPONSE_LIMIT'],
     'The note, a source line, draft or result exceeds a supported size limit.',
-    'Preserve the complete note, the submitted content and any retained draft, and report the limit. Each Markdown source line is limited to 64 KiB. Ask how to proceed. Do not shorten, split, strip metadata or create a separate note to bypass the limit.'],
+    'Preserve the complete note, the submitted content and any retained draft, and report the limit. Each Markdown source line is limited to 64 KiB. Ask how to proceed. Do not shorten, split, strip metadata or create a separate note to bypass the limit. A source limit is relieved only by a metadata repair the user asks for and sees previewed; the refusal itself authorizes none.'],
   [['WORKSPACE_NOTE_INCOMPLETE'],
     'Queued drafting has not read the complete note it proposes to replace.',
     'Read every range before submitting complete replacement content, or use exact edits against the inspected note. If the workspace budget prevents either, leave the run unfinished and report the limit; preserve the note and queued input, and do not create a separate note to bypass it.'],
-  [['DIRECT_NOTE_REQUEST_CHANGED', 'DIRECT_NOTE_CONTENT_REQUIRED', 'DIRECT_NOTE_RUN_REQUIRED'],
+  [['DIRECT_NOTE_REQUEST_CHANGED', 'REPAIR_REQUEST_CHANGED', 'DIRECT_NOTE_CONTENT_REQUIRED', 'DIRECT_NOTE_RUN_REQUIRED'],
     'This request identity was used before with different arguments, or needs its original arguments and run.',
     'Reuse a requestId only with identical arguments. Inspect the retained draft or outcome with cuefluent_review_note and the original projectId and runId; to revise a pending draft, relay the user\'s Discard with cuefluent_skip_note and the reviewed revision first, then submit the revision with a fresh UUID.'],
   [['REVIEW_REVISION_STALE', 'REVIEW_RUN_CHANGED', 'DIRECT_NOTE_RUN_CHANGED', 'RUN_PHASE_INVALID'],
@@ -94,8 +94,8 @@ const DEFAULT = ['Cuefluent could not complete this operation.', 'Keep existing 
 const GUIDANCE = new Map(TABLE.flatMap(([codes, message, recovery]) => codes.map(code => [code, [message, recovery]])));
 /** The codes the table explains, for the check that each is still raised. */
 export const GUIDED_CODES = Object.freeze([...GUIDANCE.keys()]);
-export const NOTE_TOOL_NAMES = Object.freeze(['cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_check_notes', 'cuefluent_create_note',
-  'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note']);
+export const NOTE_TOOL_NAMES = Object.freeze(['cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_check_notes', 'cuefluent_preview_repair', 'cuefluent_repair_notes',
+  'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note']);
 const TOOL_NAMES = new Set(['cuefluent_control', 'cuefluent_invocation', 'cuefluent_setup', 'cuefluent_status', ...NOTE_TOOL_NAMES]);
 const data = (value, key) => value !== null && (typeof value === 'object' || typeof value === 'function') ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
 const codeOf = value => { const code = data(value, 'code'); return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(code) ? code : null; };

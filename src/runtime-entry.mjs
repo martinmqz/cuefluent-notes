@@ -18,6 +18,7 @@ import { createDirectNoteTools } from './control/direct-notes.mjs';
 import { createProjectTools, PROJECT_TOOLS } from './control/project-tools.mjs';
 import { readProjectStatus } from './control/status.mjs';
 import { checkNotes } from './control/doctor.mjs';
+import { previewRepair } from './control/repair.mjs';
 import { setupProject } from './control/setup.mjs';
 import { createSyncRuntime } from './sync/runtime.mjs';
 import { packageIdentity } from './core/version.mjs';
@@ -88,7 +89,7 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
   // The connector and the read-only commands start on a location that holds
   // at most the resumable scaffold of a first initialization, so explicit
   // setup can create or resume the store there; a mutation keeps failing on it.
-  let store = ['mcp', 'settings', 'status', 'check'].includes(args.command) ? await openStoreOrScaffold(storeRoot) : await openStore(storeRoot);
+  let store = ['mcp', 'settings', 'status', 'check', 'preview-repair'].includes(args.command) ? await openStoreOrScaffold(storeRoot) : await openStore(storeRoot);
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
@@ -99,6 +100,13 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
     const { projectId, target, cursor } = args;
     const report = await checkNotes(store, { projectId, ...(target === undefined ? {} : { target }), ...(cursor === undefined ? {} : { cursor }) }, { skillVersion });
     output(presentControlResult(report, { stage: 'result', operation: args.command, version: skillVersion }, { bounded: false })); return;
+  }
+  if (args.command === 'preview-repair') {
+    // The file holds the preview tool's own arguments. Applying a repair stays
+    // with the connector, where its review decision is relayed.
+    const request = await readJSON(await pinDirectory(path.dirname(args.requestPath)), path.basename(args.requestPath), { maxBytes: 1024 * 1024 });
+    if (!request.value || typeof request.value !== 'object' || Array.isArray(request.value) || Object.keys(request.value).some(key => !['projectId', 'repairs', 'cursor'].includes(key))) fail('REPAIR_ARGUMENT', 'A repair preview needs a projectId, the selected repairs and at most a cursor.');
+    output(presentControlResult(await previewRepair(store, request.value, { skillVersion }), { stage: 'result', operation: args.command, version: skillVersion }, { bounded: false })); return;
   }
   let runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
   let execute = commandExecutor(store, runtime, skillVersion);

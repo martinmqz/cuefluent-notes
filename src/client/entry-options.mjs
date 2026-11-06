@@ -51,6 +51,9 @@ export function parseEntryArguments(argv, { platform = process.platform } = {}) 
       else invalid();
     }
     if (result.target !== undefined && result.cursor !== undefined) invalid();
+  } else if (command === COMMAND.previewRepair && args.length === 2 && args[0] === '--request') {
+    // Read-only repair preview: the selection is structured, so it comes in a file.
+    result = { command, requestPath: absolute(args[1], platform) };
   } else if (command === COMMAND.syncSteward && args.length === 1) result = { command, storeRoot: absolute(args[0], platform) };
   else if (command === COMMAND.syncCollect && args.length === 3) result = { command, storeRoot: absolute(args[0], platform), client: client(args[1]), sessionId: token(args[2]) };
   else if (command === COMMAND.commandWorker && args.length === 2) result = { command, storeRoot: absolute(args[0], platform), handle: invocationHandle(args[1]) };

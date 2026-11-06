@@ -26,6 +26,36 @@ The same check runs from the [package CLI](setup.md#fallback-the-cli) as
 `check --project <id>`, with either `--target <path>` or `--cursor <cursor>`,
 and prints the same result as JSON.
 
+`cuefluent_preview_repair(projectId, repairs, cursor?)` previews selected
+[metadata repairs](notes.md#repairing-metadata). It is read-only: it writes no
+note, retains no draft and starts no run. `repairs` names up to 128 notes in
+order, each with its typed `operations`. The result lists every selected note as
+`change`, `unchanged`, `refused` with a `code`, or `deferred`. A change has
+its `summary`, its sizes, the findings that are `remaining` after it and its
+complete change list as JSON text in `changes`. Each page fits 48 KiB, so a long
+change list continues in pieces: follow `next` with `cursor` and concatenate the
+`changes` of one note. Every page carries the same `proposal`, and a page whose
+notes or selection changed is refused (`REPAIR_PROPOSAL_CHANGED`): preview again
+without a cursor. The preview also runs from the package CLI as
+`preview-repair --request <absolute file>`, where the file holds these arguments
+as JSON.
+
+`cuefluent_repair_notes(projectId, requestId, proposal, repairs)` applies one
+previewed batch. It builds the candidates again and compares them with the cited
+`proposal`; a difference (`REPAIR_PROPOSAL_CHANGED`) or a refused note
+(`REPAIR_TARGET_REFUSED`) ends the call before a run or a draft exists. In review
+mode the result is the review of the retained batch, with `kind` `repair` and each
+note's change list in `changes` under `part` `changes`; relay the decision with
+`cuefluent_save_note` or `cuefluent_skip_note` and its `revision`. In automatic
+mode the batch is saved at once, and its result adds `batch`: the changed notes
+with their sizes before and after, the unchanged ones and the deferred ones,
+within what the result has room for.
+Retry only with the same `requestId` and identical arguments; that returns the
+retained review or the completed outcome without building anything, and any other
+use of the id is refused (`REPAIR_REQUEST_CHANGED`). Only the latest outcome is
+replayed: after another run, check and preview again. Applying a repair has no
+CLI command, because its review decision is relayed through these tools.
+
 `cuefluent_create_note(projectId, requestId, target, content, summary, sources?)` requires an
 absent target. `cuefluent_update_note` takes the same fields plus the exact
 inspected `expectedHash` and requires the existing target; a changed or missing

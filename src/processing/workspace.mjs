@@ -7,7 +7,8 @@ import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
 import { validateSettings } from '../core/settings.mjs';
 import { assertChain, assertDirectory, assertRegularFile, inspectAncestors, lstatOrNull, pinDirectory, relativePath } from '../storage/paths.mjs';
 import { hashBytes, readSnapshot } from '../storage/files.mjs';
-import { NOTE_PROFILE, SOURCE_LOCATOR_LENGTH, assertOrdinaryTarget, assertValidNote, validateNote, createGeneratedNote, decodeNote, isNoteTimestamp, preserveMetadata, validateDocumentSources } from '../notes/index.mjs';
+import { NOTE_PROFILE, SOURCE_LOCATOR_LENGTH, assertOrdinaryTarget, assertValidNote, validateNote, createGeneratedNote, decodeNote, isNoteTimestamp, preserveMetadata, validateDocumentSources,
+  constructRepair, describeRepair, summarizeRepair } from '../notes/index.mjs';
 
 export const WORKSPACE_LIMITS = Object.freeze({ contextBytes: 64 * 1024, draftBytes: 128 * 1024, privateBytes: 64 * 1024 * 1024,
   fileBytes: NOTE_PROFILE.fileBytes, readBytes: 8192, targets: 128, drafts: 64, listEntries: 8192, listResults: 100, edits: 128 });
@@ -256,6 +257,32 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     privateBytes += bytes.length - (prior?.bytes.length ?? 0); draftBytes += submitted;
     drafts.set(selected.key, draft); return receipt;
   }
+  /** Trusted metadata repair of one existing note. The candidate is built from
+   * the pinned original by typed operations alone and held to the repair
+   * contract before it is admitted, with the summary a review shows. A note the
+   * operations leave as it is retains nothing. Not a model tool: no ordinary
+   * draft can become a repair candidate. */
+  async function repair_note(input) {
+    object(input, ['target', 'operations'], ['target', 'operations']); await active();
+    const selected = target(input.target), retained = originals.get(selected.key);
+    // Room for a whole note is required before one is read, so that a note of
+    // any allowed size is deferred by the budget and never mistaken for too large.
+    if (!retained && limits.privateBytes - privateBytes < limits.fileBytes) fail('WORKSPACE_PRIVATE_LIMIT', 'The private note workspace budget is exhausted.');
+    const original = retained ?? await inspect(selected);
+    await assertChain(original.binding.parent);
+    if (!original.bytes) fail('REPAIR_NOTE_MISSING', 'The note to repair does not exist.');
+    if (drafts.has(selected.key)) fail('WORKSPACE_ARGUMENT', 'A note is repaired once in one batch.');
+    const repaired = constructRepair(original.bytes, input.operations);
+    if (!repaired.changed) return freeze({ target: original.file, expectedHash: original.hash, hash: original.hash, changed: false, bytes: original.bytes.length });
+    const bytes = repaired.bytes, kept = retained ? 0 : original.bytes.length;
+    if (drafts.size >= limits.drafts || (!retained && originals.size >= limits.targets)) fail('WORKSPACE_DRAFT_LIMIT', 'Too many draft targets are retained.');
+    if (privateBytes + kept + bytes.length > limits.privateBytes) fail('WORKSPACE_PRIVATE_LIMIT', 'The complete private draft exceeds the workspace budget.');
+    const description = describeRepair(original.bytes, bytes);
+    const draft = { id: randomUUID(), target: original.file, expectedHash: original.hash, hash: hashBytes(bytes), summary: summarizeRepair(description), heading: null, bytes: Buffer.from(bytes), binding: original.binding };
+    if (!retained) originals.set(selected.key, original);
+    privateBytes += kept + bytes.length; drafts.set(selected.key, draft);
+    return freeze({ target: draft.target, expectedHash: draft.expectedHash, hash: draft.hash, changed: true, bytes: original.bytes.length, summary: draft.summary, description, candidate: Buffer.from(bytes) });
+  }
   async function read_activity_log(input) {
     object(input, ['year', 'from', 'to', 'target', 'projectId', 'limit', 'cursor'], ['year']); await active();
     if (!readActivityLog || project.destination.kind !== 'directory') fail('WORKSPACE_LOG_UNAVAILABLE', 'A verified bounded activity-log reader is required.');
@@ -324,6 +351,9 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     // whole note outside the model context budget, neither retained. `verify`
     // says whether the pinned notes root still stands.
     entries: input => serial(() => list_notes(input, true)), peek: input => serial(() => peek(input)), verify: () => serial(active),
+    // Trusted metadata repair names a note without touching it, and admits a
+    // candidate that only its typed operations built.
+    resolve: input => serial(async () => { await active(); return target(input).file; }), repair: input => serial(() => repair_note(input)),
     // Trusted direct tools bound their own input and output. This entry shares
     // note validation and private retention without model context accounting.
     draft: input => serial(() => draft_note(input, true)),

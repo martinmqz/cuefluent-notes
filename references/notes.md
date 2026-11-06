@@ -250,6 +250,84 @@ from another only by case or normalization, and
 folder behind it is not read. Other notes naming an alias or identity are listed up to five, with
 the rest counted in `moreNotes`.
 
+## Repairing metadata
+
+A repair acts on findings a check reported. It changes a note's header and its
+alias comments and leaves every other byte as it is: prose, headings, links, code,
+other comments, whitespace and line endings. The note `id`, `created`, `updated`
+and the writer version stay, the file keeps its name, and no activity log entry is
+written, so a repair does not make a note look recently edited. An ordinary note
+update keeps all of its own rules: it still cannot remove a source, a hash or a
+header field.
+
+Each selected note takes a list of typed operations. None accepts note content or
+a free-form header change.
+
+| Operation | Class | Effect |
+| --- | --- | --- |
+| `remove-content-hash` | mechanical | Removes the embedded content hash. |
+| `strip-source-hashes` | mechanical | Removes `source_hash` and `hash` from document sources. Sources that are then identical become one. |
+| `remove-session-sources` | mechanical | Removes capture-session sources that carry no reference text. |
+| `remove-fields` with `fields` | choice | Removes the named header fields among `type`, `context`, `series`, `sprint` and `period`. |
+| `remove-sources` with `sources` | choice | Removes the sources at those indexes. |
+| `replace-sources` with `sources` and `with` | choice | Puts one document source in place of the indexed ones, at the first of them. `with` is held to the [supplied-source contract](#source-metadata). |
+| `replace-alias` with `line`, `alias` and `with` | choice | Replaces one alias of the section whose H2 heading is on that line. |
+| `remove-alias` with `line` and `alias` | choice | Removes one alias from that section. A section left without aliases loses its alias comment. |
+
+Indexes and heading lines are those the check reported, and every operation of a
+request refers to the note as it was inspected. A mechanical operation that finds
+nothing leaves the note `unchanged`, which is how a repaired note answers the same
+request again. An operation that names a source or an alias the note does not have
+is refused. A session source with a reference text, a descriptive field and an
+alias may hold information worth keeping, so each is removed only when it is named.
+Hidden comments are not repaired: remove one, or move what it says into visible
+prose, with an ordinary note update, then check again.
+
+The header keeps its layout: its opening and closing lines, its key order, the
+compact or expanded style of each collection and the quoting of every value that
+stays. The project's metadata formatting preference plays no part, and a repair of
+aliases alone does not rewrite the header. Spacing in a header that was edited by
+hand may be normalized where it is rewritten. A repair that cannot be written in
+the existing layout, for instance because a YAML comment belongs to a removed
+entry, is refused.
+
+A preview lists each selected note as one of:
+
+- `change`, with the complete change list: `header` fields with their values
+  before and after, `sources` that were `removed`, `stripped` of hash fields or
+  `added`, and the `aliases` of each changed section before and after. The list
+  is read from the note and its candidate, so it names every difference between
+  them. `remaining` counts the findings the candidate would still have; aliases
+  shared with other notes need a new check.
+- `unchanged`, when the operations leave every byte as it is.
+- `refused`, with the reason as a code.
+- `deferred`, when the batch was already full.
+
+| Code | Meaning |
+| --- | --- |
+| `REPAIR_NOTE_BLOCKED` | The note does not satisfy the note profile, its metadata is malformed or of another schema version, or it is an activity log. |
+| `REPAIR_NOTE_MISSING` | There is no note at that target. |
+| `REPAIR_OPERATION_INVALID` | An operation names a source or an alias the note does not have, two operations name one source, or the replacement alias is already there. |
+| `REPAIR_SOURCE_CONFLICT` | Two remaining sources would share one reference with different details. Select which to keep, replace or remove. |
+| `NOTE_REPAIR_LAYOUT` | The header cannot hold the repair in its existing layout. |
+| `PATH_UNSAFE`, `READ_LIMIT_EXCEEDED`, `NOTE_UTF8_INVALID`, `FILE_CHANGED`, `EACCES`, `EPERM`, `EBUSY` | The file is not an ordinary file, is larger than a note file may be, is not UTF-8, changed while it was read, or could not be opened. |
+
+The `proposal` of a preview stands for the project and destination, the selected
+notes in order, each note's operations, the hash each was inspected at and the
+hash of each exact candidate. Applying a batch builds the candidates again and
+requires the same proposal, so nothing is saved that the preview did not show. It
+is a consistency check, not a record of approval: the request to apply still comes
+from the user.
+
+One call forms one batch of at most 64 changed notes within the
+[repair bounds](limits.md#output-profile). Unchanged notes do not count, and the
+notes after a full batch are `deferred` to a batch of their own, with their own
+preview, proposal and request. In review mode the retained batch is decided as a
+whole with Save, Discard or Keep pending. A note that was edited after the preview
+or the review is never overwritten: its save is refused and the notes already
+saved stay saved. The review then shows that note as `changed`, and a saved one
+as `saved`, in place of a change list.
+
 ## Portable metadata
 
 The note format is independent of private runtime state. Metadata is compact by

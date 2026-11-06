@@ -239,6 +239,29 @@ test('the check command reports a configured project through the real executable
   assert.equal(await fs.readFile(note, 'utf8'), bytes); assert.equal((await fs.stat(note, { bigint: true })).mtimeNs, written.mtimeNs);
 });
 
+test('the preview-repair command previews a selection from a request file and changes no note', async t => {
+  const f = await fixture(t), configPath = path.join(f.root, 'setup.json'), requestPath = path.join(f.root, 'repair.json');
+  await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
+    destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } } }));
+  const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+  await fs.mkdir(f.notes, { recursive: true });
+  const note = path.join(f.notes, 'topic.md'), bytes = '# Topic\n\n## Overview\n<!-- aliases: first, second -->\nVisible.\n';
+  await fs.writeFile(note, bytes); const written = await fs.stat(note, { bigint: true });
+  const request = { projectId: 'demo', repairs: [{ target: 'topic.md', operations: [{ op: 'remove-alias', line: 3, alias: 'second' }] }] };
+  await fs.writeFile(requestPath, JSON.stringify(request));
+  const run = await f.run(['preview-repair', '--request', requestPath]); assert.deepEqual({ code: run.code, stderr: run.stderr }, { code: 0, stderr: '' });
+  const preview = JSON.parse(run.stdout);
+  assert.deepEqual([preview.state, preview.counts, preview.targets[0].target], ['previewed', { change: 1, unchanged: 0, refused: 0, deferred: 0 }, note]);
+  assert.deepEqual(JSON.parse(preview.targets[0].changes).aliases, [{ line: 3, before: ['first', 'second'], after: ['first'] }]);
+  await fs.writeFile(requestPath, JSON.stringify({ ...request, cursor: `${'0'.repeat(64)}:0:0` }));
+  const stale = await f.run(['preview-repair', '--request', requestPath]); assert.equal(stale.code, 1); assert.equal(stale.stdout, ''); assert.match(stale.stderr, /REPAIR_PROPOSAL_CHANGED/);
+  for (const invalid of [{ ...request, requestId: 'x' }, { projectId: 'demo' }, []]) {
+    await fs.writeFile(requestPath, JSON.stringify(invalid));
+    const refused = await f.run(['preview-repair', '--request', requestPath]); assert.equal(refused.code, 1); assert.match(refused.stderr, /REPAIR_ARGUMENT/);
+  }
+  assert.equal(await fs.readFile(note, 'utf8'), bytes); assert.equal((await fs.stat(note, { bigint: true })).mtimeNs, written.mtimeNs);
+});
+
 test('entry points reject unsupported store schemas before reading or changing retained cleanup state', async t => {
   const f = await fixture(t), configPath = path.join(f.root, 'setup.json');
   await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
@@ -379,7 +402,7 @@ test('CLI Claude MCP polling is read-only and accepts no caller native identitie
   const responses = server.stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(responses.find(item => item.id === 1).result.serverInfo, { name: 'cuefluent-control', version: JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version });
   assert.deepEqual(responses.find(item => item.id === 2).result.tools.map(item => item.name),
-    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_check_notes', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note', 'cuefluent_setup', 'cuefluent_status']);
+    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_check_notes', 'cuefluent_preview_repair', 'cuefluent_repair_notes', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note', 'cuefluent_setup', 'cuefluent_status']);
   assert.equal(responses.find(item => item.id === 3).result.structuredContent.state, 'expired');
   assert.equal(responses.find(item => item.id === 4).result.isError, true);
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });

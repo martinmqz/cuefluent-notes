@@ -28,6 +28,10 @@ test('exact CLI grammar returns bounded named options', () => {
   assert.deepEqual(parseEntryArguments(['status', '--project', 'project-1']), { command: 'status', projectId: 'project-1' });
   const cursor = `${'a'.repeat(64)}:12`;
   assert.deepEqual(parseEntryArguments(['check', '--project', 'project-1']), { command: 'check', projectId: 'project-1' });
+  assert.deepEqual(parseEntryArguments(['preview-repair', '--request', '/synthetic/repair.json'], { platform: 'linux' }), { command: 'preview-repair', requestPath: '/synthetic/repair.json' });
+  for (const refused of [['preview-repair'], ['preview-repair', '--request'], ['preview-repair', '--request', 'relative.json'], ['preview-repair', '--project', 'demo'], ['preview-repair', '--request', '/a.json', '--cursor', 'x'], ['repair', '--request', '/a.json']]) {
+    assert.throws(() => parseEntryArguments(refused, { platform: 'linux' }), error => typeof error.code === 'string', refused.join(' '));
+  }
   assert.deepEqual(parseEntryArguments(['check', '--project', 'project-1', '--target', 'meetings/planning.md']), { command: 'check', projectId: 'project-1', target: 'meetings/planning.md' });
   assert.deepEqual(parseEntryArguments(['check', '--project', 'project-1', '--cursor', cursor]), { command: 'check', projectId: 'project-1', cursor });
   assert.deepEqual(parseEntryArguments(['sync-steward', root]), { command: 'sync-steward', storeRoot: root });

@@ -238,7 +238,7 @@ test('diagnostic operations follow the same command identities as the entry gram
   const root = '/synthetic/private', handle = Buffer.alloc(64, 1).toString('base64url');
   const argumentsByCommand = {
     hook: ['claude'], mcp: ['codex'], setup: ['--config', '/synthetic/setup.json'], settings: [],
-    status: ['--project', 'demo'], check: ['--project', 'demo'], 'sync-steward': [root], 'sync-collect': [root, 'codex', 'native'],
+    status: ['--project', 'demo'], check: ['--project', 'demo'], 'preview-repair': ['--request', '/synthetic/repair.json'], 'sync-steward': [root], 'sync-collect': [root, 'codex', 'native'],
     'command-worker': [root, handle],
   };
   assert.deepEqual(Object.keys(argumentsByCommand).sort(), Object.values(ENTRY_COMMANDS).sort());
