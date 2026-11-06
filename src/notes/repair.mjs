@@ -20,7 +20,8 @@ const OPERATIONS = Object.freeze({
   'remove-fields': ['fields'], 'remove-sources': ['sources'], 'replace-sources': ['sources', 'with'],
   'replace-alias': ['line', 'alias', 'with'], 'remove-alias': ['line', 'alias'],
 });
-const aliasLine = /^( {0,3}<!--[ \t]*aliases:)([^\r\n]*?)(-->[ \t]*(?:\r?\n)?)$/;
+// The line of an alias comment, in whichever line-ending convention the note has.
+const aliasLine = /^( {0,3}<!--[ \t]*aliases:)([^\r\n]*?)(-->[ \t]*(?:\r\n|\r|\n)?)$/;
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const argument = () => fail('REPAIR_ARGUMENT', 'Use only the advertised repair operations with valid values.');
 const inapplicable = message => fail('REPAIR_OPERATION_INVALID', message);
@@ -89,6 +90,9 @@ function aliasComments(source) {
   return found;
 }
 const aliasValues = text => text.split(',').map(value => inlineText(value).trim());
+/** An alias is selected as the check identifies it: case, accents, width and
+ * punctuation folded, so every spelling of it at a section is one alias. */
+const aliasKey = value => normalizedText(inlineText(value).trim());
 
 function planSources(operations, sources) {
   const actions = new Map(); let hashes = false, sessions = false;
@@ -171,12 +175,12 @@ function repairAliases(source, operations) {
     const [, open, text, close] = comment.parts, lead = /^[ \t]*/.exec(text)[0], trail = /[ \t]*$/.exec(text.slice(lead.length))[0];
     let segments = text.slice(lead.length, text.length - trail.length).split(',');
     for (const operation of requested.filter(item => item.line === line)) {
-      const matches = segments.map((segment, index) => inlineText(segment).trim() === operation.alias ? index : -1).filter(index => index >= 0);
+      const key = aliasKey(operation.alias), matches = segments.map((segment, index) => aliasKey(segment) === key ? index : -1).filter(index => index >= 0);
       if (!matches.length) inapplicable('The section does not have that alias.');
       if (operation.op === 'replace-alias') {
         // An alias the section already has is removed, not written a second time.
-        const key = normalizedText(operation.with);
-        if (segments.some((segment, index) => !matches.includes(index) && normalizedText(inlineText(segment).trim()) === key)) inapplicable('The section already has the replacement alias; remove the other one instead.');
+        const replacement = normalizedText(operation.with);
+        if (segments.some((segment, index) => !matches.includes(index) && aliasKey(segment) === replacement)) inapplicable('The section already has the replacement alias; remove the other one instead.');
         const [, before, after] = /^([ \t]*)[\s\S]*?([ \t]*)$/.exec(segments[matches[0]]);
         segments[matches[0]] = before + operation.with + after; matches.shift();
       }

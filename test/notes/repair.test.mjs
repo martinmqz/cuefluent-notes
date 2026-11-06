@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseDocument } from 'yaml';
-import { REPAIR_LIMITS, assertRepairScope, constructRepair, createGeneratedNote, describeRepair, inspectMetadata, serializeRepair, summarizeRepair,
+import { REPAIR_LIMITS, assertRepairScope, constructRepair, createGeneratedNote, describeRepair, inspectMetadata, inspectNoteHealth, serializeRepair, summarizeRepair,
   validateNote, validateRepairOperations } from '../../src/notes/index.mjs';
 
 const sha = character => `sha256:${character.repeat(64)}`;
@@ -91,6 +91,30 @@ test('aliases change only at their section, and the rest of the body and an unto
   assert.equal(constructRepair(future, [{ op: 'remove-alias', line: 11, alias: 'beta' }]).bytes.toString(), future.toString().replace('<!-- aliases: beta -->\n', ''));
   for (const operation of [{ op: 'remove-alias', line: first, alias: 'delta' }, { op: 'remove-alias', line: first + 1, alias: 'alpha' }, { op: 'remove-alias', line: lines + 1, alias: 'alpha' },
     { op: 'replace-alias', line: first, alias: 'alpha', with: 'Beta' }]) refused('REPAIR_OPERATION_INVALID', () => constructRepair(note, [operation]));
+});
+
+test('an alias is selected as the check identifies it, so every spelling of it at that section goes with it', () => {
+  const text = '# Topic\n\n## First\n<!-- aliases: Alpha, beta -->\nOne.\n\n## Second\n<!-- aliases: ALPHA, Álpha, gamma -->\nTwo.\n', note = Buffer.from(text);
+  // A section holds an alias once, so the check counts the two sections.
+  assert.deepEqual(inspectNoteHealth(note).findings.map(item => [item.code, item.count]), [['alias-in-note', 2]]);
+  const removed = constructRepair(note, [{ op: 'remove-alias', line: 7, alias: 'alpha' }]).bytes;
+  assert.equal(removed.toString(), text.replace('<!-- aliases: ALPHA, Álpha, gamma -->', '<!-- aliases: gamma -->'));
+  assert.deepEqual(inspectNoteHealth(removed).findings, []);
+  const replaced = constructRepair(note, [{ op: 'replace-alias', line: 7, alias: 'alpha', with: 'Alpha release' }]).bytes;
+  assert.equal(replaced.toString(), text.replace('<!-- aliases: ALPHA, Álpha, gamma -->', '<!-- aliases: Alpha release, gamma -->'));
+  // A respelling keeps the identity; a replacement the section already has in another spelling is refused.
+  assert.equal(constructRepair(note, [{ op: 'replace-alias', line: 3, alias: 'alpha', with: 'ALPHA' }]).bytes.toString(), text.replace('Alpha, beta', 'ALPHA, beta'));
+  refused('REPAIR_OPERATION_INVALID', () => constructRepair(note, [{ op: 'replace-alias', line: 3, alias: 'beta', with: 'álpha' }]));
+  assert.deepEqual(describeRepair(note, removed).aliases, [{ line: 7, before: ['ALPHA', 'Álpha', 'gamma'], after: ['gamma'] }]);
+});
+
+test('a note with carriage-return line endings takes an alias repair and keeps every ending', () => {
+  for (const newline of ['\r', '\r\n', '\n']) {
+    const note = handwritten(`schema_version: 1\nid: ${id}`, body, newline), expected = body.replace('<!-- aliases: alpha, beta , gamma -->', '<!-- aliases: alpha, gamma -->').replace(/\n/g, newline);
+    const repaired = constructRepair(note, [{ op: 'remove-alias', line: 7, alias: 'beta' }]).bytes.toString();
+    assert.equal(repaired, note.toString().slice(0, note.toString().indexOf('# Topic')) + expected, JSON.stringify(newline));
+    assert.equal(constructRepair(Buffer.from(body.replace(/\n/g, newline)), [{ op: 'remove-alias', line: 7, alias: 'beta' }]).bytes.toString(), body.replace('<!-- aliases: beta -->\n', '').replace(/\n/g, newline));
+  }
 });
 
 test('operations are a closed, bounded set, and anything else is an argument error', () => {
