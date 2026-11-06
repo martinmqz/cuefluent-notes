@@ -186,6 +186,7 @@ test('CLI no-create reads and unconfigured native hooks leave no private store',
   const f = await fixture(t);
   const settings = await f.run(['settings']); assert.equal(settings.code, 0); assert.equal(JSON.parse(settings.stdout).settingsHash, null);
   const status = await f.run(['status', '--project', 'demo']); assert.equal(JSON.parse(status.stdout).state, 'unconfigured');
+  const check = await f.run(['check', '--project', 'demo']); assert.deepEqual({ code: check.code, state: JSON.parse(check.stdout).state }, { code: 0, state: 'unconfigured' });
   const lifecycle = await f.run(['hook', 'claude'], JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup', session_id: 'synthetic', cwd: f.cwd, transcript_path: null }));
   assert.deepEqual(lifecycle, { code: 0, stdout: '', stderr: '' });
   const command = await f.run(['hook', 'claude'], JSON.stringify({ hook_event_name: 'UserPromptExpansion', expansion_type: 'slash_command',
@@ -216,6 +217,26 @@ test('default entry points stay unconfigured beside an existing product parent w
   assert.deepEqual(await fs.readdir(parent), ['retained.txt']);
   assert.deepEqual(await fs.readFile(retained), original);
   await assert.rejects(fs.access(selected), { code: 'ENOENT' });
+});
+
+test('the check command reports a configured project through the real executable and changes no note', async t => {
+  const f = await fixture(t), configPath = path.join(f.root, 'setup.json');
+  await fs.writeFile(configPath, JSON.stringify({ expectedHash: null, project: { id: 'demo', root: f.cwd,
+    destination: { kind: 'directory', path: f.notes }, activityLog: { enabled: false } } }));
+  const setup = await f.run(['setup', '--config', configPath]); assert.equal(setup.code, 0, setup.stderr);
+  await fs.mkdir(f.notes, { recursive: true });
+  const note = path.join(f.notes, 'topic.md'), bytes = '# Topic\n\n## Overview\nVisible.\n\n<!-- Evidence: captured earlier -->\n';
+  await fs.writeFile(note, bytes); const written = await fs.stat(note, { bigint: true });
+  const project = await f.run(['check', '--project', 'demo']); assert.deepEqual({ code: project.code, stderr: project.stderr }, { code: 0, stderr: '' });
+  const report = JSON.parse(project.stdout);
+  assert.equal(report.state, 'checked'); assert.equal(report.scope, 'project'); assert.deepEqual(report.notes.map(item => item.target), [note]);
+  assert.deepEqual(report.notes[0].findings.map(item => item.code), ['hidden-comment']);
+  const selected = JSON.parse((await f.run(['check', '--project', 'demo', '--target', 'topic.md'])).stdout);
+  assert.equal(selected.scope, 'note'); assert.equal(selected.corpus, report.corpus);
+  const stale = await f.run(['check', '--project', 'demo', '--cursor', `${'0'.repeat(64)}:1`]);
+  assert.equal(stale.code, 1); assert.equal(stale.stdout, ''); assert.match(stale.stderr, /WORKSPACE_LIST_CHANGED/);
+  const missing = await f.run(['check', '--project', 'other']); assert.equal(missing.code, 1); assert.match(missing.stderr, /PROJECT_UNCONFIGURED/);
+  assert.equal(await fs.readFile(note, 'utf8'), bytes); assert.equal((await fs.stat(note, { bigint: true })).mtimeNs, written.mtimeNs);
 });
 
 test('entry points reject unsupported store schemas before reading or changing retained cleanup state', async t => {
@@ -358,7 +379,7 @@ test('CLI Claude MCP polling is read-only and accepts no caller native identitie
   const responses = server.stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(responses.find(item => item.id === 1).result.serverInfo, { name: 'cuefluent-control', version: JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version });
   assert.deepEqual(responses.find(item => item.id === 2).result.tools.map(item => item.name),
-    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note', 'cuefluent_setup', 'cuefluent_status']);
+    ['cuefluent_invocation', 'cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_check_notes', 'cuefluent_create_note', 'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note', 'cuefluent_setup', 'cuefluent_status']);
   assert.equal(responses.find(item => item.id === 3).result.structuredContent.state, 'expired');
   assert.equal(responses.find(item => item.id === 4).result.isError, true);
   await assert.rejects(fs.access(f.storeRoot), { code: 'ENOENT' });

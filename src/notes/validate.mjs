@@ -30,7 +30,7 @@ function authoredComments(tokens) {
       if (token.type === 'html_block' || token.type === 'html_inline') {
         const comments = htmlParts(token.content).filter(part => part.comment !== undefined).map(part => part.comment);
         if (token.type === 'html_block' && token.level === 0 && aliasComment.test(token.content)) comments.shift();
-        for (const comment of comments) if (!metadataComment.test(comment)) found.push({ text: comment.replace(/\s+/g, ' ').trim(), line });
+        for (const comment of comments) if (!metadataComment.test(comment)) found.push({ text: comment.replace(/\s+/g, ' ').trim(), line, bytes: Buffer.byteLength(comment) });
       }
       if (token.children) visit(token.children, line);
     }
@@ -38,6 +38,8 @@ function authoredComments(tokens) {
   visit(tokens, 1); return found;
 }
 const sourceTokens = source => { const { tokens, env } = parseMarkdown(source); return env.sourceTokens ?? tokens; };
+/** Where a note's hidden comments are and how many bytes each occupies. */
+export const hiddenComments = input => authoredComments(sourceTokens(decodeNote(input))).map(({ line, bytes }) => ({ line, bytes }));
 
 /** Content-only approval view: literal examples of metadata remain visible. */
 export function reviewNoteContent(input, inspection) {

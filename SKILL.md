@@ -1,6 +1,6 @@
 ---
 name: cuefluent-notes
-description: Create or update Markdown notes from content the assistant prepares using user-authorized context, or track Claude Code and Codex chats for later explicit processing. Use when the user asks Cuefluent to save supplied material, conversation details, or task results as a note, update an existing note, or manage tracked conversation.
+description: Create or update Markdown notes from content the assistant prepares using user-authorized context, check existing notes for metadata and alias findings, or track Claude Code and Codex chats for later explicit processing. Use when the user asks Cuefluent to save supplied material, conversation details, or task results as a note, update an existing note, check notes, or manage tracked conversation.
 user-invocable: true
 argument-hint: "describe the note to create or update, or track | untrack | process | process project | save | skip | status"
 ---
@@ -75,6 +75,20 @@ Example: "Use Cuefluent to save the meeting details above as a note."
 
 Never read transcript files, enroll the chat or run `process` for this. A busy
 result means another run is pending: explain it and change nothing else.
+
+## Check notes
+
+Example: "Check these notes for metadata problems."
+
+Call `cuefluent_check_notes` with the `projectId`, and a `target` for one note. It is
+read-only: it writes no note, creates no private state and repairs nothing. Follow
+`next` with `cursor` until it is null, then report the totals, the notes with
+findings and the coverage as returned. Each finding has a code, a count and a
+repair class; [checking notes](references/notes.md#checking-notes) explains them.
+A finding describes a note, not a defect: a shared alias or an older field may be
+intended, and partial coverage is never a whole-project count. Resolve a finding
+only when the user asks, and a `content-update` finding only through an ordinary
+note update.
 
 ## Tracked chats
 

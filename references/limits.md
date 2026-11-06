@@ -216,7 +216,12 @@ and JSON escaping. Queued processing has separate budgets: 8 KiB read ranges,
 full-content replacement requires reading the whole original; exact edits can
 preserve unread content without resubmitting it. A note stores at most 128
 sources, and a newly supplied source locator is limited to 120 UTF-16 code units;
-see [source metadata](notes.md#source-metadata).
+see [source metadata](notes.md#source-metadata). A note check reads at most 1,024
+notes and 32 MiB, in at most 512 folders to a depth of 16, and reports anything
+beyond that as partial coverage; its pages share the 48 KiB budget, and it lists
+at most 20 items per finding with the remainder counted. Nothing is kept between
+pages: each one reads the notes again, so a long report costs one full read per
+page.
 
 ## What is verified
 
@@ -227,7 +232,10 @@ checked in Claude Desktop's Code tab and Codex Desktop. Checks do not establish
 desktop rendering of diagnostics, live hook activation, native processing
 isolation on an unaudited platform, reboot recovery, Cuefluent corpus admission or
 search ranking, and per-file validation does not prove admission into a full
-corpus. The chat-decision flow (an accepted save, a declined decision that leaves
+corpus. A note check's alias counts follow the consumer's warning rule and were
+compared on synthetic notes with the app's own parser and corpus assembly; the
+check does not run the app, and a note the app refuses to load raises no warning
+there while the check still counts its aliases. The chat-decision flow (an accepted save, a declined decision that leaves
 the draft pending, and a discard, with saved bytes compared to the retained draft,
 and a full 48 KiB page delivered inline including CJK text) is not yet verified
 live on Claude Code in Terminal, Claude Desktop's Code tab or Codex Desktop; nor

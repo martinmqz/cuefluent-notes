@@ -31,7 +31,7 @@ const TABLE = [
     'Call cuefluent_projects and use the exact projectId of the intended destination. Set up a project only when that destination is not configured.'],
   [['SETTINGS_CONFLICT', 'EXPECTED_HASH_REQUIRED', 'DIRECT_NOTE_CONFLICT', 'WORKSPACE_NOTE_UNREAD', 'WORKSPACE_LIST_CHANGED', 'NOTE_PUBLICATION_CONFLICT', 'DRAFT_CHANGED', 'PATH_CHANGED'],
     'The settings, note or directory changed after they were inspected or reviewed, or the inspected hash is missing.',
-    'Read the current state again: cuefluent_projects for settings, cuefluent_read_note for a note, keeping the hash it returns as expectedHash, and reconcile the request with it before retrying. For a reviewed draft set, relay Discard or Skip to release it, then submit a fresh draft; notes already saved stay. Never replace a hash to force an older proposal; creation requires an absent target.'],
+    'Read the current state again: cuefluent_projects for settings, cuefluent_read_note for a note, keeping the hash it returns as expectedHash, and reconcile the request with it before retrying. Restart a note check without its cursor. For a reviewed draft set, relay Discard or Skip to release it, then submit a fresh draft; notes already saved stay. Never replace a hash to force an older proposal; creation requires an absent target.'],
   [['PATH_MISSING', 'PATH_INVALID', 'PATH_UNSAFE'],
     'A path is missing, escapes its destination, or is not a plain file or directory.',
     'Use absolute normalized paths inside the configured destination, or an existing project root for setup, with no parent segments or symbolic links. A read creates nothing, and a missing original never authorizes a replacement; preserve existing files and pending work.'],
@@ -94,7 +94,7 @@ const DEFAULT = ['Cuefluent could not complete this operation.', 'Keep existing 
 const GUIDANCE = new Map(TABLE.flatMap(([codes, message, recovery]) => codes.map(code => [code, [message, recovery]])));
 /** The codes the table explains, for the check that each is still raised. */
 export const GUIDED_CODES = Object.freeze([...GUIDANCE.keys()]);
-export const NOTE_TOOL_NAMES = Object.freeze(['cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_create_note',
+export const NOTE_TOOL_NAMES = Object.freeze(['cuefluent_projects', 'cuefluent_list_notes', 'cuefluent_read_note', 'cuefluent_check_notes', 'cuefluent_create_note',
   'cuefluent_update_note', 'cuefluent_review_note', 'cuefluent_save_note', 'cuefluent_skip_note']);
 const TOOL_NAMES = new Set(['cuefluent_control', 'cuefluent_invocation', 'cuefluent_setup', 'cuefluent_status', ...NOTE_TOOL_NAMES]);
 const data = (value, key) => value !== null && (typeof value === 'object' || typeof value === 'function') ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;

@@ -90,6 +90,8 @@ export const SOURCE_LOCATOR_LENGTH = 120;
 // Rooted, home, drive, UNC and file: forms name a place on one machine. The
 // forms are checked on every platform: notes travel between them.
 const localReference = /^(?:[\\/~]|[A-Za-z]:|file:)/i;
+/** Whether a source ref names a place on one machine instead of a portable reference. */
+export const isLocalSourceReference = ref => typeof ref === 'string' && localReference.test(ref);
 const checkedSources = new WeakSet();
 /** The supplied sources a note does not already cite, in submission order. */
 function sourceAdditions(existing, supplied) {

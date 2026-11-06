@@ -17,6 +17,7 @@ import { executeControl } from './control/execute.mjs';
 import { createDirectNoteTools } from './control/direct-notes.mjs';
 import { createProjectTools, PROJECT_TOOLS } from './control/project-tools.mjs';
 import { readProjectStatus } from './control/status.mjs';
+import { checkNotes } from './control/doctor.mjs';
 import { setupProject } from './control/setup.mjs';
 import { createSyncRuntime } from './sync/runtime.mjs';
 import { packageIdentity } from './core/version.mjs';
@@ -87,12 +88,17 @@ async function runEntry(args, skillVersion, storeRoot, envelope) {
   // The connector and the read-only commands start on a location that holds
   // at most the resumable scaffold of a first initialization, so explicit
   // setup can create or resume the store there; a mutation keeps failing on it.
-  let store = ['mcp', 'settings', 'status'].includes(args.command) ? await openStoreOrScaffold(storeRoot) : await openStore(storeRoot);
+  let store = ['mcp', 'settings', 'status', 'check'].includes(args.command) ? await openStoreOrScaffold(storeRoot) : await openStore(storeRoot);
   if (args.command === 'settings') {
     const settings = await readSettings(store); output({ state: store ? 'configured' : 'unconfigured', storeRoot, settingsHash: settings.hash, settings: settings.value }); return;
   }
   if (args.command === 'status') {
     output(presentControlResult(await readProjectStatus(store, args.projectId), { stage: 'result', operation: args.command, client: args.client, version: skillVersion }, { bounded: false })); return;
+  }
+  if (args.command === 'check') {
+    const { projectId, target, cursor } = args;
+    const report = await checkNotes(store, { projectId, ...(target === undefined ? {} : { target }), ...(cursor === undefined ? {} : { cursor }) }, { skillVersion });
+    output(presentControlResult(report, { stage: 'result', operation: args.command, version: skillVersion }, { bounded: false })); return;
   }
   let runtime = createSyncRuntime({ store, entry: ENTRY, version: skillVersion });
   let execute = commandExecutor(store, runtime, skillVersion);

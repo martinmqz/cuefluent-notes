@@ -26,6 +26,10 @@ test('exact CLI grammar returns bounded named options', () => {
   assert.deepEqual(parseEntryArguments(['settings']), { command: 'settings' });
   assert.deepEqual(parseEntryArguments(['setup', '--config', root]), { command: 'setup', configPath: root });
   assert.deepEqual(parseEntryArguments(['status', '--project', 'project-1']), { command: 'status', projectId: 'project-1' });
+  const cursor = `${'a'.repeat(64)}:12`;
+  assert.deepEqual(parseEntryArguments(['check', '--project', 'project-1']), { command: 'check', projectId: 'project-1' });
+  assert.deepEqual(parseEntryArguments(['check', '--project', 'project-1', '--target', 'meetings/planning.md']), { command: 'check', projectId: 'project-1', target: 'meetings/planning.md' });
+  assert.deepEqual(parseEntryArguments(['check', '--project', 'project-1', '--cursor', cursor]), { command: 'check', projectId: 'project-1', cursor });
   assert.deepEqual(parseEntryArguments(['sync-steward', root]), { command: 'sync-steward', storeRoot: root });
   assert.deepEqual(parseEntryArguments(['sync-collect', root, 'codex', 'native-thread']), { command: 'sync-collect', storeRoot: root, client: 'codex', sessionId: 'native-thread' });
   assert.deepEqual(parseEntryArguments(['command-worker', root, handle]), { command: 'command-worker', storeRoot: root, handle });
@@ -35,6 +39,10 @@ test('exact CLI grammar returns bounded named options', () => {
 test('CLI refuses unknown, repeated, missing or authority-smuggling options', () => {
   for (const args of [[], ['unknown'], ['hook', 'other'], ['settings', '--store', root], ['mcp', 'codex', '--session', 'fake'], ['setup', root],
     ['setup', '--config', 'relative.json'], ['status', '--project', '../other'], ['sync-collect', root, 'codex', 'thread/other'],
+    ['check'], ['check', '--project'], ['check', '--project', '../other'], ['check', '--target', 'topic.md', '--project', 'demo'], ['check', '--project', 'demo', '--target'],
+    ['check', '--project', 'demo', '--target', ''], ['check', '--project', 'demo', '--target', 'a.md', '--target', 'b.md'], ['check', '--project', 'demo', '--cursor', 'opaque'],
+    ['check', '--project', 'demo', '--cursor', `${'a'.repeat(64)}:01`], ['check', '--project', 'demo', '--cursor', `${'a'.repeat(64)}:0`], ['check', '--project', 'demo', '--cursor', `${'a'.repeat(64)}:12345`],
+    ['check', '--project', 'demo', '--cursor', `${'a'.repeat(64)}:12`, '--target', 'topic.md'], ['check', '--project', 'demo', '--target', 'topic.md', '--cursor', `${'a'.repeat(64)}:12`], ['check', '--project', 'demo', '--store', root],
     ['command-worker', root, 'opaque'], ['command-worker', root, 'a'.repeat(86)], ['hook', 'claude\n'], ['settings', '--config', root]]) {
     assert.throws(() => parseEntryArguments(args), { code: 'ENTRY_ARGUMENT_INVALID' });
   }

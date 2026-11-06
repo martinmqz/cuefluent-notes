@@ -13,6 +13,19 @@ including JSON escaping and its other fields, must fit 48 KiB. Follow the return
 `next` offset and pass the first `hash` as `expectedHash` on every later range, so
 a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than read inconsistently.
 
+`cuefluent_check_notes(projectId, target?, cursor?)` reports metadata and alias
+findings for the project's ordinary notes, or for one note with `target`; see
+[checking notes](notes.md#checking-notes). It is read-only: it writes no note,
+creates no private state, starts no run and repairs nothing. A result is
+`checked`, `absent` for a missing `target`, or `unconfigured`. Each page fits
+48 KiB; pass the returned `next` as `cursor` for the following page of a project
+check. One note is a single page, so `cursor` is refused with `target`. Every
+page reads the notes again, and a cursor is refused once any of them changed
+(`WORKSPACE_LIST_CHANGED`): start again without one.
+The same check runs from the [package CLI](setup.md#fallback-the-cli) as
+`check --project <id>`, with either `--target <path>` or `--cursor <cursor>`,
+and prints the same result as JSON.
+
 `cuefluent_create_note(projectId, requestId, target, content, summary, sources?)` requires an
 absent target. `cuefluent_update_note` takes the same fields plus the exact
 inspected `expectedHash` and requires the existing target; a changed or missing

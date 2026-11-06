@@ -192,6 +192,60 @@ draft with its retained metadata and no further rewriting; a draft that changed
 after review is refused. See [commands](commands.md) for pages, choices, retries
 and conflicts.
 
+## Checking notes
+
+`cuefluent_check_notes` describes what a project's notes carry; it changes nothing.
+It reads the destination's ordinary notes: `.md` and `.markdown` files outside
+`logs/`. A file with such a name that is a link, has several hard links, is not a
+regular file, has no portable name or differs from another only by case or
+normalization is never opened and is listed as `note-unreadable`. Notes without findings are counted in `totals` and
+not listed; a note selected with `target` is always listed. `run` is `none`,
+`pending` with the run's kind and phase, `busy` while another operation holds the
+project, or `unavailable` with a code when the run's records cannot be read;
+`status` explains the last two, and the check leaves all of it untouched.
+
+Each finding has a `code`, a `count`, where known a `bytes` estimate measured on
+the field's JSON form, and a repair class. `mechanical` means a fixed
+transformation would remove it, `choice` that a replacement has to be supplied or
+picked, `content-update` that an ordinary note update resolves it, and `blocked`
+that it is only reported.
+
+| Code | Class | Meaning |
+| --- | --- | --- |
+| `content-hash` | mechanical | The header carries an embedded content hash, which the writer neither computes nor checks. |
+| `source-hash` | mechanical | Document sources carry embedded hashes. |
+| `source-session` | mechanical | Sources name sessions of a capture system instead of documents. An item marked `reference` also carries a reference text. |
+| `descriptive-field` | mechanical | The header carries `type`, `context`, `series`, `sprint` or `period`, which the writer adds to no note. |
+| `source-field` | choice | Document sources carry fields outside the supplied-source contract, such as a description. |
+| `source-local-ref` | choice | A source `ref` is a local path or file URL. |
+| `source-long-locator` | choice | A locator is longer than the limit for a newly supplied one. |
+| `source-volume` | choice | The note cites more than 20 document sources. |
+| `alias-in-note` | choice | An alias belongs to more than one section of the note. |
+| `alias-across-notes` | choice | An alias also belongs to sections of other notes. |
+| `hidden-comment` | content-update | The body contains hidden HTML comments. |
+| `note-unreadable`, `note-invalid` | blocked | The file is not an ordinary file of bounded UTF-8 Markdown, or does not satisfy the note profile. |
+| `metadata-invalid`, `metadata-unsupported` | blocked | The metadata block is malformed, or uses a schema version that is not interpreted. |
+| `note-id-duplicate` | blocked | Another note declares the same note ID. |
+
+A finding describes a note; it is not a defect by itself. An older field or a
+shared alias may be intended, and a `mechanical` finding can still hold
+information worth reading first, such as a meeting series or a session's
+reference text. Alias counts follow the consumer's warning rule: an alias on
+several sections of one note counts once per section, and an alias that sections
+of two or more notes share counts every occurrence in each of those notes. Terms
+are compared as search compares them, with case, accents, width and punctuation
+folded.
+
+A check reads within fixed [bounds](limits.md#output-profile). When it could not
+read everything, `coverage.complete` is false and every count covers only what
+was read. `coverage.reasons` says why: `note-limit`, `byte-limit`,
+`directory-limit`, `directory-entry-limit` or `depth-limit` for a bound, `changed`
+for a note that changed while it was read, `skipped-directory` for a folder that
+has no portable name or differs from another only by case or normalization, and
+`skipped-link` for a link without a Markdown name, which is never followed, so a
+folder behind it is not read. Other notes naming an alias or identity are listed up to five, with
+the rest counted in `moreNotes`.
+
 ## Portable metadata
 
 The note format is independent of private runtime state. Metadata is compact by

@@ -3,11 +3,12 @@ import os from 'node:os';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { fail } from '../core/errors.mjs';
-import { ENTRY_COMMANDS as COMMAND } from '../core/entry-contract.mjs';
+import { ENTRY_COMMANDS as COMMAND, CHECK_CURSOR_PATTERN } from '../core/entry-contract.mjs';
 import { pinDirectory, assertDirectory, inspectParent, assertChain, fileIdentity, sameIdentity, lstatOrNull } from '../storage/paths.mjs';
 import { readHandleStat } from '../storage/stat.mjs';
 
 const CLIENTS = new Set(['claude', 'codex']);
+const CHECK_CURSOR = new RegExp(CHECK_CURSOR_PATTERN);
 const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const invalid = () => fail('ENTRY_ARGUMENT_INVALID', 'Use a supported command and its exact documented arguments.');
 const invalidStoreRoot = () => fail('ENTRY_STORE_ROOT_INVALID', 'CUEFLUENT_HOME must identify the intended normalized absolute private-store location.');
@@ -39,6 +40,17 @@ export function parseEntryArguments(argv, { platform = process.platform } = {}) 
   else if (command === COMMAND.status && args.length === 2 && args[0] === '--project') {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(args[1])) invalid();
     result = { command, projectId: args[1] };
+  } else if (command === COMMAND.check && [2, 4].includes(args.length) && args[0] === '--project') {
+    // Read-only note check: one project, and either one note or a page cursor.
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(args[1])) invalid();
+    result = { command, projectId: args[1] };
+    for (let index = 2; index < args.length; index += 2) {
+      const name = args[index], value = args[index + 1];
+      if (name === '--target' && result.target === undefined && value) result.target = value;
+      else if (name === '--cursor' && result.cursor === undefined && CHECK_CURSOR.test(value)) result.cursor = value;
+      else invalid();
+    }
+    if (result.target !== undefined && result.cursor !== undefined) invalid();
   } else if (command === COMMAND.syncSteward && args.length === 1) result = { command, storeRoot: absolute(args[0], platform) };
   else if (command === COMMAND.syncCollect && args.length === 3) result = { command, storeRoot: absolute(args[0], platform), client: client(args[1]), sessionId: token(args[2]) };
   else if (command === COMMAND.commandWorker && args.length === 2) result = { command, storeRoot: absolute(args[0], platform), handle: invocationHandle(args[1]) };

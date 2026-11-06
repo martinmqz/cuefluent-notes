@@ -132,8 +132,9 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     }
     snapshot.readRanges = ranges; return result;
   }
-  async function list_notes(input = {}) {
+  async function list_notes(input = {}, trusted = false) {
     object(input, ['directory', 'cursor', 'limit']); await active();
+    const present = trusted ? freeze : visible;
     const limit = integer(input.limit === undefined ? 25 : input.limit, 1, limits.listResults), cursor = input.cursor === undefined ? '' : input.cursor;
     if (typeof cursor !== 'string' || cursor.length > 32768 || /[\p{Cc}\p{Cs}]/u.test(cursor)) fail('WORKSPACE_ARGUMENT', 'Invalid directory cursor.');
     if (input.directory !== undefined && typeof input.directory !== 'string') fail('WORKSPACE_ARGUMENT', 'A portable directory path is required.');
@@ -141,7 +142,7 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
       if (input.directory || cursor) fail('WORKSPACE_ARGUMENT', 'The project has one explicit file destination.');
       const selected = target(project.destination.path), stat = await lstatOrNull(selected.file);
       if (stat) assertRegularFile(selected.file, stat);
-      await assertDirectory(pin); return visible({ entries: stat ? [{ target: selected.file, kind: 'note' }] : [], nextCursor: null });
+      await assertDirectory(pin); return present({ entries: stat ? [{ target: selected.file, kind: 'note' }] : [], nextCursor: null });
     }
     const directory = input.directory ? path.dirname(target(path.isAbsolute(input.directory) ? path.join(input.directory, 'workspace-list.md') : `${input.directory}/workspace-list.md`).file) : root;
     const chain = await inspectAncestors(directory), candidates = []; let count = 0;
@@ -151,22 +152,32 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
       if (directory === root && entry.name.toLowerCase() === 'logs') continue;
       const file = path.join(directory, entry.name), relative = path.relative(root, file).split(path.sep).join('/');
       if (relative <= cursor) continue;
-      if (!entry.isDirectory() && !isMarkdownPath(entry.name)) continue;
-      // An unsafe unrelated entry cannot authorize access or make every safe
-      // sibling unavailable. Direct reads/drafts retain their strict checks.
-      try { relativePath(pin, relative); } catch (error) { if (error.code === 'PATH_INVALID') continue; throw error; }
-      const stat = await lstatOrNull(file);
-      if (!stat) fail('WORKSPACE_LIST_CHANGED', 'The notes directory changed during inspection.');
-      if (stat.isDirectory() && !stat.isSymbolicLink()) candidates.push({ target: file, kind: 'directory', relative });
-      else {
-        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) continue;
-        assertRegularFile(file, stat); candidates.push({ target: file, kind: 'note', relative });
+      let kind;
+      if (!entry.isDirectory() && !isMarkdownPath(entry.name)) {
+        // A link is never followed, so whether it leads to a folder stays unknown.
+        if (!entry.isSymbolicLink()) continue;
+        kind = 'skipped-link';
+      } else {
+        try { relativePath(pin, relative); } catch (error) { if (error.code !== 'PATH_INVALID') throw error; kind = entry.isDirectory() ? 'skipped-directory' : 'skipped-note'; }
+        if (!kind) {
+          const stat = await lstatOrNull(file);
+          if (!stat) fail('WORKSPACE_LIST_CHANGED', 'The notes directory changed during inspection.');
+          if (stat.isDirectory() && !stat.isSymbolicLink()) kind = 'directory';
+          else if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) kind = 'skipped-note';
+          else { assertRegularFile(file, stat); kind = 'note'; }
+        }
       }
+      // An unsafe unrelated entry cannot authorize access or make every safe
+      // sibling unavailable, so a listing leaves it out; direct reads and drafts
+      // retain their strict checks. Only trusted inspection is told what was left
+      // out, so that it can say its coverage is partial.
+      if (!trusted && kind.startsWith('skipped-')) continue;
+      candidates.push({ target: file, kind, relative });
       candidates.sort((a, b) => a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0);
       if (candidates.length > limit + 1) candidates.pop();
     }
     await assertChain(chain); await assertDirectory(pin);
-    return visible({ entries: candidates.slice(0, limit).map(({ target, kind }) => ({ target, kind })), nextCursor: candidates.length > limit ? candidates[limit - 1].relative : null });
+    return present({ entries: candidates.slice(0, limit).map(({ target, kind }) => ({ target, kind })), nextCursor: candidates.length > limit ? candidates[limit - 1].relative : null });
   }
   async function draft_note(input, trusted = false) {
     object(input, ['target', 'content', 'edits', 'summary', 'sources', 'heading', 'usefulChange'], ['target', 'summary']); await active();
@@ -276,9 +287,20 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     await assertChain(snapshot.binding.parent);
     return freeze({ target: snapshot.file, exists: snapshot.bytes !== null, hash: snapshot.hash, totalBytes: snapshot.bytes?.length ?? 0, bytes: snapshot.bytes ? Buffer.from(snapshot.bytes) : null });
   }
+  /** Trusted whole read that retains nothing, so inspecting many notes never
+   * fills the originals a draft set pins. Not a model tool. */
+  async function peek(input) {
+    object(input, ['target'], ['target']); await active();
+    const selected = target(input.target), snapshot = await inspect(selected);
+    await assertChain(snapshot.binding.parent);
+    return freeze({ target: snapshot.file, exists: snapshot.bytes !== null, hash: snapshot.hash, totalBytes: snapshot.bytes?.length ?? 0, bytes: snapshot.bytes ? Buffer.from(snapshot.bytes) : null });
+  }
   return Object.freeze({ list_notes: input => serial(() => list_notes(input)), read_note: input => serial(() => read_note(input)), draft_note: input => serial(() => draft_note(input)),
     read_activity_log: input => serial(() => read_activity_log(input)), finish_drafting: input => serial(() => finish_drafting(input)),
     original: input => serial(() => original(input)),
+    // Trusted read-only inspection bounds its own output: a directory page and a
+    // whole note outside the model context budget, neither retained.
+    entries: input => serial(() => list_notes(input, true)), peek: input => serial(() => peek(input)),
     // Trusted direct tools bound their own input and output. This entry shares
     // note validation and private retention without model context accounting.
     draft: input => serial(() => draft_note(input, true)),
