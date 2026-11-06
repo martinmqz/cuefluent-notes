@@ -53,6 +53,12 @@ function line(value, max, nullable = false) {
 }
 const targetKey = value => value.normalize('NFC').toLowerCase();
 const continuation = (bytes, at) => at < bytes.length && (bytes[at] & 0xc0) === 0x80;
+// The one rule for a stored file, asked as a question: a listing leaves out or
+// names an entry it refuses instead of failing on it.
+function ordinary(file, stat) {
+  try { assertRegularFile(file, stat); return true; }
+  catch (error) { if (error.code !== 'PATH_UNSAFE') throw error; return false; }
+}
 
 /** Draft-only capability: no writes, mkdir, shell or model launch. Tool responses
  * contain bounded context/receipts; only the trusted manifest() consumer receives
@@ -89,21 +95,33 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     if (prior && prior !== file) fail('WORKSPACE_TARGET_ALIAS', 'Two target spellings resolve to the same portable note name.');
     spellings.set(key, file); return { file, relative, key };
   }
-  async function inspect(selected, { absentOnly = false } = {}) {
+  /** `budget` is what trusted inspection may still read. A note within its own
+   * profile but beyond that budget is not opened, and one that is read comes
+   * back undecoded, so its caller can report bytes that are not UTF-8. */
+  async function inspect(selected, { absentOnly = false, budget = null } = {}) {
     const parent = await inspectAncestors(path.dirname(selected.file), { allowMissing: true });
     await assertDirectory(pin);
     const stat = await lstatOrNull(selected.file);
     if (stat) {
       assertRegularFile(selected.file, stat);
       if (absentOnly) fail('WORKSPACE_NOTE_UNREAD', 'Read the existing note before drafting an update.');
+      if (budget !== null && stat.size <= limits.fileBytes && stat.size > budget) fail('WORKSPACE_INSPECTION_LIMIT', 'The note exceeds the remaining inspection budget.');
     }
     let snapshot = null;
     if (stat && privateBytes >= limits.privateBytes) fail('WORKSPACE_PRIVATE_LIMIT', 'The private note workspace budget is exhausted.');
-    if (!absentOnly && parent.at(-1)?.path === path.dirname(selected.file)) snapshot = await readSnapshot(pin, selected.relative, { maxBytes: Math.min(limits.fileBytes, limits.privateBytes - privateBytes), missing: true });
+    const maxBytes = Math.min(limits.fileBytes, limits.privateBytes - privateBytes, budget ?? Infinity);
+    if (!absentOnly && parent.at(-1)?.path === path.dirname(selected.file)) {
+      try { snapshot = await readSnapshot(pin, selected.relative, { maxBytes, missing: true }); }
+      catch (error) {
+        // It fitted the budget a moment ago, so it grew before it was opened.
+        if (budget !== null && error.code === 'READ_LIMIT_EXCEEDED' && !(stat?.size > maxBytes)) fail('FILE_CHANGED', 'The file changed while it was being read.', error);
+        throw error;
+      }
+    }
     await assertChain(parent); await assertDirectory(pin);
     if (absentOnly && await lstatOrNull(selected.file)) fail('WORKSPACE_NOTE_UNREAD', 'An unread target must remain absent.');
     if (absentOnly && snapshot) fail('WORKSPACE_NOTE_UNREAD', 'An unread target must remain absent.');
-    if (snapshot) decodeNote(snapshot.bytes);
+    if (snapshot && budget === null) decodeNote(snapshot.bytes);
     return { ...selected, bytes: snapshot?.bytes ?? null, hash: snapshot?.hash ?? null, readRanges: [], noteId: randomUUID(), binding: freeze({ root, parent }) };
   }
   function retain(snapshot, collection) {
@@ -141,8 +159,12 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     if (project.destination.kind === 'file') {
       if (input.directory || cursor) fail('WORKSPACE_ARGUMENT', 'The project has one explicit file destination.');
       const selected = target(project.destination.path), stat = await lstatOrNull(selected.file);
-      if (stat) assertRegularFile(selected.file, stat);
-      await assertDirectory(pin); return present({ entries: stat ? [{ target: selected.file, kind: 'note' }] : [], nextCursor: null });
+      // The destination is no unrelated entry, so a listing refuses one that is
+      // not an ordinary file. Trusted inspection is told instead, so that it can
+      // report the file.
+      if (stat && !trusted) assertRegularFile(selected.file, stat);
+      await assertDirectory(pin);
+      return present({ entries: stat ? [{ target: selected.file, kind: ordinary(selected.file, stat) ? 'note' : 'skipped-note' }] : [], nextCursor: null });
     }
     const directory = input.directory ? path.dirname(target(path.isAbsolute(input.directory) ? path.join(input.directory, 'workspace-list.md') : `${input.directory}/workspace-list.md`).file) : root;
     const chain = await inspectAncestors(directory), candidates = []; let count = 0;
@@ -162,9 +184,7 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
         if (!kind) {
           const stat = await lstatOrNull(file);
           if (!stat) fail('WORKSPACE_LIST_CHANGED', 'The notes directory changed during inspection.');
-          if (stat.isDirectory() && !stat.isSymbolicLink()) kind = 'directory';
-          else if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) kind = 'skipped-note';
-          else { assertRegularFile(file, stat); kind = 'note'; }
+          kind = stat.isDirectory() && !stat.isSymbolicLink() ? 'directory' : ordinary(file, stat) ? 'note' : 'skipped-note';
         }
       }
       // An unsafe unrelated entry cannot authorize access or make every safe
@@ -288,10 +308,12 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     return freeze({ target: snapshot.file, exists: snapshot.bytes !== null, hash: snapshot.hash, totalBytes: snapshot.bytes?.length ?? 0, bytes: snapshot.bytes ? Buffer.from(snapshot.bytes) : null });
   }
   /** Trusted whole read that retains nothing, so inspecting many notes never
-   * fills the originals a draft set pins. Not a model tool. */
+   * fills the originals a draft set pins. `maxBytes` is what the caller may
+   * still read, and the bytes are returned as they are on disk. Not a model tool. */
   async function peek(input) {
-    object(input, ['target'], ['target']); await active();
-    const selected = target(input.target), snapshot = await inspect(selected);
+    object(input, ['target', 'maxBytes'], ['target', 'maxBytes']); await active();
+    const budget = integer(input.maxBytes, 0, Number.MAX_SAFE_INTEGER);
+    const selected = target(input.target), snapshot = await inspect(selected, { budget });
     await assertChain(snapshot.binding.parent);
     return freeze({ target: snapshot.file, exists: snapshot.bytes !== null, hash: snapshot.hash, totalBytes: snapshot.bytes?.length ?? 0, bytes: snapshot.bytes ? Buffer.from(snapshot.bytes) : null });
   }
@@ -299,8 +321,9 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     read_activity_log: input => serial(() => read_activity_log(input)), finish_drafting: input => serial(() => finish_drafting(input)),
     original: input => serial(() => original(input)),
     // Trusted read-only inspection bounds its own output: a directory page and a
-    // whole note outside the model context budget, neither retained.
-    entries: input => serial(() => list_notes(input, true)), peek: input => serial(() => peek(input)),
+    // whole note outside the model context budget, neither retained. `verify`
+    // says whether the pinned notes root still stands.
+    entries: input => serial(() => list_notes(input, true)), peek: input => serial(() => peek(input)), verify: () => serial(active),
     // Trusted direct tools bound their own input and output. This entry shares
     // note validation and private retention without model context accounting.
     draft: input => serial(() => draft_note(input, true)),

@@ -10,7 +10,7 @@ import { normalizedText } from './markdown.mjs';
  * blocked: it is reported and nothing is proposed. */
 const finding = (repair, message) => Object.freeze({ repair, message });
 export const DOCTOR_FINDINGS = Object.freeze({
-  'note-unreadable': finding('blocked', 'The file is not an ordinary file of bounded UTF-8 Markdown, so it was not read as a note.'),
+  'note-unreadable': finding('blocked', 'The file is not an ordinary file of bounded UTF-8 Markdown or could not be opened, so it was not read as a note.'),
   'note-invalid': finding('blocked', 'The note does not satisfy the supported note profile, so the writer cannot change it.'),
   'metadata-invalid': finding('blocked', 'The Cuefluent metadata block is malformed. It is reported, never repaired.'),
   'metadata-unsupported': finding('blocked', 'The metadata block uses a schema version that is not interpreted here. It stays unchanged.'),

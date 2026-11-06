@@ -300,3 +300,139 @@ test('run records that cannot be read do not lose the report, which names the co
   assert.deepEqual(report.run, { state: 'unavailable', reason });
   assert.deepEqual(names(f, report), ['existing.md']); assert.deepEqual(await tree(f.store.root), before);
 });
+
+const refusal = code => Object.assign(new Error('Synthetic refusal.'), { code });
+const unread = reason => [{ code: 'note-unreadable', repair: 'blocked', count: 1, items: [{ reason }] }];
+
+test('a note or folder that mode bits keep closed is reported, its siblings are still checked, and a closed destination still fails', async t => {
+  const f = await fixture(t);
+  await f.write('readable.md', text('Readable', 'readable alias', comment));
+  await f.write('open/inside.md', text('Open', 'open alias', comment));
+  const locked = await f.write('locked.md', text('Locked', 'locked alias', comment));
+  const closed = path.dirname(await f.write('closed/inside.md', text('Inside', 'inside alias', comment)));
+  const before = await tree(f.notes), modes = [];
+  for (const file of [f.notes, closed, locked]) modes.push([file, (await fs.stat(file)).mode & 0o777]);
+  let denied, report, selected, inside, destination;
+  // The modes are restored before anything is asserted, so the fixture can always be removed.
+  try {
+    await fs.chmod(locked, 0); await fs.chmod(closed, 0);
+    denied = await fs.open(locked).then(handle => handle.close().then(() => false), error => error.code === 'EACCES');
+    if (denied) {
+      report = await f.check(); selected = await f.check({ target: 'locked.md' }); inside = await f.check({ target: 'closed/inside.md' });
+      await fs.chmod(f.notes, 0);
+      destination = await f.check().then(() => 'checked', error => error.code);
+    }
+  } finally { for (const [file, mode] of modes) await fs.chmod(file, mode); }
+  if (!denied) return t.skip('Mode bits do not keep this user out of a file here.');
+  assert.deepEqual(names(f, report), ['locked.md', 'open/inside.md', 'readable.md']);
+  assert.equal(report.notes[0].metadata, 'unreadable'); assert.deepEqual(report.notes[0].findings, unread('EACCES'));
+  assert.deepEqual(report.notes.slice(1).map(codes), [['hidden-comment'], ['hidden-comment']]);
+  assert.deepEqual(report.coverage, { complete: false, notes: 3, directories: 2, reasons: ['skipped-directory'] });
+  assert.deepEqual(report.totals.metadata, { supported: 0, absent: 2, invalid: 0, unsupported: 0, unreadable: 1 });
+  assert.deepEqual(selected.notes.map(note => [note.target, note.findings]), [[locked, unread('EACCES')]]);
+  assert.deepEqual(inside.notes.map(note => [note.target, note.findings]), [[path.join(closed, 'inside.md'), unread('EACCES')]]);
+  assert.equal(destination, 'EACCES', 'a destination that cannot be listed is a failure, not an empty report');
+  assert.deepEqual(await tree(f.notes), before);
+});
+
+test('a note or folder the system refuses to open is reported on every platform, and a note that vanishes counts as changed', async t => {
+  const f = await fixture(t);
+  await f.write('readable.md', text('Readable', 'readable alias', comment));
+  const locked = await f.write('locked.md', text('Locked', 'locked alias', comment)), gone = await f.write('gone.md', text('Gone', 'gone alias', comment));
+  // A file that another program holds open is refused this way on Windows.
+  const held = await f.write('held.md', text('Held', 'held alias', comment));
+  const closed = path.dirname(await f.write('closed/inside.md', text('Inside', 'inside alias', comment)));
+  const open = fs.open, opendir = fs.opendir, refused = new Map([[locked, 'EPERM'], [held, 'EBUSY'], [gone, 'ENOENT'], [closed, 'EACCES']]);
+  const refuse = original => async (file, ...rest) => { if (refused.has(file)) throw refusal(refused.get(file)); return original(file, ...rest); };
+  t.mock.method(fs, 'open', refuse(open)); t.mock.method(fs, 'opendir', refuse(opendir));
+  const report = await f.check();
+  assert.deepEqual(names(f, report), ['held.md', 'locked.md', 'readable.md']);
+  assert.deepEqual(report.notes.map(note => note.findings), [unread('EBUSY'), unread('EPERM'), [{ code: 'hidden-comment', repair: 'content-update', count: 1, bytes: Buffer.byteLength(comment.trim()), items: [{ line: 7 }] }]]);
+  assert.deepEqual({ ...report.coverage, reasons: [...report.coverage.reasons].sort() }, { complete: false, notes: 3, directories: 1, reasons: ['changed', 'skipped-directory'] });
+  // The note bound counts every note it tries, whether or not the note could be kept.
+  const bounded = await f.check({}, { limits: { notes: 2 } });
+  assert.deepEqual(names(f, bounded), ['held.md']);
+  assert.deepEqual({ ...bounded.coverage, reasons: [...bounded.coverage.reasons].sort() }, { complete: false, notes: 1, directories: 1, reasons: ['changed', 'note-limit', 'skipped-directory'] });
+  // The destination itself has to open: its refusal still ends the check.
+  refused.set(f.notes, 'EPERM');
+  await assert.rejects(f.check(), { code: 'EPERM' });
+});
+
+test('a notes root that disappears during the check ends it instead of blaming the notes', async t => {
+  const f = await fixture(t);
+  for (const name of ['a', 'b']) await f.write(`${name}.md`, text(`Topic ${name}`, `alias ${name}`, comment));
+  const open = fs.open, lstat = fs.lstat; let gone = false;
+  t.mock.method(fs, 'open', async (file, ...rest) => { if (path.dirname(file) === f.notes) { gone = true; throw refusal('ENOENT'); } return open(file, ...rest); });
+  t.mock.method(fs, 'lstat', async (file, ...rest) => { if (gone && (file === f.notes || path.dirname(file) === f.notes)) throw refusal('ENOENT'); return lstat(file, ...rest); });
+  await assert.rejects(f.check(), { code: 'PATH_UNSAFE' });
+});
+
+test('a file destination that is not an ordinary file is reported unread, while a listing still refuses it', async t => {
+  const outside = async f => { const file = path.join(f.root, 'outside.md'); await fs.writeFile(file, text('Outside', 'outside alias', comment)); return file; };
+  const kinds = { 'hard link': async (f, target) => fs.link(await outside(f), target), folder: (f, target) => fs.mkdir(target), link: async (f, target) => fs.symlink(await outside(f), target) };
+  const made = [];
+  for (const [kind, make] of Object.entries(kinds)) {
+    const f = await fixture(t, { file: true }), target = path.join(f.notes, 'explicit.md');
+    // A platform may refuse to make a link; the other kinds are always made.
+    if (!await make(f, target).then(() => true, () => false)) continue;
+    made.push(kind);
+    const report = await f.check();
+    assert.deepEqual(report.coverage, { complete: true, notes: 1, directories: 1, reasons: [] }, kind);
+    assert.deepEqual(report.notes.map(note => [note.target, note.metadata, note.findings]), [[target, 'unreadable', unread('PATH_UNSAFE')]], kind);
+    assert.deepEqual((await f.check({ target: 'explicit.md' })).notes.map(note => note.findings), [unread('PATH_UNSAFE')], kind);
+    const tools = createDirectNoteTools({ store: f.store, client: 'claude', skillVersion });
+    await assert.rejects(tools.call('cuefluent_list_notes', { projectId: 'demo' }), { code: 'PATH_UNSAFE' }, kind);
+  }
+  assert.ok(made.includes('hard link') && made.includes('folder'), `made: ${made}`);
+});
+
+test('bytes that are not UTF-8 count toward the byte bound, and a note beyond what remains is never opened', async t => {
+  const f = await fixture(t), size = 4096, valid = text('Topic d', 'alias d', comment);
+  for (const name of ['a', 'b', 'c']) await f.write(`${name}.md`, Buffer.alloc(size, 0xff));
+  await f.write('d.md', valid);
+  const open = fs.open, opened = [];
+  t.mock.method(fs, 'open', async (file, ...rest) => { if (path.dirname(file) === f.notes) opened.push(path.basename(file)); return open(file, ...rest); });
+  const bounded = await f.check({}, { limits: { bytes: size * 2 + 1 } });
+  assert.deepEqual(bounded.coverage, { complete: false, notes: 2, directories: 1, reasons: ['byte-limit'] });
+  assert.deepEqual(bounded.notes.map(note => [path.basename(note.target), note.metadata, note.bytes, note.findings]),
+    ['a.md', 'b.md'].map(name => [name, 'unreadable', size, unread('NOTE_UTF8_INVALID')]));
+  assert.equal(bounded.totals.bytes, size * 2); assert.deepEqual(opened, ['a.md', 'b.md']);
+  opened.length = 0;
+  const exact = await f.check({}, { limits: { bytes: size * 3 } });
+  assert.deepEqual(exact.coverage, { complete: false, notes: 3, directories: 1, reasons: ['byte-limit'] }); assert.deepEqual(opened, ['a.md', 'b.md', 'c.md']);
+  opened.length = 0;
+  const whole = await f.check({}, { limits: { bytes: size * 3 + Buffer.byteLength(valid) } });
+  assert.deepEqual(whole.coverage, { complete: true, notes: 4, directories: 1, reasons: [] });
+  assert.equal(whole.totals.bytes, size * 3 + Buffer.byteLength(valid)); assert.deepEqual(opened, ['a.md', 'b.md', 'c.md', 'd.md']);
+});
+
+test('a note that grows beyond the remaining bytes while it is opened is a changed note, not an oversized one', async t => {
+  const f = await fixture(t), body = text('Topic', 'topic alias', comment), note = await f.write('note.md', body);
+  const open = fs.open; let grown = false;
+  t.mock.method(fs, 'open', async (file, ...rest) => {
+    if (file === note && !grown) { grown = true; await fs.appendFile(note, 'More text.\n'); }
+    return open(file, ...rest);
+  });
+  const report = await f.check({}, { limits: { bytes: Buffer.byteLength(body) } });
+  assert.equal(grown, true); assert.deepEqual(report.notes, []);
+  assert.deepEqual(report.coverage, { complete: false, notes: 0, directories: 1, reasons: ['changed'] });
+});
+
+test('a selected note that the listing did not reach is read once and reported like any other', async t => {
+  const f = await fixture(t), limits = { depth: 1 }, target = 'one/two/deep.md';
+  const deep = await f.write(target, text('Deep', 'deep alias', comment));
+  const open = fs.open; let opened = 0;
+  t.mock.method(fs, 'open', async (file, ...rest) => { if (file === deep) opened++; return open(file, ...rest); });
+  const report = await f.check({ target }, { limits });
+  assert.deepEqual(report.notes.map(note => [note.target, codes(note)]), [[deep, ['hidden-comment']]]);
+  assert.deepEqual(report.coverage, { complete: false, notes: 1, directories: 2, reasons: ['depth-limit'] });
+  assert.equal(opened, 1);
+  await fs.writeFile(deep, Buffer.from([0x23, 0x20, 0xff, 0xfe, 0x0a]));
+  assert.deepEqual((await f.check({ target }, { limits })).notes.map(note => [note.target, note.bytes, note.findings]), [[deep, 5, unread('NOTE_UTF8_INVALID')]]);
+  const outside = path.join(f.root, 'outside.md');
+  await fs.writeFile(outside, text('Outside', 'outside alias', comment)); await fs.rm(deep); await fs.link(outside, deep);
+  assert.deepEqual((await f.check({ target }, { limits })).notes.map(note => [note.target, note.findings]), [[deep, unread('PATH_UNSAFE')]]);
+  assert.deepEqual(await f.check({ target: 'one/two/missing.md' }, { limits }), { state: 'absent', projectId: 'demo', target: path.join(f.notes, 'one', 'two', 'missing.md') });
+  await assert.rejects(f.check({ target: 'one/two/what?.md' }, { limits }), { code: 'PATH_INVALID' });
+  await assert.rejects(f.check({ target: 'one/../two.md' }, { limits }), { code: 'PATH_INVALID' });
+});

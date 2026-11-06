@@ -198,8 +198,11 @@ and conflicts.
 It reads the destination's ordinary notes: `.md` and `.markdown` files outside
 `logs/`. A file with such a name that is a link, has several hard links, is not a
 regular file, has no portable name or differs from another only by case or
-normalization is never opened and is listed as `note-unreadable`. Notes without findings are counted in `totals` and
-not listed; a note selected with `target` is always listed. `run` is `none`,
+normalization is never opened and is listed as `note-unreadable`, also when it is
+a project's single file destination. A file that the operating system will not
+open, that is larger than a note file may be or that is not UTF-8 is listed the
+same way, and each such finding names its reason. Notes without findings are
+counted in `totals` and not listed; a note selected with `target` is always listed. `run` is `none`,
 `pending` with the run's kind and phase, `busy` while another operation holds the
 project, or `unavailable` with a code when the run's records cannot be read;
 `status` explains the last two, and the check leaves all of it untouched.
@@ -223,7 +226,7 @@ that it is only reported.
 | `alias-in-note` | choice | An alias belongs to more than one section of the note. |
 | `alias-across-notes` | choice | An alias also belongs to sections of other notes. |
 | `hidden-comment` | content-update | The body contains hidden HTML comments. |
-| `note-unreadable`, `note-invalid` | blocked | The file is not an ordinary file of bounded UTF-8 Markdown, or does not satisfy the note profile. |
+| `note-unreadable`, `note-invalid` | blocked | The file is not an ordinary file of bounded UTF-8 Markdown or could not be opened, or does not satisfy the note profile. |
 | `metadata-invalid`, `metadata-unsupported` | blocked | The metadata block is malformed, or uses a schema version that is not interpreted. |
 | `note-id-duplicate` | blocked | Another note declares the same note ID. |
 
@@ -240,8 +243,9 @@ A check reads within fixed [bounds](limits.md#output-profile). When it could not
 read everything, `coverage.complete` is false and every count covers only what
 was read. `coverage.reasons` says why: `note-limit`, `byte-limit`,
 `directory-limit`, `directory-entry-limit` or `depth-limit` for a bound, `changed`
-for a note that changed while it was read, `skipped-directory` for a folder that
-has no portable name or differs from another only by case or normalization, and
+for a note that changed or disappeared while it was read, `skipped-directory` for
+a folder that the operating system will not list, has no portable name or differs
+from another only by case or normalization, and
 `skipped-link` for a link without a Markdown name, which is never followed, so a
 folder behind it is not read. Other notes naming an alias or identity are listed up to five, with
 the rest counted in `moreNotes`.

@@ -17,10 +17,19 @@ export const DOCTOR_LIMITS = Object.freeze({ notes: 1024, bytes: 32 * 1024 * 102
   items: 20, itemBytes: 512, related: 5, noteBytes: 8 * 1024, pageBytes: REVIEW_PAGE_BYTES, pageNodes: CONTROL_LIMITS.nodes * 0.8 });
 const CURSOR = new RegExp(CHECK_CURSOR_PATTERN);
 const PROJECT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-// A file that cannot be read as a note is a finding of that file; anything else,
-// such as a replaced notes root, ends the check.
-const UNREADABLE = new Set(['NOTE_UTF8_INVALID', 'NOTE_FILE_LIMIT', 'READ_LIMIT_EXCEEDED', 'PATH_UNSAFE', 'PATH_INVALID', 'NOTE_TARGET_INVALID', 'WORKSPACE_TARGET_ALIAS']);
-const CHANGED = new Set(['FILE_CHANGED', 'FILE_MISSING']);
+// A file that cannot be read as a note is a finding of that file, and a folder
+// that cannot be listed is partial coverage. Anything else, such as a notes root
+// that was replaced or cannot be listed, ends the check.
+
+// The operating system refuses access, or on Windows another program holds the file.
+const DENIED = new Set(['EACCES', 'EPERM', 'EBUSY']);
+// A file that is not opened: it is not an ordinary file, exceeds the note
+// profile, or is refused.
+const UNOPENED = new Set(['PATH_UNSAFE', 'READ_LIMIT_EXCEEDED', ...DENIED]);
+// A listed name that is no note target. For a requested target it is an argument error.
+const UNNAMED = new Set(['PATH_INVALID', 'NOTE_TARGET_INVALID', 'WORKSPACE_TARGET_ALIAS']);
+// A note that changed or vanished while it was read.
+const CHANGED = new Set(['FILE_CHANGED', 'FILE_MISSING', 'ENOENT']);
 const ORDER = Object.keys(DOCTOR_FINDINGS);
 const size = value => Buffer.byteLength(JSON.stringify(value));
 // Counted as the response contract counts them: every value, whatever its kind.
@@ -38,8 +47,9 @@ function checkArguments(input) {
 
 /** Every Markdown-named file of the destination, within fixed bounds and
  * without the reserved logs folder. One that is not an ordinary file is kept so
- * that it is reported instead of read. A folder without a portable name is not
- * entered and a link is not followed; each makes the coverage partial. */
+ * that it is reported instead of read. A folder that has no portable name or
+ * that the operating system will not list is not entered, and a link is not
+ * followed; each makes the coverage partial. The destination itself must list. */
 async function listTargets(workspace, coverage, limits) {
   const targets = [], pending = [{ directory: undefined, depth: 0 }];
   for (let next = 0; next < pending.length; next++) {
@@ -52,9 +62,12 @@ async function listTargets(workspace, coverage, limits) {
       catch (error) {
         if (error?.code === 'WORKSPACE_LIST_LIMIT') coverage.partial('directory-entry-limit');
         // A folder whose name differs from an earlier one only by case or
-        // normalization has no portable name of its own.
-        else if (error?.code === 'WORKSPACE_TARGET_ALIAS') { coverage.directories--; coverage.partial('skipped-directory'); }
-        else throw error;
+        // normalization has no portable name of its own. It counts as inspected
+        // only once a page of it was listed.
+        else if (directory !== undefined && (error?.code === 'WORKSPACE_TARGET_ALIAS' || DENIED.has(error?.code))) {
+          if (cursor === undefined) coverage.directories--;
+          coverage.partial('skipped-directory');
+        } else throw error;
         break;
       }
       for (const entry of page.entries) {
@@ -70,20 +83,29 @@ async function listTargets(workspace, coverage, limits) {
   return targets;
 }
 
-const unreadable = reason => ({ status: 'unreadable', bytes: 0, id: null, headerBytes: 0, aliasBytes: 0, sections: 0, aliases: [],
+const unopened = reason => ({ status: 'unreadable', bytes: 0, id: null, headerBytes: 0, aliasBytes: 0, sections: 0, aliases: [],
   sources: { document: 0, session: 0 }, findings: [{ code: 'note-unreadable', count: 1, bytes: 0, items: [{ reason }] }] });
 
-/** Read one note without retaining it. `null` means it changed or vanished
- * while it was read, which is partial coverage, not a finding. */
-async function readNote(workspace, target) {
-  try {
-    const read = await workspace.peek({ target });
-    return read.exists ? { target: read.target, hash: read.hash, health: inspectNoteHealth(read.bytes) } : null;
-  } catch (error) {
-    if (CHANGED.has(error?.code)) return null;
-    if (!UNREADABLE.has(error?.code)) throw error;
-    return { target, hash: error.code, health: unreadable(error.code) };
+/** Read one note without retaining it, within the bytes the check may still
+ * read. A `requested` target that the listing did not reach is asked for as it
+ * was given, so that a name that is no note target stays an argument error;
+ * `file` is where that note is. The result is `read` with the bytes it cost,
+ * `absent`, `changed`, or `beyond` for a note the remaining bytes cannot hold. */
+async function readNote(workspace, { file, target = file, requested = false, maxBytes }) {
+  let read;
+  try { read = await workspace.peek({ target, maxBytes }); }
+  catch (error) {
+    const code = error?.code;
+    if (code === 'WORKSPACE_INSPECTION_LIMIT') return { state: 'beyond' };
+    const changed = CHANGED.has(code);
+    if (!changed && !UNOPENED.has(code) && (requested || !UNNAMED.has(code))) throw error;
+    // The failure belongs to this note only while the notes root still stands.
+    await workspace.verify();
+    return changed ? { state: 'changed' } : { state: 'read', bytes: 0, note: { target: file, hash: code, health: unopened(code) } };
   }
+  if (!read.exists) return { state: 'absent', target: read.target };
+  // Bytes that are not UTF-8 were read all the same: the health names them and their size.
+  return { state: 'read', bytes: read.totalBytes, note: { target: read.target, hash: read.hash, health: inspectNoteHealth(read.bytes) } };
 }
 
 /** The report is about notes, so it never waits for whoever holds the project
@@ -130,28 +152,31 @@ export async function checkNotes(store, input, { skillVersion, limits: lower = {
 
   const reasons = [], coverage = { directories: 0, partial: reason => { if (!reasons.includes(reason)) reasons.push(reason); } };
   const targets = (await listTargets(workspace, coverage, limits)).sort((left, right) => name(left) < name(right) ? -1 : name(left) > name(right) ? 1 : 0);
-  let selected = null;
+  let selected = null, unlisted = false;
   if (target !== undefined) {
     // A note is selected by its portable name, in whatever spelling the listing
-    // found on disk. One the listing did not reach is read on its own, and it is
-    // always inspected, even when the bounds stop before it.
+    // found on disk. One the listing did not reach is read on its own. Either way
+    // it is read first, so the bounds stop only the notes after it.
     const key = value => value.normalize('NFC').toLowerCase();
-    const wanted = key(path.isAbsolute(target) ? target : path.join(root, ...target.split('/')));
-    selected = targets.find(file => key(file) === wanted) ?? null;
-    if (!selected) {
-      const read = await workspace.peek({ target });
-      if (!read.exists) return { state: 'absent', projectId, target: read.target };
-      selected = read.target;
-    } else targets.splice(targets.indexOf(selected), 1);
+    const wanted = path.isAbsolute(target) ? target : path.join(root, ...target.split('/')), wantedKey = key(wanted);
+    selected = targets.find(file => key(file) === wantedKey) ?? null;
+    if (selected) targets.splice(targets.indexOf(selected), 1);
+    else { selected = wanted; unlisted = true; }
     targets.unshift(selected);
   }
-  const notes = []; let bytes = 0;
+  // Both bounds cover what was attempted, not what could be kept: a note that
+  // cannot be read counts as a note, bytes that are not UTF-8 count as bytes, and
+  // a note that the remaining bytes cannot hold is not opened.
+  const notes = []; let bytes = 0, attempts = 0;
   for (const file of targets) {
-    if (notes.length === limits.notes) { coverage.partial('note-limit'); break; }
-    const note = await readNote(workspace, file);
-    if (!note) { coverage.partial('changed'); continue; }
-    if (bytes + note.health.bytes > limits.bytes) { coverage.partial('byte-limit'); break; }
-    bytes += note.health.bytes; notes.push({ ...note, name: name(note.target) });
+    if (attempts === limits.notes) { coverage.partial('note-limit'); break; }
+    attempts++;
+    const requested = unlisted && file === selected;
+    const read = await readNote(workspace, { file, ...(requested ? { target, requested } : {}), maxBytes: limits.bytes - bytes });
+    if (read.state === 'absent' && requested) return { state: 'absent', projectId, target: read.target };
+    if (read.state === 'beyond') { coverage.partial('byte-limit'); break; }
+    if (read.state !== 'read') { coverage.partial('changed'); continue; }
+    bytes += read.bytes; notes.push({ ...read.note, name: name(read.note.target) });
   }
   notes.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
 
