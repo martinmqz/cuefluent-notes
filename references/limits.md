@@ -214,7 +214,9 @@ otherwise it arrives in bounded UTF-8 ranges. A requested range can be up to
 and JSON escaping. Queued processing has separate budgets: 8 KiB read ranges,
 64 KiB of cumulative tool responses and 128 KiB of cumulative draft submissions. A queued
 full-content replacement requires reading the whole original; exact edits can
-preserve unread content without resubmitting it.
+preserve unread content without resubmitting it. A note stores at most 128
+sources, and a newly supplied source locator is limited to 120 UTF-16 code units;
+see [source metadata](notes.md#source-metadata).
 
 ## What is verified
 

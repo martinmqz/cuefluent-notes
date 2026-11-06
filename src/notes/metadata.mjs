@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar, visit as visitYaml } from 'yaml';
 import { fail } from '../core/errors.mjs';
@@ -83,72 +83,63 @@ function sourceIdentity(source) {
   return JSON.stringify(identity);
 }
 
-const nativeSourceKeys = new Set(['client', 'session_id', 'unit_id', 'revision', 'raw_ref']);
+/** A submitted source has only these fields. Each is part of the document
+ * identity, so two submissions with one identity are the same descriptor. */
+const submittedSourceKeys = new Set(['type', 'ref', 'locator', 'version']);
+export const SOURCE_LOCATOR_LENGTH = 120;
+// Rooted, home, drive, UNC and file: forms name a place on one machine. The
+// forms are checked on every platform: notes travel between them.
+const localReference = /^(?:[\\/~]|[A-Za-z]:|file:)/i;
 const checkedSources = new WeakSet();
-function sourceFields(existing, supplied) {
-  const fields = {};
-  for (const [key, value] of Object.entries(supplied)) {
-    if (Object.hasOwn(existing, key)) {
-      if (!isDeepStrictEqual(existing[key], value)) fail('NOTE_SOURCE_CONFLICT', 'A source identity already has different descriptive metadata. Preserve it and reconcile the source descriptions.');
-    } else fields[key] = value;
-  }
-  return fields;
-}
-function sourceChanges(existing, supplied) {
-  const additions = [], amendments = new Map();
-  const identities = new Map(existing.map((value, index) => [sourceIdentity(value), { value, index }]));
+/** The supplied sources a note does not already cite, in submission order. */
+function sourceAdditions(existing, supplied) {
+  const identities = new Set(existing.map(sourceIdentity)), additions = [];
   for (const source of supplied) {
-    const identity = sourceIdentity(source), prior = identities.get(identity);
-    if (prior) {
-      const fields = sourceFields(prior.value, source);
-      if (!Object.keys(fields).length) continue;
-      if (Object.keys(prior.value).length + Object.keys(fields).length > P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'The combined source descriptor exceeds its field limit. Preserve the existing source and supplied data.');
-      prior.value = Object.freeze(Object.fromEntries(Object.entries({ ...prior.value, ...fields }).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)));
-      if (prior.index < existing.length) amendments.set(prior.index, { ...amendments.get(prior.index), ...fields });
-      else additions[prior.index - existing.length] = prior.value;
-    } else {
-      if (existing.length + additions.length === P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'The note source limit is reached. Preserve the existing note and supplied sources; do not prune provenance or split the note to fit.');
-      identities.set(identity, { value: source, index: existing.length + additions.length }); additions.push(source);
-    }
+    const identity = sourceIdentity(source);
+    if (identities.has(identity)) continue;
+    if (existing.length + additions.length === P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'The note source limit is reached. Preserve the existing note and supplied sources; do not prune provenance or split the note to fit.');
+    identities.add(identity); additions.push(source);
   }
-  return { additions, amendments };
+  return additions;
 }
 
-/** Shared writer/validator policy: retain source order, identities and all old
- * values, admitting only document additions and nonconflicting descriptive keys. */
+/** Shared writer/validator policy: every earlier source stays exactly as it
+ * was, in order, followed only by newly submitted document sources. */
 export function isSourceAppend(previous, current) {
   try {
     if (!Array.isArray(previous) || !Array.isArray(current) || current.length < previous.length || current.length > P.metadataItems) return false;
-    for (let index = 0; index < previous.length; index++) {
-      const before = previous[index], after = current[index];
-      if (sourceIdentity(before) !== sourceIdentity(after)) return false;
-      const extra = sourceFields(before, after);
-      if (Object.keys(before).some(key => !Object.hasOwn(after, key))) return false;
-      if (before.type !== 'document' && Object.keys(extra).length) return false;
-      if (Object.keys(extra).some(key => nativeSourceKeys.has(key))) return false;
-      if (Object.keys(extra).length) {
-        const identity = Object.fromEntries(['type', 'ref', 'locator', 'version', 'source_hash'].filter(key => Object.hasOwn(after, key)).map(key => [key, after[key]]));
-        validateDocumentSources([{ ...identity, ...extra }]);
-      }
-    }
+    for (let index = 0; index < previous.length; index++) if (!isDeepStrictEqual(previous[index], current[index])) return false;
     const added = current.slice(previous.length);
     return validateDocumentSources(added).length === added.length;
   } catch { return false; }
 }
 
 /** Assistant-provided provenance is bounded descriptive document data, never
- * native session authority or replacement of writer-owned note metadata. */
+ * native session authority or replacement of writer-owned note metadata. Stored
+ * metadata keeps the wider schema-1 source shape; only submissions are closed. */
 export function validateDocumentSources(input) {
   if (checkedSources.has(input)) return input;
   if (Array.isArray(input) && input.length > P.metadataItems) fail('NOTE_SOURCE_LIMIT', 'Too many supplied sources. Preserve the input and use the supported source bound.');
+  // A locator over its limit is that refusal at any length, so it is read here,
+  // as plain data, before the structural bound on every metadata string applies.
+  if (Array.isArray(input)) for (let index = 0; index < input.length; index++) {
+    const source = Object.getOwnPropertyDescriptor(input, index)?.value;
+    const locator = plain(source) ? Object.getOwnPropertyDescriptor(source, 'locator')?.value : undefined;
+    if (typeof locator === 'string' && locator.length > SOURCE_LOCATOR_LENGTH) fail('NOTE_SOURCE_LOCATOR', `A source locator is limited to ${SOURCE_LOCATOR_LENGTH} UTF-16 code units. Give a concise position, not a summary.`);
+  }
   try {
     const sources = dataValue({ sources: input }, true).sources;
     requireValue(Array.isArray(sources));
-    for (const source of sources) requireValue(plain(source) && source.type === 'document' && !Object.keys(source).some(key => nativeSourceKeys.has(key)));
-    const result = Object.freeze(sourceChanges([], sources).additions);
+    for (const source of sources) {
+      requireValue(plain(source) && source.type === 'document');
+      if (!Object.keys(source).every(key => submittedSourceKeys.has(key))) fail('NOTE_SOURCE_FIELD', 'A supplied source accepts only type, ref, locator and version. Leave out hashes, session identities and every other field.');
+      requireValue(text(source.ref, 2048));
+      if (localReference.test(source.ref)) fail('NOTE_SOURCE_REFERENCE', 'A source ref must be a portable reference or a truthful descriptive label, not a local path or file URL.');
+    }
+    const result = Object.freeze(sourceAdditions([], sources));
     checkedSources.add(result); return result;
   } catch (error) {
-    if (error.code === 'NOTE_METADATA_INVALID') fail('NOTE_SOURCE_ARGUMENT', 'Invalid supplied source descriptor. Use bounded document fields without native session identities, control characters, surrounding whitespace or comment delimiters.');
+    if (error.code === 'NOTE_METADATA_INVALID') fail('NOTE_SOURCE_ARGUMENT', 'Invalid supplied source descriptor. Use bounded document fields without control characters, surrounding whitespace or comment delimiters.');
     throw error;
   }
 }
@@ -343,13 +334,13 @@ function renderMetadata(document, expandedMetadata, newline, preserveLayoutOnOve
 export function preserveMetadata(originalInput, proposedInput, { usefulChange, updated, skillVersion, expandedMetadata = false, sources = [] } = {}) {
   const original = decodeNote(originalInput), proposed = decodeNote(proposedInput);
   const before = inspectMetadata(original), after = inspectMetadata(proposed);
-  const additions = validateDocumentSources(sources);
-  if (additions.length && before.status !== 'supported') {
+  const supplied = validateDocumentSources(sources);
+  if (supplied.length && before.status !== 'supported') {
     if (before.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be repaired by a note update.');
     fail('NOTE_SOURCES_UNSUPPORTED', 'New sources require existing supported Cuefluent metadata. Preserve this note without enriching or replacing its metadata.');
   }
-  const changes = additions.length ? sourceChanges(before.value.sources ?? [], additions) : { additions: [], amendments: new Map() };
-  const sourcesChanged = changes.additions.length > 0 || changes.amendments.size > 0;
+  const additions = supplied.length ? sourceAdditions(before.value.sources ?? [], supplied) : [];
+  const sourcesChanged = additions.length > 0;
   if (sourcesChanged && usefulChange === false) fail('NOTE_SOURCE_ARGUMENT', 'New source metadata is a change; do not declare a source addition unchanged.');
   const unchanged = () => ({ bytes: Buffer.from(original), changed: false, diagnostics: before.diagnostics });
   if (!sourcesChanged && (original === proposed || usefulChange === false)) return unchanged();
@@ -363,14 +354,9 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
     if (sourcesChanged) {
       if (!document.has('sources')) document.set('sources', document.createNode([]));
       const sequence = document.get('sources', true);
-      for (const [index, fields] of changes.amendments) {
-        const node = sequence.items[index];
-        const additions = quoteSourceStrings(document.createNode(fields));
-        for (const pair of additions.items) node.add(pair);
-      }
       // A sequence-end comment belongs with the original source set, not a
       // newly appended source. Keep it before the first addition.
-      for (const source of changes.additions) {
+      for (const source of additions) {
         const node = quoteSourceStrings(document.createNode(source));
         if (sequence.comment) { node.commentBefore = sequence.comment; sequence.comment = null; }
         sequence.add(node);
@@ -388,11 +374,6 @@ export function preserveMetadata(originalInput, proposedInput, { usefulChange, u
       const current = document.getIn(['generation', 'skill_version'], true);
       if (isScalar(current)) current.value = skillVersion;
       else document.setIn(['generation', 'skill_version'], skillVersion);
-    }
-    if (oldBody !== newBody && before.value.generation?.content_hash !== undefined) {
-      // The optional digest covers the exact note bytes outside its metadata block.
-      const value = `sha256:${createHash('sha256').update(prefix + newBody).digest('hex')}`;
-      document.getIn(['generation', 'content_hash'], true).value = value;
     }
     raw = renderMetadata(document, expandedMetadata, noteNewline(raw), true, sourcesChanged);
   }

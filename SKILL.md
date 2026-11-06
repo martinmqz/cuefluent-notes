@@ -28,20 +28,25 @@ Example: "Use Cuefluent to save the meeting details above as a note."
 3. Compose the complete Markdown: a topic H1, useful H2 sections, only what the user
    asked to save, no invented facts, sources or identifiers, and no Cuefluent
    metadata block. Follow [note authoring](references/notes.md#content-and-evidence):
-   the visible body contains substantive content only. Source references, citation
-   offsets and note-production details belong in hidden metadata, not a Sources
-   section, footnotes or inline citations. Keep meaningful attribution, event
+   the visible body contains substantive content only, with no Sources section,
+   footnotes or inline citations, and no hidden HTML comment other than H2
+   aliases. Leave hashes, capture details and note-production bookkeeping out
+   altogether. Keep meaningful attribution, event
    dates, decisions and uncertainty visible. For an update, reconcile with the
    original and keep its useful content, manual edits and aliases.
 4. Call `cuefluent_create_note` for an absent target or `cuefluent_update_note`
    with the inspected `expectedHash`, each with `projectId`, a fresh UUID
    `requestId`, `target`, `content` and `summary`. Supply known document references
-   separately as optional `sources`; the writer adds them to hidden metadata.
-   Do not invent session provenance or copy private machine paths into the note.
+   separately as optional `sources`, one per meaningful evidence unit, each with
+   only `type`, `ref`, an optional concise `locator` and an optional `version`
+   ([source metadata](references/notes.md#source-metadata)); the writer adds them
+   to hidden metadata. Do not invent session provenance, versions or URLs, or copy
+   private machine paths into the note.
    Retry the same submission only with the same requestId and arguments.
-   Source object key order does not change request identity. Source fields must follow
-   the advertised limits; malformed source arguments do not mean the existing note
-   is malformed. Preserve existing data on a capacity refusal.
+   Source object key order does not change request identity. Rewrite a refused
+   source; never truncate it, drop it or move its detail into the body or a
+   comment. A refused source does not mean the existing note is malformed.
+   Preserve existing data on a capacity refusal.
 5. Automatic saving returns the saved path: link it. A `review` result is not saved
    yet: show the complete draft set and its proposed sources, then ask.
    - Source pages (`part: sources`) contain `sourceContent`: concatenate these

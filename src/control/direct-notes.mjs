@@ -30,7 +30,7 @@ const target = workspaceSchema('read_note').target;
 const expectedHash = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 const revision = { type: 'string', pattern: '^[a-f0-9]{64}$', description: 'The revision returned by the review the user decided on. A changed draft set is refused.' };
 const content = { type: 'string', minLength: 1, maxLength: DIRECT_NOTE_BYTES,
-  description: 'Complete visible Markdown subject content composed by the calling assistant. Keep source references and citation locators out of the body; supply them separately with sources. Maximum 128 KiB in UTF-8, with each source line at most 64 KiB. Preserve useful existing content when updating; the writer retains existing metadata.' };
+  description: 'Complete visible Markdown subject content composed by the calling assistant. Keep source references out of the body; supply them separately with sources. Add no hidden HTML comment: an H2 aliases comment is the only one to author, and an existing comment stays exactly as it is unless the user asked to remove it. Maximum 128 KiB in UTF-8, with each source line at most 64 KiB. Preserve useful existing content when updating; the writer retains existing metadata.' };
 const summary = workspaceSchema('draft_note').summary;
 const sources = workspaceSchema('draft_note').sources;
 const definition = (name, description, inputSchema, readOnlyHint = false) => ({ name, description, inputSchema,

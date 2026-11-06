@@ -24,7 +24,9 @@ Report a size refusal and ask how to proceed; do not shorten, split or create a 
 receive identity and timestamps; updates keep theirs. The writer enforces the configured destination.
 Optional `sources` contains known document descriptors for hidden metadata,
 separate from the substantive body; see [source metadata](notes.md#source-metadata).
-The same argument is available to queued `draft_note`. Source additions preserve
+The same argument is available to queued `draft_note`. A source outside that
+contract, or content that adds a hidden HTML comment, is refused before a draft
+is reserved. Source additions preserve
 existing descriptions and are bound to the complete retained draft and review
 revision, while the Markdown preview omits metadata. Review returns paged `sourceContent`
 separately; show it alongside the body before approval. Source object key order
