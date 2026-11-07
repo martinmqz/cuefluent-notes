@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { parseDocument } from 'yaml';
 import { createProject } from '../src/core/settings.mjs';
-import { inspectMetadata, NOTE_PROFILE } from '../src/notes/index.mjs';
+import { inspectMetadata, NOTE_PROFILE, SOURCE_LOCATOR_LENGTH } from '../src/notes/index.mjs';
 import { createRun, validateRun, runRevision } from '../src/core/run.mjs';
 import { initializeStore, withProject, readSettings, updateSettings } from '../src/storage/store.mjs';
 import { readJSON, writeJSON, hashBytes } from '../src/storage/files.mjs';
@@ -102,15 +102,8 @@ test('direct document sources are hidden from previews, saved exactly, and bound
   await assert.rejects(f.create({ sources: changed }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
 });
 
-test('direct source replay preserves numeric distinctions in descriptive data', async t => {
-  const f = await fixture(t), source = { type: 'document', ref: 'Synthetic', offset: -0 };
-  await f.create({ sources: [source] });
-  await assert.rejects(f.create({ sources: [{ ...source, offset: 0 }] }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
-  await f.call('skip');
-});
-
-test('direct source-only updates retain original metadata and reject conflicting descriptions before reserving a run', async t => {
-  const f = await fixture(t, { saving: 'auto' }), source = { type: 'document', ref: 'Synthetic meeting', description: 'Original account' };
+test('direct source-only updates retain original metadata and refuse a field outside the source contract before reserving a run', async t => {
+  const f = await fixture(t, { saving: 'auto' }), source = { type: 'document', ref: 'Synthetic meeting', locator: '00:48' };
   const saved = await f.create({ sources: [source] }), target = saved.result.paths[0], original = await fs.readFile(target);
   const addition = { type: 'document', ref: 'Synthetic design', locator: 'Agreed scope' };
   const update = { ...f.request, requestId: randomUUID(), expectedHash: hashBytes(original), sources: [addition] };
@@ -119,7 +112,7 @@ test('direct source-only updates retain original metadata and reject conflicting
   assert.ok(revised.toString().endsWith(content));
   assert.deepEqual(inspectMetadata(revised).value.sources, [source, addition]);
   assert.equal(inspectMetadata(revised).value.id, inspectMetadata(original).value.id);
-  await assert.rejects(f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: hashBytes(revised), sources: [{ ...source, description: 'Different account' }] }), { code: 'NOTE_SOURCE_CONFLICT' });
+  await assert.rejects(f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: hashBytes(revised), sources: [{ ...source, description: 'Different account' }] }), { code: 'NOTE_SOURCE_FIELD' });
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null); assert.ok((await fs.readFile(target)).equals(revised));
   const written = await fs.stat(target);
   const unchanged = await f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: hashBytes(revised) });
@@ -133,12 +126,33 @@ test('invalid document sources and additions to plain notes never create pending
     await assert.rejects(f.create({ sources }), { code: 'NOTE_SOURCE_ARGUMENT' });
     assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
   }
+  for (const [code, extra] of [['NOTE_SOURCE_FIELD', { source_hash: `sha256:${'a'.repeat(64)}` }], ['NOTE_SOURCE_FIELD', { hash: 'invented' }],
+    ['NOTE_SOURCE_REFERENCE', { ref: '~/Downloads/transcript.vtt' }], ['NOTE_SOURCE_REFERENCE', { ref: 'C:\\Users\\synthetic\\capture.png' }],
+    ['NOTE_SOURCE_LOCATOR', { locator: 'x'.repeat(SOURCE_LOCATOR_LENGTH + 1) }]]) {
+    await assert.rejects(f.create({ sources: [{ ...source, ...extra }] }), { code });
+    assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
+  }
+  assert.deepEqual(await fs.readdir(f.notes), []);
   const target = path.join(f.notes, 'plain.md'); await fs.writeFile(target, content);
   await assert.rejects(f.tools.call('cuefluent_update_note', { ...f.request, target: 'plain.md', expectedHash: hashBytes(content), sources: [source] }), { code: 'NOTE_SOURCES_UNSUPPORTED' });
   assert.equal((await readProjectStatus(f.store, 'demo')).run, null); assert.equal(await fs.readFile(target, 'utf8'), content);
   const draft = await f.create({ sources: [] });
   assert.deepEqual(await f.create(), draft, 'an empty list has the same request identity as omitted sources');
   await f.call('skip');
+});
+
+test('a direct note that adds a hidden comment is refused before a run or a file exists, and an update may keep one it already has', async t => {
+  const f = await fixture(t, { saving: 'auto' }), comment = '\n<!-- Evidence: captured earlier -->\n';
+  await assert.rejects(f.create({ content: content + comment }), { code: 'NOTE_COMMENT_ADDED' });
+  assert.equal((await readProjectStatus(f.store, 'demo')).run, null); assert.deepEqual(await fs.readdir(f.notes), []);
+  const target = (await f.create()).result.paths[0], saved = await fs.readFile(target);
+  const update = { ...f.request, requestId: randomUUID(), expectedHash: hashBytes(saved) };
+  await assert.rejects(f.tools.call('cuefluent_update_note', { ...update, content: content + comment }), { code: 'NOTE_COMMENT_ADDED' });
+  assert.equal((await readProjectStatus(f.store, 'demo')).run, null); assert.ok((await fs.readFile(target)).equals(saved));
+  const historical = Buffer.concat([saved, Buffer.from(comment)]); await fs.writeFile(target, historical);
+  const revised = content.replace('small', 'focused') + comment;
+  const outcome = await f.tools.call('cuefluent_update_note', { ...update, requestId: randomUUID(), expectedHash: hashBytes(historical), content: revised });
+  assert.equal(outcome.state, 'saved'); assert.ok((await fs.readFile(target, 'utf8')).endsWith(revised));
 });
 
 test('approval previews omit internal aliases while preserving Markdown, Unicode, newlines and literal code examples', async t => {
@@ -322,6 +336,22 @@ async function nativeTools(f, { client = 'codex' } = {}) {
     return response.result.isError ? JSON.parse(response.result.content[0].text) : response.result.structuredContent;
   } };
 }
+
+test('both MCP hosts report a refused source or hidden comment by its own code, with guidance and no pending run or file', async t => {
+  for (const client of ['claude', 'codex']) {
+    const f = await fixture(t, { client }), native = await nativeTools(f, { client }), source = { type: 'document', ref: 'Synthetic meeting' };
+    for (const [code, input] of [['NOTE_SOURCE_FIELD', { sources: [{ ...source, source_hash: `sha256:${'a'.repeat(64)}` }] }],
+      ['NOTE_SOURCE_REFERENCE', { sources: [{ ...source, ref: '/synthetic/private/capture.png' }] }],
+      ['NOTE_SOURCE_LOCATOR', { sources: [{ ...source, locator: 'x'.repeat(SOURCE_LOCATOR_LENGTH + 1) }] }],
+      ['NOTE_COMMENT_ADDED', { content: `${content}\n<!-- Evidence: captured earlier -->\n` }]]) {
+      const failure = await native.call('cuefluent_create_note', { ...f.request, requestId: randomUUID(), ...input });
+      assert.equal(failure.error, code); assert.equal(failure.diagnostics.toolName, 'cuefluent_create_note');
+      assert.ok(failure.message.length > 20 && failure.recovery.length > 40);
+      assert.equal((await readProjectStatus(f.store, 'demo')).run, null);
+    }
+    assert.deepEqual(await fs.readdir(f.notes), []);
+  }
+});
 
 test('both MCP hosts execute project/list/read/update through the real response contract and save exact reviewed bytes', async t => {
   for (const client of ['claude', 'codex']) {
@@ -743,7 +773,7 @@ for (const saving of ['auto', 'review']) {
     let body = content + line.repeat(Math.floor((DIRECT_NOTE_BYTES - Buffer.byteLength(content)) / Buffer.byteLength(line)));
     body += 'x'.repeat(DIRECT_NOTE_BYTES - Buffer.byteLength(body));
     assert.equal(Buffer.byteLength(body), 128 * 1024);
-    const sources = Array.from({ length: 80 }, (_, i) => ({ type: 'document', ref: `Synthetic sprint source ${i}`, locator: 'x'.repeat(600) }));
+    const sources = Array.from({ length: 80 }, (_, i) => ({ type: 'document', ref: `Synthetic sprint source ${i} ${'x'.repeat(580)}`, locator: `Section ${i}` }));
     const request = { ...f.request, content: body, sources };
     assert.ok(Buffer.byteLength(JSON.stringify(request)) > WORKSPACE_LIMITS.draftBytes);
     const target = path.join(f.notes, f.request.target);

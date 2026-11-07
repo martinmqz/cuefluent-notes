@@ -13,6 +13,33 @@ const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const logMarker = new RegExp(`^<!-- note-log-entry event=${uuid} project=${identifier} -->$`);
 export const isLogEntryMarker = value => typeof value === 'string' && logMarker.test(value.trim());
 const aliasComment = /^ {0,3}<!--[ \t]*aliases:[ \t]*([^\r\n]*?)-->[ \t]*(?:\r?\n)?$/;
+const metadataComment = /^<!--[\t \r\n]*cuefluent(?=[\t \r\n]|-->|$)/i;
+
+/** Hidden comments an author controls: every HTML comment the parser recognizes,
+ * in blocks, inline or inside raw HTML, except the metadata header and the
+ * directive of a top-level alias line, which have their own rules. Anything
+ * after that directive on its line is an ordinary comment, and so is alias-like
+ * text anywhere else. Literal examples in code and comment markers inside a
+ * tag's attributes are not comments. Whitespace runs collapse, so re-wrapping a
+ * comment is not a change. */
+function authoredComments(tokens) {
+  const found = [];
+  const visit = (items, parentLine) => {
+    for (const token of items) {
+      const line = token.map ? token.map[0] + 1 : parentLine;
+      if (token.type === 'html_block' || token.type === 'html_inline') {
+        const comments = htmlParts(token.content).filter(part => part.comment !== undefined).map(part => part.comment);
+        if (token.type === 'html_block' && token.level === 0 && aliasComment.test(token.content)) comments.shift();
+        for (const comment of comments) if (!metadataComment.test(comment)) found.push({ text: comment.replace(/\s+/g, ' ').trim(), line, bytes: Buffer.byteLength(comment) });
+      }
+      if (token.children) visit(token.children, line);
+    }
+  };
+  visit(tokens, 1); return found;
+}
+const sourceTokens = source => { const { tokens, env } = parseMarkdown(source); return env.sourceTokens ?? tokens; };
+/** Where a note's hidden comments are and how many bytes each occupies. */
+export const hiddenComments = input => authoredComments(sourceTokens(decodeNote(input))).map(({ line, bytes }) => ({ line, bytes }));
 
 /** Content-only approval view: literal examples of metadata remain visible. */
 export function reviewNoteContent(input, inspection) {
@@ -53,16 +80,27 @@ function stableData(value) {
 }
 const sameData = (left, right) => JSON.stringify(stableData(left)) === JSON.stringify(stableData(right));
 
+/** Split raw HTML into its comments, its tags and the text between them, the
+ * way an HTML reader does: a comment marker inside a tag, such as in a quoted
+ * attribute, is part of that tag and neither opens nor closes a comment. */
 function htmlParts(source) {
   const parts = []; let cursor = 0, index = 0;
+  const push = (part, end) => {
+    if (cursor < index) parts.push({ text: source.slice(cursor, index) });
+    parts.push(part); cursor = end; index = end;
+  };
   while ((index = source.indexOf('<', index)) !== -1) {
+    if (source.startsWith('<!--', index)) {
+      // A comment may close on its own opening dashes: <!--> and <!--->.
+      const close = source.indexOf('-->', index + 2), end = close === -1 ? source.length : close + 3;
+      push({ comment: source.slice(index, end), closed: close !== -1 }, end); continue;
+    }
     if (!/^<(?:\/?[A-Za-z]|[!?])/.test(source.slice(index))) { index++; continue; }
     const name = /^<\/?[^\t\n\f\r />]+/.exec(source.slice(index));
     const parsed = name ? htmlAttributes(source, index + name[0].length) : null;
     const end = parsed?.end ?? (source.indexOf('>', index + 1) + 1);
     if (!end) break;
-    if (cursor < index) parts.push({ text: source.slice(cursor, index) });
-    parts.push({ tag: source.slice(index, end), attributes: parsed?.attributes ?? [] }); cursor = end; index = cursor;
+    push({ tag: source.slice(index, end), attributes: parsed?.attributes ?? [] }, end);
   }
   if (cursor < source.length) parts.push({ text: source.slice(cursor) });
   return parts;
@@ -119,22 +157,23 @@ function measure(tokens, issues, initialDepth = 0) {
     if (token.nesting < 0) { depth--; continue; }
     if (token.type === 'inline') { add(result, measure(token.children ?? [], issues, depth + htmlStack.length)); continue; }
     if (token.type === 'html_inline' || token.type === 'html_block') {
-      const html = token.content;
-      if (/^\s*<!--[\s\S]*?-->\s*$/.test(html) && !html.replace(/<!--[\s\S]*?-->/g, '').trim()) {
+      const html = token.content, parts = htmlParts(html), comments = parts.filter(part => part.comment !== undefined);
+      if (comments.length && parts.every(part => part.comment !== undefined ? part.closed : part.text !== undefined && !part.text.trim())) {
         charge([...html.matchAll(/<!--/g)].length);
         if (/<!--\s*aliases\b/i.test(html)) issues.push({ code: 'alias-outside-metadata', severity: 'error', line });
         if (!isLogEntryMarker(html)) issues.push({ code: 'html-comment', severity: 'warning', line });
         continue;
       }
       issues.push({ code: dangerousTags.test(html) ? 'unsafe-html' : 'raw-html', severity: dangerousTags.test(html) ? 'error' : 'warning', line });
-      if ([...html.matchAll(/<!--/g)].length !== [...html.matchAll(/-->/g)].length) issues.push({ code: 'unclosed-html-block', severity: 'error', line });
-      const cleaned = html.replace(/<!--[\s\S]*?(?:-->|$)/g, '');
-      for (const part of htmlParts(cleaned)) {
-        if (part.text !== undefined) {
-          const visible = decodeEntities(part.text);
-          if (visible.length) charge(1, visible, Boolean(visible.trim()));
-          continue;
-        }
+      if (comments.some(part => !part.closed)) issues.push({ code: 'unclosed-html-block', severity: 'error', line });
+      // Text on either side of a comment is one run; every tag keeps all of its
+      // attributes, whatever comment markers their values contain.
+      let run = '';
+      const chargeRun = () => { const visible = decodeEntities(run); if (visible.length) charge(1, visible, Boolean(visible.trim())); run = ''; };
+      for (const part of parts) {
+        if (part.comment !== undefined) continue;
+        if (part.text !== undefined) { run += part.text; continue; }
+        chargeRun();
         const match = /^<\s*(\/?)\s*([a-z][a-z0-9-]*)\b/i.exec(part.tag);
         if (!match) { charge(1, part.tag); continue; }
         const name = match[2].toLowerCase();
@@ -152,6 +191,7 @@ function measure(tokens, issues, initialDepth = 0) {
           if (['href', 'src'].includes(name) && !destinationAllowed(decodeEntities(value), name === 'src')) issues.push({ code: 'unsafe-destination', severity: 'error', line });
         }
       }
+      chargeRun();
       continue;
     }
     if (token.nesting > 0) {
@@ -197,7 +237,7 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
       if (metadata.status === 'supported' && !sameData(retained(metadata.value), retained(old.value))) issue('metadata-descriptions-changed');
       if (metadata.status === 'supported') {
         if (!isSourceAppend(old.value.sources ?? [], metadata.value.sources ?? [])) issue('metadata-sources-changed');
-        const unfamiliar = value => Object.fromEntries(Object.entries(value.generation ?? {}).filter(([key]) => !['skill_version', 'content_hash'].includes(key)));
+        const unfamiliar = value => Object.fromEntries(Object.entries(value.generation ?? {}).filter(([key]) => key !== 'skill_version'));
         if (!sameData(unfamiliar(old.value), unfamiliar(metadata.value))) issue('metadata-generation-changed');
       }
     }
@@ -205,6 +245,16 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
   }
   if (generated && metadata.status === 'supported' && (!metadata.value.created || !metadata.value.updated || !metadata.value.generation?.skill_version)) issue('generated-metadata-incomplete');
   const { tokens, env } = parseMarkdown(source);
+  if (kind === 'note' && (generated || existing !== undefined)) {
+    // A newly authored note has no hidden comment. An update keeps or removes
+    // each comment its original has; it cannot add, repeat or reword one.
+    const comments = authoredComments(env.sourceTokens ?? tokens), retained = new Map();
+    if (comments.length && existing !== undefined) for (const { text } of authoredComments(sourceTokens(decodeNote(existing)))) retained.set(text, (retained.get(text) ?? 0) + 1);
+    for (const { text, line } of comments) {
+      const available = retained.get(text) ?? 0;
+      if (available) retained.set(text, available - 1); else issue('html-comment-added', line);
+    }
+  }
   const sourceMeasure = measure(env.sourceTokens ?? tokens, []);
   sourceMeasure.nodes += [...source.matchAll(/^ {0,3}\[[^\]\r\n]+\]:/gm)].length;
   if (sourceMeasure.nodes > P.documentNodes || sourceMeasure.depth > P.depth) issue('document-source-limit');
@@ -288,9 +338,12 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
 export function assertValidNote(input, options) {
   const result = validateNote(input, options);
   if (!result.valid) {
-    const error = result.diagnostics.some(item => item.code === 'source-line-limit')
+    const errors = result.diagnostics.filter(item => item.severity === 'error');
+    const error = errors.some(item => item.code === 'source-line-limit')
       ? new CuefluentError('NOTE_LINE_LIMIT', 'A Markdown source line exceeds the supported byte limit.')
-      : new CuefluentError('NOTE_INVALID', 'The note does not satisfy the supported output profile.');
+      : errors.every(item => item.code === 'html-comment-added')
+        ? new CuefluentError('NOTE_COMMENT_ADDED', 'The proposed note adds, repeats or rewords a hidden HTML comment.')
+        : new CuefluentError('NOTE_INVALID', 'The note does not satisfy the supported output profile.');
     error.diagnostics = result.diagnostics; throw error;
   }
   return result;

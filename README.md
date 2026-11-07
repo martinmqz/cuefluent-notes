@@ -33,6 +33,9 @@ or a newer Node 26 patch must be the Node the client launches; see
 3. To collect a chat: `/cuefluent-notes:cuefluent-notes track` in Claude Code, or
    select `$cuefluent-notes` and type `track` in Codex. Later, `process` drafts
    notes from the queue, and `status` is read-only.
+4. To look over existing notes: "Check these notes for metadata problems." A check
+   is read-only. A metadata repair is previewed first, changes only headers and
+   alias comments, and is applied only when you ask.
 
 Automatic tracking includes existing and new chats from their next prompt after
 it is enabled. Earlier history stays excluded, and explicit untrack opt-outs remain.
@@ -40,7 +43,8 @@ Processing is always explicit. Claude forks whose inherited history cannot be
 verified stay pending; see [native collection limits](references/limits.md#native-clients-and-collection).
 
 Defaults are manual tracking, review saving and activity logging on for directory
-destinations, where `logs/YYYY.md` records successful note changes. Repeat setup to
+destinations, where `logs/YYYY.md` records successful note changes; a metadata
+repair is not logged. Repeat setup to
 change a choice; only the choices you name change. If the connector tools are
 unavailable, [setup](references/setup.md#fallback-the-cli) has the command-line
 fallback.

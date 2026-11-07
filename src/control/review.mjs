@@ -1,10 +1,15 @@
 import { fail } from '../core/errors.mjs';
-import { runRevision, everyNoteSaved } from '../core/run.mjs';
+import path from 'node:path';
+import { runRevision, everyNoteSaved, isRepairRun, runKind } from '../core/run.mjs';
 import { inspectDraftArtifacts } from '../storage/draft-artifacts.mjs';
 import { withProject } from '../storage/store.mjs';
 import { ownDirectAttempt, launchOwnedAttempt } from '../storage/attempts.mjs';
 import { reviewNoteContent } from '../notes/validate.mjs';
 import { inspectMetadata, serializeSources } from '../notes/metadata.mjs';
+import { describeRepair, serializeRepair } from '../notes/repair.mjs';
+import { NOTE_PROFILE } from '../notes/profile.mjs';
+import { readSnapshot } from '../storage/files.mjs';
+import { pinDirectory } from '../storage/paths.mjs';
 import { readPrivateDraft } from '../processing/save.mjs';
 import { runProcessingWork } from '../processing/worker.mjs';
 import { readRunSnapshot } from './status.mjs';
@@ -65,7 +70,20 @@ function pageEntry(run, draft, index, content, start, end, part = 'content') {
   return { index, target: draft.target, summary: draft.summary, heading: draft.heading, expectedHash: draft.expectedHash, hash: draft.hash,
     saved: run.saved.some(item => item.draftId === draft.id),
     totalBytes: content.length, start, end, next: end < content.length ? end : null,
-    ...(part === 'sources' ? { part, sourceScope: 'all-proposed', sourceContent: piece, content: '' } : { content: piece }) };
+    ...(part === 'sources' ? { part, sourceScope: 'all-proposed', sourceContent: piece, content: '' } : part === 'changes' ? { part, changes: piece, content: '' } : { content: piece }) };
+}
+
+/** The change list of one repair draft, read from the note as it is now and the
+ * retained candidate. A note that already holds the candidate is `saved`, and one
+ * that is no longer the inspected original is `changed`: saving it is refused. */
+async function repairChanges(draft, candidate) {
+  let original = null;
+  try {
+    const pin = await pinDirectory(draft.binding.root);
+    original = await readSnapshot(pin, path.relative(pin.root, draft.target).split(path.sep).join('/'), { maxBytes: NOTE_PROFILE.fileBytes, missing: true });
+  } catch (error) { if (typeof error?.code !== 'string') throw error; }
+  if (original?.hash !== draft.expectedHash) return serializeRepair({ unavailable: original?.hash === draft.hash ? 'saved' : 'changed' });
+  return serializeRepair(describeRepair(original.bytes, candidate));
 }
 
 /** Largest UTF-8 boundary so the serialized piece fits the remaining budget. */
@@ -82,50 +100,68 @@ function fitPiece(run, draft, index, content, start, available, part) {
   fail('CONTROL_RESPONSE_LIMIT', 'The draft preview cannot be split into a bounded page.');
 }
 
+/** Fill one page from the draft at `first`. `partsOf` names each draft's parts
+ * with the text of each, read only when the page reaches it. */
+async function fillPage(page, run, first, offset, firstPart, partsOf) {
+  // Measure with the largest possible continuation marker and one separator
+  // per entry, so the finished page never exceeds the budget it was built to.
+  let size = serialized({ ...page, next: { draft: 1023, start: 10 * 1024 * 1024, part: 'sources' } }) + 1;
+  drafts: for (let index = first; index < run.drafts.length; index++) {
+    const draft = run.drafts[index], parts = await partsOf(draft, index);
+    const firstPiece = index === first && firstPart === 'sources' ? 1 : 0;
+    if (firstPiece >= parts.length) invalid('This draft has no source metadata to review.');
+    for (const [part, text] of parts.slice(firstPiece)) {
+      const content = Buffer.from(await text(), 'utf8');
+      if ((offset && offset >= content.length) || continuation(content, offset)) invalid('The requested preview offset is not a UTF-8 boundary inside this draft part.');
+      const cursor = start => ({ draft: index, start, ...(part === 'content' ? {} : { part }) });
+      const whole = pageEntry(run, draft, index, content, offset, content.length, part), wholeSize = serialized(whole) + 1;
+      if (size + wholeSize <= REVIEW_PAGE_BYTES) { page.drafts.push(whole); size += wholeSize; offset = 0; continue; }
+      if (page.drafts.length) { page.next = cursor(offset); break drafts; }
+      const end = fitPiece(run, draft, index, content, offset, REVIEW_PAGE_BYTES - size - 1, part);
+      page.drafts.push(pageEntry(run, draft, index, content, offset, end, part));
+      page.next = cursor(end); break drafts;
+    }
+  }
+  return page;
+}
+
 /** Content-only Markdown and separately identified proposed source metadata, in
  * bounded pages with the immutable revision every decision must cite. Source JSON
- * is never part of the temporary Markdown approval file. Read-only: no model,
- * synchronization or save is started. */
+ * is never part of the temporary Markdown approval file. A metadata repair is
+ * shown as its change list instead; the note bodies it leaves alone are not sent.
+ * Read-only: no model, synchronization or save is started. */
 export async function reviewRun(store, { projectId, runId, draft: first = 0, start: offset = 0, part: firstPart = 'content' }) {
   if (![first, offset].every(value => Number.isSafeInteger(value) && value >= 0)) invalid('A review page position is a nonnegative draft index and byte offset.');
-  if (!['content', 'sources'].includes(firstPart)) invalid('A review page part is content or sources.');
-  return withProject(store, projectId, async context => {
+  if (!['content', 'sources', 'changes'].includes(firstPart)) invalid('A review page part is content, sources or changes.');
+  const held = await withProject(store, projectId, async context => {
     const located = locateRun(await readRunSnapshot(store, context), runId);
-    if (located.result) return located.result;
-    const { run } = located;
-    const page = { state: run.phase === 'review' ? 'review' : 'interrupted', projectId: run.projectId, runId: run.id, kind: run.scope.kind, phase: run.phase,
+    if (located.result) return located;
+    const { run } = located, repair = isRepairRun(run);
+    if (firstPart === 'changes' && !repair) invalid('Only a metadata repair has a change list to review.');
+    const page = { state: run.phase === 'review' ? 'review' : 'interrupted', projectId: run.projectId, runId: run.id, kind: runKind(run), phase: run.phase,
       revision: runRevision(run), draftCount: run.drafts.length, savedCount: run.saved.length, choices: decisionChoices(run, { retained: await retainedComplete(store, run) }), drafts: [], next: null,
       warnings: run.warnings.slice(0, PAGE_WARNINGS), warningsTruncated: run.warnings.length > PAGE_WARNINGS };
     if (!['review', 'saving'].includes(run.phase)) {
-      if (first !== 0 || offset !== 0 || firstPart !== 'content') invalid('This run has no reviewable draft page at that position.');
-      return page;
+      if (first !== 0 || offset !== 0 || !['content', 'changes'].includes(firstPart)) invalid('This run has no reviewable draft page at that position.');
+      return { result: page };
     }
     if (first >= run.drafts.length) invalid('The requested draft index is beyond this draft set.');
-    // Measure with the largest possible continuation marker and one separator
-    // per entry, so the finished page never exceeds the budget it was built to.
-    let size = serialized({ ...page, next: { draft: 1023, start: 10 * 1024 * 1024, part: 'sources' } }) + 1;
-    drafts: for (let index = first; index < run.drafts.length; index++) {
-      const draft = run.drafts[index];
+    if (repair) {
+      // Only the retained candidates are read under the project gate. Reading
+      // and comparing the notes themselves happens after it is released.
+      const candidates = [];
+      for (const draft of run.drafts.slice(first)) candidates.push(await readPrivateDraft(store, context.directory, run, draft));
+      return { page, run, candidates };
+    }
+    return { result: await fillPage(page, run, first, offset, firstPart, async draft => {
       const bytes = await readPrivateDraft(store, context.directory, run, draft), metadata = inspectMetadata(bytes);
       if (metadata.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be hidden in a review.');
       const sources = metadata.status === 'supported' ? metadata.value.sources ?? [] : [];
-      const parts = ['content', ...(sources.length ? ['sources'] : [])];
-      const firstPiece = index === first && firstPart === 'sources' ? 1 : 0;
-      if (firstPiece >= parts.length) invalid('This draft has no source metadata to review.');
-      for (const part of parts.slice(firstPiece)) {
-        const content = Buffer.from(part === 'sources' ? serializeSources(sources) : reviewNoteContent(bytes, metadata), 'utf8');
-        if ((offset && offset >= content.length) || continuation(content, offset)) invalid('The requested preview offset is not a UTF-8 boundary inside this draft part.');
-        const cursor = start => ({ draft: index, start, ...(part === 'sources' ? { part } : {}) });
-        const whole = pageEntry(run, draft, index, content, offset, content.length, part), wholeSize = serialized(whole) + 1;
-        if (size + wholeSize <= REVIEW_PAGE_BYTES) { page.drafts.push(whole); size += wholeSize; offset = 0; continue; }
-        if (page.drafts.length) { page.next = cursor(offset); break drafts; }
-        const end = fitPiece(run, draft, index, content, offset, REVIEW_PAGE_BYTES - size - 1, part);
-        page.drafts.push(pageEntry(run, draft, index, content, offset, end, part));
-        page.next = cursor(end); break drafts;
-      }
-    }
-    return page;
+      return [['content', () => reviewNoteContent(bytes, metadata)], ...(sources.length ? [['sources', () => serializeSources(sources)]] : [])];
+    }) };
   });
+  if (held.result) return held.result;
+  return fillPage(held.page, held.run, first, offset, firstPart, (draft, index) => [['changes', () => repairChanges(draft, held.candidates[index - first])]]);
 }
 
 const stale = () => fail('REVIEW_REVISION_STALE', 'The reviewed draft set changed since this decision was prepared.');

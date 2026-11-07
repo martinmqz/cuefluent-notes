@@ -1,6 +1,6 @@
 ---
 name: cuefluent-notes
-description: Create or update Markdown notes from content the assistant prepares using user-authorized context, or track Claude Code and Codex chats for later explicit processing. Use when the user asks Cuefluent to save supplied material, conversation details, or task results as a note, update an existing note, or manage tracked conversation.
+description: Create or update Markdown notes from content the assistant prepares using user-authorized context, check existing notes for metadata and alias findings and repair the selected ones, or track Claude Code and Codex chats for later explicit processing. Use when the user asks Cuefluent to save supplied material, conversation details, or task results as a note, update an existing note, check or repair notes, or manage tracked conversation.
 user-invocable: true
 argument-hint: "describe the note to create or update, or track | untrack | process | process project | save | skip | status"
 ---
@@ -28,20 +28,25 @@ Example: "Use Cuefluent to save the meeting details above as a note."
 3. Compose the complete Markdown: a topic H1, useful H2 sections, only what the user
    asked to save, no invented facts, sources or identifiers, and no Cuefluent
    metadata block. Follow [note authoring](references/notes.md#content-and-evidence):
-   the visible body contains substantive content only. Source references, citation
-   offsets and note-production details belong in hidden metadata, not a Sources
-   section, footnotes or inline citations. Keep meaningful attribution, event
+   the visible body contains substantive content only, with no Sources section,
+   footnotes or inline citations, and no hidden HTML comment other than H2
+   aliases. Leave hashes, capture details and note-production bookkeeping out
+   altogether. Keep meaningful attribution, event
    dates, decisions and uncertainty visible. For an update, reconcile with the
    original and keep its useful content, manual edits and aliases.
 4. Call `cuefluent_create_note` for an absent target or `cuefluent_update_note`
    with the inspected `expectedHash`, each with `projectId`, a fresh UUID
    `requestId`, `target`, `content` and `summary`. Supply known document references
-   separately as optional `sources`; the writer adds them to hidden metadata.
-   Do not invent session provenance or copy private machine paths into the note.
+   separately as optional `sources`, one per meaningful evidence unit, each with
+   only `type`, `ref`, an optional concise `locator` and an optional `version`
+   ([source metadata](references/notes.md#source-metadata)); the writer adds them
+   to hidden metadata. Do not invent session provenance, versions or URLs, or copy
+   private machine paths into the note.
    Retry the same submission only with the same requestId and arguments.
-   Source object key order does not change request identity. Source fields must follow
-   the advertised limits; malformed source arguments do not mean the existing note
-   is malformed. Preserve existing data on a capacity refusal.
+   Source object key order does not change request identity. Rewrite a refused
+   source; never truncate it, drop it or move its detail into the body or a
+   comment. A refused source does not mean the existing note is malformed.
+   Preserve existing data on a capacity refusal.
 5. Automatic saving returns the saved path: link it. A `review` result is not saved
    yet: show the complete draft set and its proposed sources, then ask.
    - Source pages (`part: sources`) contain `sourceContent`: concatenate these
@@ -70,6 +75,46 @@ Example: "Use Cuefluent to save the meeting details above as a note."
 
 Never read transcript files, enroll the chat or run `process` for this. A busy
 result means another run is pending: explain it and change nothing else.
+
+## Check notes
+
+Example: "Check these notes for metadata problems."
+
+Call `cuefluent_check_notes` with the `projectId`, and a `target` for one note. It is
+read-only: it writes no note, creates no private state and repairs nothing. Follow
+`next` with `cursor` until it is null, then report the totals, the notes with
+findings and the coverage as returned. Each finding has a code, a count and a
+repair class; [checking notes](references/notes.md#checking-notes) explains them.
+A finding describes a note, not a defect: a shared alias or an older field may be
+intended, and partial coverage is never a whole-project count. Resolve a finding
+only when the user asks, and a `content-update` finding only through an ordinary
+note update.
+
+## Repair note metadata
+
+Examples: "Preview the selected metadata repairs without saving" and "Apply these
+previewed metadata repairs."
+
+A repair changes a note's header and its alias comments, never its visible content.
+Check first, then call `cuefluent_preview_repair` with the `projectId` and
+`repairs`: each selected note with its typed operations, using the source indexes
+and heading lines the check reported. A preview is read-only. Follow `next` with
+`cursor` until it is null and show the complete change list: every selected note
+as change, unchanged, refused or deferred, with the values before and after each
+change. A summary does not replace it. Mechanical removals may be grouped;
+removing a descriptive field, a source or an alias is a choice, so select only what
+the user decided.
+
+Apply a batch only when the user asks for exactly those repairs: call
+`cuefluent_repair_notes` with the preview's `proposal`, the same `repairs` and a
+fresh `requestId`. A check, a preview or an earlier approval authorizes nothing.
+The project's saving mode applies. Review mode returns the change list for the
+Save, Discard or Keep pending decision. Automatic mode saves at once, so say
+before applying that no later confirmation follows. One call is one batch: settle
+it before previewing the notes it deferred. Repaired notes keep their timestamps,
+and no activity is logged. [Repairing metadata](references/notes.md#repairing-metadata)
+lists the operations, the refusals and the bounds. Hidden comments are not
+repaired this way; they change through an ordinary note update.
 
 ## Tracked chats
 

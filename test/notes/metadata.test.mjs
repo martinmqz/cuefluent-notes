@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { Document, parseDocument } from 'yaml';
 import { NOTE_PROFILE } from '../../src/notes/profile.mjs';
-import { createGeneratedNote, inspectMetadata, preserveMetadata, validateMetadata, validateDocumentSources, serializeSources } from '../../src/notes/metadata.mjs';
+import { SOURCE_LOCATOR_LENGTH, createGeneratedNote, inspectMetadata, preserveMetadata, validateMetadata, validateDocumentSources, serializeSources } from '../../src/notes/metadata.mjs';
 
 const body = '# Synthetic topic\n\n## Decision\n\nUse the checked result.\n';
 const options = { id: 'synthetic-note', now: '2026-10-22T01:00:00Z', skillVersion: '0.16.0-dev.0' };
@@ -37,20 +37,72 @@ test('new generated metadata uses quoted timestamps and supported document prove
   assert.equal(result.value.sources[0].type, 'document');
 });
 
-test('document source additions preserve identity and descriptions, deduplicate exact data and refuse conflicting descriptors', () => {
+test('document source additions preserve stored descriptions and deduplicate repeated citations', () => {
   const existing = { type: 'document', ref: 'Synthetic design', locator: 'Decision', description: 'Reviewed proposal' };
+  const recited = { type: 'document', ref: existing.ref, locator: existing.locator };
   const addition = { type: 'document', ref: 'Synthetic meeting', locator: '00:48–04:58', version: '2026-10-28' };
   const original = createGeneratedNote(body, { ...options, metadata: { sources: [existing], custom: { owner: 'synthetic' }, generation: { content_hash: `sha256:${'b'.repeat(64)}` } } });
-  const changed = preserveMetadata(original, body, { sources: [existing, addition, addition], updated: '2026-10-28T01:00:00Z', skillVersion: '0.20.0' });
+  const changed = preserveMetadata(original, body, { sources: [recited, addition, addition], updated: '2026-10-28T01:00:00Z', skillVersion: '0.20.0' });
   const value = inspectMetadata(changed.bytes).value;
   assert.equal(changed.changed, true); assert.ok(changed.bytes.toString().endsWith(body));
   assert.deepEqual(value.sources, [existing, addition]); assert.equal(value.id, options.id); assert.equal(value.created, options.now);
   assert.equal(value.updated, '2026-10-28T01:00:00Z'); assert.equal(value.custom.owner, 'synthetic');
-  assert.equal(value.generation.content_hash, `sha256:${'b'.repeat(64)}`, 'source-only edits do not refresh a body hash');
+  assert.equal(value.generation.content_hash, `sha256:${'b'.repeat(64)}`);
   assert.ok(preserveMetadata(changed.bytes, body, { sources: [addition], updated: '2026-10-29T01:00:00Z' }).bytes.equals(changed.bytes));
-  assert.throws(() => preserveMetadata(original, body, { sources: [{ ...existing, description: 'Different claim' }] }), { code: 'NOTE_SOURCE_CONFLICT' });
-  assert.throws(() => validateDocumentSources([existing, { ...existing, description: 'Different claim' }]), { code: 'NOTE_SOURCE_CONFLICT' });
-  assert.deepEqual(validateDocumentSources([existing, { description: existing.description, locator: existing.locator, ref: existing.ref, type: existing.type }]), [existing]);
+  assert.deepEqual(validateDocumentSources([recited, { locator: recited.locator, ref: recited.ref, type: recited.type }]), [recited]);
+});
+
+test('an identical citation changes nothing, while another locator or version is a distinct citation', () => {
+  const source = { type: 'document', ref: 'synthetic-org/synthetic-repository', locator: 'README', version: 'abc1234' };
+  const original = createGeneratedNote(body, { ...options, metadata: { sources: [source] } });
+  assert.ok(preserveMetadata(original, body, { sources: [{ ...source }], updated: '2026-10-29T01:00:00Z' }).bytes.equals(original));
+  for (const variant of [{ ...source, locator: 'CHANGELOG' }, { ...source, version: 'def5678' }, { type: source.type, ref: source.ref }]) {
+    const result = preserveMetadata(original, body, { sources: [variant] });
+    assert.equal(result.changed, true);
+    assert.deepEqual(inspectMetadata(result.bytes).value.sources, [source, variant]);
+  }
+});
+
+test('stored sources that differ only by an embedded hash stay valid and distinct, and citing one without it adds an entry', () => {
+  const hashed = digit => ({ type: 'document', ref: 'Synthetic file', source_hash: `sha256:${digit.repeat(64)}` });
+  const original = createGeneratedNote(body, { ...options, metadata: { sources: [hashed('a'), hashed('b')] } });
+  assert.equal(inspectMetadata(original).status, 'supported');
+  const cited = { type: 'document', ref: 'Synthetic file' };
+  const result = preserveMetadata(original, body, { sources: [cited] });
+  assert.deepEqual(inspectMetadata(result.bytes).value.sources, [hashed('a'), hashed('b'), cited]);
+  assert.ok(preserveMetadata(result.bytes, body, { sources: [cited] }).bytes.equals(result.bytes));
+});
+
+test('a submitted locator is limited in UTF-16 code units and is refused whole at any length, never shortened', () => {
+  const source = { type: 'document', ref: 'Synthetic transcript' }, limit = SOURCE_LOCATOR_LENGTH;
+  for (const locator of ['x'.repeat(limit), '😀'.repeat(limit / 2), `${'x'.repeat(limit - 2)}😀`]) {
+    assert.equal(validateDocumentSources([{ ...source, locator }])[0].locator, locator);
+  }
+  for (const locator of ['x'.repeat(limit + 1), `${'😀'.repeat(limit / 2)}x`, `${'x'.repeat(limit - 1)}😀`,
+    'x'.repeat(NOTE_PROFILE.metadataString), 'x'.repeat(NOTE_PROFILE.metadataString + 1), '😀'.repeat(NOTE_PROFILE.metadataString)]) {
+    assert.throws(() => validateDocumentSources([{ ...source, locator }]), { code: 'NOTE_SOURCE_LOCATOR' });
+  }
+  const original = createGeneratedNote(body, options);
+  assert.throws(() => preserveMetadata(original, body, { sources: [{ ...source, locator: 'x'.repeat(limit + 1) }] }), { code: 'NOTE_SOURCE_LOCATOR' });
+  const stored = createGeneratedNote(body, { ...options, metadata: { sources: [{ ...source, locator: 'x'.repeat(900) }] } });
+  const appended = inspectMetadata(preserveMetadata(stored, body, { sources: [{ ...source, locator: '00:48' }] }).bytes);
+  assert.equal(appended.status, 'supported');
+  assert.deepEqual(appended.value.sources.map(item => item.locator.length), [900, 5]);
+});
+
+test('a submitted ref is never a local path or file URL, whatever the host platform', () => {
+  for (const ref of ['/Users/synthetic/notes/topic.md', '/var/folders/ab/T/capture.png', '/tmp/pasted.txt', '//server/share/file.txt',
+    '~/Downloads/transcript.vtt', '~synthetic/file.txt', 'C:\\Users\\synthetic\\file.txt', 'c:/Users/synthetic/file.txt', 'D:relative.txt',
+    '\\\\server\\share\\file.txt', '\\rooted\\file.txt', 'file:///etc/hosts', 'FILE://server/share/file.txt', 'File:relative.txt']) {
+    assert.throws(() => validateDocumentSources([{ type: 'document', ref }]), { code: 'NOTE_SOURCE_REFERENCE' }, ref);
+  }
+  for (const ref of ['Supplied design-review transcript', 'synthetic-org/synthetic-repository', 'docs/guide.md', '../shared/notes.md',
+    'https://example.test/docs/page', 'Planning meeting: follow-up', 'filename.md', 'Build 42']) {
+    assert.deepEqual(validateDocumentSources([{ type: 'document', ref }]), [{ type: 'document', ref }], ref);
+  }
+  const stored = createGeneratedNote(body, { ...options, metadata: { sources: [{ type: 'document', ref: '/synthetic/stored/path.md' }] } });
+  const appended = inspectMetadata(preserveMetadata(stored, body, { sources: [{ type: 'document', ref: 'Portable label' }] }).bytes);
+  assert.equal(appended.status, 'supported'); assert.equal(appended.value.sources.length, 2);
 });
 
 test('source additions cannot enrich plain or opaque notes, replace metadata, fabricate sessions or exceed metadata bounds', () => {
@@ -61,17 +113,17 @@ test('source additions cannot enrich plain or opaque notes, replace metadata, fa
     assert.ok(preserveMetadata(original, original, { sources: [] }).bytes.equals(Buffer.from(original)));
   }
   for (const sources of [null, {}, [{ type: 'session', client: 'codex', session_id: 'chat', unit_id: 'unit', revision: 'a'.repeat(64) }],
-    [{ ...source, ref: 'x'.repeat(2049) }], [{ ...source, description: '-->visible' }]]) {
+    [{ ...source, ref: 'x'.repeat(2049) }], [{ ...source, locator: '-->visible' }]]) {
     assert.throws(() => validateDocumentSources(sources), { code: 'NOTE_SOURCE_ARGUMENT' });
   }
   let accessed = false;
-  assert.throws(() => validateDocumentSources([Object.defineProperty({ ...source }, 'description', { enumerable: true, get() { accessed = true; return 'unsafe'; } })]), { code: 'NOTE_SOURCE_ARGUMENT' });
+  assert.throws(() => validateDocumentSources([Object.defineProperty({ ...source }, 'locator', { enumerable: true, get() { accessed = true; return 'unsafe'; } })]), { code: 'NOTE_SOURCE_ARGUMENT' });
   assert.equal(accessed, false);
   assert.throws(() => validateDocumentSources(Array(129).fill(source)), { code: 'NOTE_SOURCE_LIMIT' });
   const many = Array.from({ length: 128 }, (_, i) => ({ ...source, ref: `Synthetic ${i}` }));
   const original = createGeneratedNote(body, { ...options, metadata: { sources: many } });
   assert.throws(() => preserveMetadata(original, body, { sources: [source] }), { code: 'NOTE_SOURCE_LIMIT' });
-  const oversized = Array.from({ length: 40 }, (_, i) => ({ type: 'document', ref: `Synthetic ${i}`, description: 'x'.repeat(2048) }));
+  const oversized = Array.from({ length: 40 }, (_, i) => ({ type: 'document', ref: `Synthetic ${i} ${'x'.repeat(2030)}` }));
   assert.throws(() => preserveMetadata(createGeneratedNote(body, options), body, { sources: oversized }), { code: 'NOTE_SOURCE_LIMIT' });
 });
 
@@ -84,7 +136,7 @@ test('source additions retain existing YAML comments and reject a contradictory 
   assert.throws(() => preserveMetadata(original, body, { sources: [source], usefulChange: false }), { code: 'NOTE_SOURCE_ARGUMENT' });
 });
 
-test('re-citing a source retains omitted descriptions and adds only nonconflicting descriptive fields', () => {
+test('re-citing a source retains its stored description and admits no added field', () => {
   const source = { type: 'document', ref: 'Synthetic meeting', locator: '00:48', description: 'Original account' };
   const original = createGeneratedNote(body, { ...options, metadata: { sources: [source] } });
   const recited = { type: 'document', ref: source.ref, locator: source.locator };
@@ -93,30 +145,33 @@ test('re-citing a source retains omitted descriptions and adds only nonconflicti
   assert.ok(update.bytes.toString().endsWith(revised));
   assert.deepEqual(inspectMetadata(update.bytes).value.sources, [source]);
   assert.ok(preserveMetadata(original, body, { sources: [recited] }).bytes.equals(original));
-  const enriched = preserveMetadata(original, body, { sources: [{ ...recited, author: 'Synthetic participant' }] });
-  assert.equal(enriched.changed, true);
-  assert.deepEqual(inspectMetadata(enriched.bytes).value.sources, [{ ...source, author: 'Synthetic participant' }]);
-  assert.throws(() => preserveMetadata(original, revised, { sources: [{ ...recited, description: 'Conflicting account' }] }), { code: 'NOTE_SOURCE_CONFLICT' });
+  for (const field of ['description', 'author']) {
+    assert.throws(() => preserveMetadata(original, revised, { sources: [{ ...recited, [field]: 'Synthetic value' }] }), { code: 'NOTE_SOURCE_FIELD' });
+  }
 });
 
-test('supplied source serialization is independent of object-key order and preserves signed zero', () => {
-  const first = { type: 'document', ref: 'Synthetic', detail: { z: -0, a: ['one', { y: true, b: 2 }] } };
-  const reordered = { detail: { a: ['one', { b: 2, y: true }], z: -0 }, ref: 'Synthetic', type: 'document' };
+test('source serialization is independent of object-key order and preserves signed zero in stored data', () => {
+  const first = { type: 'document', ref: 'Synthetic', locator: 'Section 2', version: '2026-10-28' };
+  const reordered = { version: '2026-10-28', locator: 'Section 2', ref: 'Synthetic', type: 'document' };
   assert.equal(serializeSources(validateDocumentSources([first])), serializeSources(validateDocumentSources([reordered])));
-  assert.ok(Object.is(JSON.parse(serializeSources([first]))[0].detail.z, -0));
-  assert.notEqual(serializeSources([first]), serializeSources([{ ...first, detail: { ...first.detail, z: 0 } }]));
-  const combined = validateDocumentSources([{ type: 'document', ref: 'Synthetic' }, { ...first }]);
-  assert.equal(serializeSources(combined), serializeSources(validateDocumentSources([first])));
+  assert.equal(serializeSources(validateDocumentSources([first, reordered])), serializeSources(validateDocumentSources([first])));
+  const stored = { type: 'document', ref: 'Synthetic', detail: { z: -0, a: ['one', { y: true, b: 2 }] } };
+  assert.equal(serializeSources([stored]), serializeSources([{ detail: { a: ['one', { b: 2, y: true }], z: -0 }, ref: 'Synthetic', type: 'document' }]));
+  assert.ok(Object.is(JSON.parse(serializeSources([stored]))[0].detail.z, -0));
+  assert.notEqual(serializeSources([stored]), serializeSources([{ ...stored, detail: { ...stored.detail, z: 0 } }]));
 });
 
-test('document source arguments refuse native identity keys and provide input errors without claiming note corruption', () => {
+test('document source arguments refuse every field outside the closed set and report input errors without claiming note corruption', () => {
   const source = { type: 'document', ref: 'Synthetic source' };
-  for (const key of ['client', 'session_id', 'unit_id', 'revision', 'raw_ref']) {
-    assert.throws(() => validateDocumentSources([{ ...source, [key]: 'invented' }]), { code: 'NOTE_SOURCE_ARGUMENT' });
+  for (const key of ['client', 'session_id', 'unit_id', 'revision', 'raw_ref', 'source_hash', 'hash', 'description', 'page']) {
+    assert.throws(() => validateDocumentSources([{ ...source, [key]: `sha256:${'a'.repeat(64)}` }]), { code: 'NOTE_SOURCE_FIELD' });
+  }
+  for (const value of [{ ...source, locator: 12 }, { ...source, version: '' }, { ...source, type: 'session' }]) {
+    assert.throws(() => validateDocumentSources([value]), { code: 'NOTE_SOURCE_ARGUMENT' });
   }
   for (const value of [{ ...source, ref: 'Trailing ' }, { ...source, locator: 'a\tb' },
     { ...source, locator: '00:00:48.000 --> 00:04:58.000' }, { ...source, 'page number': 2 },
-    { ...source, ref: '😀'.repeat(1025) }, { ...source, ref: 'Unsupported\uFFFE' }, { ...source, description: '\uFFFF' }]) {
+    { ...source, ref: '😀'.repeat(1025) }, { ...source, ref: 'Unsupported\uFFFE' }, { ...source, locator: '\uFFFF' }]) {
     assert.throws(() => validateDocumentSources([value]), { code: 'NOTE_SOURCE_ARGUMENT' });
   }
   const malformed = metadata('schema_version: 1\nid: [bad');
@@ -130,30 +185,28 @@ test('source capacity refuses additions specifically while retaining at-capacity
   assert.throws(() => preserveMetadata(original, body, { sources: [{ type: 'document', ref: 'One more' }] }), { code: 'NOTE_SOURCE_LIMIT' });
   const detailed = (start, count) => Array.from({ length: count }, (_, index) => ({ type: 'document', ref: `Synthetic ${start + index}`,
     ...Object.fromEntries(Array.from({ length: 25 }, (_, key) => [`field_${key}`, 'retained'])) }));
-  const dense = createGeneratedNote(body, { ...options, metadata: { sources: detailed(0, 60) } });
-  assert.throws(() => preserveMetadata(dense, body, { sources: detailed(60, 15) }), { code: 'NOTE_SOURCE_LIMIT' });
-  const fields = Object.fromEntries(Array.from({ length: 126 }, (_, key) => [`field_${key}`, 'retained']));
-  const fullDescriptor = createGeneratedNote(body, { ...options, metadata: { sources: [{ type: 'document', ref: 'Synthetic', ...fields }] } });
-  assert.throws(() => preserveMetadata(fullDescriptor, body, { sources: [{ type: 'document', ref: 'Synthetic', extra: 'new' }] }), { code: 'NOTE_SOURCE_LIMIT' });
+  // A header already dense with stored fields has no structural room for more sources.
+  const dense = createGeneratedNote(body, { ...options, metadata: { sources: detailed(0, 73) } });
+  const additions = Array.from({ length: 15 }, (_, index) => ({ type: 'document', ref: `Added synthetic ${index}` }));
+  assert.throws(() => preserveMetadata(dense, body, { sources: additions }), { code: 'NOTE_SOURCE_LIMIT' });
+  assert.ok(preserveMetadata(dense, body, { sources: [{ type: 'document', ref: 'Synthetic 0' }] }).bytes.equals(dense));
 });
 
-test('added source strings round-trip trailing newlines and ambiguous scalars in both metadata layouts', () => {
-  const source = { type: 'document', ref: 'No', locator: '12:30', version: '2026-10-28', description: 'line\n\n' };
+test('added source strings round-trip ambiguous scalars in both metadata layouts', () => {
+  const source = { type: 'document', ref: 'No', locator: '12:30', version: '2026-10-28' };
   for (const expandedMetadata of [false, true]) {
     const original = createGeneratedNote(body, { ...options, expandedMetadata });
     const changed = preserveMetadata(original, body, { sources: [source], expandedMetadata });
     assert.deepEqual(inspectMetadata(changed.bytes).value.sources, [source]);
     const yaml = metadataDocument(changed.bytes);
-    for (const key of ['ref', 'locator', 'version', 'description']) assert.equal(yaml.getIn(['sources', 0, key], true).type, 'QUOTE_DOUBLE');
+    for (const key of ['ref', 'locator', 'version']) assert.equal(yaml.getIn(['sources', 0, key], true).type, 'QUOTE_DOUBLE');
     const parsed11 = parseDocument(yaml.toString(), { version: '1.1' }).toJS();
     assert.deepEqual(parsed11.sources, [source]);
   }
 });
 
-test('new source keys retain distinct spellings across YAML versions on creation, append and amendment', () => {
-  const fields = { no: 'first', on: 'second', yes: 'third', nested: { no: 'fourth', on: 'fifth', yes: 'sixth' },
-    records: [{ no: 'seventh', on: 'eighth', yes: 'ninth' }] };
-  const source = { type: 'document', ref: 'Synthetic source', ...fields };
+test('new source values keep their spelling across YAML versions on creation and append, beside untouched stored entries', () => {
+  const source = { type: 'document', ref: 'no', locator: 'on', version: 'yes' };
   const inspect = (bytes, expected) => {
     const raw = inspectMetadata(bytes).raw;
     const payload = raw.replace(/^<!-- cuefluent(?:\r\n|\r|\n)/, '').replace(/(?:\r\n|\r|\n)-->(?:\r\n|\r|\n)?$/, '');
@@ -168,14 +221,14 @@ test('new source keys retain distinct spellings across YAML versions on creation
     const prior = { type: 'document', ref: 'Earlier synthetic source' };
     const original = createGeneratedNote(body, { ...options, expandedMetadata, metadata: { sources: [prior] } });
     inspect(preserveMetadata(original, body, { sources: [source], expandedMetadata }).bytes, [prior, source]);
-    const amendable = metadata("schema_version: 1\nid: stable\nsources:\n  - type: document\n    ref: 'Synthetic source' # Preserve reference comment\n    'retained': unchanged # Preserve value comment");
-    const amended = preserveMetadata(amendable, body, { sources: [source], expandedMetadata }).bytes;
-    inspect(amended, [{ type: 'document', ref: source.ref, retained: 'unchanged', ...fields }]);
-    const retained = metadataDocument(amended).getIn(['sources', 0], true);
+    const commented = metadata("schema_version: 1\nid: stable\nsources:\n  - type: document\n    ref: 'Synthetic source' # Preserve reference comment\n    'retained': unchanged # Preserve value comment");
+    const appended = preserveMetadata(commented, body, { sources: [{ type: 'document', ref: 'Synthetic source' }, source], expandedMetadata }).bytes;
+    inspect(appended, [{ type: 'document', ref: 'Synthetic source', retained: 'unchanged' }, source]);
+    const retained = metadataDocument(appended).getIn(['sources', 0], true);
     assert.equal(retained.items.find(pair => pair.key.value === 'retained').key.type, 'QUOTE_SINGLE');
     assert.equal(retained.get('ref', true).type, 'QUOTE_SINGLE');
-    assert.match(amended.toString(), /Preserve reference comment/);
-    assert.match(amended.toString(), /Preserve value comment/);
+    assert.match(appended.toString(), /Preserve reference comment/);
+    assert.match(appended.toString(), /Preserve value comment/);
   }
 });
 
@@ -249,15 +302,15 @@ test('useful edits preserve unknown metadata and stable identity while updating 
   assert.match(changed.bytes.toString(), /# keep generation explanation/);
 });
 
-test('body edits maintain an existing content hash over exact bytes outside the metadata block', () => {
-  const hash = content => `sha256:${createHash('sha256').update(content).digest('hex')}`;
+test('body edits leave an existing embedded content hash exactly as it was written', () => {
+  const digest = `sha256:${createHash('sha256').update('an earlier synthetic body').digest('hex')}`;
   const prefix = '\uFEFF\r\n', originalBody = body.replaceAll('\n', '\r\n');
   const proposed = originalBody.replace('checked', 'verified');
-  const original = prefix + `<!-- cuefluent\r\nschema_version: 1\r\nid: stable\r\ngeneration:\r\n  content_hash: "${hash(prefix + originalBody)}" # Retain digest explanation\r\n  extra: retained\r\n-->\r\n` + originalBody;
+  const original = prefix + `<!-- cuefluent\r\nschema_version: 1\r\nid: stable\r\ngeneration:\r\n  content_hash: "${digest}" # Retain digest explanation\r\n  extra: retained\r\n-->\r\n` + originalBody;
   for (const update of [{}, { updated: options.now, skillVersion: options.skillVersion }]) {
     const result = preserveMetadata(original, proposed, update), inspection = inspectMetadata(result.bytes);
     assert.equal(result.changed, true);
-    assert.equal(inspection.value.generation.content_hash, hash(prefix + proposed));
+    assert.equal(inspection.value.generation.content_hash, digest);
     assert.equal(inspection.value.id, 'stable');
     assert.equal(inspection.value.generation.extra, 'retained');
     assert.ok(result.bytes.toString().startsWith(prefix));
@@ -266,7 +319,7 @@ test('body edits maintain an existing content hash over exact bytes outside the 
   }
 });
 
-test('content hash maintenance does not enrich metadata or rewrite unchanged notes', () => {
+test('the writer adds no content hash and rewrites no unchanged note that has one', () => {
   const proposed = body.replace('checked', 'verified');
   const original = metadata(`schema_version: 1\nid: stable\ngeneration:\n  content_hash: "sha256:${'a'.repeat(64)}"`);
   for (const result of [preserveMetadata(original, original), preserveMetadata(original, body),
