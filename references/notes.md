@@ -20,7 +20,10 @@ never shorten, split or create a separate note to bypass it.
 Updates stay at the same path. Name a note and its folders in the exact spelling a
 listing returns: a name that differs from an existing note or folder only by case
 or Unicode normalization is refused (`WORKSPACE_TARGET_ALIAS`), so no read, update
-or new note renames or misplaces one. An explicit file destination authorizes only that file. New directory-routed notes go to
+or new note renames or misplaces one. A note renamed that way after it was read is
+not written back under its earlier name: drafting refuses it, and saving refuses it
+as a changed original (`NOTE_PUBLICATION_CONFLICT`). An explicit file destination
+keeps its configured spelling and authorizes only that file. New directory-routed notes go to
 `meetings/`, `tasks/`, `knowledge-base/`, `decisions/` or the root by their
 dominant purpose. All of `logs/` is reserved for writer-managed activity logs.
 Notes may use `.md` or `.markdown` (ASCII case-insensitive); bare `.md` and

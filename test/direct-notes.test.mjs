@@ -119,6 +119,17 @@ test('direct tools name an existing note and its folders in their exact spelling
   assert.deepEqual(await listing(), before); assert.ok((await fs.readFile(target, 'utf8')).endsWith(revised));
 });
 
+test('a note renamed by case after its update was reviewed is not saved back under its earlier name', async t => {
+  const f = await fixture(t);
+  await f.create(); const saved = await f.decide('save'), target = saved.result.paths[0], original = await fs.readFile(target);
+  const requestId = randomUUID(), revised = content.replace('Keep the release small.', 'Keep the release small and dated.');
+  const pending = await f.tools.call('cuefluent_update_note', { ...f.request, requestId, expectedHash: hashBytes(original), content: revised });
+  assert.equal(pending.state, 'review');
+  const renamed = path.join(path.dirname(target), 'Planning.md'); await fs.rename(target, renamed);
+  await assert.rejects(f.decide('save', requestId, pending.revision), { code: 'NOTE_PUBLICATION_CONFLICT' });
+  assert.deepEqual(await fs.readdir(path.dirname(target)), ['Planning.md']); assert.ok((await fs.readFile(renamed)).equals(original));
+});
+
 test('direct source-only updates retain original metadata and refuse a field outside the source contract before reserving a run', async t => {
   const f = await fixture(t, { saving: 'auto' }), source = { type: 'document', ref: 'Synthetic meeting', locator: '00:48' };
   const saved = await f.create({ sources: [source] }), target = saved.result.paths[0], original = await fs.readFile(target);

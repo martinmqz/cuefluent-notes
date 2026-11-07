@@ -261,6 +261,18 @@ test('model tools name a note and its folders in their exact spelling, and the l
   assert.deepEqual(await listing(), before);
 });
 
+test('a note renamed by case after it was read is not drafted under its old name, and a renamed file destination is not listed', async t => {
+  const f = await fixture(t); await fs.writeFile(path.join(f.root, 'meeting.md'), body);
+  const workspace = await f.open(); assert.equal((await workspace.read_note({ target: 'meeting.md' })).exists, true);
+  await fs.rename(path.join(f.root, 'meeting.md'), path.join(f.root, 'Meeting.md'));
+  await assert.rejects(workspace.draft_note({ target: 'meeting.md', content: body.replace('original', 'revised'), summary: 'Revised note' }), { code: 'WORKSPACE_TARGET_ALIAS' });
+  assert.deepEqual(await fs.readdir(f.root), ['Meeting.md']);
+  const explicit = await fixture(t, { file: true }); await fs.writeFile(path.join(explicit.root, 'Chosen.md'), body);
+  for (const work of [workspace => workspace.list_notes(), workspace => workspace.read_note({ target: 'chosen.md' })]) {
+    await assert.rejects(work(await explicit.open()), { code: 'WORKSPACE_TARGET_ALIAS', message: /configured note file/ });
+  }
+});
+
 test('path/link defenses reserve logs even off and bind replaced parents/root without creating missing directories', async t => {
   const f = await fixture(t); await fs.mkdir(path.join(f.root, 'tasks')); await fs.writeFile(path.join(f.root, 'tasks', 'one.md'), body);
   const workspace = await f.open();

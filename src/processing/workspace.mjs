@@ -120,7 +120,8 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
       } catch (error) { if (['ENOENT', 'PATH_MISSING'].includes(error.code)) return; throw error; }
       if (alias && !exact) {
         if (spellings.get(selected.key) === selected.file && !originals.has(selected.key) && !drafts.has(selected.key)) spellings.delete(selected.key);
-        fail('WORKSPACE_TARGET_ALIAS', 'Use the exact note spelling returned by the listing.');
+        fail('WORKSPACE_TARGET_ALIAS', project.destination.kind === 'file' ? 'The configured note file is spelled differently on disk; restore its configured name or change the destination.'
+          : 'Use the exact note spelling returned by the listing.');
       }
       if (!exact) return;
       directory = path.join(directory, component);
@@ -197,8 +198,9 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
       if (input.directory || cursor) fail('WORKSPACE_ARGUMENT', 'The project has one explicit file destination.');
       const selected = target(project.destination.path), stat = await lstatOrNull(selected.file);
       // The destination is no unrelated entry, so a listing refuses one that is
-      // not an ordinary file. Trusted inspection is told instead, so that it can
-      // report the file.
+      // not an ordinary file, or one spelled otherwise on disk that a read would
+      // refuse. Trusted inspection is told instead, so that it can report the file.
+      if (!trusted) await assertExactSpelling(selected);
       if (stat && !trusted) assertRegularFile(selected.file, stat);
       await assertDirectory(pin);
       return present({ entries: stat ? [{ target: selected.file, kind: ordinary(selected.file, stat) ? 'note' : 'skipped-note' }] : [], nextCursor: null });
@@ -258,8 +260,10 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     }
     const submitted = trusted ? 0 : Buffer.byteLength(JSON.stringify(input));
     if (!trusted && draftBytes + submitted > limits.draftBytes) fail('WORKSPACE_DRAFT_LIMIT', 'The cumulative submitted draft budget is exhausted.');
+    // A retained original is checked again: a note renamed after it was read is
+    // not drafted under its old name, and its pinned hash is never refreshed.
     const retained = originals.get(selected.key);
-    if (!retained) await assertExactSpelling(selected);
+    await assertExactSpelling(selected);
     const original = retained ?? await inspect(selected, { absentOnly: true });
     if (!retained && originals.size >= limits.targets) fail('WORKSPACE_TARGET_LIMIT', 'Too many note versions are retained in one workspace.');
     await assertChain(original.binding.parent);
