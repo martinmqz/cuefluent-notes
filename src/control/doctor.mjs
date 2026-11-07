@@ -5,6 +5,7 @@ import { runKind } from '../core/run.mjs';
 import { CHECK_CURSOR_PATTERN } from '../core/entry-contract.mjs';
 import { hashBytes } from '../storage/files.mjs';
 import { readSettings, withProject } from '../storage/store.mjs';
+import { assertRelativeName } from '../storage/paths.mjs';
 import { openNoteWorkspace, targetKey, WORKSPACE_LIMITS } from '../processing/workspace.mjs';
 import { DOCTOR_FINDINGS, unreadableNoteHealth, inspectNoteHealth, sharedAliases, repeatedIdentities } from '../notes/index.mjs';
 import { CONTROL_LIMITS } from '../client/control-server.mjs';
@@ -156,7 +157,10 @@ export async function checkNotes(store, input, { skillVersion, limits: lower = {
   if (target !== undefined) {
     // A note is selected by its portable name, in whatever spelling the listing
     // found on disk. One the listing did not reach is read on its own. Either way
-    // it is read first, so the bounds stop only the notes after it.
+    // it is read first, so the bounds stop only the notes after it. A relative
+    // name is checked before the lookup, so its refusal never depends on which
+    // notes the folder holds.
+    if (!path.isAbsolute(target)) assertRelativeName(target);
     const wanted = path.isAbsolute(target) ? target : path.join(root, ...target.split('/')), wantedKey = targetKey(wanted);
     selected = targets.find(file => file === wanted) ?? targets.find(file => targetKey(file) === wantedKey) ?? null;
     if (selected) targets.splice(targets.indexOf(selected), 1);

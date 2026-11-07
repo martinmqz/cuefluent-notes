@@ -123,6 +123,10 @@ test('one note is selected by its portable name, reported even when clean, and a
   await assert.rejects(f.check({ target: path.join(f.root, 'outside.md') }), { code: 'PATH_INVALID' });
   await assert.rejects(f.check({ target: 'logs/2026.md' }), { code: 'NOTE_TARGET_RESERVED' });
   for (const target of ['', 7, 'x'.repeat(32769)]) await assert.rejects(f.check({ target }), { code: 'DIRECT_NOTE_ARGUMENT' });
+  // A relative target is a portable name whatever the folder holds: one that
+  // would resolve to a listed note is refused like one that would not.
+  for (const target of ['missing/../knowledge-base/clean.md', 'knowledge-base/./clean.md', 'knowledge-base//clean.md', './knowledge-base/clean.md',
+    'knowledge-base\\clean.md', 'missing/../absent.md']) await assert.rejects(f.check({ target }), { code: 'PATH_INVALID' }, target);
 });
 
 test('files that cannot be interpreted are reported as blocked while every other note is still checked', async t => {
