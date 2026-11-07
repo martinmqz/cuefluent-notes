@@ -102,6 +102,23 @@ test('direct document sources are hidden from previews, saved exactly, and bound
   await assert.rejects(f.create({ sources: changed }), { code: 'DIRECT_NOTE_REQUEST_CHANGED' });
 });
 
+test('direct tools name an existing note and its folders in their exact spelling, so an update never renames one', async t => {
+  const f = await fixture(t, { saving: 'auto' }), saved = await f.create(), target = saved.result.paths[0], original = await fs.readFile(target);
+  const listing = async () => (await fs.readdir(f.notes, { recursive: true })).sort(), before = await listing();
+  const update = (spelling, text = content) => f.tools.call('cuefluent_update_note', { ...f.request, requestId: randomUUID(), target: spelling, expectedHash: hashBytes(original), content: text });
+  for (const spelling of ['Meetings/planning.md', 'meetings/Planning.md']) {
+    await assert.rejects(f.tools.call('cuefluent_read_note', { projectId: f.project.id, target: spelling }), { code: 'WORKSPACE_TARGET_ALIAS' }, spelling);
+    await assert.rejects(update(spelling), { code: 'WORKSPACE_TARGET_ALIAS' }, spelling);
+  }
+  await assert.rejects(f.create({ requestId: randomUUID(), target: 'Meetings/other.md' }), { code: 'WORKSPACE_TARGET_ALIAS' });
+  await assert.rejects(f.tools.call('cuefluent_list_notes', { projectId: f.project.id, directory: 'Meetings' }), { code: 'WORKSPACE_TARGET_ALIAS' });
+  assert.deepEqual(await listing(), before); assert.ok((await fs.readFile(target)).equals(original));
+  // The listed spelling updates the note in place.
+  const revised = content.replace('Keep the release small.', 'Keep the release small and dated.');
+  assert.equal((await update('meetings/planning.md', revised)).state, 'saved');
+  assert.deepEqual(await listing(), before); assert.ok((await fs.readFile(target, 'utf8')).endsWith(revised));
+});
+
 test('direct source-only updates retain original metadata and refuse a field outside the source contract before reserving a run', async t => {
   const f = await fixture(t, { saving: 'auto' }), source = { type: 'document', ref: 'Synthetic meeting', locator: '00:48' };
   const saved = await f.create({ sources: [source] }), target = saved.result.paths[0], original = await fs.readFile(target);

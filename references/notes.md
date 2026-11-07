@@ -17,7 +17,10 @@ the complete current note before proposing its replacement and pass that hash as
 source line must fit the 64 KiB line limit.
 A size refusal requires reporting the limit and asking the user how to proceed;
 never shorten, split or create a separate note to bypass it.
-Updates stay at the same path. An explicit file destination authorizes only that file. New directory-routed notes go to
+Updates stay at the same path. Name a note and its folders in the exact spelling a
+listing returns: a name that differs from an existing note or folder only by case
+or Unicode normalization is refused (`WORKSPACE_TARGET_ALIAS`), so no read, update
+or new note renames or misplaces one. An explicit file destination authorizes only that file. New directory-routed notes go to
 `meetings/`, `tasks/`, `knowledge-base/`, `decisions/` or the root by their
 dominant purpose. All of `logs/` is reserved for writer-managed activity logs.
 Notes may use `.md` or `.markdown` (ASCII case-insensitive); bare `.md` and

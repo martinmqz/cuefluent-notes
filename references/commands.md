@@ -12,6 +12,8 @@ when the serialized result fits 48 KiB. Otherwise it returns bounded UTF-8 range
 including JSON escaping and its other fields, must fit 48 KiB. Follow the returned
 `next` offset and pass the first `hash` as `expectedHash` on every later range, so
 a changed file is refused (`DIRECT_NOTE_CONFLICT`) rather than read inconsistently.
+Name notes and folders exactly as a listing returns them; a case or normalization
+variant of an existing name is refused (`WORKSPACE_TARGET_ALIAS`).
 
 `cuefluent_check_notes(projectId, target?, cursor?)` reports metadata and alias
 findings for the project's ordinary notes, or for one note with `target`; see

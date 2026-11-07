@@ -99,6 +99,33 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     if (prior && prior !== file) fail('WORKSPACE_TARGET_ALIAS', 'Two target spellings resolve to the same portable note name.');
     spellings.set(key, file); return { file, relative, key };
   }
+  /** A name keeps the exact spelling of every entry on its path that exists. One
+   * that differs from an existing note or folder only by case or Unicode
+   * normalization is refused, so no write renames an entry and no read or listing
+   * hands back a name that a later write would refuse. A name not yet on disk
+   * passes from its first missing component. A refused spelling is not kept as
+   * the name's spelling, so the listed one can follow in the same workspace. */
+  async function assertExactSpelling(selected) {
+    let directory = root;
+    for (const component of selected.relative.split('/')) {
+      let exact = false, alias = false, count = 0;
+      try {
+        const chain = await inspectAncestors(directory), opened = await fs.opendir(directory);
+        for await (const entry of opened) {
+          if (++count > limits.listEntries) fail('WORKSPACE_LIST_LIMIT', 'The directory exceeds the bounded spelling check.');
+          if (entry.name === component) { exact = true; break; }
+          alias ||= targetKey(entry.name) === targetKey(component);
+        }
+        await assertChain(chain);
+      } catch (error) { if (['ENOENT', 'PATH_MISSING'].includes(error.code)) return; throw error; }
+      if (alias && !exact) {
+        if (spellings.get(selected.key) === selected.file && !originals.has(selected.key) && !drafts.has(selected.key)) spellings.delete(selected.key);
+        fail('WORKSPACE_TARGET_ALIAS', 'Use the exact note spelling returned by the listing.');
+      }
+      if (!exact) return;
+      directory = path.join(directory, component);
+    }
+  }
   /** `budget` is what trusted inspection may still read. A note within its own
    * profile but beyond that budget is not opened, and one that is read comes
    * back undecoded, so its caller can report bytes that are not UTF-8. */
@@ -135,10 +162,15 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     if (privateBytes + size > limits.privateBytes) fail('WORKSPACE_PRIVATE_LIMIT', 'The private note workspace budget is exhausted.');
     privateBytes += size; collection.set(snapshot.key, snapshot); return snapshot;
   }
+  /** The first read of a note pins it under its exact spelling. */
+  async function retainExact(selected) {
+    await assertExactSpelling(selected);
+    return retain(await inspect(selected), originals);
+  }
   async function read_note(input) {
     object(input, ['target', 'start', 'maxBytes'], ['target']); await active();
     const selected = target(input.target), start = integer(input.start === undefined ? 0 : input.start, 0, limits.fileBytes), maxBytes = integer(input.maxBytes === undefined ? limits.readBytes : input.maxBytes, 1, limits.readBytes);
-    const snapshot = originals.get(selected.key) ?? retain(await inspect(selected), originals);
+    const snapshot = originals.get(selected.key) ?? await retainExact(selected);
     await assertChain(snapshot.binding.parent);
     if (!snapshot.bytes) return visible({ target: snapshot.file, exists: false, hash: null, totalBytes: 0, start: 0, end: 0, next: null, content: '' });
     if (start > snapshot.bytes.length || continuation(snapshot.bytes, start)) fail('WORKSPACE_RANGE_INVALID', 'The requested byte offset is not a UTF-8 boundary.');
@@ -174,7 +206,10 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     // An absolute directory is resolved first, so that a trailing separator names
     // the same folder; the root named explicitly is the omitted directory.
     const named = input.directory && path.isAbsolute(input.directory) ? path.resolve(input.directory) : input.directory;
-    const directory = !named || named === root ? root : target(named, false).file;
+    const folder = !named || named === root ? null : target(named, false);
+    // Trusted inspection lists folders by the names a listing returned.
+    if (folder && !trusted) await assertExactSpelling(folder);
+    const directory = folder?.file ?? root;
     const chain = await inspectAncestors(directory), candidates = []; let count = 0;
     const opened = await fs.opendir(directory);
     for await (const entry of opened) {
@@ -223,7 +258,9 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     }
     const submitted = trusted ? 0 : Buffer.byteLength(JSON.stringify(input));
     if (!trusted && draftBytes + submitted > limits.draftBytes) fail('WORKSPACE_DRAFT_LIMIT', 'The cumulative submitted draft budget is exhausted.');
-    const retained = originals.get(selected.key), original = retained ?? await inspect(selected, { absentOnly: true });
+    const retained = originals.get(selected.key);
+    if (!retained) await assertExactSpelling(selected);
+    const original = retained ?? await inspect(selected, { absentOnly: true });
     if (!retained && originals.size >= limits.targets) fail('WORKSPACE_TARGET_LIMIT', 'Too many note versions are retained in one workspace.');
     await assertChain(original.binding.parent);
     if (!trusted && original.bytes && Object.hasOwn(input, 'content') &&
@@ -273,22 +310,8 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     object(input, ['target', 'operations'], ['target', 'operations']); await active();
     const selected = target(input.target), retained = originals.get(selected.key);
     // A repair publishes under the existing spelling, never a case-only or
-    // normalization-only rename. Check each component inside the destination.
-    let directory = root;
-    for (const component of selected.relative.split('/')) {
-      let exact = false, alias = false, count = 0;
-      try {
-        const chain = await inspectAncestors(directory), opened = await fs.opendir(directory);
-        for await (const entry of opened) {
-          if (++count > limits.listEntries) fail('WORKSPACE_LIST_LIMIT', 'The directory exceeds the bounded repair spelling check.');
-          if (entry.name === component) { exact = true; break; }
-          alias ||= targetKey(entry.name) === targetKey(component);
-        }
-        await assertChain(chain);
-      } catch (error) { if (['ENOENT', 'PATH_MISSING'].includes(error.code)) break; throw error; }
-      if (!exact && alias) fail('WORKSPACE_TARGET_ALIAS', 'Use the exact note spelling returned by the listing.');
-      directory = path.join(directory, component);
-    }
+    // normalization-only rename.
+    await assertExactSpelling(selected);
     const original = retained ?? await inspect(selected);
     await assertChain(original.binding.parent);
     if (!original.bytes) fail('REPAIR_NOTE_MISSING', 'The note to repair does not exist.');
@@ -352,7 +375,7 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
    * context budget. Not a model tool. */
   async function original(input) {
     object(input, ['target'], ['target']); await active();
-    const selected = target(input.target), snapshot = originals.get(selected.key) ?? retain(await inspect(selected), originals);
+    const selected = target(input.target), snapshot = originals.get(selected.key) ?? await retainExact(selected);
     await assertChain(snapshot.binding.parent);
     return freeze({ target: snapshot.file, exists: snapshot.bytes !== null, hash: snapshot.hash, totalBytes: snapshot.bytes?.length ?? 0, bytes: snapshot.bytes ? Buffer.from(snapshot.bytes) : null });
   }
