@@ -231,6 +231,8 @@ read per page. A repair request selects at most 128 notes, each with at most 256
 operations, and forms one batch of at most 64 changed notes within the 64 MiB a
 run keeps privately; the notes after a full batch are deferred. A repair
 preview's pages share the 48 KiB budget, and each page builds the batch again.
+A note's change list holds at most 16 MiB; a larger one is refused
+(`REPAIR_CHANGES_LIMIT`).
 An alias selector fits within the supported 64 KiB source line; a replacement
 alias is at most 256 UTF-16 code units. The note check excludes version-control
 and recycle folders as listed in [notes](notes.md#checking-notes).

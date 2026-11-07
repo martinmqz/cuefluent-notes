@@ -4,7 +4,7 @@ import { REPAIR_CURSOR_PATTERN } from '../core/entry-contract.mjs';
 import { hashBytes } from '../storage/files.mjs';
 import { readSettings } from '../storage/store.mjs';
 import { openNoteWorkspace, targetKey } from '../processing/workspace.mjs';
-import { inspectNoteHealth, serializeRepair, serializeSources, validateRepairOperations } from '../notes/index.mjs';
+import { inspectNoteHealth, serializeSources, validateRepairOperations } from '../notes/index.mjs';
 import { fields } from '../client/control-server.mjs';
 import { REVIEW_PAGE_BYTES, fitJsonPiece } from './review.mjs';
 import { submitDirectRun } from './direct-run.mjs';
@@ -21,7 +21,7 @@ const FULL = new Set(['WORKSPACE_DRAFT_LIMIT', 'WORKSPACE_PRIVATE_LIMIT']);
 // A note that cannot take its repair as it is now. The reason is that note's
 // alone; the others are still previewed.
 const REFUSED = new Set(['REPAIR_NOTE_MISSING', 'REPAIR_NOTE_BLOCKED', 'REPAIR_OPERATION_INVALID', 'REPAIR_SOURCE_CONFLICT', 'NOTE_REPAIR_LAYOUT',
-  'WORKSPACE_LIST_LIMIT', 'REPAIR_SCOPE_VIOLATION', 'NOTE_FILE_LIMIT', 'WORKSPACE_TARGET_ALIAS', 'NOTE_UTF8_INVALID', 'READ_LIMIT_EXCEEDED', 'PATH_UNSAFE', 'FILE_CHANGED', 'EACCES', 'EPERM', 'EBUSY']);
+  'WORKSPACE_LIST_LIMIT', 'REPAIR_SCOPE_VIOLATION', 'REPAIR_CHANGES_LIMIT', 'NOTE_FILE_LIMIT', 'WORKSPACE_TARGET_ALIAS', 'NOTE_UTF8_INVALID', 'READ_LIMIT_EXCEEDED', 'PATH_UNSAFE', 'FILE_CHANGED', 'EACCES', 'EPERM', 'EBUSY']);
 
 /** The selected notes with their operations, closed and in the caller's order. */
 export function validateRepairs(input) {
@@ -51,7 +51,7 @@ async function propose(project, repairs, { skillVersion, runId, limits = {} }) {
       try {
         const receipt = await workspace.repair({ target: repair.target, operations: repair.operations });
         entries.push({ ...entry, state: receipt.changed ? 'change' : 'unchanged', expectedHash: receipt.expectedHash, hash: receipt.hash, before: receipt.bytes,
-          ...(receipt.changed ? { after: receipt.candidate.length, summary: receipt.summary, changes: Buffer.from(serializeRepair(receipt.description)),
+          ...(receipt.changed ? { after: receipt.candidate.length, summary: receipt.summary, changes: receipt.changes,
             remaining: Object.fromEntries(inspectNoteHealth(receipt.candidate).findings.map(item => [item.code, item.count])) } : {}) });
         continue;
       } catch (error) {

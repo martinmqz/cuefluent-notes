@@ -6,6 +6,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createProject } from '../../src/core/settings.mjs';
 import { createRun, isRepairRun, runKind, validateRun } from '../../src/core/run.mjs';
+import { REPAIR_CURSOR_PATTERN } from '../../src/core/entry-contract.mjs';
 import { initializeStore, readSettings, updateSettings, withProject } from '../../src/storage/store.mjs';
 import { hashBytes, readJSON, writeJSON } from '../../src/storage/files.mjs';
 import { NOTE_PROFILE, constructRepair, createGeneratedNote, describeRepair, inspectMetadata, serializeRepair } from '../../src/notes/index.mjs';
@@ -260,7 +261,7 @@ test('an interrupted repair is restored from its retained candidates instead of 
   await fs.appendFile(f.file('b'), '\nAn edit made meanwhile.\n'); const edited = await f.read('b');
   const restored = await f.repair(repairs, preview.proposal, requestId);
   assert.deepEqual([restored.state, restored.revision, restored.batch], ['review', review.revision, undefined]);
-  assert.deepEqual(restored.drafts.map(item => [item.hash, item.changes]), [[review.drafts[0].hash, review.drafts[0].changes], [review.drafts[1].hash, `${JSON.stringify({ unavailable: 'changed' }, null, 1)}\n`]]);
+  assert.deepEqual(restored.drafts.map(item => [item.hash, item.changes]), [[review.drafts[0].hash, review.drafts[0].changes], [review.drafts[1].hash, serializeRepair({ unavailable: 'changed' })]]);
   await code('NOTE_PUBLICATION_CONFLICT', () => f.call('cuefluent_save_note', { runId: requestId, revision: restored.revision }));
   assert.deepEqual(await f.read('a'), constructRepair(f.originals.get('a'), mechanical).bytes); assert.deepEqual(await f.read('b'), edited);
   assert.equal(await fs.stat(path.join(f.notes, 'logs')).then(() => true, () => false), false);
@@ -330,6 +331,21 @@ test('a batch holds as many changed notes as one run retains and names the rest 
   assert.deepEqual(tight.targets.map(item => item.state), ['change', 'deferred', 'deferred']);
   const saved = await apply(three, tight.proposal, limits);
   assert.deepEqual([saved.result.paths, saved.batch.deferred], [[f.file('n10')], [f.file('n11'), f.file('n12')]]);
+});
+
+test('a change list above its bound refuses only that note, and every offset within the bound can be paged', async t => {
+  const f = await fixture(t), repairs = [{ target: 'a.md', operations: mechanical }, { target: 'b.md', operations: [{ op: 'remove-content-hash' }] }];
+  const whole = await previewRepair(f.store, { projectId: 'demo', repairs }, { skillVersion }), [large, small] = whole.targets.map(item => item.totalBytes);
+  assert.ok(large > small);
+  const bounded = await previewRepair(f.store, { projectId: 'demo', repairs }, { skillVersion, limits: { changeBytes: small } });
+  assert.deepEqual(bounded.targets.map(item => [item.state, item.code ?? null]), [['refused', 'REPAIR_CHANGES_LIMIT'], ['change', null]]);
+  assert.equal(bounded.targets[1].changes, whole.targets[1].changes);
+  // A change list can outgrow its note, so both cursors reach the whole bound, not only the note file limit.
+  assert.ok(WORKSPACE_LIMITS.changeBytes > NOTE_PROFILE.fileBytes);
+  assert.match(`${whole.proposal}:${REPAIR_BATCH.targets - 1}:${WORKSPACE_LIMITS.changeBytes - 1}`, new RegExp(REPAIR_CURSOR_PATTERN));
+  const review = start => f.call('cuefluent_review_note', { runId: randomUUID(), part: 'changes', start });
+  await code('REVIEW_RUN_CHANGED', () => review(WORKSPACE_LIMITS.changeBytes - 1));
+  await code('DIRECT_NOTE_ARGUMENT', () => review(WORKSPACE_LIMITS.changeBytes + 1));
 });
 
 test('a repair run carries its proposal, can hold no log event, and no ordinary request can become one', async t => {

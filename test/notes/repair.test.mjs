@@ -283,6 +283,33 @@ test('reported aliases longer than replacement bounds or containing whitespace r
 });
 
 
+test('alias selectors name the inspected note, never an alias another operation writes, and name each alias once', () => {
+  const single = '# Topic\n\n## Section\n<!-- aliases: alpha -->\nBody.\n', replace = { op: 'replace-alias', line: 3, alias: 'alpha', with: 'beta' };
+  for (const operations of [[replace, { op: 'remove-alias', line: 3, alias: 'beta' }], [replace, { op: 'replace-alias', line: 3, alias: 'beta', with: 'gamma' }],
+    [replace, { op: 'remove-alias', line: 3, alias: 'Alpha' }]]) refused('REPAIR_OPERATION_INVALID', () => constructRepair(single, operations));
+  // Operations on the inspected aliases give one result in any order.
+  const pair = '# Topic\n\n## Section\n<!-- aliases: alpha, beta -->\nBody.\n', remove = { op: 'remove-alias', line: 3, alias: 'beta' };
+  for (const operations of [[remove, replace], [replace, remove]]) assert.equal(constructRepair(pair, operations).bytes.toString(), '# Topic\n\n## Section\n<!-- aliases: beta -->\nBody.\n');
+  refused('REPAIR_OPERATION_INVALID', () => constructRepair(pair, [replace]));
+});
+
+test('the scope check finds retained historical sources in order after stripped hashes merge a later duplicate', () => {
+  const hashed = { type: 'document', ref: 'Design', description: 'Specification', source_hash: sha('a') }, kept = { type: 'document', ref: 'Design', description: 'Specification' };
+  const old = generated(false, { sources: [hashed, session('one'), kept] }), repaired = constructRepair(old, [{ op: 'strip-source-hashes' }]);
+  assert.deepEqual(value(repaired.bytes).sources, [kept, session('one')]);
+  assert.doesNotThrow(() => assertRepairScope(old, repaired.bytes));
+  // Historical sources that change their order are still outside a repair.
+  const ordered = generated(false, { sources: [session('one'), session('two')] }), swapped = generated(false, { sources: [session('two'), session('one')] });
+  refused('REPAIR_SCOPE_VIOLATION', () => assertRepairScope(ordered, swapped));
+});
+
+test('a change list keeps a stored signed zero', () => {
+  const old = handwritten(`schema_version: 1\nid: ${id}\nsources:\n  - type: document\n    ref: Measured\n    reading: -0\n  - type: document\n    ref: Kept`);
+  const repaired = constructRepair(old, [{ op: 'remove-sources', sources: [0] }]), listed = JSON.parse(serializeRepair(repaired.description));
+  assert.deepEqual(listed.sources, { removed: [{ index: 0, source: { type: 'document', ref: 'Measured', reading: -0 } }] });
+  assert.ok(Object.is(listed.sources.removed[0].source.reading, -0));
+});
+
 test('alias markup remains visible when the same section also changes another alias', () => {
   const old = '# Topic\n\n## Section\n<!-- aliases: *Alpha*, Beta -->\nBody.\n';
   const repaired = constructRepair(old, [{ op: 'replace-alias', line: 3, alias: 'Alpha', with: 'Alpha' }, { op: 'replace-alias', line: 3, alias: 'Beta', with: 'Gamma' }]);

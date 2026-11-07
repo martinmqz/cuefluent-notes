@@ -166,13 +166,15 @@ test('a pending run is reported and left exactly as it was, and a busy project d
     content: '# Planning meeting\n\n## Decisions\nKeep the release small.\n', summary: 'Planning decisions.' });
   assert.equal(draft.state, 'review');
   const before = { status: await readProjectStatus(f.store, 'demo'), notes: await tree(f.notes), store: await tree(f.store.root) };
-  const report = await f.check();
+  const quiet = performance.now(), report = await f.check(), quietMs = performance.now() - quiet;
   assert.deepEqual(report.run, { state: 'pending', kind: 'direct', phase: 'review', active: false });
   assert.deepEqual(names(f, report), ['existing.md']);
   assert.deepEqual({ status: await readProjectStatus(f.store, 'demo'), notes: await tree(f.notes), store: await tree(f.store.root) }, before);
   await withProject(f.store, 'demo', async () => {
-    const busy = await f.check();
+    const started = performance.now(), busy = await f.check(), waitedMs = performance.now() - started;
     assert.deepEqual(busy.run, { state: 'busy' }); assert.deepEqual(names(f, busy), ['existing.md']);
+    // Contention is reported at once: waiting out the holder's one-second short gate would show here.
+    assert.ok(waitedMs < quietMs + 750, `the busy check took ${Math.round(waitedMs)} ms, a quiet one ${Math.round(quietMs)} ms`);
   });
 });
 

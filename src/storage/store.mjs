@@ -434,17 +434,20 @@ async function retainedFacts(store, settings, proposed) {
 }
 
 /** Every project mutation enters settings then project; model/source reads do neither. */
-export async function withProject(store, id, fn) {
-  return withSelectedProject(store, () => id, fn);
+export async function withProject(store, id, fn, options) {
+  return withSelectedProject(store, () => id, fn, options);
 }
 
 /** Resolve first ownership while holding settings, then enter the chosen project.
  * select may inspect bounded metadata, never source transcripts or model output.
- * Returning null reports unconfigured without creating any state.
+ * Returning null reports unconfigured without creating any state. `timeoutMs`
+ * bounds the wait for each of the two gates; a read that reports contention
+ * instead of waiting for it passes 0.
  */
-export async function withSelectedProject(store, select, fn) {
+export async function withSelectedProject(store, select, fn, { timeoutMs } = {}) {
   if (!store) return null;
-  return withShortGate(store.settingsGate, gateOptions, async () => {
+  const gate = timeoutMs === undefined ? gateOptions : { ...gateOptions, timeoutMs };
+  return withShortGate(store.settingsGate, gate, async () => {
     const settings = await readSettings(store);
     const id = await select(settings.value);
     if (id === null) return null;
@@ -453,7 +456,7 @@ export async function withSelectedProject(store, select, fn) {
     const layout = await readLayout(store);
     const gates = Object.hasOwn(layout.value.projects, id) ? layout.value.projects[id] : null;
     if (!gates) fail('STORE_LAYOUT_INVALID', 'The configured project has no registered ownership gates.');
-    return withShortGate(gates.stateGate, gateOptions, async () => fn(Object.freeze({
+    return withShortGate(gates.stateGate, gate, async () => fn(Object.freeze({
       project, settingsHash: settings.hash, gates,
       directory: `store/projects/${projectKey(id)}`,
     })));

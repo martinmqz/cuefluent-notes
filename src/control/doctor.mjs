@@ -112,7 +112,7 @@ async function readNote(workspace, { file, target = file, requested = false, max
  * status explains them. */
 async function runState(store, projectId) {
   try {
-    const { run, active } = await withProject(store, projectId, context => readRunSnapshot(store, context));
+    const { run, active } = await withProject(store, projectId, context => readRunSnapshot(store, context), { timeoutMs: 0 });
     return run ? { state: 'pending', kind: runKind(run), phase: run.phase, active } : { state: 'none' };
   } catch (error) {
     if (typeof error?.code !== 'string' || !/^[A-Z][A-Z0-9_]{0,79}$/.test(error.code)) throw error;

@@ -237,6 +237,15 @@ test('listing is bounded/paged and does not grant overwrite authority; explicit 
   assert.equal((await finish(fileWorkspace)).drafts[0].target, explicit.project.destination.path);
 });
 
+test('a listing names a folder as listed, the root by its own path, and either with a trailing separator', async t => {
+  const f = await fixture(t); await fs.mkdir(path.join(f.root, 'tasks'));
+  await fs.writeFile(path.join(f.root, 'a.md'), body); await fs.writeFile(path.join(f.root, 'tasks', 'b.md'), body);
+  const workspace = await f.open(), names = async input => (await workspace.list_notes(input)).entries.map(entry => path.relative(f.root, entry.target));
+  for (const directory of [undefined, f.root, f.root + path.sep]) assert.deepEqual(await names({ directory }), ['a.md', 'tasks']);
+  for (const directory of ['tasks', path.join(f.root, 'tasks'), path.join(f.root, 'tasks') + path.sep]) assert.deepEqual(await names({ directory }), [path.join('tasks', 'b.md')]);
+  await assert.rejects(workspace.list_notes({ directory: '.' }), { code: 'PATH_INVALID' });
+});
+
 test('path/link defenses reserve logs even off and bind replaced parents/root without creating missing directories', async t => {
   const f = await fixture(t); await fs.mkdir(path.join(f.root, 'tasks')); await fs.writeFile(path.join(f.root, 'tasks', 'one.md'), body);
   const workspace = await f.open();

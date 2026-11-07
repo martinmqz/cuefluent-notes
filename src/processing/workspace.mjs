@@ -8,10 +8,14 @@ import { validateSettings } from '../core/settings.mjs';
 import { assertChain, assertDirectory, assertRegularFile, inspectAncestors, lstatOrNull, pinDirectory, relativePath } from '../storage/paths.mjs';
 import { hashBytes, readSnapshot } from '../storage/files.mjs';
 import { NOTE_PROFILE, SOURCE_LOCATOR_LENGTH, assertOrdinaryTarget, assertValidNote, validateNote, createGeneratedNote, decodeNote, isNoteTimestamp, preserveMetadata, validateDocumentSources,
-  constructRepair, summarizeRepair } from '../notes/index.mjs';
+  constructRepair, serializeRepair, summarizeRepair } from '../notes/index.mjs';
 
+/** `changeBytes` bounds a repair's serialized change list. It names each changed
+ * value before and after, so it can outgrow its note; preview and review offsets
+ * into it stay within this bound. */
 export const WORKSPACE_LIMITS = Object.freeze({ contextBytes: 64 * 1024, draftBytes: 128 * 1024, privateBytes: 64 * 1024 * 1024,
-  fileBytes: NOTE_PROFILE.fileBytes, readBytes: 8192, targets: 128, drafts: 64, listEntries: 8192, listResults: 100, edits: 128 });
+  fileBytes: NOTE_PROFILE.fileBytes, readBytes: 8192, targets: 128, drafts: 64, listEntries: 8192, listResults: 100, edits: 128,
+  changeBytes: 16 * 1024 * 1024 });
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const freeze = value => { if (value && typeof value === 'object' && !(value instanceof Uint8Array)) { Object.values(value).forEach(freeze); Object.freeze(value); } return value; };
 const schema = (properties, required = []) => ({ type: 'object', additionalProperties: false, properties, ...(required.length ? { required } : {}) });
@@ -167,7 +171,10 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
       await assertDirectory(pin);
       return present({ entries: stat ? [{ target: selected.file, kind: ordinary(selected.file, stat) ? 'note' : 'skipped-note' }] : [], nextCursor: null });
     }
-    const directory = input.directory ? target(input.directory, false).file : root;
+    // An absolute directory is resolved first, so that a trailing separator names
+    // the same folder; the root named explicitly is the omitted directory.
+    const named = input.directory && path.isAbsolute(input.directory) ? path.resolve(input.directory) : input.directory;
+    const directory = !named || named === root ? root : target(named, false).file;
     const chain = await inspectAncestors(directory), candidates = []; let count = 0;
     const opened = await fs.opendir(directory);
     for await (const entry of opened) {
@@ -288,14 +295,15 @@ export async function openNoteWorkspace({ project: inputProject, runId, skillVer
     if (drafts.has(selected.key)) fail('WORKSPACE_ARGUMENT', 'A note is repaired once in one batch.');
     const repaired = constructRepair(original.bytes, input.operations);
     if (!repaired.changed) return freeze({ target: original.file, expectedHash: original.hash, hash: original.hash, changed: false, bytes: original.bytes.length });
+    const description = repaired.description, changes = Buffer.from(serializeRepair(description));
+    if (changes.length > limits.changeBytes) fail('REPAIR_CHANGES_LIMIT', 'The change list of this repair is larger than a review can page through; select fewer operations for this note.');
     const bytes = repaired.bytes, kept = retained ? 0 : original.bytes.length;
     if (drafts.size >= limits.drafts || (!retained && originals.size >= limits.targets)) fail('WORKSPACE_DRAFT_LIMIT', 'Too many draft targets are retained.');
     if (privateBytes + kept + bytes.length > limits.privateBytes) fail('WORKSPACE_PRIVATE_LIMIT', 'The complete private draft exceeds the workspace budget.');
-    const description = repaired.description;
     const draft = { id: randomUUID(), target: original.file, expectedHash: original.hash, hash: hashBytes(bytes), summary: summarizeRepair(description), heading: null, bytes: Buffer.from(bytes), binding: original.binding };
     if (!retained) originals.set(selected.key, original);
     privateBytes += kept + bytes.length; drafts.set(selected.key, draft);
-    return freeze({ target: draft.target, expectedHash: draft.expectedHash, hash: draft.hash, changed: true, bytes: original.bytes.length, summary: draft.summary, description, candidate: Buffer.from(bytes) });
+    return freeze({ target: draft.target, expectedHash: draft.expectedHash, hash: draft.hash, changed: true, bytes: original.bytes.length, summary: draft.summary, description, changes, candidate: Buffer.from(bytes) });
   }
   async function read_activity_log(input) {
     object(input, ['year', 'from', 'to', 'target', 'projectId', 'limit', 'cursor'], ['year']); await active();

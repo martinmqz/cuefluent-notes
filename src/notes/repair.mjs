@@ -167,18 +167,26 @@ function repairAliases(source, operations, syntax) {
     const comment = comments.find(item => item.line === line);
     if (!comment) inapplicable('No section with aliases has its heading on that line.');
     const [, open, text, close] = comment.parts, lead = /^[ \t]*/.exec(text)[0], trail = /[ \t]*$/.exec(text.slice(lead.length))[0];
-    let segments = parseAliasValues(text.slice(lead.length, text.length - trail.length));
+    // Every selector names an alias of the note as it was inspected, never one
+    // that another operation of the request writes, and each alias is named once.
+    // Every spelling of a selected alias goes; a replacement takes the first.
+    const inspected = parseAliasValues(text.slice(lead.length, text.length - trail.length)), chosen = new Map();
     for (const operation of requested.filter(item => item.line === line)) {
-      const key = normalizedText(operation.alias), matches = segments.map((segment, index) => segment.key === key ? index : -1).filter(index => index >= 0);
+      const key = normalizedText(operation.alias), matches = inspected.flatMap((segment, index) => segment.key === key ? [index] : []);
       if (!matches.length) inapplicable('The section does not have that alias.');
-      if (operation.op === 'replace-alias') {
-        // An alias the section already has is removed, not written a second time.
-        const replacement = normalizedText(operation.with);
-        if (segments.some((segment, index) => !matches.includes(index) && segment.key === replacement)) inapplicable('The section already has the replacement alias; remove the other one instead.');
-        const [, before, after] = /^([ \t]*)[\s\S]*?([ \t]*)$/.exec(segments[matches[0]].raw);
-        segments[matches[0]] = { raw: before + operation.with + after, value: operation.with, key: replacement }; matches.shift();
-      }
-      segments = segments.filter((_segment, index) => !matches.includes(index));
+      if (matches.some(index => chosen.has(index))) inapplicable('Two operations name one alias.');
+      for (const index of matches) chosen.set(index, { operation, first: index === matches[0] });
+    }
+    const segments = inspected.flatMap((segment, index) => {
+      const choice = chosen.get(index);
+      if (!choice) return [segment];
+      if (choice.operation.op === 'remove-alias' || !choice.first) return [];
+      const [, before, after] = /^([ \t]*)[\s\S]*?([ \t]*)$/.exec(segment.raw), value = choice.operation.with;
+      return [{ raw: before + value + after, value, key: normalizedText(value), replaced: true }];
+    });
+    // An alias the section keeps is not written a second time.
+    for (const [index, segment] of segments.entries()) {
+      if (segment.replaced && segments.some((other, position) => position !== index && other.key === segment.key)) inapplicable('The section already has the replacement alias; remove the other one instead.');
     }
     if (segments.length) { segments[0].raw = segments[0].raw.trimStart(); segments.at(-1).raw = segments.at(-1).raw.trimEnd(); }
     edits.push({ start: comment.start, end: comment.end, text: segments.length ? open + lead + segments.map(({ raw }) => raw).join(',') + trail + close : '' });
@@ -236,21 +244,23 @@ function checkRepairScope(originalInput, candidateInput, inspectedBefore) {
   }
   const { content_hash: _hash, ...generation } = old.generation ?? {};
   if (!isDeepStrictEqual(next.generation ?? {}, generation) && !isDeepStrictEqual(next.generation, old.generation)) violation();
-  const sources = old.sources ?? [], nextSources = next.sources ?? [], matches = matchSources(sources, nextSources);
+  const sources = old.sources ?? [];
   let cursor = -1;
-  for (const [index, source] of nextSources.entries()) {
+  for (const source of next.sources ?? []) {
     // Newly supplied descriptors may replace any selected slot. Historical-only
-    // descriptors must still exist, in their original relative order.
+    // descriptors must still exist, in their original relative order: each takes
+    // the earliest original after the one before it, exact or without hashes.
     try { validateDocumentSources([source]); continue; } catch { /* retained data */ }
-    const at = matches[index];
-    if (at === undefined || at <= cursor) violation();
+    const at = sources.findIndex((item, index) => index > cursor && (same(item, source) || withoutHashes(item, source)));
+    if (at < 0) violation();
     cursor = at;
   }
   return { before, after };
 }
 
-/** Reserve exact matches first, then hash-stripped matches. A replacement
- * cannot consume the original of a later retained descriptor. */
+/** The original each candidate source is listed as in a change list: exact
+ * matches are reserved first, then hash-stripped ones, so a replacement is never
+ * listed as the original of a later kept source. The scope check matches in order. */
 function matchSources(before, after) {
   const used = new Set(), matches = [];
   for (const equal of [same, withoutHashes]) after.forEach((source, index) => {
@@ -300,8 +310,9 @@ function describeParts(original, candidate, before, after) {
     ...(Object.keys(listed).length ? { sources: listed } : {}), ...(aliases.length ? { aliases } : {}) };
 }
 
-/** The change list as text, so that a bounded page can carry any part of it. */
-export const serializeRepair = description => `${JSON.stringify(description, null, 1)}\n`;
+/** The change list as text, so that a bounded page can carry any part of it.
+ * Values keep their stored form, signed zero included. */
+export const serializeRepair = description => `${serializeSources(description)}\n`;
 
 /** One line for a draft descriptor and a result: what kind of change, never a value. */
 export function summarizeRepair(description) {

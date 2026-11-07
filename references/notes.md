@@ -327,12 +327,13 @@ A preview lists each selected note as one of:
 | --- | --- |
 | `REPAIR_NOTE_BLOCKED` | The note does not satisfy the note profile, its metadata is malformed or of another schema version, or it is an activity log. |
 | `REPAIR_NOTE_MISSING` | There is no note at that target. |
-| `REPAIR_OPERATION_INVALID` | An operation names a source or an alias the note does not have, two operations name one source, or the replacement alias is already there. |
+| `REPAIR_OPERATION_INVALID` | An operation names a source or an alias the note does not have, two operations name one source or one alias, or a replacement alias would repeat one its section keeps. |
 | `REPAIR_SOURCE_CONFLICT` | Two remaining sources would share one reference with different details. Select which to keep, replace or remove. |
 | `NOTE_REPAIR_LAYOUT` | The header cannot hold the repair in its existing layout. |
 | `WORKSPACE_TARGET_ALIAS` | The target spelling differs from the existing note; use its exact listed spelling. |
 | `WORKSPACE_LIST_LIMIT` | The target spelling could not be checked within the directory-entry bound. |
 | `REPAIR_SCOPE_VIOLATION`, `NOTE_FILE_LIMIT` | The candidate exceeds the repair scope or supported note profile. This note is refused; other selected notes are still previewed. |
+| `REPAIR_CHANGES_LIMIT` | The change list is larger than a review can page through. Repair this note with fewer operations at a time. |
 | `PATH_UNSAFE`, `READ_LIMIT_EXCEEDED`, `NOTE_UTF8_INVALID`, `FILE_CHANGED`, `EACCES`, `EPERM`, `EBUSY` | The file is not an ordinary file, is larger than a note file may be, is not UTF-8, changed while it was read, or could not be opened. |
 
 The `proposal` of a preview stands for the project, destination and saving mode, the selected
