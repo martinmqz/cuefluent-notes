@@ -80,6 +80,56 @@ test('selected sources are removed or replaced by a descriptor that a new note c
   refused('REPAIR_OPERATION_INVALID', () => constructRepair(Buffer.from(body), [{ op: 'remove-sources', sources: [0] }]));
 });
 
+// Four entries in one expanded header, each in its own style: block with plain keys, a trailing comment and a
+// quoted locator; flow with a single-quoted version; block with double-quoted keys and values; block and plain.
+const styled = ['schema_version: 1', `id: ${id}`, 'sources:', '  - type: document', '    ref: /tmp/old.png # pasted', '    locator: "Old: position" # where', `    source_hash: "${sha('b')}"`,
+  "  - {type: document, ref: https://x, version: 'v 1'}", '  - "type": "document"', '    "ref": "quoted keys"', '  - type: document', '    ref: kept'];
+const replaced = (note, operations) => { const repaired = constructRepair(note, operations); assert.equal(validateNote(repaired.bytes).valid, true); return repaired.bytes; };
+
+test('a replaced source keeps its entry\'s layout: collection style, key order and spelling, and the spelling and comments of its values', () => {
+  const descriptors = [{ locator: 'New: position', ref: 'Screenshot pasted into Codex', type: 'document' }, { type: 'document', ref: 'left: right', version: 'v2' }, { type: 'document', ref: 'r2', locator: 'L' }];
+  for (const newline of ['\n', '\r\n']) {
+    const note = handwritten(styled.join('\n'), body, newline);
+    const bytes = replaced(note, descriptors.map((descriptor, index) => ({ op: 'replace-sources', sources: [index], with: descriptor })));
+    // Keys stay in the entry's order whatever order the descriptor gave them, a dropped hash leaves no trace, a value
+    // that changes is double-quoted and keeps the comment of the one it replaces, a value that stays keeps its own
+    // spelling, and a new key is spelled like the entry's first.
+    assert.equal(bytes.toString(), handwritten(['schema_version: 1', `id: ${id}`, 'sources:', '  - type: document', '    ref: "Screenshot pasted into Codex" # pasted', '    locator: "New: position" # where',
+      '  - {type: document, ref: "left: right", version: "v2"}', '  - "type": "document"', '    "ref": "r2"', '    "locator": "L"', '  - type: document', '    ref: kept'].join('\n'), body, newline).toString());
+    assert.deepEqual(value(bytes).sources, [{ type: 'document', ref: 'Screenshot pasted into Codex', locator: 'New: position' }, descriptors[1], descriptors[2], { type: 'document', ref: 'kept' }]);
+  }
+  // The request's key order plays no part, and a value that stays is not rewritten.
+  const note = handwritten(styled.join('\n'));
+  const once = replaced(note, [{ op: 'replace-sources', sources: [3], with: { type: 'document', ref: 'kept', locator: 'true' } }]);
+  assert.equal(header(once), header(handwritten([...styled, '    locator: "true"'].join('\n'))));
+  assert.equal(replaced(note, [{ op: 'replace-sources', sources: [3], with: { locator: 'true', ref: 'kept', type: 'document' } }]).equals(once), true);
+  // Strings a YAML 1.1 or 1.2 reader could take for a boolean, a number or a comment read back as given.
+  const unsafe = replaced(note, [{ op: 'replace-sources', sources: [3], with: { type: 'document', ref: 'yes', locator: '12:30 #1' } }]);
+  assert.equal(header(unsafe), header(handwritten([...styled.slice(0, -1), '    ref: "yes"', '    locator: "12:30 #1"'].join('\n'))));
+  assert.deepEqual(value(unsafe).sources[3], { type: 'document', ref: 'yes', locator: '12:30 #1' });
+  assert.deepEqual(parseDocument(inspectMetadata(unsafe).raw.split(/\r?\n/).slice(1, -2).join('\n'), { version: '1.1' }).toJS().sources[3], { type: 'document', ref: 'yes', locator: '12:30 #1' });
+  // A comment that went with a dropped key would be lost, so the repair is refused; the same descriptor with the key keeps it.
+  refused('NOTE_REPAIR_LAYOUT', () => constructRepair(note, [{ op: 'replace-sources', sources: [0], with: { type: 'document', ref: 'no locator' } }]));
+  assert.equal(header(replaced(note, [{ op: 'replace-sources', sources: [0], with: { type: 'document', ref: 'no locator', locator: 'kept comment' } }])),
+    header(handwritten(['schema_version: 1', `id: ${id}`, 'sources:', '  - type: document', '    ref: "no locator" # pasted', '    locator: "kept comment" # where', ...styled.slice(7)].join('\n'))));
+});
+
+test('a merge takes the layout of the earliest selected entry, in an expanded header and in a compact one', () => {
+  const note = handwritten(styled.join('\n'));
+  assert.equal(header(replaced(note, [{ op: 'replace-sources', sources: [2, 0], with: { type: 'document', ref: 'merged', locator: 'first' } }])),
+    header(handwritten(['schema_version: 1', `id: ${id}`, 'sources:', '  - type: document', '    ref: "merged" # pasted', '    locator: "first" # where', styled[7], '  - type: document', '    ref: kept'].join('\n'))));
+  assert.equal(header(replaced(note, [{ op: 'replace-sources', sources: [3, 2], with: { type: 'document', ref: 'merged', version: '1' } }])),
+    header(handwritten([...styled.slice(0, 8), '  - "type": "document"', '    "ref": "merged"', '    "version": "1"'].join('\n'))));
+  const compact = sources => `{schema_version: 1, id: ${id}, sources: [${sources.join(', ')}]}`;
+  const flow = handwritten(compact(['{type: document, ref: one, locator: first}', '{type: document, ref: two}', '{"type": "document", "ref": "three"}']));
+  assert.equal(header(replaced(flow, [{ op: 'replace-sources', sources: [2, 0], with: { locator: 'primero', ref: 'uno', type: 'document' } }])),
+    header(handwritten(compact(['{type: document, ref: "uno", locator: "primero"}', '{type: document, ref: two}']))));
+  assert.equal(header(replaced(flow, [{ op: 'replace-sources', sources: [1, 2], with: { type: 'document', ref: 'dos', version: 'v' } }])),
+    header(handwritten(compact(['{type: document, ref: one, locator: first}', '{type: document, ref: "dos", version: "v"}']))));
+  assert.equal(header(replaced(flow, [{ op: 'replace-sources', sources: [2], with: { type: 'document', ref: 'tres', version: 'v' } }])),
+    header(handwritten(compact(['{type: document, ref: one, locator: first}', '{type: document, ref: two}', '{"type": "document", "ref": "tres", "version": "v"}']))));
+});
+
 test('aliases change only at their section, and the rest of the body and an untouched header keep every byte', () => {
   const note = generated(false), lines = header(note).split('\n').length - 1, first = lines + 3, second = lines + 7;
   const repaired = constructRepair(note, [{ op: 'remove-alias', line: first, alias: 'beta' }, { op: 'replace-alias', line: first, alias: 'gamma', with: 'gamma ray' }, { op: 'remove-alias', line: second, alias: 'beta' }]).bytes.toString();

@@ -159,7 +159,8 @@ function repairHeader(metadata, operations) {
       sequence.items = slots.map(slot => {
         const item = items[slot.index];
         if (!slot.replacement) { for (const key of slot.drop) if (isMap(item)) item.delete(key); return item; }
-        const node = sourceNode(slot.value); if (isMap(item)) node.flow = item.flow; return node;
+        // A replacement takes the layout of the earliest entry it replaces.
+        return sourceNode(slot.value, item);
       });
       if (!slots.length) document.delete('sources');
     }

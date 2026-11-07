@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { isAlias, isMap, isScalar, isSeq, parseDocument, Scalar, visit as visitYaml } from 'yaml';
+import { isAlias, isMap, isScalar, isSeq, Pair, parseDocument, Scalar, visit as visitYaml } from 'yaml';
 import { fail } from '../core/errors.mjs';
 import { SEMVER_VERSION_PATTERN } from '../core/version.mjs';
 import { decodeNote, noteNewline, NOTE_PROFILE as P } from './profile.mjs';
@@ -307,6 +307,29 @@ function quoteSourceStrings(node) {
   visitYaml(node, { Scalar(_key, value) { if (typeof value.value === 'string') value.type = Scalar.QUOTE_DOUBLE; } });
   return node;
 }
+const KEY_SPELLINGS = [Scalar.PLAIN, Scalar.QUOTE_DOUBLE, Scalar.QUOTE_SINGLE];
+/** Make the source entry `node` hold exactly `descriptor` in its own layout. Its
+ * collection style, its key order and the spelling of its keys stay; a value
+ * that stays keeps its spelling and comments; a value that changes is
+ * double-quoted, as every new source string is so that YAML 1.1 and 1.2 readers
+ * agree on it, and keeps the comments of the one it replaces; a new key is
+ * spelled like the entry's first key; and a key the descriptor lacks goes with
+ * its value. A comment that went with a dropped key is lost, which the caller
+ * refuses. */
+function restyleSourceNode(node, descriptor) {
+  const remaining = new Map(Object.entries(descriptor));
+  const first = node.items.find(pair => isScalar(pair.key))?.key, keyType = KEY_SPELLINGS.includes(first?.type) ? first.type : Scalar.PLAIN;
+  node.items = node.items.filter(pair => isScalar(pair.key) && remaining.has(pair.key.value));
+  for (const pair of node.items) {
+    const value = remaining.get(pair.key.value); remaining.delete(pair.key.value);
+    if (isScalar(pair.value) && pair.value.value === value) continue;
+    const scalar = quoted(value);
+    if (isScalar(pair.value)) for (const key of ['comment', 'commentBefore', 'spaceBefore']) if (pair.value[key] !== undefined) scalar[key] = pair.value[key];
+    pair.value = scalar;
+  }
+  for (const [key, value] of remaining) { const name = new Scalar(key); name.type = keyType; node.items.push(new Pair(name, quoted(value))); }
+  return node;
+}
 
 /** The one YAML formatter. `any` keeps each collection in its own style. */
 const payloadText = (document, collectionStyle) => document.toString({ lineWidth: 0, collectionStyle, flowCollectionPadding: false, doubleQuotedAsJSON: true });
@@ -343,13 +366,15 @@ function yamlComments(document) {
  * parsed document. The wrapper lines, key order, each collection's own style and
  * the style of every untouched scalar stay as they are; the project's formatting
  * preference plays no part. `edit` receives the document and a factory for a
- * source node, and returns the value the header must then hold. A result that
- * does not read back as exactly that value, loses a YAML comment or outgrows the
- * header limit is refused instead of being written in another layout. */
+ * source node holding a descriptor: given the entry it replaces, the node is
+ * that entry restyled to the descriptor, and otherwise a double-quoted node.
+ * `edit` returns the value the header must then hold. A result that does not
+ * read back as exactly that value, loses a YAML comment or outgrows the header
+ * limit is refused instead of being written in another layout. */
 export function editMetadata(raw, edit) {
   const parts = wrapper.exec(raw); requireValue(parts);
   const { document } = parseYaml(parts[2]), comments = yamlComments(document);
-  const expected = validateMetadata(edit(document, descriptor => quoteSourceStrings(document.createNode(descriptor))));
+  const expected = validateMetadata(edit(document, (descriptor, replaced) => isMap(replaced) ? restyleSourceNode(replaced, descriptor) : quoteSourceStrings(document.createNode(descriptor))));
   const refuse = () => fail('NOTE_REPAIR_LAYOUT', 'The header cannot hold this repair in its existing layout. Preserve the note unchanged.');
   if (!isDeepStrictEqual(yamlComments(document), comments)) refuse();
   const payload = payloadText(document, 'any').replace(/\n$/, '');

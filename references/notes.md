@@ -287,11 +287,16 @@ prose, with an ordinary note update, then check again.
 
 The header keeps its layout: its opening and closing lines, its key order, the
 compact or expanded style of each collection and the quoting of every value that
-stays. The project's metadata formatting preference plays no part, and a repair of
-aliases alone does not rewrite the header. Spacing in a header that was edited by
-hand may be normalized where it is rewritten. A repair that cannot be written in
-the existing layout, for instance because a YAML comment belongs to a removed
-entry, is refused.
+stays. A replacement source takes the layout of the entry it replaces, the
+earliest selected one when several are merged: its collection style, its key
+order and spelling, and the spelling of each value it keeps; a value that changes
+is written in double quotes, as a new source's values are, and a field the entry
+did not have is named like its first. The project's
+metadata formatting preference plays no part, and a repair of aliases alone does
+not rewrite the header. Spacing in a header that was edited by hand may be
+normalized where it is rewritten. A repair that cannot be written in the existing
+layout, for instance because a YAML comment belongs to a removed entry or field,
+is refused.
 
 A preview lists each selected note as one of:
 
