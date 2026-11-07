@@ -8,7 +8,7 @@ import { installPackage } from './install.mjs';
 import { createGitRunner } from './git.mjs';
 
 const requireCI = condition => { if (!condition) { const error = new Error('Candidate build verification failed.'); error.code = 'CI_CANDIDATE_INVALID'; throw error; } };
-export const ARTIFACT_NAMES = Object.freeze(['candidate-ubuntu-24.04', 'candidate-macos-14', 'candidate-windows-2025']);
+export const ARTIFACT_NAMES = Object.freeze(['candidate-ubuntu-24.04', 'candidate-macos-15', 'candidate-windows-2025']);
 export const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 export const decode = bytes => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 export async function bounded(file, limit) {

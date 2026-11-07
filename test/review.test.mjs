@@ -252,12 +252,15 @@ test('source paging rejects nonexistent parts and sources without changing a pen
   assert.deepEqual(await f.current(), before); assert.deepEqual(await fs.readdir(f.notes), []);
 });
 
-test('source review retains signed zero in a proposed descriptor', async t => {
-  const f = await fixture(t), page = await f.direct('numeric-source.md', RETRY.content,
-    [{ type: 'document', ref: 'Synthetic numeric report', reading: -0 }]);
+test('source review retains signed zero in a stored descriptor beside a newly supplied source', async t => {
+  const f = await fixture(t), target = f.file('numeric-source.md'), stored = { type: 'document', ref: 'Synthetic numeric report', reading: -0 };
+  const original = createGeneratedNote(RETRY.content, { id: 'numeric-source', now: CREATED_AT, skillVersion: SKILL_VERSION, metadata: { sources: [stored] } });
+  await fs.writeFile(target, original);
+  const page = await f.tools.call('cuefluent_update_note', { projectId: PROJECT, requestId: randomUUID(), target, expectedHash: hashBytes(original),
+    content: RETRY.content, summary: 'Add the supplied report source.', sources: [{ type: 'document', ref: 'New synthetic report' }] });
   const source = page.drafts.find(entry => entry.part === 'sources');
   assert.ok(source); assert.ok(Object.is(JSON.parse(source.sourceContent)[0].reading, -0));
-  assert.equal(page.drafts[0].content, RETRY.content);
+  assert.equal(JSON.parse(source.sourceContent).length, 2); assert.equal(page.drafts[0].content, RETRY.content);
 });
 
 test('queued review pages fill up to the byte budget with whole drafts; following next visits every draft once, in order', async t => {

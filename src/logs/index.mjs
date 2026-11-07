@@ -1,3 +1,4 @@
+import { htmlParts } from '../notes/markdown.mjs';
 import { createHash } from 'node:crypto';
 import { fail } from '../core/errors.mjs';
 import { isMarkdownPath } from '../core/note-path.mjs';
@@ -135,7 +136,8 @@ function inspect(input, options = {}) {
     for (const token of items) {
       const map = token.map ?? range;
       if (['html_inline', 'html_block'].includes(token.type)) {
-        for (const match of token.content.matchAll(/<!--\s*note-log-entry\b[\s\S]*?(?:-->|$)/gi)) {
+        for (const { comment } of htmlParts(token.content).filter(part => /^<!--\s*note-log-entry\b/i.test(part.comment ?? ''))) {
+          const match = [comment];
           requireLog(token.type === 'html_inline' && isLogEntryMarker(match[0]) && map, 'LOG_INVALID', (map?.[0] ?? 0) + 1);
           const identity = markerPattern.exec(match[0]); requireLog(identity && !ids.has(identity[1]), 'LOG_EVENT_CONFLICT', (map?.[0] ?? 0) + 1); ids.add(identity[1]);
           const candidates = (markerLines.get(match[0]) ?? []).filter(line => line >= map[0] && line < map[1]);

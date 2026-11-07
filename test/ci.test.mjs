@@ -30,7 +30,7 @@ test('native shards and client smoke run in parallel after classification and re
     assert.equal(job.strategy['max-parallel'], undefined);
   }
   const rows = source.strategy.matrix.include, names = new Set([plan.name ?? 'plan', guidance.name ?? 'guidance', reproducibility.name]);
-  for (const [platform, count] of [['ubuntu-24.04', 1], ['macos-14', 1], ['windows-2025', 4]]) {
+  for (const [platform, count] of [['ubuntu-24.04', 1], ['macos-15', 1], ['windows-2025', 4]]) {
     const selected = rows.filter(row => row.os === platform);
     assert.deepEqual(selected.map(row => row.shard).sort(), Array.from({ length: count }, (_, index) => `${index + 1}/${count}`));
     assert.equal(selected.filter(row => row.primary).length, 1);
@@ -40,7 +40,7 @@ test('native shards and client smoke run in parallel after classification and re
   assert.equal(rows.length, 6);
   for (const platform of smoke.strategy.matrix.os) names.add(smoke.name.replace('${{ matrix.os }}', platform));
   assert.deepEqual([...names].sort(), [...EXPECTED_CHECK_JOBS].sort(), 'Release evidence must require every workflow job.');
-  for (const required of ['plan', 'guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)', 'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
+  for (const required of ['plan', 'guidance', 'test (ubuntu-24.04)', 'test (macos-15)', 'test (windows-2025)', 'client-smoke (macos-15)', 'client-smoke (windows-2025)', 'reproducibility']) assert(names.has(required), `Missing required context: ${required}`);
   assert.deepEqual(reproducibility.needs, ['plan', 'guidance', 'test', 'client-smoke']);
   for (const step of source.steps.filter(step => step.run === 'npm run check:examples' || step.run === 'node tools/ci.mjs build' || step.uses?.startsWith('actions/upload-artifact@'))) assert.equal(step.if, "needs.plan.outputs.mode == 'full' && matrix.primary");
   const upload = source.steps.find(step => step.uses?.startsWith('actions/upload-artifact@'));

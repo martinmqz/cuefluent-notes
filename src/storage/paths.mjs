@@ -5,7 +5,7 @@ import { LIVE_DEVICE } from '../core/filesystem-identity.mjs';
 import { readPathStat } from './stat.mjs';
 import { assertLocalFilesystem, assertPrivateAccess, establishWindowsPrivacy } from './platform.mjs';
 
-const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const RESERVED = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i;
 const CONTROLS = /[\u0000-\u001f\u007f]/;
 
 export function fileIdentity(stat) {
@@ -94,11 +94,18 @@ export async function assertDirectory(pin) {
   if (pin.private) assertPrivateAccess(pin.root, await readPathStat(pin.root));
 }
 
-export function relativePath(pin, relative) {
+/** A portable relative name: ordinary file names joined by `/`, with no empty,
+ * `.` or `..` segment, backslash, control character or reserved device name. */
+export function assertRelativeName(relative) {
   if (typeof relative !== 'string' || !relative || CONTROLS.test(relative) || relative.includes('\\') ||
       relative.split('/').some(part => !part || part === '.' || part === '..' || /[:*?"<>|]|[. ]$/.test(part) || RESERVED.test(part))) {
     fail('PATH_INVALID', 'Use a portable relative path with ordinary file names.');
   }
+  return relative;
+}
+
+export function relativePath(pin, relative) {
+  assertRelativeName(relative);
   const file = path.join(pin.root, ...relative.split('/'));
   if (!isWithin(pin.root, file) || file === pin.root) fail('PATH_OUTSIDE_ROOT', 'The file is outside its verified root.');
   return file;

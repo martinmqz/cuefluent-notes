@@ -221,8 +221,12 @@ network failure fails the smoke check and required gate and may require a rerun.
 No native client downloads, credentials, model calls, installations, or
 hook-trust changes are part of artifact-producing jobs.
 
+The native macOS jobs use the ARM64 `macos-15` runner. The required macOS
+check names in branch protection must match `test (macos-15)` and
+`client-smoke (macos-15)`; keep the other required checks and strictness.
+
 The retained artifact identities are `candidate-ubuntu-24.04`,
-`candidate-macos-14`, and `candidate-windows-2025`. Reproducibility, Main evidence,
+`candidate-macos-15`, and `candidate-windows-2025`. Reproducibility, Main evidence,
 PR base evidence, and release preparation require this one exact set and a
 successful `plan` job. Plan-less runs are ineligible even if they contain the
 expected artifacts. Retained artifacts with other names cannot satisfy these

@@ -91,7 +91,7 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-24.04, shard: '1/1', suffix: '', primary: true }
-          - { os: macos-14, shard: '1/1', suffix: '', primary: true }
+          - { os: macos-15, shard: '1/1', suffix: '', primary: true }
           - { os: windows-2025, shard: '1/4', suffix: '', primary: true }
           - { os: windows-2025, shard: '2/4', suffix: ', 2/4', primary: false }
           - { os: windows-2025, shard: '3/4', suffix: ', 3/4', primary: false }
@@ -168,7 +168,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2025]
+        os: [macos-15, windows-2025]
     # A job-level skip would leave literal matrix placeholders in check names.
     # Retain each required context while avoiding native clients in this mode.
     runs-on: ${{ needs.plan.outputs.mode == 'distribution' && 'ubuntu-24.04' || matrix.os }}

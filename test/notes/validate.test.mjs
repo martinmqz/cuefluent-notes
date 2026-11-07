@@ -1,8 +1,9 @@
+import { hiddenComments } from '../../src/notes/validate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { NOTE_PROFILE } from '../../src/notes/profile.mjs';
-import { createGeneratedNote, preserveMetadata } from '../../src/notes/metadata.mjs';
-import { assertOrdinaryTarget, isLogEntryMarker, validateNote } from '../../src/notes/validate.mjs';
+import { SOURCE_LOCATOR_LENGTH, createGeneratedNote, preserveMetadata } from '../../src/notes/metadata.mjs';
+import { assertOrdinaryTarget, assertValidNote, isLogEntryMarker, validateNote } from '../../src/notes/validate.mjs';
 
 const marker = '<!-- note-log-entry event=12345678-1234-4123-8123-123456789abc project=synthetic -->';
 const has = (result, code) => result.diagnostics.some(issue => issue.code === code);
@@ -16,7 +17,7 @@ test('plain notes and generated notes have visible H2 bodies', () => {
   assert.equal(validateNote('## Existing plain section\n\nBody.').valid, true);
 });
 
-test('existing note validation permits only additive document sources while retaining all prior source data', () => {
+test('existing note validation permits only appended document sources while every prior source stays exactly as it was', () => {
   const body = '# Topic\n\n## Answer\nUseful content.\n';
   const options = { id: 'source-note', now: '2026-10-22T01:00:00Z', skillVersion: '0.20.0' };
   const first = { type: 'document', ref: 'Existing design', description: 'Retain this explanation' };
@@ -24,14 +25,19 @@ test('existing note validation permits only additive document sources while reta
   const existing = createGeneratedNote(body, { ...options, metadata: { sources: [first, second], custom: 'keep' } });
   const candidate = (sources, custom = 'keep') => createGeneratedNote(body, { ...options, metadata: { sources, custom } });
   assert.equal(validateNote(candidate([first, second, addition]), { existing }).valid, true);
-  assert.equal(validateNote(candidate([{ ...first, category: 'reference' }, second]), { existing }).valid, true);
   const recited = preserveMetadata(existing, body.replace('Useful content.', 'Corrected useful content.'), { sources: [{ type: first.type, ref: first.ref }] }).bytes;
   assert.equal(validateNote(recited, { existing }).valid, true);
-  for (const sources of [[first], [second, first], [{ ...first, description: 'Changed' }, second],
+  for (const sources of [[first], [second, first], [{ ...first, description: 'Changed' }, second], [{ ...first, category: 'reference' }, second],
     [{ type: first.type, ref: first.ref }, second], [{ ...first, raw_ref: 'Invented native reference' }, second],
-    [first, second, { type: 'session', client: 'codex', session_id: 'invented', unit_id: 'unit', revision: 'a'.repeat(64) }]]) {
+    [first, second, { type: 'session', client: 'codex', session_id: 'invented', unit_id: 'unit', revision: 'a'.repeat(64) }],
+    [first, second, { ...addition, source_hash: `sha256:${'a'.repeat(64)}` }], [first, second, { ...addition, locator: 'x'.repeat(SOURCE_LOCATOR_LENGTH + 1) }],
+    [first, second, { type: 'document', ref: '/synthetic/local/path.md' }]]) {
     assert.equal(has(validateNote(candidate(sources), { existing }), 'metadata-sources-changed'), true);
   }
+  const hashed = digit => ({ type: 'document', ref: 'Synthetic file', source_hash: `sha256:${digit.repeat(64)}` });
+  const historical = createGeneratedNote(body, { ...options, metadata: { sources: [hashed('a'), hashed('b')] } });
+  const cited = preserveMetadata(historical, body, { sources: [{ type: 'document', ref: 'Synthetic file' }] }).bytes;
+  assert.equal(validateNote(cited, { existing: historical }).valid, true);
   assert.equal(has(validateNote(candidate([first, second, addition], 'changed'), { existing }), 'metadata-descriptions-changed'), true);
   const signedZero = '<!-- cuefluent\nschema_version: 1\nid: source-note\nsources:\n  - type: document\n    ref: Existing design\n    offset: -0\n-->\n' + body;
   assert.equal(validateNote(signedZero, { existing: signedZero }).valid, true);
@@ -57,6 +63,95 @@ test('valid activity markers are inert and receive no raw-comment advisory exemp
   assert.equal(has(result, 'html-comment'), false);
   assert.equal(has(validateNote(`# Topic\n\n## Answer\n\n${marker}`), 'empty-body'), true);
   assert.equal(has(validateNote('# Topic\n\n## Answer\n\nBody <!-- note-log-entry malformed -->'), 'html-comment'), true);
+});
+
+test('a newly authored note carries no hidden comment, while aliases and literal examples stay available', () => {
+  const generated = text => validateNote(createGeneratedNote(text, { now: '2026-10-22T01:00:00Z', skillVersion: '0.24.0' }), { generated: true });
+  for (const text of [
+    '# Topic\n\n## Answer\n\nBody.\n\n<!-- Evidence: captured earlier -->\n',
+    '# Topic\n\n<!-- between the title and the first section -->\n\n## Answer\n\nBody.\n',
+    '# Topic\n\n## Answer\n\nBody <!-- inline remark --> continues.\n',
+    '# Topic\n\n## Answer\n\n<div>\n<!-- nested in raw HTML -->\nVisible\n</div>\n',
+    '# Topic\n\n## Answer\n<!-- aliases: first --> <!-- trailing prose -->\nBody.\n',
+    '# Topic\n\nIntroduction <!-- aliases hidden prose --> continues.\n\n## Answer\n\nBody.\n',
+    '# Topic <!-- aliases: hidden -->\n\n## Answer\n\nBody.\n',
+    '# Topic\n\n## Answer\n\nBody.\n\n[^unused]: Unreferenced\n\n    <!-- aliases: hidden prose -->\n',
+    `# Topic\n\n## Answer\n\nBody. ${marker}\n`,
+    '# Topic\n\n## Answer\n\nBody.[^a]\n\n[^a]: Definition <!-- in a footnote -->\n',
+    '# Topic\n\n## Answer\n\nBody.\n\n[^unused]: Unreferenced <!-- in an unused footnote -->\n',
+    '# Topic\n\n## Answer\n\nBody.\n\n<!-- never closed\n',
+    '# Topic\n\n## Answer\n\nVisible <!--> text.\n',
+    '# Topic\n\n## Answer\n\n<span title="<!-- literal -->">Visible</span> <!-- real remark -->\n',
+  ]) {
+    const result = generated(text);
+    assert.equal(has(result, 'html-comment-added'), true, text); assert.equal(result.valid, false, text);
+  }
+  for (const text of [
+    '# Topic\n\n## Answer\n<!-- aliases: first, second -->\nBody.\n',
+    '# Topic\n\n## Answer\n\n```html\n<!-- literal example -->\n```\n',
+    '# Topic\n\n## Answer\n\nWrite `<!-- like this -->` to hide text.\n',
+    '# Topic\n\n## Answer\n\n    <!-- indented code -->\n\nBody.\n',
+    '# Topic\n\n## Answer\n\nAn escaped \\<!-- marker --> is text.\n',
+    '# Topic\n\n## Answer\n\n<span title="Show <!-- marker --> syntax">Visible</span>\n',
+    "# Topic\n\n## Answer\n\n<div title='<!-- literal -->'>\nVisible\n</div>\n",
+  ]) {
+    const result = generated(text);
+    assert.equal(has(result, 'html-comment-added'), false, text); assert.equal(result.valid, true, text);
+  }
+  const commented = createGeneratedNote('# Topic\n\n## Answer\n\nBody.\n\n<!-- Evidence: captured earlier -->\n', { now: '2026-10-22T01:00:00Z', skillVersion: '0.24.0' });
+  assert.throws(() => assertValidNote(commented, { generated: true }), { code: 'NOTE_COMMENT_ADDED' });
+  const unsafe = createGeneratedNote('# Topic\n\n## Answer\n\n<script>bad()</script>\n\n<!-- Evidence -->\n', { now: '2026-10-22T01:00:00Z', skillVersion: '0.24.0' });
+  assert.throws(() => assertValidNote(unsafe, { generated: true }), { code: 'NOTE_INVALID' });
+});
+
+test('an update keeps or removes existing hidden comments but cannot add, repeat or reword one', () => {
+  const options = { id: 'commented-note', now: '2026-10-22T01:00:00Z', skillVersion: '0.24.0' };
+  const comments = '<!-- Evidence: first\n     capture -->\n\n<!-- Second remark -->\n';
+  const original = createGeneratedNote(`# Topic\n\n## Answer\n\nBody.\n\n${comments}`, options);
+  const update = text => validateNote(preserveMetadata(original, text).bytes, { existing: original });
+  const kept = `# Topic\n\n## Answer\n\nRevised body.\n\n${comments}`;
+  assert.equal(update(kept).valid, true); assert.equal(has(update(kept), 'html-comment'), true);
+  assert.equal(update(kept.replace('first\n     capture', 'first capture')).valid, true);
+  assert.equal(update(`# Topic\n\n## Answer\n\n<!-- Second remark -->\n\nRevised body.\n\n## Evidence\n\n<!-- Evidence: first capture -->\n\nMoved with its section.\n`).valid, true);
+  assert.equal(update('# Topic\n\n## Answer\n\nRevised body. The first capture is described here.\n').valid, true);
+  for (const text of [`${kept}\n<!-- Third remark -->\n`, `${kept}\n<!-- Second remark -->\n`, kept.replace('Second remark', 'Second remark, reworded'),
+    kept.replace('Revised body.', 'Revised body <!-- inline remark -->.'), kept.replace('Revised body.', `Revised body. ${marker}`)]) {
+    const result = update(text);
+    assert.equal(has(result, 'html-comment-added'), true, text); assert.equal(result.valid, false, text);
+    assert.throws(() => assertValidNote(preserveMetadata(original, text).bytes, { existing: original }), { code: 'NOTE_COMMENT_ADDED' });
+  }
+  const plain = '# Topic\n\n## Answer\n\nBody.\n';
+  assert.equal(has(validateNote(`${plain}\n<!-- new remark -->\n`, { existing: plain }), 'html-comment-added'), true);
+  // A comment marker in an attribute is text of that tag: keeping it adds nothing,
+  // and it never stands in for a real comment with the same words.
+  const literal = '# Topic\n\n## Answer\n\n<span title="Show <!-- marker --> syntax">Visible</span>\n';
+  assert.equal(validateNote(literal.replace('Visible', 'Still visible'), { existing: literal }).valid, true);
+  const swapped = validateNote('# Topic\n\n## Answer\n\n<span title="Show syntax">Visible</span> <!-- marker -->\n', { existing: literal });
+  assert.equal(has(swapped, 'html-comment-added'), true); assert.equal(swapped.valid, false);
+  assert.equal(validateNote(`${kept}\n<!-- Third remark -->\n`).valid, true);
+});
+
+test('activity logs keep their entry markers and existing hand-written comments outside the authoring rule', () => {
+  const log = `# Activity\n\n## About this log\n\nSave times; partial coverage; gaps possible.\n\n<!-- hand-written remark -->\n\n## October\n\n- Changed a [note](../knowledge-base/topic.md). ${marker}\n`;
+  const next = marker.replace('12345678', '87654321');
+  const appended = validateNote(`${log}- Changed [another](../tasks/topic.md). ${next}\n`, { existing: log, kind: 'log' });
+  assert.equal(appended.valid, true); assert.equal(has(appended, 'html-comment-added'), false);
+});
+
+test('comment markers inside attribute values neither hide a tag\'s other attributes nor count as comments', () => {
+  const note = html => `# Topic\n\n## Answer\n\n${html}\n`;
+  const hidden = validateNote(note('See <a title="<!--" href="javascript:alert(1)" data-note="-->">link</a>.'));
+  assert.equal(has(hidden, 'unsafe-destination'), true); assert.equal(hidden.valid, false);
+  const handler = validateNote(note('<span title="<!--" onclick="bad()" data-note="-->">text</span>'));
+  assert.equal(has(handler, 'unsafe-html'), true); assert.equal(handler.valid, false);
+  for (const html of ['<span title="Show <!-- marker">Visible</span>', '<span title="Show --> marker">Visible</span>', '<a title="<!-- literal -->" href="https://example.test/page">link</a>']) {
+    const result = validateNote(note(html));
+    assert.equal(result.valid, true, html); assert.equal(has(result, 'html-comment'), false, html);
+  }
+  const unclosed = validateNote(note('<div>\n<!-- never closed\n</div>'));
+  assert.equal(has(unclosed, 'unclosed-html-block'), true); assert.equal(unclosed.valid, false);
+  const mixed = validateNote(note('<div>Visible <!-- remark --> text</div>'));
+  assert.equal(mixed.valid, true); assert.equal(has(mixed, 'raw-html'), true);
 });
 
 test('unsafe links and active HTML are reported without rendering or fetching', () => {
@@ -161,5 +256,19 @@ test('HTML attribute scanning handles stray slashes and adjacent quoted attribut
   }
   for (const html of ['<span title="/onerror=bad href=javascript:bad style = bold">text</span>', '<span title=x/onerror=bad>text</span>', '<div>font style = bold</div>', '<a/href="&#32;https://example.test">link</a>']) {
     assert.equal(validateNote(note(html)).valid, true, html);
+  }
+});
+
+
+test('comment locations follow paragraph breaks, table rows and raw HTML offsets', () => {
+  const text = '# Topic\n\n## Answer\nfirst\nsecond\nthird <!-- paragraph -->\n\n| A | B |\n|---|---|\n| C | <!-- table --> |\n\n<div>\n<!-- raw -->\ntext\n<!-- raw second -->\n</div>\n';
+  assert.deepEqual(hiddenComments(text).map(item => item.line), [6, 10, 13, 15]);
+});
+
+test('abrupt and bang comment closers do not swallow the remaining heading', () => {
+  for (const close of ['<!-->', '<!--->', '<!-- comment --!>']) {
+    const result = validateNote(`# Topic\n\n## ${close} Overview\nBody.\n\n## ${close} Other\nOther body.\n`);
+    assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+    assert.deepEqual(result.sections.map(item => item.heading.trim()), ['Overview', 'Other']);
   }
 });

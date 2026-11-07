@@ -119,8 +119,16 @@ There is no linter, formatter, or type checker.
   conflicts instead of forcing an old draft over changed content. Saving
   writes the exact approved draft bytes. Stage under names ending in `.tmp`,
   never `.md`. A save with no useful change leaves the note's bytes and
-  timestamps unchanged. Cleanup removes successfully handled private input and
-  completed drafts, never notes or native transcripts.
+  timestamps unchanged. A metadata repair is the one save that removes or
+  replaces selected header fields, sources and aliases; it uses the same
+  inspected hash and writer. Cleanup removes successfully handled private input
+  and completed drafts, never notes or native transcripts.
+- A metadata repair is explicit and typed. Check and preview write nothing and
+  reserve no run. A repair applies only the previewed batch whose proposal it
+  cites, under the project's saving mode. It changes a header and alias comments
+  only: every other byte, the note identity, both timestamps and the writer
+  version stay, the header keeps its layout, and no activity is logged. No
+  ordinary note request can become a repair.
 
 ## Runtime and storage
 
@@ -162,6 +170,10 @@ There is no linter, formatter, or type checker.
   rechecks the current run and attempt under the same short gates. Parent death
   before activation releases the unstarted worker; a detached active worker
   may finish and publish a truthful result.
+- A metadata repair is a direct run whose scope names the proposal it applies.
+  Its candidates come only from the constructor in `src/notes/repair.mjs`,
+  which preview and repair share, and are held to the repair contract before
+  admission. Such a run pins no log series and records no log event.
 - The latest result holds run and project identifiers, status, paths, counts,
   and warnings, plus the request hash for a direct note. It never authorizes
   writes and contains no conversation or input receipts. Runtime failures
@@ -177,15 +189,19 @@ There is no linter, formatter, or type checker.
 
 - Portable notes use a topic H1 and visible H2 sections. Preserve existing
   plain notes, aliases, identity, creation timestamps, sources, and unfamiliar
-  metadata. Leave unsupported metadata exactly unchanged and report malformed
-  metadata instead of repairing it. The schema-1 note format is independent of
+  metadata. Only a metadata repair removes or replaces what its typed
+  operations select. Leave unsupported metadata exactly unchanged and report
+  malformed metadata instead of repairing it. The schema-1 note format is independent of
   the plugin version.
-- Newly authored visible bodies contain substantive content only. Keep source
-  references, citation offsets and note-production details in hidden metadata;
-  supplied document sources use the separate `sources` argument. Preserve
-  meaningful attribution, occurrence dates, decisions and uncertainty in prose.
-  Search aliases remain hidden section comments. Do not silently relocate existing
-  user-written references or add private paths to portable notes.
+- Newly authored visible bodies contain substantive content only. Supplied
+  document sources use the separate `sources` argument with a closed field set:
+  a portable reference, an optional concise locator and an optional version.
+  Omit hashes, capture details and note-production bookkeeping; never move them
+  to another field, the body or a comment. Newly authored content adds no hidden
+  comment other than search aliases, which remain hidden section comments.
+  Preserve meaningful attribution, occurrence dates, decisions and uncertainty
+  in prose. Do not silently relocate existing user-written references or add
+  private paths to portable notes.
 - Honor explicit file destinations and update a matching existing note in
   place. Otherwise route new notes by purpose to `meetings/`, `tasks/`,
   `knowledge-base/`, `decisions/`, or the notes root. `logs/` is reserved from
@@ -193,7 +209,8 @@ There is no linter, formatter, or type checker.
 - Activity logging is directory-only and best effort. Setup records an IANA
   timezone, defaulting to the system timezone for a new series; existing series
   keep theirs. Writer-managed annual logs share series identity and timezone,
-  start with a nonempty About section, and get one entry per changed note.
+  start with a nonempty About section, and get one entry per note that an
+  ordinary save changed; a metadata repair adds none.
   Retry details stay in the current run. A log failure never blocks successful
   cleanup or reserves a project after completion.
 - Log entries only locate notes; the assistant reads a note before making

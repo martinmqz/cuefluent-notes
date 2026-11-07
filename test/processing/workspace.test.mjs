@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { openNoteWorkspace, NOTE_WORKSPACE_TOOLS, WORKSPACE_LIMITS } from '../../src/processing/workspace.mjs';
 import { createProject } from '../../src/core/settings.mjs';
-import { createGeneratedNote, inspectMetadata } from '../../src/notes/index.mjs';
+import { SOURCE_LOCATOR_LENGTH, createGeneratedNote, inspectMetadata } from '../../src/notes/index.mjs';
 import { createAnnualLog, appendLogEntry, queryLogEntries } from '../../src/logs/index.mjs';
 
 const runId = '12345678-1234-4123-8123-123456789abc', now = '2026-10-22T01:00:00Z', skillVersion = '0.16.0-dev.0';
@@ -77,15 +77,40 @@ test('workspace refuses invalid or unsupported source additions without dropping
   for (const sources of [null, [{ type: 'session', client: 'codex', session_id: 'invented', unit_id: 'invented', revision: 'a'.repeat(64) }]]) {
     await assert.rejects(workspace.draft_note({ ...request, sources }), { code: 'NOTE_SOURCE_ARGUMENT' });
   }
+  for (const [code, extra] of [['NOTE_SOURCE_FIELD', { source_hash: `sha256:${'a'.repeat(64)}` }], ['NOTE_SOURCE_FIELD', { session_id: 'invented' }],
+    ['NOTE_SOURCE_REFERENCE', { ref: '/synthetic/private/capture.png' }], ['NOTE_SOURCE_LOCATOR', { locator: 'x'.repeat(SOURCE_LOCATOR_LENGTH + 1) }]]) {
+    await assert.rejects(workspace.draft_note({ ...request, sources: [{ ...source, ...extra }] }), { code });
+  }
   await fs.writeFile(path.join(f.root, 'plain.md'), body); await workspace.read_note({ target: 'plain.md' });
   await assert.rejects(workspace.draft_note({ ...request, target: 'plain.md', sources: [source] }), { code: 'NOTE_SOURCES_UNSUPPORTED' });
   await workspace.finish_drafting({ outcome: 'nothing-useful' }); assert.deepEqual((await workspace.manifest()).drafts, []);
   assert.equal(await fs.readFile(path.join(f.root, 'plain.md'), 'utf8'), body);
 });
 
+test('workspace drafts add no hidden comment and keep or remove the ones a note already has', async t => {
+  const f = await fixture(t), workspace = await f.open();
+  const commented = `${body}\n<!-- Evidence: captured earlier -->\n`;
+  await assert.rejects(workspace.draft_note({ target: 'new.md', content: commented, summary: 'Record topic' }), { code: 'NOTE_COMMENT_ADDED' });
+  const original = createGeneratedNote(commented, { id: 'existing', now, skillVersion });
+  await fs.writeFile(path.join(f.root, 'existing.md'), original); await workspace.read_note({ target: 'existing.md' });
+  const kept = commented.replace('original', 'revised'), request = { target: 'existing.md', summary: 'Revise topic' };
+  for (const content of [`${kept}\n<!-- Another remark -->\n`, `${kept}\n<!-- Evidence: captured earlier -->\n`, kept.replace('captured earlier', 'captured later')]) {
+    await assert.rejects(workspace.draft_note({ ...request, content }), { code: 'NOTE_COMMENT_ADDED' });
+  }
+  await assert.rejects(workspace.draft_note({ ...request, edits: [{ oldText: 'Useful original content.', newText: 'Useful content. <!-- inline remark -->' }] }), { code: 'NOTE_COMMENT_ADDED' });
+  const retained = await workspace.draft_note({ ...request, content: kept });
+  assert.equal(retained.changed, true); assert.deepEqual(retained.warnings, ['html-comment']);
+  const removed = await workspace.draft_note({ ...request, content: body.replace('original', 'revised'), summary: 'Remove bookkeeping' });
+  assert.equal(removed.changed, true); assert.deepEqual(removed.warnings, []);
+  const drafts = (await finish(workspace)).drafts;
+  assert.deepEqual(drafts.map(draft => path.basename(draft.target)), ['existing.md']);
+  assert.ok(drafts[0].bytes.toString().endsWith(body.replace('original', 'revised')));
+  assert.ok((await fs.readFile(path.join(f.root, 'existing.md'))).equals(original));
+});
+
 test('repeated source submissions use the cumulative budget without replacing the last accepted draft on refusal', async t => {
   const f = await fixture(t), workspace = await f.open({ limits: { draftBytes: 2048 } });
-  const sources = [{ type: 'document', ref: 'Synthetic', description: 'x'.repeat(800) }];
+  const sources = [{ type: 'document', ref: `Synthetic ${'x'.repeat(800)}` }];
   const request = { target: 'new.md', content: body, summary: 'Keep useful content', sources };
   const first = await workspace.draft_note(request);
   const second = await workspace.draft_note({ ...request, content: body.replace('original', 'revised') });
@@ -210,6 +235,15 @@ test('listing is bounded/paged and does not grant overwrite authority; explicit 
   await fileWorkspace.draft_note({ target: 'chosen.md', content: body, summary: 'Explicit target' });
   await assert.rejects(fileWorkspace.draft_note({ target: 'elsewhere.md', content: body, summary: 'Wrong target' }), { code: 'NOTE_TARGET_OUTSIDE' });
   assert.equal((await finish(fileWorkspace)).drafts[0].target, explicit.project.destination.path);
+});
+
+test('a listing names a folder as listed, the root by its own path, and either with a trailing separator', async t => {
+  const f = await fixture(t); await fs.mkdir(path.join(f.root, 'tasks'));
+  await fs.writeFile(path.join(f.root, 'a.md'), body); await fs.writeFile(path.join(f.root, 'tasks', 'b.md'), body);
+  const workspace = await f.open(), names = async input => (await workspace.list_notes(input)).entries.map(entry => path.relative(f.root, entry.target));
+  for (const directory of [undefined, f.root, f.root + path.sep]) assert.deepEqual(await names({ directory }), ['a.md', 'tasks']);
+  for (const directory of ['tasks', path.join(f.root, 'tasks'), path.join(f.root, 'tasks') + path.sep]) assert.deepEqual(await names({ directory }), [path.join('tasks', 'b.md')]);
+  await assert.rejects(workspace.list_notes({ directory: '.' }), { code: 'PATH_INVALID' });
 });
 
 test('path/link defenses reserve logs even off and bind replaced parents/root without creating missing directories', async t => {

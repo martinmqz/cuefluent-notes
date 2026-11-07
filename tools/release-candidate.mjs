@@ -5,9 +5,9 @@ import { compareBuilds, verifyBuildArchives, ARTIFACT_NAMES as ARTIFACTS, digest
 import { PACKAGE_VERSION } from './packaging.mjs';
 import { createGitRunner } from './git.mjs';
 
-export const EXPECTED_CHECK_JOBS = Object.freeze(['plan', 'guidance', 'test (ubuntu-24.04)', 'test (macos-14)', 'test (windows-2025)',
+export const EXPECTED_CHECK_JOBS = Object.freeze(['plan', 'guidance', 'test (ubuntu-24.04)', 'test (macos-15)', 'test (windows-2025)',
   'test (windows-2025, 2/4)', 'test (windows-2025, 3/4)', 'test (windows-2025, 4/4)',
-  'client-smoke (macos-14)', 'client-smoke (windows-2025)', 'reproducibility']);
+  'client-smoke (macos-15)', 'client-smoke (windows-2025)', 'reproducibility']);
 const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const json = value => `${JSON.stringify(value, null, 2)}\n`;

@@ -214,7 +214,28 @@ otherwise it arrives in bounded UTF-8 ranges. A requested range can be up to
 and JSON escaping. Queued processing has separate budgets: 8 KiB read ranges,
 64 KiB of cumulative tool responses and 128 KiB of cumulative draft submissions. A queued
 full-content replacement requires reading the whole original; exact edits can
-preserve unread content without resubmitting it.
+preserve unread content without resubmitting it. A note stores at most 128
+sources, and a newly supplied source locator is limited to 120 UTF-16 code units;
+see [source metadata](notes.md#source-metadata). A note check reads at most 1,024
+notes in at most 512 folders to a depth of 16 and covers at most 32 MiB of them;
+anything beyond that is reported as partial coverage. A file that cannot be read
+counts as a note, one that turns out not to be UTF-8 counts toward the bytes, and
+a note larger than the bytes that remain is not opened. The 32 MiB counts notes
+that were read whole, so it is not a ceiling on the bytes read: a note that
+changes while it is read is discarded and makes coverage partial, and what was
+read of it is not counted. The ceiling on bytes read is 10 MiB, one note file,
+for each of the 1,024 notes. A check's pages share the 48 KiB budget, and it
+lists at most 20 items per finding with the remainder counted. Nothing is kept
+between pages: each one reads the notes again, so a long report costs one full
+read per page. A repair request selects at most 128 notes, each with at most 256
+operations, and forms one batch of at most 64 changed notes within the 64 MiB a
+run keeps privately; the notes after a full batch are deferred. A repair
+preview's pages share the 48 KiB budget, and each page builds the batch again.
+A note's change list holds at most 16 MiB; a larger one is refused
+(`REPAIR_CHANGES_LIMIT`).
+An alias selector fits within the supported 64 KiB source line; a replacement
+alias is at most 256 UTF-16 code units. The note check excludes version-control
+and recycle folders as listed in [notes](notes.md#checking-notes).
 
 ## What is verified
 
@@ -225,7 +246,10 @@ checked in Claude Desktop's Code tab and Codex Desktop. Checks do not establish
 desktop rendering of diagnostics, live hook activation, native processing
 isolation on an unaudited platform, reboot recovery, Cuefluent corpus admission or
 search ranking, and per-file validation does not prove admission into a full
-corpus. The chat-decision flow (an accepted save, a declined decision that leaves
+corpus. A note check's alias counts follow the consumer's warning rule and were
+compared on synthetic notes with the app's own parser and corpus assembly; the
+check does not run the app, and a note the app refuses to load raises no warning
+there while the check still counts its aliases. The chat-decision flow (an accepted save, a declined decision that leaves
 the draft pending, and a discard, with saved bytes compared to the retained draft,
 and a full 48 KiB page delivered inline including CJK text) is not yet verified
 live on Claude Code in Terminal, Claude Desktop's Code tab or Codex Desktop; nor
