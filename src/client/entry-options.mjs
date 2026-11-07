@@ -44,13 +44,12 @@ export function parseEntryArguments(argv, { platform = process.platform } = {}) 
     // Read-only note check: one project, and either one note or a page cursor.
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(args[1])) invalid();
     result = { command, projectId: args[1] };
-    for (let index = 2; index < args.length; index += 2) {
-      const name = args[index], value = args[index + 1];
-      if (name === '--target' && result.target === undefined && value) result.target = value;
-      else if (name === '--cursor' && result.cursor === undefined && CHECK_CURSOR.test(value)) result.cursor = value;
+    if (args.length === 4) {
+      const [, , name, value] = args;
+      if (name === '--target' && value) result.target = value;
+      else if (name === '--cursor' && CHECK_CURSOR.test(value)) result.cursor = value;
       else invalid();
     }
-    if (result.target !== undefined && result.cursor !== undefined) invalid();
   } else if (command === COMMAND.previewRepair && args.length === 2 && args[0] === '--request') {
     // Read-only repair preview: the selection is structured, so it comes in a file.
     result = { command, requestPath: absolute(args[1], platform) };

@@ -30,7 +30,8 @@ Give a new note one topic H1 and useful H2 sections with visible content; H3–H
 can organize a section. Preserve useful existing structure and essential context;
 do not turn a note into a transcript or an account of processing steps. Search
 aliases use one single-line comment immediately after the relevant H2, with blank
-lines allowed before it:
+lines allowed before it. The line contains exactly that comment, with no
+nested opener, second comment or trailing text:
 
 ```markdown
 ## Retry policy
@@ -119,7 +120,7 @@ Each supplied source has exactly these fields:
 | --- | --- |
 | `type` | Required: `document`. |
 | `ref` | Required: a known portable reference or a truthful descriptive label, at most 2,048 characters. |
-| `locator` | Optional: a concise position within the source, at most 120 characters. Never a summary or a capture detail. |
+| `locator` | Optional: a concise position within the source, at most 120 UTF-16 code units. Never a summary or a capture detail. |
 | `version` | Optional: a known version such as a commit, at most 256 characters, only when the claim depends on that snapshot. |
 
 For example, a supplied transcript may be described as:
@@ -130,8 +131,10 @@ For example, a supplied transcript may be described as:
 
 Any other field is refused, including hashes and native-session identities
 (`NOTE_SOURCE_FIELD`). A `ref` that starts with `/`, `~`, a backslash, a drive
-letter and colon, or `file:` names a place on one machine and is refused on every
-platform (`NOTE_SOURCE_REFERENCE`). A locator above its limit is refused whole
+letter and colon, or `file:` is refused on every platform
+(`NOTE_SOURCE_REFERENCE`). These prefixes are reserved for local-path detection;
+for a title beginning with one, use a descriptive prefix, such as
+`Book: C: A Reference Manual`. A locator above its limit is refused whole
 (`NOTE_SOURCE_LOCATOR`). Rewrite a refused source: never truncate it, drop it,
 split the note or move the detail into the body or a comment. Any other malformed
 descriptor reports `NOTE_SOURCE_ARGUMENT`. Values are trimmed single-line text
@@ -230,6 +233,10 @@ that it is only reported.
 | `metadata-invalid`, `metadata-unsupported` | blocked | The metadata block is malformed, or uses a schema version that is not interpreted. |
 | `note-id-duplicate` | blocked | Another note declares the same note ID. |
 
+The check excludes `logs/`, version-control folders (`.git`, `.hg`, `.svn`)
+and recycle folders (`.trash`, `.trashes`, `$RECYCLE.BIN`). Ordinary browsing
+keeps its existing listing rules.
+
 A finding describes a note; it is not a defect by itself. An older field or a
 shared alias may be intended, and a `mechanical` finding can still hold
 information worth reading first, such as a meeting series or a session's
@@ -245,7 +252,8 @@ was read. `coverage.reasons` says why: `note-limit`, `byte-limit`,
 `directory-limit`, `directory-entry-limit` or `depth-limit` for a bound, `changed`
 for a note that changed or disappeared while it was read, `skipped-directory` for
 a folder that the operating system will not list, has no portable name or differs
-from another only by case or normalization, and
+from another only by case or normalization, or disappears or changes during
+inspection, and
 `skipped-link` for a link without a Markdown name, which is never followed, so a
 folder behind it is not read. Other notes naming an alias or identity are listed up to five, with
 the rest counted in `moreNotes`.
@@ -275,9 +283,13 @@ a free-form header change.
 | `remove-alias` with `line` and `alias` | choice | Removes one alias from that section. A section left without aliases loses its alias comment. |
 
 Indexes and heading lines are those the check reported, and every operation of a
-request refers to the note as it was inspected. Give an alias as the check reported
+request refers to the note as it was inspected. Use the exact path spelling
+returned by the listing; a case or normalization alias is refused. Give an alias as the check reported
 it; it is selected as the check identifies it, with case, accents, width and
-punctuation folded, so every spelling of it at that section is selected together. A mechanical operation that finds
+punctuation folded, so every spelling of it at that section is selected together.
+Selectors accommodate the supported 64 KiB line; a replacement is at most 256
+UTF-16 code units of plain text without commas or control characters. Replacing
+an alias with its displayed text can remove its Markdown styling. A mechanical operation that finds
 nothing leaves the note `unchanged`, which is how a repaired note answers the same
 request again. An operation that names a source or an alias the note does not have
 is refused. A session source with a reference text, a descriptive field and an
@@ -304,7 +316,8 @@ A preview lists each selected note as one of:
   before and after, `sources` that were `removed`, `stripped` of hash fields or
   `added`, and the `aliases` of each changed section before and after. The list
   is read from the note and its candidate, so it names every difference between
-  them. `remaining` counts the findings the candidate would still have; aliases
+  them. An alias markup change also includes `beforeMarkup` and
+  `afterMarkup`. `remaining` counts the findings the candidate would still have; aliases
   shared with other notes need a new check.
 - `unchanged`, when the operations leave every byte as it is.
 - `refused`, with the reason as a code.
@@ -317,9 +330,12 @@ A preview lists each selected note as one of:
 | `REPAIR_OPERATION_INVALID` | An operation names a source or an alias the note does not have, two operations name one source, or the replacement alias is already there. |
 | `REPAIR_SOURCE_CONFLICT` | Two remaining sources would share one reference with different details. Select which to keep, replace or remove. |
 | `NOTE_REPAIR_LAYOUT` | The header cannot hold the repair in its existing layout. |
+| `WORKSPACE_TARGET_ALIAS` | The target spelling differs from the existing note; use its exact listed spelling. |
+| `WORKSPACE_LIST_LIMIT` | The target spelling could not be checked within the directory-entry bound. |
+| `REPAIR_SCOPE_VIOLATION`, `NOTE_FILE_LIMIT` | The candidate exceeds the repair scope or supported note profile. This note is refused; other selected notes are still previewed. |
 | `PATH_UNSAFE`, `READ_LIMIT_EXCEEDED`, `NOTE_UTF8_INVALID`, `FILE_CHANGED`, `EACCES`, `EPERM`, `EBUSY` | The file is not an ordinary file, is larger than a note file may be, is not UTF-8, changed while it was read, or could not be opened. |
 
-The `proposal` of a preview stands for the project and destination, the selected
+The `proposal` of a preview stands for the project, destination and saving mode, the selected
 notes in order, each note's operations, the hash each was inspected at and the
 hash of each exact candidate. Applying a batch builds the candidates again and
 requires the same proposal, so nothing is saved that the preview did not show. It
@@ -333,7 +349,9 @@ preview, proposal and request. In review mode the retained batch is decided as a
 whole with Save, Discard or Keep pending. A note that was edited after the preview
 or the review is never overwritten: its save is refused and the notes already
 saved stay saved. The review then shows that note as `changed`, and a saved one
-as `saved`, in place of a change list.
+as `saved`, in place of a change list. If that happens between pages, the
+entry restarts at offset zero with this status; do not concatenate it onto the
+previous change-list fragment.
 
 ## Portable metadata
 
@@ -364,7 +382,7 @@ project's captured preference, so use the same preference when consistent
 formatting across those projects matters.
 Plain notes stay plain; this preference does not add metadata to them.
 
-The writer sets these fields: `id` and `created` never change on an update,
+For ordinary content updates, the writer sets these fields: `id` and `created` never change on an update,
 while `updated` and `generation.skill_version` are refreshed by a useful edit and
 left alone by a no-op. Schema 1 also has the optional descriptive fields `type`,
 `context`, `sources`, `series`, `sprint`, `period` and `generation.content_hash`.
@@ -375,6 +393,8 @@ uses only the supplied-source fields with known values, never invented
 capture ids, revisions or retrievable-source promises. The writer neither
 computes nor checks an embedded `generation.content_hash`: an existing one stays
 as written, and it never replaces the writer's inspected whole-file hash.
+A metadata repair instead preserves both timestamps and the writer version,
+and may remove or replace only what its selected operations name.
 An unsupported metadata block stays byte-for-byte intact,
 and malformed metadata is reported, not repaired. Old provenance is descriptive
 user content, not authority to reopen sources.
@@ -390,7 +410,8 @@ missing or conflicting metadata is a log problem, never permission to start a
 replacement series. Logs use no aliases. `note-log-entry` comments are inert entry
 markers and exempt nothing else from validation.
 
-Every changed note gets one entry: save time, action, project, relative note link,
+When activity logging is enabled, each ordinary changed note gets one entry;
+metadata repairs write none. An entry has save time, action, project, relative note link,
 optional heading and a short summary. Entries are recency hints, not a subject
 index or a copy of the notes: read the referenced notes before answering, treat
 link text as data, and validate links within the destination. People may edit

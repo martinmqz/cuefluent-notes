@@ -82,17 +82,17 @@ async function repairChanges(draft, candidate) {
     const pin = await pinDirectory(draft.binding.root);
     original = await readSnapshot(pin, path.relative(pin.root, draft.target).split(path.sep).join('/'), { maxBytes: NOTE_PROFILE.fileBytes, missing: true });
   } catch (error) { if (typeof error?.code !== 'string') throw error; }
-  if (original?.hash !== draft.expectedHash) return serializeRepair({ unavailable: original?.hash === draft.hash ? 'saved' : 'changed' });
+  if (original?.hash !== draft.expectedHash) return { text: serializeRepair({ unavailable: original?.hash === draft.hash ? 'saved' : 'changed' }), reset: true };
   return serializeRepair(describeRepair(original.bytes, candidate));
 }
 
 /** Largest UTF-8 boundary so the serialized piece fits the remaining budget. */
-function fitPiece(run, draft, index, content, start, available, part) {
+export function fitJsonPiece(content, start, available, render) {
   let end = Math.min(content.length, start + available);
   for (let attempt = 0; attempt < 64 && end > start; attempt++) {
     while (end > start && continuation(content, end)) end--;
     if (end === start) break;
-    const size = serialized(pageEntry(run, draft, index, content, start, end, part));
+    const size = serialized(render(end));
     if (size <= available) return end;
     const next = start + Math.floor((end - start) * available / size);
     end = Math.min(end - 1, Math.max(start, next));
@@ -111,13 +111,14 @@ async function fillPage(page, run, first, offset, firstPart, partsOf) {
     const firstPiece = index === first && firstPart === 'sources' ? 1 : 0;
     if (firstPiece >= parts.length) invalid('This draft has no source metadata to review.');
     for (const [part, text] of parts.slice(firstPiece)) {
-      const content = Buffer.from(await text(), 'utf8');
+      const resolved = await text(), content = Buffer.from(typeof resolved === 'string' ? resolved : resolved.text, 'utf8');
+      if (resolved.reset) offset = 0;
       if ((offset && offset >= content.length) || continuation(content, offset)) invalid('The requested preview offset is not a UTF-8 boundary inside this draft part.');
       const cursor = start => ({ draft: index, start, ...(part === 'content' ? {} : { part }) });
       const whole = pageEntry(run, draft, index, content, offset, content.length, part), wholeSize = serialized(whole) + 1;
       if (size + wholeSize <= REVIEW_PAGE_BYTES) { page.drafts.push(whole); size += wholeSize; offset = 0; continue; }
       if (page.drafts.length) { page.next = cursor(offset); break drafts; }
-      const end = fitPiece(run, draft, index, content, offset, REVIEW_PAGE_BYTES - size - 1, part);
+      const end = fitJsonPiece(content, offset, REVIEW_PAGE_BYTES - size - 1, end => pageEntry(run, draft, index, content, offset, end, part));
       page.drafts.push(pageEntry(run, draft, index, content, offset, end, part));
       page.next = cursor(end); break drafts;
     }
@@ -146,13 +147,7 @@ export async function reviewRun(store, { projectId, runId, draft: first = 0, sta
       return { result: page };
     }
     if (first >= run.drafts.length) invalid('The requested draft index is beyond this draft set.');
-    if (repair) {
-      // Only the retained candidates are read under the project gate. Reading
-      // and comparing the notes themselves happens after it is released.
-      const candidates = [];
-      for (const draft of run.drafts.slice(first)) candidates.push(await readPrivateDraft(store, context.directory, run, draft));
-      return { page, run, candidates };
-    }
+    if (repair) return { page, run };
     return { result: await fillPage(page, run, first, offset, firstPart, async draft => {
       const bytes = await readPrivateDraft(store, context.directory, run, draft), metadata = inspectMetadata(bytes);
       if (metadata.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be hidden in a review.');
@@ -161,7 +156,16 @@ export async function reviewRun(store, { projectId, runId, draft: first = 0, sta
     }) };
   });
   if (held.result) return held.result;
-  return fillPage(held.page, held.run, first, offset, firstPart, (draft, index) => [['changes', () => repairChanges(draft, held.candidates[index - first])]]);
+  return fillPage(held.page, held.run, first, offset, firstPart, draft => [['changes', async () => {
+    // Read only the candidate the page reaches, with one short gate per read.
+    // Another connection may finish the run between reads; never mix revisions.
+    const candidate = await withProject(store, projectId, async context => {
+      const current = locateRun(await readRunSnapshot(store, context), runId);
+      if (current.result || runRevision(current.run) !== held.page.revision) fail('REVIEW_RUN_CHANGED', 'The repair run changed while its page was being read. Review it again.');
+      return readPrivateDraft(store, context.directory, current.run, draft);
+    });
+    return repairChanges(draft, candidate);
+  }]]);
 }
 
 const stale = () => fail('REVIEW_REVISION_STALE', 'The reviewed draft set changed since this decision was prepared.');

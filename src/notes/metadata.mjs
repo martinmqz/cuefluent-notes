@@ -273,10 +273,10 @@ function activeMarkers(source, tokens) {
   return { matches, count: Math.max(matches.length, htmlCount) };
 }
 
-export function inspectMetadata(input) {
+export function inspectMetadata(input, syntax) {
   const source = decodeNote(input), absent = { status: 'absent', value: null, raw: null, start: null, end: null, diagnostics: [] };
   if (!/cuefluent/i.test(source) || !source.includes('<!--')) return Object.freeze(absent);
-  const { tokens } = parseMarkdown(source), active = activeMarkers(source, tokens);
+  const { tokens } = syntax ?? parseMarkdown(source), active = activeMarkers(source, tokens);
   if (!active.count) return Object.freeze(absent);
   const invalid = reason => Object.freeze({ ...absent, status: 'invalid', diagnostics: [reason] });
   if (Buffer.byteLength(source) > P.metadataSourceBytes) return invalid('metadata-input-limit');
@@ -367,14 +367,14 @@ function yamlComments(document) {
  * the style of every untouched scalar stay as they are; the project's formatting
  * preference plays no part. `edit` receives the document and a factory for a
  * source node holding a descriptor: given the entry it replaces, the node is
- * that entry restyled to the descriptor, and otherwise a double-quoted node.
+ * that entry restyled to the descriptor.
  * `edit` returns the value the header must then hold. A result that does not
  * read back as exactly that value, loses a YAML comment or outgrows the header
  * limit is refused instead of being written in another layout. */
 export function editMetadata(raw, edit) {
   const parts = wrapper.exec(raw); requireValue(parts);
   const { document } = parseYaml(parts[2]), comments = yamlComments(document);
-  const expected = validateMetadata(edit(document, (descriptor, replaced) => isMap(replaced) ? restyleSourceNode(replaced, descriptor) : quoteSourceStrings(document.createNode(descriptor))));
+  const expected = validateMetadata(edit(document, (descriptor, replaced) => restyleSourceNode(replaced, descriptor)));
   const refuse = () => fail('NOTE_REPAIR_LAYOUT', 'The header cannot hold this repair in its existing layout. Preserve the note unchanged.');
   if (!isDeepStrictEqual(yamlComments(document), comments)) refuse();
   const payload = payloadText(document, 'any').replace(/\n$/, '');

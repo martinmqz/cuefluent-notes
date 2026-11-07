@@ -1,7 +1,8 @@
+import { REPAIR_FIELDS, REPAIR_HASH_FIELDS } from './repair.mjs';
 import { decodeNote } from './profile.mjs';
 import { SOURCE_LOCATOR_LENGTH, inspectMetadata, isLocalSourceReference, noteContent } from './metadata.mjs';
 import { hiddenComments, reviewNoteContent, validateNote } from './validate.mjs';
-import { normalizedText } from './markdown.mjs';
+import { normalizedText, parseMarkdown } from './markdown.mjs';
 
 /** What each finding means and how it could be resolved. A finding describes a
  * note; it is not a defect by itself, and nothing in this module changes a file.
@@ -31,12 +32,15 @@ export const DOCTOR_FINDINGS = Object.freeze({
 export const DOCTOR_SOURCE_VOLUME = 20;
 
 const SUBMITTED = new Set(['type', 'ref', 'locator', 'version']);
-const HASHES = new Set(['source_hash', 'hash']);
-const DESCRIPTIVE = ['type', 'context', 'series', 'sprint', 'period'];
+const HASHES = new Set(REPAIR_HASH_FIELDS);
 const size = value => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
 // The stored form varies with the header layout, so a field is measured on its
 // JSON form: an estimate of what removing it would save, not an exact count.
 const fieldBytes = (record, keys) => keys.reduce((total, key) => total + size(key) + size(JSON.stringify(record[key])), 0);
+
+/** A file refused before decoding has the same record as undecodable bytes. */
+export const unreadableNoteHealth = (reason, bytes = 0) => ({ status: 'unreadable', bytes, id: null, headerBytes: 0, aliasBytes: 0, sections: 0, aliases: [],
+  sources: { document: 0, session: 0 }, findings: [{ code: 'note-unreadable', count: 1, bytes: 0, items: [{ reason }] }] });
 
 /** One note's metadata state, alias occurrences and findings that need no other
  * note. Reads the given bytes only. */
@@ -47,17 +51,16 @@ export function inspectNoteHealth(input) {
   let source;
   try { source = decodeNote(input); }
   catch (error) {
-    add('note-unreadable', 1, 0, [{ reason: error.code }]);
-    return { status: 'unreadable', bytes: input?.byteLength ?? 0, ...empty, findings };
+    return unreadableNoteHealth(error.code, input?.byteLength ?? 0);
   }
-  const validation = validateNote(source), metadata = validation.metadata ?? inspectMetadata(source);
+  const syntax = parseMarkdown(source), validation = validateNote(source, { syntax }), metadata = validation.metadata ?? inspectMetadata(source, syntax);
   const errors = [...new Set(validation.diagnostics.filter(item => item.severity === 'error' && item.code !== 'metadata-invalid').map(item => item.code))];
   add('note-invalid', errors.length, 0, errors.map(reason => ({ reason })));
   if (metadata.status === 'invalid') add('metadata-invalid', 1, 0, metadata.diagnostics.map(reason => ({ reason })));
   if (metadata.status === 'unsupported') add('metadata-unsupported', 1, size(metadata.raw), []);
   const result = { status: metadata.status, bytes: size(source), ...empty, sources: { document: 0, session: 0 }, findings };
   if (metadata.raw !== null) result.headerBytes = size(metadata.raw);
-  if (metadata.status !== 'invalid') result.aliasBytes = size(noteContent(source, metadata)) - size(reviewNoteContent(source, metadata));
+  if (metadata.status !== 'invalid') result.aliasBytes = size(noteContent(source, metadata)) - size(reviewNoteContent(source, metadata, syntax));
 
   if (metadata.status === 'supported') {
     const value = metadata.value, sources = value.sources ?? [];
@@ -83,7 +86,7 @@ export function inspectNoteHealth(input) {
     add('source-hash', hashes.count, hashes.bytes, hashes.items);
     add('source-session', sessions.count, sessions.bytes, sessions.items);
     if (value.type !== 'log') {
-      const present = DESCRIPTIVE.filter(key => value[key] !== undefined);
+      const present = REPAIR_FIELDS.filter(key => value[key] !== undefined);
       add('descriptive-field', present.length, fieldBytes(value, present), present.map(field => ({ field })));
     }
     add('source-field', fields.count, fields.bytes, fields.items);
@@ -92,7 +95,7 @@ export function inspectNoteHealth(input) {
     if (result.sources.document > DOCTOR_SOURCE_VOLUME) add('source-volume', result.sources.document, documentBytes, []);
   }
 
-  const comments = hiddenComments(source);
+  const comments = hiddenComments(source, syntax);
   add('hidden-comment', comments.length, comments.reduce((total, item) => total + item.bytes, 0), comments.map(({ line }) => ({ line })));
 
   // One occurrence per section that carries the alias; a section never repeats

@@ -343,6 +343,7 @@ test('both MCP hosts report a refused source or hidden comment by its own code, 
     for (const [code, input] of [['NOTE_SOURCE_FIELD', { sources: [{ ...source, source_hash: `sha256:${'a'.repeat(64)}` }] }],
       ['NOTE_SOURCE_REFERENCE', { sources: [{ ...source, ref: '/synthetic/private/capture.png' }] }],
       ['NOTE_SOURCE_LOCATOR', { sources: [{ ...source, locator: 'x'.repeat(SOURCE_LOCATOR_LENGTH + 1) }] }],
+      ['NOTE_SOURCE_LOCATOR', { sources: [{ ...source, locator: 'x'.repeat(SOURCE_LOCATOR_LENGTH - 1) + '😀' }] }],
       ['NOTE_COMMENT_ADDED', { content: `${content}\n<!-- Evidence: captured earlier -->\n` }]]) {
       const failure = await native.call('cuefluent_create_note', { ...f.request, requestId: randomUUID(), ...input });
       assert.equal(failure.error, code); assert.equal(failure.diagnostics.toolName, 'cuefluent_create_note');

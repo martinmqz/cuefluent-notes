@@ -5,7 +5,7 @@ import { CHECK_CURSOR_PATTERN, REPAIR_CURSOR_PATTERN } from '../core/entry-contr
 import { hashBytes } from '../storage/files.mjs';
 import { readSettings } from '../storage/store.mjs';
 import { openNoteWorkspace, NOTE_WORKSPACE_TOOLS } from '../processing/workspace.mjs';
-import { NOTE_PROFILE, REPAIR_FIELDS, REPAIR_LIMITS, decodeNote, inspectMetadata, validateDocumentSources, serializeSources } from '../notes/index.mjs';
+import { NOTE_PROFILE, REPAIR_FIELDS, REPAIR_OPERATIONS, REPAIR_LIMITS, decodeNote, inspectMetadata, validateDocumentSources, serializeSources } from '../notes/index.mjs';
 import { fields, freezeData, CONTROL_LIMITS } from '../client/control-server.mjs';
 import { readPendingSetup } from './setup.mjs';
 import { checkNotes } from './doctor.mjs';
@@ -38,12 +38,12 @@ const repairs = { type: 'array', minItems: 1, maxItems: REPAIR_BATCH.targets,
   description: 'The selected notes in order, each with its typed operations. Sources are named by the index and aliases by the heading line that cuefluent_check_notes reported for the inspected note.',
   items: { type: 'object', additionalProperties: false, required: ['target', 'operations'], properties: { target,
     operations: { type: 'array', minItems: 1, maxItems: REPAIR_LIMITS.operations, items: { type: 'object', additionalProperties: false, required: ['op'], properties: {
-      op: { type: 'string', enum: ['remove-content-hash', 'strip-source-hashes', 'remove-session-sources', 'remove-fields', 'remove-sources', 'replace-sources', 'replace-alias', 'remove-alias'] },
+      op: { type: 'string', enum: Object.keys(REPAIR_OPERATIONS) },
       fields: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', enum: [...REPAIR_FIELDS] }, description: 'For remove-fields: each header field to remove.' },
       sources: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'integer', minimum: 0, maximum: NOTE_PROFILE.metadataItems - 1 }, description: 'For remove-sources and replace-sources: indexes into the note\'s sources.' },
       with: { description: 'For replace-sources: one document source as a new note may be given it (type document, ref, optional locator and version). For replace-alias: the new alias, one line without commas or markup.' },
       line: { type: 'integer', minimum: 1, description: 'For replace-alias and remove-alias: the line of the section\'s H2 heading.' },
-      alias: { type: 'string', minLength: 1, maxLength: REPAIR_LIMITS.aliasLength, description: 'For replace-alias and remove-alias: the alias as the check reported it.' } } } } } } };
+      alias: { type: 'string', minLength: 1, maxLength: REPAIR_LIMITS.selectorLength, description: 'For replace-alias and remove-alias: the alias as the check reported it.' } } } } } } };
 const definition = (name, description, inputSchema, readOnlyHint = false) => ({ name, description, inputSchema,
   annotations: { readOnlyHint, idempotentHint: true, openWorldHint: false } });
 const SIZE_REFUSAL = 'On a size refusal, preserve the complete note and draft, report the limit and ask the user how to proceed. Do not shorten, split or create a separate note to bypass it.';

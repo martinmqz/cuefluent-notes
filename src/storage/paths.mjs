@@ -5,7 +5,7 @@ import { LIVE_DEVICE } from '../core/filesystem-identity.mjs';
 import { readPathStat } from './stat.mjs';
 import { assertLocalFilesystem, assertPrivateAccess, establishWindowsPrivacy } from './platform.mjs';
 
-const RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const RESERVED = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i;
 const CONTROLS = /[\u0000-\u001f\u007f]/;
 
 export function fileIdentity(stat) {

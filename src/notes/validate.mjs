@@ -2,8 +2,8 @@ import path from 'node:path';
 import { isMarkdownPath } from '../core/note-path.mjs';
 import { CuefluentError, fail } from '../core/errors.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
-import { inspectMetadata, isSourceAppend, lineStarts, noteContent } from './metadata.mjs';
-import { decodeEntities, headingSlug, inlineText, normalizedText, parseMarkdown } from './markdown.mjs';
+import { inspectMetadata, isSourceAppend, lineStarts } from './metadata.mjs';
+import { decodeEntities, headingSlug, htmlParts, inlineText, matchAliasComment, normalizedText, parseMarkdown } from './markdown.mjs';
 
 const safeTags = new Set('p br strong em del s code pre blockquote ul ol li hr table thead tbody tfoot tr th td a img h1 h2 h3 h4 h5 h6 div span sup sub kbd mark'.split(' '));
 const voidTags = new Set(['br', 'hr', 'img']);
@@ -12,7 +12,6 @@ const identifier = '[A-Za-z0-9][A-Za-z0-9_-]{0,127}';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 const logMarker = new RegExp(`^<!-- note-log-entry event=${uuid} project=${identifier} -->$`);
 export const isLogEntryMarker = value => typeof value === 'string' && logMarker.test(value.trim());
-const aliasComment = /^ {0,3}<!--[ \t]*aliases:[ \t]*([^\r\n]*?)-->[ \t]*(?:\r?\n)?$/;
 const metadataComment = /^<!--[\t \r\n]*cuefluent(?=[\t \r\n]|-->|$)/i;
 
 /** Hidden comments an author controls: every HTML comment the parser recognizes,
@@ -25,28 +24,35 @@ const metadataComment = /^<!--[\t \r\n]*cuefluent(?=[\t \r\n]|-->|$)/i;
 function authoredComments(tokens) {
   const found = [];
   const visit = (items, parentLine) => {
+    let currentLine = parentLine;
     for (const token of items) {
-      const line = token.map ? token.map[0] + 1 : parentLine;
+      if (token.map) currentLine = token.map[0] + 1;
+      const line = currentLine;
       if (token.type === 'html_block' || token.type === 'html_inline') {
-        const comments = htmlParts(token.content).filter(part => part.comment !== undefined).map(part => part.comment);
-        if (token.type === 'html_block' && token.level === 0 && aliasComment.test(token.content)) comments.shift();
-        for (const comment of comments) if (!metadataComment.test(comment)) found.push({ text: comment.replace(/\s+/g, ' ').trim(), line, bytes: Buffer.byteLength(comment) });
+        const comments = htmlParts(token.content).filter(part => part.comment !== undefined);
+        if (token.type === 'html_block' && token.level === 0 && matchAliasComment(token.content)) comments.shift();
+        for (const { comment, offset } of comments) if (!metadataComment.test(comment)) found.push({ text: comment.replace(/\s+/g, ' ').trim(), line: line + (token.content.slice(0, offset).match(/\n/g)?.length ?? 0), bytes: Buffer.byteLength(comment) });
       }
       if (token.children) visit(token.children, line);
+      else currentLine += (token.content.match(/\n/g)?.length ?? 0) + (['softbreak', 'hardbreak'].includes(token.type) ? 1 : 0);
     }
   };
   visit(tokens, 1); return found;
 }
 const sourceTokens = source => { const { tokens, env } = parseMarkdown(source); return env.sourceTokens ?? tokens; };
 /** Where a note's hidden comments are and how many bytes each occupies. */
-export const hiddenComments = input => authoredComments(sourceTokens(decodeNote(input))).map(({ line, bytes }) => ({ line, bytes }));
+export const hiddenComments = (input, syntax) => authoredComments(syntax ? syntax.env.sourceTokens ?? syntax.tokens : sourceTokens(decodeNote(input))).map(({ line, bytes }) => ({ line, bytes }));
 
 /** Content-only approval view: literal examples of metadata remain visible. */
-export function reviewNoteContent(input, inspection) {
-  const body = noteContent(input, inspection), starts = lineStarts(body), { tokens } = parseMarkdown(body);
-  const aliases = tokens.filter(token => token.type === 'html_block' && token.level === 0 && token.map && aliasComment.test(token.content));
-  let content = body;
-  for (const token of aliases.reverse()) content = content.slice(0, starts[token.map[0]]) + content.slice(starts[token.map[1]] ?? body.length);
+export function reviewNoteContent(input, inspection, syntax) {
+  const source = decodeNote(input), metadata = inspection ?? inspectMetadata(source, syntax);
+  if (metadata.status === 'invalid') fail('NOTE_METADATA_INVALID', 'Malformed metadata cannot be hidden in a review.');
+  const starts = lineStarts(source), { tokens } = syntax ?? parseMarkdown(source);
+  const ranges = tokens.filter(token => token.type === 'html_block' && token.level === 0 && token.map && matchAliasComment(token.content))
+    .map(token => [starts[token.map[0]], starts[token.map[1]] ?? source.length]);
+  if (metadata.raw !== null) ranges.push([metadata.start, metadata.end]);
+  let content = source;
+  for (const [start, end] of ranges.sort((left, right) => right[0] - left[0])) content = content.slice(0, start) + content.slice(end);
   return content;
 }
 
@@ -80,62 +86,6 @@ function stableData(value) {
 }
 const sameData = (left, right) => JSON.stringify(stableData(left)) === JSON.stringify(stableData(right));
 
-/** Split raw HTML into its comments, its tags and the text between them, the
- * way an HTML reader does: a comment marker inside a tag, such as in a quoted
- * attribute, is part of that tag and neither opens nor closes a comment. */
-function htmlParts(source) {
-  const parts = []; let cursor = 0, index = 0;
-  const push = (part, end) => {
-    if (cursor < index) parts.push({ text: source.slice(cursor, index) });
-    parts.push(part); cursor = end; index = end;
-  };
-  while ((index = source.indexOf('<', index)) !== -1) {
-    if (source.startsWith('<!--', index)) {
-      // A comment may close on its own opening dashes: <!--> and <!--->.
-      const close = source.indexOf('-->', index + 2), end = close === -1 ? source.length : close + 3;
-      push({ comment: source.slice(index, end), closed: close !== -1 }, end); continue;
-    }
-    if (!/^<(?:\/?[A-Za-z]|[!?])/.test(source.slice(index))) { index++; continue; }
-    const name = /^<\/?[^\t\n\f\r />]+/.exec(source.slice(index));
-    const parsed = name ? htmlAttributes(source, index + name[0].length) : null;
-    const end = parsed?.end ?? (source.indexOf('>', index + 1) + 1);
-    if (!end) break;
-    push({ tag: source.slice(index, end), attributes: parsed?.attributes ?? [] }, end);
-  }
-  if (cursor < source.length) parts.push({ text: source.slice(cursor) });
-  return parts;
-}
-
-function htmlAttributes(tag, start) {
-  const whitespace = character => /[\t\n\f\r ]/.test(character);
-  const attributes = []; let cursor = start;
-  while (cursor < tag.length) {
-    // HTML re-enters the before-attribute state after a stray self-closing
-    // slash, and accepts a new name directly after a quoted value.
-    while (cursor < tag.length && (whitespace(tag[cursor]) || tag[cursor] === '/')) cursor++;
-    if (cursor === tag.length || tag[cursor] === '>') return { attributes, end: tag[cursor] === '>' ? cursor + 1 : 0 };
-    const begin = cursor++;
-    while (cursor < tag.length && !whitespace(tag[cursor]) && !['/', '>', '='].includes(tag[cursor])) cursor++;
-    const name = tag.slice(begin, cursor).toLowerCase();
-    while (cursor < tag.length && whitespace(tag[cursor])) cursor++;
-    let value = '';
-    if (tag[cursor] === '=') {
-      cursor++;
-      while (cursor < tag.length && whitespace(tag[cursor])) cursor++;
-      const quote = tag[cursor] === '"' || tag[cursor] === "'" ? tag[cursor++] : null;
-      const begin = cursor;
-      if (quote) {
-        while (cursor < tag.length && tag[cursor] !== quote) cursor++;
-        value = tag.slice(begin, cursor); if (cursor < tag.length) cursor++;
-      } else {
-        while (cursor < tag.length && !whitespace(tag[cursor]) && tag[cursor] !== '>') cursor++;
-        value = tag.slice(begin, cursor);
-      }
-    }
-    attributes.push({ name, value });
-  }
-  return { attributes, end: 0 };
-}
 
 function metric() { return { nodes: 0, bytes: 0, depth: 0, visible: false }; }
 function add(target, source) {
@@ -214,7 +164,7 @@ function measure(tokens, issues, initialDepth = 0) {
   return result;
 }
 
-export function validateNote(input, { existing, generated = false, kind = 'note' } = {}) {
+export function validateNote(input, { existing, generated = false, kind = 'note', syntax } = {}) {
   const issues = [];
   const issue = (code, line = 1, severity = 'error') => issues.push({ code, line, severity });
   let source;
@@ -223,7 +173,7 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
   const lines = source.split(/\r\n|\r|\n/);
   lines.forEach((line, index) => { if (Buffer.byteLength(line) > P.lineBytes) issue('source-line-limit', index + 1); });
   if (issues.length) return Object.freeze({ valid: false, profile: P.id, diagnostics: Object.freeze(issues), sections: [], nodes: 0 });
-  const metadata = inspectMetadata(source);
+  const parsed = syntax ?? parseMarkdown(source), metadata = inspectMetadata(source, parsed);
   if (metadata.status === 'invalid') issue('metadata-invalid');
   if (metadata.status === 'unsupported') issue('metadata-unsupported', 1, 'warning');
   if (generated && metadata.status !== 'supported') issue('generated-metadata-required');
@@ -244,7 +194,7 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
     if (old.status === 'absent' && metadata.status !== 'absent') issue('plain-note-enriched-without-preservation');
   }
   if (generated && metadata.status === 'supported' && (!metadata.value.created || !metadata.value.updated || !metadata.value.generation?.skill_version)) issue('generated-metadata-incomplete');
-  const { tokens, env } = parseMarkdown(source);
+  const { tokens, env } = parsed;
   if (kind === 'note' && (generated || existing !== undefined)) {
     // A newly authored note has no hidden comment. An update keeps or removes
     // each comment its original has; it cannot add, repeat or reword one.
@@ -304,14 +254,14 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
       i += 2; continue;
     }
     if (token.type === 'html_block' && /<!--\s*aliases\b/i.test(token.content)) {
-      const match = aliasComment.exec(token.content);
+      const match = matchAliasComment(token.content);
       if (!section || token.level !== 0) { issue('alias-outside-section', line); continue; }
       if (!match) { issue('malformed-alias', line); continue; }
       if (section.aliasSeen) issue('repeated-alias', line);
       if (section.started) issue('alias-outside-metadata', line);
       if (kind === 'log') issue('log-alias', line);
       section.aliasSeen = true;
-      const values = match[1].split(',').map(value => inlineText(value).trim());
+      const values = match[2].split(',').map(value => inlineText(value).trim());
       if (values.some(value => !normalizedText(value))) issue('malformed-alias', line);
       const seen = new Set();
       for (const value of values) {

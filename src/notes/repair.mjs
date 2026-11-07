@@ -3,7 +3,7 @@ import { isMap, isSeq } from 'yaml';
 import { fail } from '../core/errors.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
 import { editMetadata, inspectMetadata, lineStarts, serializeSources, validateDocumentSources, validateMetadata } from './metadata.mjs';
-import { inlineText, normalizedText, parseMarkdown } from './markdown.mjs';
+import { inlineText, matchAliasComment, normalizedText, parseMarkdown } from './markdown.mjs';
 import { validateNote } from './validate.mjs';
 
 /** Metadata repair changes a note's header and its alias comments, and nothing
@@ -11,33 +11,31 @@ import { validateNote } from './validate.mjs';
  * content or a free-form metadata patch. The candidate is a pure function of the
  * original bytes and the operations, so a preview and the repair that follows it
  * construct the same bytes. */
-export const REPAIR_LIMITS = Object.freeze({ operations: 256, aliasLength: 256 });
+export const REPAIR_LIMITS = Object.freeze({ operations: 256, aliasLength: 256, selectorLength: P.lineBytes });
 /** Header fields a repair may remove when each is named. */
 export const REPAIR_FIELDS = Object.freeze(['type', 'context', 'series', 'sprint', 'period']);
-const HASH_KEYS = ['source_hash', 'hash'];
-const OPERATIONS = Object.freeze({
+export const REPAIR_HASH_FIELDS = Object.freeze(['source_hash', 'hash']);
+export const REPAIR_OPERATIONS = Object.freeze({
   'remove-content-hash': [], 'strip-source-hashes': [], 'remove-session-sources': [],
   'remove-fields': ['fields'], 'remove-sources': ['sources'], 'replace-sources': ['sources', 'with'],
   'replace-alias': ['line', 'alias', 'with'], 'remove-alias': ['line', 'alias'],
 });
-// The line of an alias comment, in whichever line-ending convention the note has.
-const aliasLine = /^( {0,3}<!--[ \t]*aliases:)([^\r\n]*?)(-->[ \t]*(?:\r\n|\r|\n)?)$/;
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const argument = () => fail('REPAIR_ARGUMENT', 'Use only the advertised repair operations with valid values.');
 const inapplicable = message => fail('REPAIR_OPERATION_INVALID', message);
 const same = (left, right) => serializeSources(left) === serializeSources(right);
 /** Whether `stripped` is the document source `item` without its hash keys. */
-const withoutHashes = (item, stripped) => item.type === 'document' && HASH_KEYS.some(key => Object.hasOwn(item, key)) &&
-  same(Object.fromEntries(Object.entries(item).filter(([key]) => !HASH_KEYS.includes(key))), stripped);
+const withoutHashes = (item, stripped) => item.type === 'document' && REPAIR_HASH_FIELDS.some(key => Object.hasOwn(item, key)) &&
+  same(Object.fromEntries(Object.entries(item).filter(([key]) => !REPAIR_HASH_FIELDS.includes(key))), stripped);
 
 function list(value, max) {
   if (!Array.isArray(value) || !value.length || value.length > max || Object.keys(value).length !== value.length) argument();
   return value;
 }
 function aliasText(value, replacement = false) {
-  if (typeof value !== 'string' || !value || value.length > REPAIR_LIMITS.aliasLength || /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u.test(value)) argument();
+  if (typeof value !== 'string' || !value || value.length > (replacement ? REPAIR_LIMITS.aliasLength : REPAIR_LIMITS.selectorLength) || /[\r\n\p{Cs}]/u.test(value)) argument();
   // A stored alias reads back as it was given: no comma, markup or comment delimiter.
-  if (replacement && (/,|<!--|-->|--!>/.test(value) || inlineText(value).trim() !== value || !normalizedText(value))) argument();
+  if (replacement && (/[\p{Cc}\p{Zl}\p{Zp},]|<!--|-->|--!>/u.test(value) || inlineText(value).trim() !== value || !normalizedText(value))) argument();
   return value;
 }
 
@@ -46,8 +44,8 @@ const checked = new WeakSet();
 export function validateRepairOperations(input) {
   if (checked.has(input)) return input;
   const result = list(input, REPAIR_LIMITS.operations).map(item => {
-    if (!plain(item) || typeof item.op !== 'string' || !Object.hasOwn(OPERATIONS, item.op)) argument();
-    const keys = OPERATIONS[item.op];
+    if (!plain(item) || typeof item.op !== 'string' || !Object.hasOwn(REPAIR_OPERATIONS, item.op)) argument();
+    const keys = REPAIR_OPERATIONS[item.op];
     if (Object.keys(item).length !== keys.length + 1 || keys.some(key => !Object.hasOwn(item, key))) argument();
     const operation = { op: item.op };
     if (keys.includes('fields')) {
@@ -69,7 +67,6 @@ export function validateRepairOperations(input) {
       operation.line = item.line; operation.alias = aliasText(item.alias);
       if (item.op === 'replace-alias') {
         operation.with = aliasText(item.with, true);
-        if (operation.with === operation.alias) argument();
       }
     }
     return Object.freeze(operation);
@@ -78,13 +75,13 @@ export function validateRepairOperations(input) {
 }
 
 /** The alias comment of each section, by the line of its H2 heading. */
-function aliasComments(source) {
+function aliasComments(source, syntax) {
   const starts = lineStarts(source), found = []; let section = null;
-  for (const token of parseMarkdown(source).tokens) {
+  for (const token of (syntax ?? parseMarkdown(source)).tokens) {
     if (token.type === 'footnote_block_open') break;
     if (token.type === 'heading_open' && token.level === 0 && ['h1', 'h2'].includes(token.tag)) { section = token.tag === 'h2' ? token.map[0] + 1 : null; continue; }
     if (token.type !== 'html_block' || token.level !== 0 || !token.map || section === null) continue;
-    const start = starts[token.map[0]], end = starts[token.map[1]] ?? source.length, parts = aliasLine.exec(source.slice(start, end));
+    const start = starts[token.map[0]], end = starts[token.map[1]] ?? source.length, parts = matchAliasComment(source.slice(start, end));
     if (parts) found.push({ line: section, start, end, parts });
   }
   return found;
@@ -121,7 +118,7 @@ function planSources(operations, sources) {
     if (action) slot = { index, value: action.with, replacement: true };
     else if (sessions && source.type === 'session' && !Object.hasOwn(source, 'raw_ref')) return;
     else {
-      const drop = hashes && source.type === 'document' ? HASH_KEYS.filter(key => Object.hasOwn(source, key)) : [];
+      const drop = hashes && source.type === 'document' ? REPAIR_HASH_FIELDS.filter(key => Object.hasOwn(source, key)) : [];
       slot = { index, drop, value: drop.length ? Object.fromEntries(Object.entries(source).filter(([key]) => !drop.includes(key))) : source };
     }
     // Exact duplicates collapse onto the first; the same reference with other
@@ -168,10 +165,10 @@ function repairHeader(metadata, operations) {
   });
 }
 
-function repairAliases(source, operations) {
+function repairAliases(source, operations, syntax) {
   const requested = operations.filter(item => item.op === 'replace-alias' || item.op === 'remove-alias');
   if (!requested.length) return [];
-  const comments = aliasComments(source), edits = [];
+  const comments = aliasComments(source, syntax), edits = [];
   for (const line of new Set(requested.map(item => item.line))) {
     const comment = comments.find(item => item.line === line);
     if (!comment) inapplicable('No section with aliases has its heading on that line.');
@@ -200,25 +197,25 @@ function repairAliases(source, operations) {
  * the same mechanical request again. */
 export function constructRepair(input, operationsInput) {
   const operations = validateRepairOperations(operationsInput), source = decodeNote(input);
-  const validation = validateNote(source), metadata = validation.metadata;
+  const syntax = parseMarkdown(source), validation = validateNote(source, { syntax }), metadata = validation.metadata;
   if (!validation.valid || !metadata) fail('REPAIR_NOTE_BLOCKED', 'The note does not satisfy the note profile, so it is reported and left unchanged.');
   const header = operations.some(item => !['replace-alias', 'remove-alias'].includes(item.op));
   if (header && metadata.status === 'unsupported') fail('REPAIR_NOTE_BLOCKED', 'The metadata uses a schema version that is not interpreted here. It stays unchanged.');
   if (metadata.status === 'supported' && metadata.value.type === 'log') fail('REPAIR_NOTE_BLOCKED', 'Activity logs are outside metadata repair.');
   let candidate = source;
-  for (const edit of repairAliases(source, operations).sort((left, right) => right.start - left.start)) candidate = candidate.slice(0, edit.start) + edit.text + candidate.slice(edit.end);
+  for (const edit of repairAliases(source, operations, syntax).sort((left, right) => right.start - left.start)) candidate = candidate.slice(0, edit.start) + edit.text + candidate.slice(edit.end);
   if (metadata.status === 'supported') {
     const raw = repairHeader(metadata, operations);
     if (raw !== metadata.raw) candidate = candidate.slice(0, metadata.start) + raw + candidate.slice(metadata.end);
   } else if (operations.some(item => ['remove-sources', 'replace-sources'].includes(item.op))) inapplicable('The note has no sources to select.');
   if (candidate === source) return Object.freeze({ changed: false, bytes: Buffer.from(source) });
-  assertRepairScope(source, candidate);
-  return Object.freeze({ changed: true, bytes: Buffer.from(candidate) });
+  const compared = checkRepairScope(source, candidate, parts(source, syntax, metadata));
+  return Object.freeze({ changed: true, bytes: Buffer.from(candidate), description: describeParts(source, candidate, compared.before, compared.after) });
 }
 
-function parts(source) {
-  const metadata = inspectMetadata(source), body = metadata.raw === null ? source : source.slice(metadata.end);
-  const comments = aliasComments(body); let text = '', cursor = 0;
+function parts(source, syntax = parseMarkdown(source), metadata = inspectMetadata(source, syntax)) {
+  const base = metadata.raw === null ? 0 : metadata.end, body = source.slice(base);
+  const comments = aliasComments(source, syntax).map(comment => ({ ...comment, start: comment.start - base, end: comment.end - base })); let text = '', cursor = 0;
   // Where each alias comment sits among the bytes that a repair may not touch.
   const offsets = comments.map(comment => { text += body.slice(cursor, comment.start); cursor = comment.end; return text.length; });
   return { metadata, prefix: metadata.raw === null ? '' : source.slice(0, metadata.start), protectedText: text + body.slice(cursor), offsets, comments, body };
@@ -229,13 +226,14 @@ function parts(source) {
  * stays at its section, identity and timestamps stay, no field is added, and a
  * source is one the note had, that source without its hashes, or a descriptor
  * a new note could be given. */
-export function assertRepairScope(originalInput, candidateInput) {
+export function assertRepairScope(originalInput, candidateInput) { checkRepairScope(originalInput, candidateInput); }
+function checkRepairScope(originalInput, candidateInput, inspectedBefore) {
   const violation = () => fail('REPAIR_SCOPE_VIOLATION', 'The candidate changes more than a metadata repair may change.');
-  const original = decodeNote(originalInput), candidate = decodeNote(candidateInput), before = parts(original), after = parts(candidate);
-  if (!validateNote(candidate).valid || before.prefix !== after.prefix || before.protectedText !== after.protectedText) violation();
+  const original = decodeNote(originalInput), candidate = decodeNote(candidateInput), syntax = parseMarkdown(candidate), validation = validateNote(candidate, { syntax }), before = inspectedBefore ?? parts(original), after = parts(candidate, syntax, validation.metadata);
+  if (!validation.valid || before.prefix !== after.prefix || before.protectedText !== after.protectedText) violation();
   if (after.offsets.some(offset => !before.offsets.includes(offset)) || new Set(after.offsets).size !== after.offsets.length) violation();
   if (before.metadata.status !== after.metadata.status) violation();
-  if (before.metadata.status !== 'supported') { if (before.metadata.raw !== after.metadata.raw) violation(); return; }
+  if (before.metadata.status !== 'supported') { if (before.metadata.raw !== after.metadata.raw) violation(); return { before, after }; }
   const old = before.metadata.value, next = after.metadata.value;
   for (const key of Object.keys(next)) if (!Object.hasOwn(old, key)) violation();
   for (const key of Object.keys(old)) {
@@ -244,19 +242,39 @@ export function assertRepairScope(originalInput, candidateInput) {
   }
   const { content_hash: _hash, ...generation } = old.generation ?? {};
   if (!isDeepStrictEqual(next.generation ?? {}, generation) && !isDeepStrictEqual(next.generation, old.generation)) violation();
-  let cursor = 0; const sources = old.sources ?? [];
-  for (const source of next.sources ?? []) {
-    const at = sources.findIndex((item, index) => index >= cursor && (same(item, source) || withoutHashes(item, source)));
-    if (at >= 0) { cursor = at + 1; continue; }
-    try { if (validateDocumentSources([source]).length !== 1) violation(); } catch { violation(); }
+  const sources = old.sources ?? [], nextSources = next.sources ?? [], matches = matchSources(sources, nextSources);
+  let cursor = -1;
+  for (const [index, source] of nextSources.entries()) {
+    // Newly supplied descriptors may replace any selected slot. Historical-only
+    // descriptors must still exist, in their original relative order.
+    try { validateDocumentSources([source]); continue; } catch { /* retained data */ }
+    const at = matches[index];
+    if (at === undefined || at <= cursor) violation();
+    cursor = at;
   }
+  return { before, after };
+}
+
+/** Reserve exact matches first, then hash-stripped matches. A replacement
+ * cannot consume the original of a later retained descriptor. */
+function matchSources(before, after) {
+  const used = new Set(), matches = [];
+  for (const equal of [same, withoutHashes]) after.forEach((source, index) => {
+    if (matches[index] !== undefined) return;
+    const at = before.findIndex((item, position) => !used.has(position) && equal(item, source));
+    if (at >= 0) { matches[index] = at; used.add(at); }
+  });
+  return matches;
 }
 
 /** What a repair changes, read from the two versions alone. It names every
  * header field and alias list that differs, with both values, so it cannot say
  * less or more than the candidate holds. */
 export function describeRepair(originalInput, candidateInput) {
-  const original = decodeNote(originalInput), candidate = decodeNote(candidateInput), before = parts(original), after = parts(candidate);
+  const original = decodeNote(originalInput), candidate = decodeNote(candidateInput);
+  return describeParts(original, candidate, parts(original), parts(candidate));
+}
+function describeParts(original, candidate, before, after) {
   const header = [], sources = { removed: [], stripped: [], added: [] }, aliases = [];
   if (before.metadata.status === 'supported' && after.metadata.status === 'supported') {
     const old = before.metadata.value, next = after.metadata.value;
@@ -266,19 +284,22 @@ export function describeRepair(originalInput, candidateInput) {
       if (key === 'generation') for (const inner of new Set([...Object.keys(old.generation ?? {}), ...Object.keys(next.generation ?? {})])) field(`generation.${inner}`, old.generation?.[inner], next.generation?.[inner]);
       else field(key, old[key], next[key]);
     }
-    const kept = new Set(), was = old.sources ?? []; let cursor = 0;
+    const kept = new Set(), was = old.sources ?? [], matched = matchSources(was, next.sources ?? []);
     for (const [index, source] of (next.sources ?? []).entries()) {
-      const at = was.findIndex((item, position) => position >= cursor && (same(item, source) || withoutHashes(item, source)));
-      if (at < 0) { sources.added.push({ index, source }); continue; }
-      kept.add(at); cursor = at + 1;
-      if (!same(was[at], source)) sources.stripped.push({ index: at, fields: Object.fromEntries(HASH_KEYS.filter(key => Object.hasOwn(was[at], key)).map(key => [key, was[at][key]])) });
+      const at = matched[index];
+      if (at === undefined) { sources.added.push({ index, source }); continue; }
+      kept.add(at);
+      if (!same(was[at], source)) sources.stripped.push({ index: at, fields: Object.fromEntries(REPAIR_HASH_FIELDS.filter(key => Object.hasOwn(was[at], key)).map(key => [key, was[at][key]])) });
     }
     was.forEach((source, index) => { if (!kept.has(index)) sources.removed.push({ index, source }); });
   }
   const values = comment => aliasValues(comment.parts[2]);
   before.comments.forEach((comment, index) => {
     const now = after.comments[after.offsets.indexOf(before.offsets[index])], was = values(comment), next = now ? values(now) : [];
-    if (!isDeepStrictEqual(was, next)) aliases.push({ line: lineStarts(original.slice(0, original.length - before.body.length)).length - 1 + comment.line, before: was, after: next });
+    const markup = item => item ? item.parts[2].split(',').map(segment => segment.trim()) : [];
+    const beforeMarkup = markup(comment), afterMarkup = markup(now);
+    const showMarkup = !isDeepStrictEqual(beforeMarkup, afterMarkup) && (!isDeepStrictEqual(beforeMarkup, was) || !isDeepStrictEqual(afterMarkup, next));
+    if (!isDeepStrictEqual(was, next) || showMarkup) aliases.push({ line: comment.line, before: was, after: next, ...(showMarkup ? { beforeMarkup, afterMarkup } : {}) });
   });
   const listed = Object.fromEntries(Object.entries(sources).filter(([, items]) => items.length));
   return { bytes: { before: Buffer.byteLength(original), after: Buffer.byteLength(candidate) }, ...(header.length ? { header } : {}),

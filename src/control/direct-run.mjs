@@ -16,11 +16,11 @@ const busy = run => ({ state: 'busy', projectId: run.projectId });
  * repair. `scope` carries the request hash that makes a `requestId` replayable
  * only with its exact request, and `changed` refuses any other use of it.
  * `build` makes the complete draft manifest from the pinned project; it runs
- * before the run is reserved, so a refused request starts nothing. `logging`
- * says whether the saved notes are activity. The outcome is a busy notice, the
+ * before the run is reserved, so a refused request starts nothing. Repairs
+ * never log activity. The outcome is a busy notice, the
  * replayed or fresh result, or the review page of the retained draft set. */
-export async function submitDirectRun(store, { projectId, requestId, scope: requested, build, changed, logging = true }, options) {
-  const scope = validateRunScope(requested), other = run => !isDeepStrictEqual(run.scope, scope);
+export async function submitDirectRun(store, { projectId, requestId, scope: requested, build, changed }, options) {
+  const scope = validateRunScope(requested), logging = !scope.repair, other = run => !isDeepStrictEqual(run.scope, scope);
   const read = context => readRunSnapshot(store, context).then(value => ({ ...value, project: context.project }));
   const initial = await withProject(store, projectId, read);
   if (initial.run && initial.run.id !== requestId) return busy(initial.run);

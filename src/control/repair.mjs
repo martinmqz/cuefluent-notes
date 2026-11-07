@@ -3,10 +3,10 @@ import { fail } from '../core/errors.mjs';
 import { REPAIR_CURSOR_PATTERN } from '../core/entry-contract.mjs';
 import { hashBytes } from '../storage/files.mjs';
 import { readSettings } from '../storage/store.mjs';
-import { openNoteWorkspace } from '../processing/workspace.mjs';
+import { openNoteWorkspace, targetKey } from '../processing/workspace.mjs';
 import { inspectNoteHealth, serializeRepair, serializeSources, validateRepairOperations } from '../notes/index.mjs';
 import { fields } from '../client/control-server.mjs';
-import { REVIEW_PAGE_BYTES } from './review.mjs';
+import { REVIEW_PAGE_BYTES, fitJsonPiece } from './review.mjs';
 import { submitDirectRun } from './direct-run.mjs';
 
 /** One call names at most this many notes; the batch it forms holds as many
@@ -21,7 +21,7 @@ const FULL = new Set(['WORKSPACE_DRAFT_LIMIT', 'WORKSPACE_PRIVATE_LIMIT']);
 // A note that cannot take its repair as it is now. The reason is that note's
 // alone; the others are still previewed.
 const REFUSED = new Set(['REPAIR_NOTE_MISSING', 'REPAIR_NOTE_BLOCKED', 'REPAIR_OPERATION_INVALID', 'REPAIR_SOURCE_CONFLICT', 'NOTE_REPAIR_LAYOUT',
-  'NOTE_UTF8_INVALID', 'READ_LIMIT_EXCEEDED', 'PATH_UNSAFE', 'FILE_CHANGED', 'EACCES', 'EPERM', 'EBUSY']);
+  'WORKSPACE_LIST_LIMIT', 'REPAIR_SCOPE_VIOLATION', 'NOTE_FILE_LIMIT', 'WORKSPACE_TARGET_ALIAS', 'NOTE_UTF8_INVALID', 'READ_LIMIT_EXCEEDED', 'PATH_UNSAFE', 'FILE_CHANGED', 'EACCES', 'EPERM', 'EBUSY']);
 
 /** The selected notes with their operations, closed and in the caller's order. */
 export function validateRepairs(input) {
@@ -43,7 +43,7 @@ async function propose(project, repairs, { skillVersion, runId, limits = {} }) {
   const workspace = await openNoteWorkspace({ project, runId, skillVersion, limits }), files = [];
   // A name that is no note target is an argument error before any note is read.
   for (const repair of repairs) files.push(await workspace.resolve(repair.target));
-  if (new Set(files.map(file => file.normalize('NFC').toLowerCase())).size !== files.length) invalid();
+  if (new Set(files.map(targetKey)).size !== files.length) invalid();
   const entries = []; let full = false;
   for (const [index, repair] of repairs.entries()) {
     const entry = { target: files[index], operations: repair.operations };
@@ -64,7 +64,7 @@ async function propose(project, repairs, { skillVersion, runId, limits = {} }) {
   }
   // A refusal belongs to its note only while the notes root still stands.
   await workspace.verify();
-  const digest = hashBytes(serializeSources(['cuefluent-repair-proposal', 1, project.id, project.destination,
+  const digest = hashBytes(serializeSources(['cuefluent-repair-proposal', 1, project.id, project.destination, project.saving,
     entries.map(entry => [entry.target, entry.state, entry.operations, entry.expectedHash ?? null, entry.hash ?? null, entry.code ?? null])]));
   return { workspace, entries, digest };
 }
@@ -104,14 +104,7 @@ export async function previewRepair(store, input, { skillVersion, limits } = {})
     if (size + wholeSize <= REVIEW_PAGE_BYTES) { page.targets.push(whole); size += wholeSize; continue; }
     if (!page.targets.length) {
       // One note's change list is larger than a page: cut it at a UTF-8 boundary.
-      let end = Math.min(total, start + REVIEW_PAGE_BYTES - size);
-      for (let attempt = 0; attempt < 64 && end > start; attempt++) {
-        while (end > start && continuation(entry.changes, end)) end--;
-        const pieceSize = serialized(shown(entry, index, start, end)) + 1;
-        if (size + pieceSize <= REVIEW_PAGE_BYTES) break;
-        end = Math.min(end - 1, start + Math.floor((end - start) * (REVIEW_PAGE_BYTES - size) / pieceSize));
-      }
-      if (end <= start || size + serialized(shown(entry, index, start, end)) + 1 > REVIEW_PAGE_BYTES) fail('CONTROL_RESPONSE_LIMIT', 'The repair preview cannot be split into a bounded page.');
+      const end = fitJsonPiece(entry.changes, start, REVIEW_PAGE_BYTES - size - 1, end => shown(entry, index, start, end));
       page.targets.push(shown(entry, index, start, end)); start = end;
     }
     page.next = `${digest}:${index}:${start}`; break;
@@ -146,7 +139,7 @@ export async function repairNotes(store, input, { client, skillVersion, limits }
   if (!store) return { state: 'unconfigured', message: 'Set up a note destination first.' };
   const requestHash = hashBytes(serializeSources(['cuefluent-repair-request', 1, input.proposal, repairs.map(repair => [repair.target, repair.operations])]));
   let built = null;
-  const outcome = await submitDirectRun(store, { projectId: input.projectId, requestId: input.requestId, logging: false,
+  const outcome = await submitDirectRun(store, { projectId: input.projectId, requestId: input.requestId,
     scope: { kind: 'direct', requestHash, repair: input.proposal },
     changed: () => fail('REPAIR_REQUEST_CHANGED', 'Reuse a requestId only with its exact original repair batch.'),
     build: async project => {

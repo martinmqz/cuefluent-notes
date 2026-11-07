@@ -102,7 +102,7 @@ works from any connection or chat.
 
 A page has `state` (`review`, `interrupted`, `running`, or a completed outcome
 state such as `saved` or `skipped`), `projectId`, `runId`, `kind` (`direct`,
-`chat` or `project`), `phase`, `revision`, `draftCount`, `savedCount`, `choices`,
+`chat`, `project` or `repair`), `phase`, `revision`, `draftCount`, `savedCount`, `choices`,
 `drafts[]`, `next`, `warnings` (at most 16, with `warningsTruncated`). `revision`
 is the immutable 64-hexadecimal identity of the reviewed set: run id, pinned
 destination and preferences, whether the set is published, and every draft's

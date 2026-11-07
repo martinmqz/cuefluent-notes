@@ -6,9 +6,9 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createProject } from '../../src/core/settings.mjs';
 import { createRun, isRepairRun, runKind, validateRun } from '../../src/core/run.mjs';
-import { initializeStore, withProject } from '../../src/storage/store.mjs';
+import { initializeStore, readSettings, updateSettings, withProject } from '../../src/storage/store.mjs';
 import { hashBytes, readJSON, writeJSON } from '../../src/storage/files.mjs';
-import { constructRepair, createGeneratedNote, describeRepair, inspectMetadata, serializeRepair } from '../../src/notes/index.mjs';
+import { NOTE_PROFILE, constructRepair, createGeneratedNote, describeRepair, inspectMetadata, serializeRepair } from '../../src/notes/index.mjs';
 import { createDirectNoteTools } from '../../src/control/direct-notes.mjs';
 import { previewRepair, repairNotes, REPAIR_BATCH } from '../../src/control/repair.mjs';
 import { REVIEW_PAGE_BYTES } from '../../src/control/review.mjs';
@@ -325,7 +325,7 @@ test('a batch holds as many changed notes as one run retains and names the rest 
   assert.deepEqual(next.counts, { change: 1, unchanged: 0, refused: 0, deferred: 0 }); assert.notEqual(next.proposal, small.proposal);
   assert.deepEqual((await f.repair(rest, next.proposal)).result.paths, [f.file('n02')]);
   // A smaller private budget makes a smaller batch, said the same way.
-  const limits = { fileBytes: 4096, privateBytes: 4096 + 600 }, three = repairsFor(['n10', 'n11', 'n12']);
+  const limits = { privateBytes: f.originals.get('n10').length + constructRepair(f.originals.get('n10'), mechanical).bytes.length }, three = repairsFor(['n10', 'n11', 'n12']);
   const tight = await previewRepair(f.store, { projectId: 'demo', repairs: three }, { skillVersion, limits });
   assert.deepEqual(tight.targets.map(item => item.state), ['change', 'deferred', 'deferred']);
   const saved = await apply(three, tight.proposal, limits);
@@ -380,4 +380,77 @@ test('both MCP hosts serve preview and repair through the response contract, and
       assert.equal((await absent.call(name, { projectId: 'demo', ...args })).state, 'unconfigured');
     }
   }
+});
+
+
+test('changing the saving mode invalidates a repair proposal before reservation', async t => {
+  const f = await fixture(t, { saving: 'review' }), repairs = repairsFor(['a']), preview = await f.preview(repairs);
+  const settings = await readSettings(f.store);
+  await updateSettings(f.store, { ...settings.value, projects: settings.value.projects.map(project => ({ ...project, saving: 'auto' })) }, { expectedHash: settings.hash });
+  await code('REPAIR_PROPOSAL_CHANGED', () => f.repair(repairs, preview.proposal));
+  await untouched(f); assert.deepEqual(await f.read('a'), f.originals.get('a'));
+});
+
+test('a repair refuses case and normalization aliases instead of renaming the saved note', async t => {
+  const f = await fixture(t);
+  for (const [stored, requested] of [['meeting', 'Meeting'], ['café', 'cafe\u0301']]) {
+    await fs.writeFile(f.file(stored), note(stored));
+    const preview = await f.preview(repairsFor([requested, 'a']));
+    assert.equal(preview.targets[0].state, 'refused');
+    assert.equal(preview.targets[0].code, 'WORKSPACE_TARGET_ALIAS');
+    assert.equal(preview.targets[1].state, 'change');
+  }
+  await untouched(f);
+});
+
+test('repair inspection uses remaining bytes rather than reserving a maximum-sized file', async t => {
+  const f = await fixture(t), repairs = repairsFor(['a', 'b']);
+  const preview = await previewRepair(f.store, { projectId: 'demo', repairs }, { skillVersion, limits: { privateBytes: 8192 } });
+  assert.deepEqual(preview.counts, { change: 2, unchanged: 0, refused: 0, deferred: 0 });
+});
+
+test('a repair exceeding the line profile refuses only its target', async t => {
+  const f = await fixture(t), prefix = '<!-- aliases: a, ';
+  const huge = `# Topic\n\n## Overview\n${prefix}${'b'.repeat(NOTE_PROFILE.lineBytes - Buffer.byteLength(prefix + ' -->'))} -->\nBody.\n`;
+  await fs.writeFile(f.file('huge'), huge);
+  const preview = await f.preview([{ target: 'huge.md', operations: [{ op: 'replace-alias', line: 3, alias: 'a', with: 'longer' }] }, ...repairsFor(['a'])]);
+  assert.equal(preview.targets[0].state, 'refused'); assert.equal(preview.targets[0].code, 'REPAIR_SCOPE_VIOLATION');
+  assert.equal(preview.targets[1].state, 'change');
+});
+
+test('a continuation of a repair review reports a changed original instead of applying the old offset', async t => {
+  const f = await fixture(t, { saving: 'review', notes: [] });
+  const sources = Array.from({ length: 110 }, (_, index) => ({ type: 'document', ref: `${index} ${'é"'.repeat(80)}` }));
+  await fs.writeFile(f.file('wide'), note('wide', { sources }));
+  const repairs = [{ target: 'wide.md', operations: [{ op: 'remove-sources', sources: sources.map((_, index) => index) }] }];
+  const preview = await f.preview(repairs), review = await f.repair(repairs, preview.proposal);
+  assert.ok(review.next?.start > 0);
+  await fs.appendFile(f.file('wide'), '\nManual edit.\n');
+  const next = await f.call('cuefluent_review_note', { runId: review.runId, ...review.next });
+  assert.equal(next.drafts[0].start, 0); assert.deepEqual(JSON.parse(next.drafts[0].changes), { unavailable: 'changed' });
+});
+
+
+test('one repair review page reads only the candidate it reaches', async t => {
+  const f = await fixture(t, { saving: 'review', notes: ['a', 'b', 'c'] });
+  const sources = Array.from({ length: 110 }, (_, index) => ({ type: 'document', ref: `${index} ${'é"'.repeat(80)}` }));
+  await fs.writeFile(f.file('wide'), note('wide', { sources }));
+  const repairs = [{ target: 'wide.md', operations: [{ op: 'remove-sources', sources: sources.map((_, index) => index) }] }, ...repairsFor(['a', 'b', 'c'])];
+  const preview = await f.preview(repairs), review = await f.repair(repairs, preview.proposal);
+  const opened = [], open = fs.open;
+  t.mock.method(fs, 'open', async (file, ...args) => { if (String(file).endsWith('.draft')) opened.push(file); return open(file, ...args); });
+  const page = await f.call('cuefluent_review_note', { runId: review.runId });
+  assert.equal(page.drafts.length, 1); assert.equal(page.next.draft, 0);
+  assert.equal(opened.length, 1);
+});
+
+
+test('a candidate exceeding the file profile refuses only its target', async t => {
+  const f = await fixture(t), prefix = '# Topic\n\n## Section\n<!-- aliases: a -->\n';
+  const line = 'x'.repeat(NOTE_PROFILE.lineBytes - 1) + '\n', remaining = NOTE_PROFILE.fileBytes - Buffer.byteLength(prefix);
+  const original = prefix + line.repeat(Math.floor(remaining / line.length)) + 'x'.repeat(remaining % line.length);
+  await fs.writeFile(f.file('full'), original);
+  const preview = await f.preview([{ target: 'full.md', operations: [{ op: 'replace-alias', line: 3, alias: 'a', with: 'longer' }] }, ...repairsFor(['a'])]);
+  assert.equal(preview.targets[0].state, 'refused'); assert.equal(preview.targets[0].code, 'NOTE_FILE_LIMIT');
+  assert.equal(preview.targets[1].state, 'change');
 });

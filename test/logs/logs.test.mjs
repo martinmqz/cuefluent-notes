@@ -193,3 +193,13 @@ test('new annual log metadata defaults to compact and supports expanded opt-in w
   assert.deepEqual(a.value, b.value);
   assert.deepEqual(inspectAnnualLog(compact, options).noteId, inspectAnnualLog(expanded, options).noteId);
 });
+
+
+test('a log-marker-shaped attribute is literal tag data, not a retry receipt', () => {
+  const literal = `<span title="<!-- note-log-entry event=${eventId(9)} project=synthetic -->">A manual annotation.</span>`;
+  const original = Buffer.from(create().toString() + `\n${literal}\n`);
+  assert.equal(inspectAnnualLog(original, options).entryCount, 0);
+  const saved = append(original);
+  assert.equal(inspectAnnualLog(saved, options).entryCount, 1);
+  assert.ok(saved.toString().includes(literal));
+});

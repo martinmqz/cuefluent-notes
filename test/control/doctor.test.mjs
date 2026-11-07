@@ -436,3 +436,49 @@ test('a selected note that the listing did not reach is read once and reported l
   await assert.rejects(f.check({ target: 'one/two/what?.md' }, { limits }), { code: 'PATH_INVALID' });
   await assert.rejects(f.check({ target: 'one/../two.md' }, { limits }), { code: 'PATH_INVALID' });
 });
+
+
+test('reserved subdirectories are partial coverage and listing a folder cannot reserve a real note name', async t => {
+  const f = await fixture(t);
+  await f.write('safe/Workspace-List.md', text('Safe', 'kept'));
+  if (process.platform !== 'win32') await f.write('com¹/hidden.md', text('Hidden', 'other'));
+  const report = await f.check();
+  assert.equal(report.totals.notes, 1);
+  assert.equal(report.totals.metadata.absent, 1);
+  assert.deepEqual(report.coverage.reasons, process.platform === 'win32' ? [] : ['skipped-directory']);
+});
+
+test('a selected note prefers exact spelling when case variants coexist', async t => {
+  const f = await fixture(t);
+  await f.write('Note.md', text('Upper', 'upper'));
+  await f.write('note.md', text('Lower', 'lower'));
+  if ((await fs.readdir(f.notes)).filter(name => name.toLowerCase() === 'note.md').length !== 2) { t.skip('case-insensitive filesystem'); return; }
+  const report = await f.check({ target: 'note.md' });
+  assert.equal(report.notes[0].target, path.join(f.notes, 'note.md'));
+  assert.notEqual(report.notes[0].metadata, 'unreadable');
+});
+
+
+test('a doctor lists each directory once and excludes VCS and recycle folders from its corpus', async t => {
+  const f = await fixture(t);
+  for (let index = 0; index < 105; index++) await f.write(`n${index}.md`, text(`Note ${index}`, `alias ${index}`));
+  for (const folder of ['.git', '.hg', '.svn', '.trash', '.Trashes', '$RECYCLE.BIN']) await f.write(`${folder}/copy.md`, text('Copied', 'alias 1'));
+  const opened = [], opendir = fs.opendir;
+  t.mock.method(fs, 'opendir', async (file, ...args) => { opened.push(file); return opendir(file, ...args); });
+  const report = await f.check();
+  assert.equal(report.totals.notes, 105); assert.equal(report.coverage.complete, true);
+  assert.deepEqual(opened, [f.notes]);
+  assert.equal(report.totals.findings['alias-across-notes'], undefined);
+});
+
+test('a vanished, changed or overlong subdirectory is partial coverage while a root refusal still fails', async t => {
+  const f = await fixture(t);
+  await f.write('safe.md', text('Safe', 'safe'));
+  const child = path.dirname(await f.write('child/note.md', text('Child', 'child'))), opendir = fs.opendir;
+  let reason;
+  t.mock.method(fs, 'opendir', async (file, ...args) => { if (file === child) throw refusal(reason); return opendir(file, ...args); });
+  for (reason of ['ENOENT', 'PATH_MISSING', 'PATH_UNSAFE', 'PATH_CHANGED', 'ENAMETOOLONG']) {
+    const report = await f.check();
+    assert.equal(report.totals.notes, 1); assert.deepEqual(report.coverage.reasons, ['skipped-directory']);
+  }
+});

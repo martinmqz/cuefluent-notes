@@ -181,7 +181,7 @@ test('operations are a closed, bounded set, and anything else is an argument err
   const many = Array.from({ length: REPAIR_LIMITS.operations + 1 }, () => ({ op: 'remove-content-hash' }));
   for (const operations of [[], many, 'remove-content-hash', [null], [{ op: 'rewrite' }], [{ op: 'remove-content-hash', extra: 1 }], [{ op: 'remove-fields' }], [{ op: 'remove-fields', fields: [] }],
     [{ op: 'remove-fields', fields: ['id'] }], [{ op: 'remove-fields', fields: ['type', 'type'] }], [{ op: 'remove-sources', sources: [-1] }], [{ op: 'remove-sources', sources: [1, 1] }],
-    [{ op: 'remove-sources', sources: [1.5] }], [{ op: 'replace-sources', sources: [0] }], [{ op: 'replace-alias', line: 0, alias: 'a', with: 'b' }], [{ op: 'replace-alias', line: 3, alias: 'a', with: 'a' }],
+    [{ op: 'remove-sources', sources: [1.5] }], [{ op: 'replace-sources', sources: [0] }], [{ op: 'replace-alias', line: 0, alias: 'a', with: 'b' }],
     [{ op: 'replace-alias', line: 3, alias: 'a', with: 'b, c' }], [{ op: 'replace-alias', line: 3, alias: 'a', with: 'b -->' }], [{ op: 'replace-alias', line: 3, alias: 'a', with: '*b*' }],
     [{ op: 'replace-alias', line: 3, alias: 'a', with: ' b' }], [{ op: 'replace-alias', line: 3, alias: 'a', with: '...' }], [{ op: 'remove-alias', line: 3, alias: 'a\nb' }], [{ op: 'remove-alias', line: 3 }]]) {
     refused('REPAIR_ARGUMENT', () => validateRepairOperations(operations));
@@ -238,4 +238,62 @@ test('the change list names every difference with both values, and its summary i
   assert.equal(summary.length <= 1024 && !/[\r\n]/.test(summary), true);
   // Nothing that stayed is listed, and an alias-only repair says nothing of the header.
   assert.deepEqual(Object.keys(describeRepair(note, constructRepair(note, [{ op: 'remove-alias', line: lines + 3, alias: 'alpha' }]).bytes)), ['bytes', 'aliases']);
+});
+
+test('an alias directive cannot swallow trailing text, another comment, or a nested opener', () => {
+  for (const line of ['<!-- aliases: foo, bar --> <!-- legal hold: keep until Q3 -->',
+    '<!-- aliases: alpha --> <img src=x onerror=alert(1)> Pay to account 123 -->',
+    '<!-- aliases: Topic <!-- content_hash=hidden -->']) {
+    const note = `# Topic\n\n## Section\n${line}\nVisible body.\n`;
+    assert.equal(validateNote(note).valid, false, line);
+    refused('REPAIR_NOTE_BLOCKED', () => constructRepair(note, [{ op: 'remove-alias', line: 3, alias: 'bar -->' }]));
+  }
+});
+
+test('source matching preserves later historical sources and describes a replacement that deduplicates a later citation', () => {
+  for (const extra of [{ source_hash: sha('b') }, { description: 'Historical details', source_hash: sha('c') }, { locator: 'x'.repeat(300) }]) {
+    const old = generated(false, { sources: [{ type: 'document', ref: 'file' }, { type: 'document', ref: 'repo', ...extra }] });
+    const candidate = constructRepair(old, [{ op: 'replace-sources', sources: [0], with: { type: 'document', ref: 'repo' } }]).bytes;
+    assert.deepEqual(value(candidate).sources, [{ type: 'document', ref: 'repo' }, { type: 'document', ref: 'repo', ...extra }]);
+    assert.deepEqual(describeRepair(old, candidate).sources, { removed: [{ index: 0, source: { type: 'document', ref: 'file' } }], added: [{ index: 0, source: { type: 'document', ref: 'repo' } }] });
+  }
+  const old = generated(false, { sources: ['a', 'b', 'other', 'repo'].map(ref => ({ type: 'document', ref })) });
+  const candidate = constructRepair(old, [{ op: 'replace-sources', sources: [0, 1], with: { type: 'document', ref: 'repo' } }]).bytes;
+  assert.deepEqual(describeRepair(old, candidate).sources, { removed: [0, 1].map(index => ({ index, source: value(old).sources[index] })) });
+});
+
+test('markup-only alias changes appear in the complete change list and summary', () => {
+  const old = '# Topic\n\n## Section\n<!-- aliases: *Release plan*, [Roadmap](https://example.test) -->\nBody.\n';
+  const candidate = constructRepair(old, [{ op: 'replace-alias', line: 3, alias: 'Release plan', with: 'Release plan' },
+    { op: 'replace-alias', line: 3, alias: 'Roadmap', with: 'Roadmap' }]).bytes;
+  const changes = describeRepair(old, candidate);
+  assert.deepEqual(changes.aliases, [{ line: 3, before: ['Release plan', 'Roadmap'], after: ['Release plan', 'Roadmap'],
+    beforeMarkup: ['*Release plan*', '[Roadmap](https://example.test)'], afterMarkup: ['Release plan', 'Roadmap'] }]);
+  assert.match(summarizeRepair(changes), /aliases changed/);
+});
+
+test('reported aliases longer than replacement bounds or containing whitespace remain selectable', () => {
+  for (const alias of ['long '.repeat(80).trim(), 'Alpha\tBeta', 'Alpha\u2028Beta']) {
+    const old = `# Topic\n\n## Section\n<!-- aliases: ${alias}, kept -->\nBody.\n`;
+    const reported = validateNote(old).sections[0].aliases[0];
+    assert.equal(validateNote(old).valid, true);
+    const candidate = constructRepair(old, [{ op: 'remove-alias', line: 3, alias: reported }]).bytes.toString();
+    assert.equal(candidate, '# Topic\n\n## Section\n<!-- aliases: kept -->\nBody.\n');
+  }
+});
+
+
+test('alias markup remains visible when the same section also changes another alias', () => {
+  const old = '# Topic\n\n## Section\n<!-- aliases: *Alpha*, Beta -->\nBody.\n';
+  const repaired = constructRepair(old, [{ op: 'replace-alias', line: 3, alias: 'Alpha', with: 'Alpha' }, { op: 'replace-alias', line: 3, alias: 'Beta', with: 'Gamma' }]);
+  assert.deepEqual(repaired.description.aliases, [{ line: 3, before: ['Alpha', 'Beta'], after: ['Alpha', 'Gamma'], beforeMarkup: ['*Alpha*', 'Beta'], afterMarkup: ['Alpha', 'Gamma'] }]);
+});
+
+test('an earlier replacement can deduplicate a later citation without displacing retained historical-only sources', () => {
+  for (const legacy of [{ type: 'document', ref: 'Historical', description: 'Retained details' }, session('one', { raw_ref: 'Retained capture reference' })]) {
+    const old = generated(false, { sources: [{ type: 'document', ref: 'file' }, legacy, { type: 'document', ref: 'repo' }] });
+    const repaired = constructRepair(old, [{ op: 'replace-sources', sources: [0], with: { type: 'document', ref: 'repo' } }]);
+    assert.deepEqual(value(repaired.bytes).sources, [{ type: 'document', ref: 'repo' }, legacy]);
+    assert.deepEqual(repaired.description.sources, { removed: [{ index: 0, source: { type: 'document', ref: 'file' } }] });
+  }
 });

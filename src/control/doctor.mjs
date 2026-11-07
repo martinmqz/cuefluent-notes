@@ -5,8 +5,8 @@ import { runKind } from '../core/run.mjs';
 import { CHECK_CURSOR_PATTERN } from '../core/entry-contract.mjs';
 import { hashBytes } from '../storage/files.mjs';
 import { readSettings, withProject } from '../storage/store.mjs';
-import { openNoteWorkspace } from '../processing/workspace.mjs';
-import { DOCTOR_FINDINGS, inspectNoteHealth, sharedAliases, repeatedIdentities } from '../notes/index.mjs';
+import { openNoteWorkspace, targetKey, WORKSPACE_LIMITS } from '../processing/workspace.mjs';
+import { DOCTOR_FINDINGS, unreadableNoteHealth, inspectNoteHealth, sharedAliases, repeatedIdentities } from '../notes/index.mjs';
 import { CONTROL_LIMITS } from '../client/control-server.mjs';
 import { readRunSnapshot } from './status.mjs';
 import { REVIEW_PAGE_BYTES } from './review.mjs';
@@ -59,13 +59,14 @@ async function listTargets(workspace, coverage, limits) {
     coverage.directories++;
     for (let cursor; ;) {
       let page;
-      try { page = await workspace.entries({ ...(directory === undefined ? {} : { directory }), ...(cursor === undefined ? {} : { cursor }), limit: 100 }); }
+      try { page = await workspace.entries({ ...(directory === undefined ? {} : { directory }), ...(cursor === undefined ? {} : { cursor }), limit: WORKSPACE_LIMITS.listEntries }); }
       catch (error) {
         if (error?.code === 'WORKSPACE_LIST_LIMIT') coverage.partial('directory-entry-limit');
         // A folder whose name differs from an earlier one only by case or
         // normalization has no portable name of its own. It counts as inspected
         // only once a page of it was listed.
-        else if (directory !== undefined && (error?.code === 'WORKSPACE_TARGET_ALIAS' || DENIED.has(error?.code))) {
+        else if (directory !== undefined && (['WORKSPACE_TARGET_ALIAS', 'PATH_INVALID', 'PATH_MISSING', 'PATH_UNSAFE', 'PATH_CHANGED', 'WORKSPACE_LIST_CHANGED', 'ENOENT', 'ENAMETOOLONG'].includes(error?.code) || DENIED.has(error?.code))) {
+          await workspace.verify();
           if (cursor === undefined) coverage.directories--;
           coverage.partial('skipped-directory');
         } else throw error;
@@ -84,9 +85,6 @@ async function listTargets(workspace, coverage, limits) {
   return targets;
 }
 
-const unopened = reason => ({ status: 'unreadable', bytes: 0, id: null, headerBytes: 0, aliasBytes: 0, sections: 0, aliases: [],
-  sources: { document: 0, session: 0 }, findings: [{ code: 'note-unreadable', count: 1, bytes: 0, items: [{ reason }] }] });
-
 /** Read one note without retaining it, within the bytes the check may still
  * read. A `requested` target that the listing did not reach is asked for as it
  * was given, so that a name that is no note target stays an argument error;
@@ -102,7 +100,7 @@ async function readNote(workspace, { file, target = file, requested = false, max
     if (!changed && !UNOPENED.has(code) && (requested || !UNNAMED.has(code))) throw error;
     // The failure belongs to this note only while the notes root still stands.
     await workspace.verify();
-    return changed ? { state: 'changed' } : { state: 'read', bytes: 0, note: { target: file, hash: code, health: unopened(code) } };
+    return changed ? { state: 'changed' } : { state: 'read', bytes: 0, note: { target: file, hash: code, health: unreadableNoteHealth(code) } };
   }
   if (!read.exists) return { state: 'absent', target: read.target };
   // Bytes that are not UTF-8 were read all the same: the health names them and their size.
@@ -152,15 +150,15 @@ export async function checkNotes(store, input, { skillVersion, limits: lower = {
   const name = file => path.relative(root, file).split(path.sep).join('/');
 
   const reasons = [], coverage = { directories: 0, partial: reason => { if (!reasons.includes(reason)) reasons.push(reason); } };
-  const targets = (await listTargets(workspace, coverage, limits)).sort((left, right) => name(left) < name(right) ? -1 : name(left) > name(right) ? 1 : 0);
+  const targets = (await listTargets(workspace, coverage, limits)).map(file => ({ file, name: name(file) }))
+    .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0).map(item => item.file);
   let selected = null, unlisted = false;
   if (target !== undefined) {
     // A note is selected by its portable name, in whatever spelling the listing
     // found on disk. One the listing did not reach is read on its own. Either way
     // it is read first, so the bounds stop only the notes after it.
-    const key = value => value.normalize('NFC').toLowerCase();
-    const wanted = path.isAbsolute(target) ? target : path.join(root, ...target.split('/')), wantedKey = key(wanted);
-    selected = targets.find(file => key(file) === wantedKey) ?? null;
+    const wanted = path.isAbsolute(target) ? target : path.join(root, ...target.split('/')), wantedKey = targetKey(wanted);
+    selected = targets.find(file => file === wanted) ?? targets.find(file => targetKey(file) === wantedKey) ?? null;
     if (selected) targets.splice(targets.indexOf(selected), 1);
     else { selected = wanted; unlisted = true; }
     targets.unshift(selected);

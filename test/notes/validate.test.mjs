@@ -1,3 +1,4 @@
+import { hiddenComments } from '../../src/notes/validate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { NOTE_PROFILE } from '../../src/notes/profile.mjs';
@@ -255,5 +256,19 @@ test('HTML attribute scanning handles stray slashes and adjacent quoted attribut
   }
   for (const html of ['<span title="/onerror=bad href=javascript:bad style = bold">text</span>', '<span title=x/onerror=bad>text</span>', '<div>font style = bold</div>', '<a/href="&#32;https://example.test">link</a>']) {
     assert.equal(validateNote(note(html)).valid, true, html);
+  }
+});
+
+
+test('comment locations follow paragraph breaks, table rows and raw HTML offsets', () => {
+  const text = '# Topic\n\n## Answer\nfirst\nsecond\nthird <!-- paragraph -->\n\n| A | B |\n|---|---|\n| C | <!-- table --> |\n\n<div>\n<!-- raw -->\ntext\n<!-- raw second -->\n</div>\n';
+  assert.deepEqual(hiddenComments(text).map(item => item.line), [6, 10, 13, 15]);
+});
+
+test('abrupt and bang comment closers do not swallow the remaining heading', () => {
+  for (const close of ['<!-->', '<!--->', '<!-- comment --!>']) {
+    const result = validateNote(`# Topic\n\n## ${close} Overview\nBody.\n\n## ${close} Other\nOther body.\n`);
+    assert.equal(result.valid, true, JSON.stringify(result.diagnostics));
+    assert.deepEqual(result.sections.map(item => item.heading.trim()), ['Overview', 'Other']);
   }
 });
