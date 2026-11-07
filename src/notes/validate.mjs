@@ -3,7 +3,7 @@ import { isMarkdownPath } from '../core/note-path.mjs';
 import { CuefluentError, fail } from '../core/errors.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
 import { inspectMetadata, isSourceAppend, lineStarts } from './metadata.mjs';
-import { decodeEntities, headingSlug, htmlParts, inlineText, matchAliasComment, normalizedText, parseMarkdown } from './markdown.mjs';
+import { decodeEntities, headingSlug, htmlParts, inlineText, matchAliasComment, parseAliasValues, parseMarkdown } from './markdown.mjs';
 
 const safeTags = new Set('p br strong em del s code pre blockquote ul ol li hr table thead tbody tfoot tr th td a img h1 h2 h3 h4 h5 h6 div span sup sub kbd mark'.split(' '));
 const voidTags = new Set(['br', 'hr', 'img']);
@@ -261,11 +261,10 @@ export function validateNote(input, { existing, generated = false, kind = 'note'
       if (section.started) issue('alias-outside-metadata', line);
       if (kind === 'log') issue('log-alias', line);
       section.aliasSeen = true;
-      const values = match[2].split(',').map(value => inlineText(value).trim());
-      if (values.some(value => !normalizedText(value))) issue('malformed-alias', line);
+      const values = parseAliasValues(match[2]);
+      if (values.some(({ key }) => !key)) issue('malformed-alias', line);
       const seen = new Set();
-      for (const value of values) {
-        const key = normalizedText(value);
+      for (const { value, key } of values) {
         if (seen.has(key)) issue('duplicate-alias', line, 'warning');
         else { seen.add(key); section.aliases.push(value); }
         if (aliases.has(key) && aliases.get(key) !== section) issue('ambiguous-alias', line, 'warning');

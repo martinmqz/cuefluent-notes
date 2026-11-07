@@ -118,3 +118,11 @@ function htmlAttributes(tag, start) {
 /** Exactly one standalone alias directive. A second closer, nested opener or
  * suffix is ordinary content, never part of an alias a repair may remove. */
 export const matchAliasComment = source => /^( {0,3}<!--[ \t]*aliases:)((?:(?!-->|--!>|<!--)[^\r\n])*)(-->[ \t]*(?:\r\n|\r|\n)?)$/.exec(source);
+
+/** Read stored alias segments once, retaining their exact spelling for edits.
+ * Selectors already reported to a caller are plain text: normalize them directly
+ * instead of parsing them as Markdown again. */
+export const parseAliasValues = text => text.split(',').map(raw => {
+  const value = inlineText(raw).trim();
+  return { raw, value, key: normalizedText(value) };
+});

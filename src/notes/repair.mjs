@@ -3,7 +3,7 @@ import { isMap, isSeq } from 'yaml';
 import { fail } from '../core/errors.mjs';
 import { decodeNote, NOTE_PROFILE as P } from './profile.mjs';
 import { editMetadata, inspectMetadata, lineStarts, serializeSources, validateDocumentSources, validateMetadata } from './metadata.mjs';
-import { inlineText, matchAliasComment, normalizedText, parseMarkdown } from './markdown.mjs';
+import { inlineText, matchAliasComment, normalizedText, parseAliasValues, parseMarkdown } from './markdown.mjs';
 import { validateNote } from './validate.mjs';
 
 /** Metadata repair changes a note's header and its alias comments, and nothing
@@ -86,12 +86,6 @@ function aliasComments(source, syntax) {
   }
   return found;
 }
-const aliasValues = text => text.split(',').map(value => inlineText(value).trim());
-/** A stored alias as the check identifies it: its Markdown read as text, then
- * case, accents, width and punctuation folded, so every spelling of it at a
- * section is one alias. A requested alias is the text the check reported, so it
- * is folded as it is and never read as Markdown again. */
-const aliasKey = segment => normalizedText(inlineText(segment).trim());
 
 function planSources(operations, sources) {
   const actions = new Map(); let hashes = false, sessions = false;
@@ -173,21 +167,21 @@ function repairAliases(source, operations, syntax) {
     const comment = comments.find(item => item.line === line);
     if (!comment) inapplicable('No section with aliases has its heading on that line.');
     const [, open, text, close] = comment.parts, lead = /^[ \t]*/.exec(text)[0], trail = /[ \t]*$/.exec(text.slice(lead.length))[0];
-    let segments = text.slice(lead.length, text.length - trail.length).split(',');
+    let segments = parseAliasValues(text.slice(lead.length, text.length - trail.length));
     for (const operation of requested.filter(item => item.line === line)) {
-      const key = normalizedText(operation.alias), matches = segments.map((segment, index) => aliasKey(segment) === key ? index : -1).filter(index => index >= 0);
+      const key = normalizedText(operation.alias), matches = segments.map((segment, index) => segment.key === key ? index : -1).filter(index => index >= 0);
       if (!matches.length) inapplicable('The section does not have that alias.');
       if (operation.op === 'replace-alias') {
         // An alias the section already has is removed, not written a second time.
         const replacement = normalizedText(operation.with);
-        if (segments.some((segment, index) => !matches.includes(index) && aliasKey(segment) === replacement)) inapplicable('The section already has the replacement alias; remove the other one instead.');
-        const [, before, after] = /^([ \t]*)[\s\S]*?([ \t]*)$/.exec(segments[matches[0]]);
-        segments[matches[0]] = before + operation.with + after; matches.shift();
+        if (segments.some((segment, index) => !matches.includes(index) && segment.key === replacement)) inapplicable('The section already has the replacement alias; remove the other one instead.');
+        const [, before, after] = /^([ \t]*)[\s\S]*?([ \t]*)$/.exec(segments[matches[0]].raw);
+        segments[matches[0]] = { raw: before + operation.with + after, value: operation.with, key: replacement }; matches.shift();
       }
       segments = segments.filter((_segment, index) => !matches.includes(index));
     }
-    if (segments.length) { segments[0] = segments[0].trimStart(); segments[segments.length - 1] = segments.at(-1).trimEnd(); }
-    edits.push({ start: comment.start, end: comment.end, text: segments.length ? open + lead + segments.join(',') + trail + close : '' });
+    if (segments.length) { segments[0].raw = segments[0].raw.trimStart(); segments.at(-1).raw = segments.at(-1).raw.trimEnd(); }
+    edits.push({ start: comment.start, end: comment.end, text: segments.length ? open + lead + segments.map(({ raw }) => raw).join(',') + trail + close : '' });
   }
   return edits;
 }
@@ -293,11 +287,11 @@ function describeParts(original, candidate, before, after) {
     }
     was.forEach((source, index) => { if (!kept.has(index)) sources.removed.push({ index, source }); });
   }
-  const values = comment => aliasValues(comment.parts[2]);
   before.comments.forEach((comment, index) => {
-    const now = after.comments[after.offsets.indexOf(before.offsets[index])], was = values(comment), next = now ? values(now) : [];
-    const markup = item => item ? item.parts[2].split(',').map(segment => segment.trim()) : [];
-    const beforeMarkup = markup(comment), afterMarkup = markup(now);
+    const now = after.comments[after.offsets.indexOf(before.offsets[index])];
+    const previous = parseAliasValues(comment.parts[2]), current = now ? parseAliasValues(now.parts[2]) : [];
+    const was = previous.map(({ value }) => value), next = current.map(({ value }) => value);
+    const beforeMarkup = previous.map(({ raw }) => raw.trim()), afterMarkup = current.map(({ raw }) => raw.trim());
     const showMarkup = !isDeepStrictEqual(beforeMarkup, afterMarkup) && (!isDeepStrictEqual(beforeMarkup, was) || !isDeepStrictEqual(afterMarkup, next));
     if (!isDeepStrictEqual(was, next) || showMarkup) aliases.push({ line: comment.line, before: was, after: next, ...(showMarkup ? { beforeMarkup, afterMarkup } : {}) });
   });

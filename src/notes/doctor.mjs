@@ -1,6 +1,6 @@
 import { REPAIR_FIELDS, REPAIR_HASH_FIELDS } from './repair.mjs';
 import { decodeNote } from './profile.mjs';
-import { SOURCE_LOCATOR_LENGTH, inspectMetadata, isLocalSourceReference, noteContent } from './metadata.mjs';
+import { SOURCE_LOCATOR_LENGTH, SUBMITTED_SOURCE_FIELDS, inspectMetadata, isLocalSourceReference, noteContent } from './metadata.mjs';
 import { hiddenComments, reviewNoteContent, validateNote } from './validate.mjs';
 import { normalizedText, parseMarkdown } from './markdown.mjs';
 
@@ -31,7 +31,6 @@ export const DOCTOR_FINDINGS = Object.freeze({
 /** Document sources above this count are reported as volume. */
 export const DOCTOR_SOURCE_VOLUME = 20;
 
-const SUBMITTED = new Set(['type', 'ref', 'locator', 'version']);
 const HASHES = new Set(REPAIR_HASH_FIELDS);
 const size = value => Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
 // The stored form varies with the header layout, so a field is measured on its
@@ -74,7 +73,7 @@ export function inspectNoteHealth(input) {
         sessions.items.push(Object.hasOwn(item, 'raw_ref') ? { index, reference: true } : { index }); return;
       }
       result.sources.document++; documentBytes += size(item);
-      const keys = Object.keys(item), hashed = keys.filter(key => HASHES.has(key)), extra = keys.filter(key => !SUBMITTED.has(key) && !HASHES.has(key));
+      const keys = Object.keys(item), hashed = keys.filter(key => HASHES.has(key)), extra = keys.filter(key => !SUBMITTED_SOURCE_FIELDS.includes(key) && !HASHES.has(key));
       if (hashed.length) { hashes.count++; hashes.bytes += fieldBytes(item, hashed); hashes.items.push({ index }); }
       if (extra.length) { fields.count++; fields.bytes += fieldBytes(item, extra); fields.items.push({ index, fields: extra.slice(0, 8) }); }
       if (isLocalSourceReference(item.ref)) { local.count++; local.bytes += size(item.ref); local.items.push({ index }); }

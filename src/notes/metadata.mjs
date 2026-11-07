@@ -85,7 +85,7 @@ function sourceIdentity(source) {
 
 /** A submitted source has only these fields. Each is part of the document
  * identity, so two submissions with one identity are the same descriptor. */
-const submittedSourceKeys = new Set(['type', 'ref', 'locator', 'version']);
+export const SUBMITTED_SOURCE_FIELDS = Object.freeze(['type', 'ref', 'locator', 'version']);
 export const SOURCE_LOCATOR_LENGTH = 120;
 // Rooted, home, drive, UNC and file: forms name a place on one machine. The
 // forms are checked on every platform: notes travel between them.
@@ -134,7 +134,7 @@ export function validateDocumentSources(input) {
     requireValue(Array.isArray(sources));
     for (const source of sources) {
       requireValue(plain(source) && source.type === 'document');
-      if (!Object.keys(source).every(key => submittedSourceKeys.has(key))) fail('NOTE_SOURCE_FIELD', 'A supplied source accepts only type, ref, locator and version. Leave out hashes, session identities and every other field.');
+      if (!Object.keys(source).every(key => SUBMITTED_SOURCE_FIELDS.includes(key))) fail('NOTE_SOURCE_FIELD', 'A supplied source accepts only type, ref, locator and version. Leave out hashes, session identities and every other field.');
       requireValue(text(source.ref, 2048));
       if (localReference.test(source.ref)) fail('NOTE_SOURCE_REFERENCE', 'A source ref must be a portable reference or a truthful descriptive label, not a local path or file URL.');
     }
