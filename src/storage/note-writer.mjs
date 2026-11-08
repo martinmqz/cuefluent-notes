@@ -400,6 +400,13 @@ async function location(pin, intent) {
   return { target, directory, stage: path.join(directory, `.cuefluent-note.${intent.runId}.${intent.draftId}.tmp`), capture, backup: path.join(capture, 'original.tmp') };
 }
 
+/** Whether a note's directory holds an entry of exactly its name. */
+async function namedExactly(file) {
+  const name = path.basename(file);
+  for await (const entry of await fs.opendir(path.dirname(file))) if (entry.name === name) return true;
+  return false;
+}
+
 async function originalMatches(file, intent, links = 1) {
   const current = await snapshot(file, { missing: true, links });
   if (intent.expectedHash === null) { if (current) conflict('A new note destination appeared after inspection.'); return null; }
@@ -478,6 +485,10 @@ export async function prepareNotePublication(pin, relative, bytes, { runId, draf
   }
   const current = await snapshot(parent.file, { missing: true });
   if ((expectedHash === null && current) || (expectedHash !== null && (!current || current.hash !== expectedHash))) conflict('The note differs from the exact inspected original or absence.');
+  // On a volume that folds case or Unicode normalization, another spelling of
+  // the name reaches the same file, and publishing through it would rename the
+  // note back to the draft's spelling.
+  if (current && !(await namedExactly(parent.file))) conflict('The note is now spelled differently on disk than when it was inspected.');
   if (current && expectedHash !== hash && process.platform === 'darwin' && process.geteuid() !== 0) {
     const groups = new Set([...process.getgroups(), process.getegid()]);
     const directory = await readPathStat(path.dirname(parent.file));
